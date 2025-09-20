@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-convert.py
-----------
 Conversion logic for Fable 2 .mdl files to .glb format.
+
+Made by Matthew W, free to use and update.
 """
 from __future__ import annotations
 import json
@@ -170,7 +170,14 @@ def find_any_meshbuffer(data: bytes, start_at: int, be: bool, vertex_stride: int
     return None
 
 
-def skip_to_mesh_headers(r: Reader, vertex_stride: int) -> Tuple[int, List[Dict], List[List[float]]]:
+def _basename_only(s: Optional[str]) -> Optional[str]:
+    if not s:
+        return s
+    s2 = s.replace('\\', '/')
+    return s2.split('/')[-1] if '/' in s2 else s2
+
+
+def skip_to_mesh_headers(r: Reader, vertex_stride: int) -> Tuple[int, List[Dict], List[List[float]], List[List[Dict]]]:
     r.ru32_arr(8)
     bones: List[Dict] = []
     bone_count = r.ru32()
@@ -179,6 +186,7 @@ def skip_to_mesh_headers(r: Reader, vertex_stride: int) -> Tuple[int, List[Dict]
             name = r.rstr()
             bone_id = r.ru32()
             bones.append({"name": name, "id": bone_id, "original_index": i})
+
     bone_transforms: List[List[float]] = []
     bt_count = r.ru32()
     if 0 < bt_count < 65535 and bt_count == bone_count:
@@ -189,54 +197,71 @@ def skip_to_mesh_headers(r: Reader, vertex_stride: int) -> Tuple[int, List[Dict]
             pass
         for _ in range(min(bt_count, 65535)):
             r.rbytes(44)
+
     r.rf32_arr(10)
     mesh_count = r.ru32()
-    r.ru32_arr(2);
-    r.rbytes(13);
-    r.ru32_arr(5)
+
+    r.ru32_arr(2); r.rbytes(13); r.ru32_arr(5)
     unk6c = r.ru32()
     if 0 < unk6c < 65535:
         r.rf32_arr(unk6c)
     r.ru32()
+
     data = r.data
-    for _ in range(mesh_count):
-        r.ru32()
-        r.rstr()
+    materials_per_mesh: List[List[Dict]] = [[] for _ in range(max(mesh_count, 0))]
+
+    for mi in range(mesh_count):
+        r.ru32()               # Unk1
+        _ = r.rstr()           # MeshName
         r.rf32_arr(2)
         r.rbytes(21)
         r.rf32()
         r.ru32_arr(3)
         matc = r.ru32()
-        for _ in range(min(matc, 200000)):
+
+        mats_this_mesh: List[Dict] = []
+        for _mj in range(min(matc, 200000)):
             hdr = find_any_meshbuffer(data, r.off, r.be, vertex_stride)
             if hdr is not None and hdr == r.off:
-                return mesh_count, bones, bone_transforms
-            r.rstr();
-            r.rstr();
-            r.rstr()
+                break
+            tex = r.rstr()
+            spec = r.rstr()
+            norm = r.rstr()
+
+            tex_b = _basename_only(tex)
+            spec_b = _basename_only(spec)
+            norm_b = _basename_only(norm)
+            disp = tex_b or spec_b or norm_b or f"Mesh{mi}_Mat{len(mats_this_mesh)}"
+
             if r.can(3 + 12):
-                r.rbytes(3);
-                r.rf32_arr(3)
+                r.rbytes(3); r.rf32_arr(3)
             elif r.can(16 + 3 + 12):
-                r.rbytes(16);
-                r.rbytes(3);
-                r.rf32_arr(3)
+                r.rbytes(16); r.rbytes(3); r.rf32_arr(3)
             else:
                 hdr = find_any_meshbuffer(data, r.off, r.be, vertex_stride)
                 if hdr is not None and hdr >= r.off:
                     r.off = hdr
-                    return mesh_count, bones, bone_transforms
                 break
+
+            mats_this_mesh.append({"display_name": disp, "albedo": tex, "spec": spec, "normal": norm})
+
             if r.can(16) and (r.off + 16 < len(data)):
                 b0 = data[r.off]
                 b16 = data[r.off + 16]
                 if (b0 not in _ALLOWED_START) and (b16 in _ALLOWED_START):
                     r.rbytes(16)
+
+        materials_per_mesh[mi] = mats_this_mesh
+
+        maybe_hdr = find_any_meshbuffer(data, r.off, r.be, vertex_stride)
+        if maybe_hdr is not None and maybe_hdr == r.off:
+            break
+
     hdr = find_any_meshbuffer(data, r.off, r.be, vertex_stride)
     if hdr is None:
         raise ValueError("Could not find a MeshBuffer header after meshes")
     r.off = hdr
-    return mesh_count, bones, bone_transforms
+    return mesh_count, bones, bone_transforms, materials_per_mesh
 
 
 def build_faces_from_indices(indices: List[int], vcount: int) -> List[Tuple[int, int, int]]:
@@ -311,37 +336,71 @@ def parse_buffer(r: Reader, preface_len: int, vertex_stride: int):
 
 
 def write_merged_glb(out_path: Path, all_geometries: List[dict], src_name: str, bones: List[Dict],
-                     bone_transforms: List[List[float]]):
+                     bone_transforms: List[List[float]], materials_per_mesh: Optional[List[List[Dict]]] = None):
     gltf = {"asset": {"version": "2.0", "generator": "fable2-bnk-converter"}, "scene": 0, "scenes": [{"nodes": []}],
             "nodes": [], "meshes": [], "buffers": [], "bufferViews": [], "accessors": []}
     bin_data = bytearray()
     processed_primitives = []
 
+    # Build materials (fallback + first material per mesh)
+    gltf_materials: List[Dict] = []
+    fallback_mat_index = len(gltf_materials)
+    gltf_materials.append({
+        "name": "Unlit_Fallback",
+        "pbrMetallicRoughness": {"baseColorFactor": [0.7, 0.7, 0.7, 1.0], "metallicFactor": 0.0, "roughnessFactor": 1.0},
+        "alphaMode": "OPAQUE",
+        "extras": {"note": "Temporary fallback until textures are available"}
+    })
+    mat_index_map: Dict[Tuple[int, int], int] = {}
+    if materials_per_mesh:
+        for mi, mats in enumerate(materials_per_mesh):
+            if not mats:
+                continue
+            m = mats[0]
+            name = m.get("display_name") or f"Mesh{mi}_Mat0"
+            # simple stable color based on name
+            h = 2166136261
+            for ch in name.encode("utf-8", "ignore"):
+                h ^= ch; h *= 16777619; h &= 0xFFFFFFFF
+            r = 0.35 + 0.55 * (((h >> 0) & 0xFF) / 255.0)
+            g = 0.35 + 0.55 * (((h >> 8) & 0xFF) / 255.0)
+            b = 0.35 + 0.55 * (((h >> 16) & 0xFF) / 255.0)
+            gi = len(gltf_materials)
+            gltf_materials.append({
+                "name": name,
+                "pbrMetallicRoughness": {"baseColorFactor": [r, g, b, 1.0], "metallicFactor": 0.1, "roughnessFactor": 0.9},
+                "alphaMode": "OPAQUE",
+                "extras": {
+                    "albedo_name": m.get("albedo") or "",
+                    "specular_name": m.get("spec") or "",
+                    "normal_name": m.get("normal") or "",
+                    "note": "Placeholder material"
+                }
+            })
+            mat_index_map[(mi, 0)] = gi
+
     for geom in all_geometries:
-        if not geom['positions']: continue
+        if not geom['positions']:
+            continue
         pos_f32 = [c for p in geom['positions'] for c in p]
         min_pos = [min(pos_f32[i::3]) for i in range(3)]
         max_pos = [max(pos_f32[i::3]) for i in range(3)]
         pos_bytes = struct.pack(f"<{len(pos_f32)}f", *pos_f32)
         bv_idx = len(gltf['bufferViews'])
-        gltf['bufferViews'].append(
-            {"buffer": 0, "byteOffset": len(bin_data), "byteLength": len(pos_bytes), "target": 34962})
+        gltf['bufferViews'].append({"buffer": 0, "byteOffset": len(bin_data), "byteLength": len(pos_bytes), "target": 34962})
         bin_data.extend(pos_bytes)
         acc_idx = len(gltf['accessors'])
-        gltf['accessors'].append(
-            {"bufferView": bv_idx, "componentType": 5126, "count": len(geom['positions']), "type": "VEC3",
-             "min": min_pos, "max": max_pos})
+        gltf['accessors'].append({"bufferView": bv_idx, "componentType": 5126, "count": len(geom['positions']), "type": "VEC3",
+                                  "min": min_pos, "max": max_pos})
         prim = {"attributes": {"POSITION": acc_idx}}
         if geom['texcoords']:
             uv_f32 = [c for uv in geom['texcoords'] for c in uv]
             uv_bytes = struct.pack(f"<{len(uv_f32)}f", *uv_f32)
             bv_idx = len(gltf['bufferViews'])
-            gltf['bufferViews'].append(
-                {"buffer": 0, "byteOffset": len(bin_data), "byteLength": len(uv_bytes), "target": 34962})
+            gltf['bufferViews'].append({"buffer": 0, "byteOffset": len(bin_data), "byteLength": len(uv_bytes), "target": 34962})
             bin_data.extend(uv_bytes)
             acc_idx = len(gltf['accessors'])
-            gltf['accessors'].append(
-                {"bufferView": bv_idx, "componentType": 5126, "count": len(geom['texcoords']), "type": "VEC2"})
+            gltf['accessors'].append({"bufferView": bv_idx, "componentType": 5126, "count": len(geom['texcoords']), "type": "VEC2"})
             prim["attributes"]["TEXCOORD_0"] = acc_idx
         flat_idx = [i - 1 for face in geom['faces'] for i in face]
         if flat_idx:
@@ -349,14 +408,20 @@ def write_merged_glb(out_path: Path, all_geometries: List[dict], src_name: str, 
             packer, comp_type = ('H', 5123) if max_index < 65536 else ('I', 5125)
             idx_bytes = struct.pack(f"<{len(flat_idx)}{packer}", *flat_idx)
             bv_idx = len(gltf['bufferViews'])
-            gltf['bufferViews'].append(
-                {"buffer": 0, "byteOffset": len(bin_data), "byteLength": len(idx_bytes), "target": 34963})
+            gltf['bufferViews'].append({"buffer": 0, "byteOffset": len(bin_data), "byteLength": len(idx_bytes), "target": 34963})
             bin_data.extend(idx_bytes)
             acc_idx = len(gltf['accessors'])
-            gltf['accessors'].append(
-                {"bufferView": bv_idx, "componentType": comp_type, "count": len(flat_idx), "type": "SCALAR"})
+            gltf['accessors'].append({"bufferView": bv_idx, "componentType": comp_type, "count": len(flat_idx), "type": "SCALAR"})
             prim.update({"indices": acc_idx, "mode": 4})
-        processed_primitives.append({'primitive': prim, 'which': geom['which']})
+
+        # bind material: first mat of mesh 'which' if available, else fallback
+        which = geom['which']
+        mindex = fallback_mat_index
+        if materials_per_mesh and (which, 0) in mat_index_map:
+            mindex = mat_index_map[(which, 0)]
+        prim["material"] = mindex
+
+        processed_primitives.append({'primitive': prim, 'which': which})
 
     scene_root_nodes = []
     if bones:
@@ -386,8 +451,7 @@ def write_merged_glb(out_path: Path, all_geometries: List[dict], src_name: str, 
         gltf['bufferViews'].append({"buffer": 0, "byteOffset": len(bin_data), "byteLength": len(ibm_bytes)})
         bin_data.extend(ibm_bytes)
         acc_idx = len(gltf['accessors'])
-        gltf['accessors'].append(
-            {"bufferView": bv_idx, "componentType": 5126, "count": len(joint_indices), "type": "MAT4"})
+        gltf['accessors'].append({"bufferView": bv_idx, "componentType": 5126, "count": len(joint_indices), "type": "MAT4"})
         gltf.setdefault('skins', []).append({"inverseBindMatrices": acc_idx, "joints": joint_indices})
 
     for item in processed_primitives:
@@ -405,6 +469,10 @@ def write_merged_glb(out_path: Path, all_geometries: List[dict], src_name: str, 
     gltf['scenes'][0]['nodes'].append(root_node_idx)
 
     gltf['buffers'].append({"byteLength": len(bin_data)})
+
+    if 'materials' not in gltf and gltf_materials:
+        gltf["materials"] = gltf_materials
+
     json_txt = json.dumps(gltf, separators=(',', ':'))
     json_bytes = json_txt.encode('utf-8')
     json_bytes += b' ' * ((4 - len(json_bytes) % 4) % 4)
@@ -426,11 +494,12 @@ def convert_single_mdl(mdl_path: str, out_dir: str):
     data = mdl_path.read_bytes()
     r = Reader(data, big_endian=True)
 
-    _, bones, bone_transforms = skip_to_mesh_headers(r, DEFAULT_VERTEX_STRIDE)
+    mesh_count, bones, bone_transforms, materials_per_mesh = skip_to_mesh_headers(r, DEFAULT_VERTEX_STRIDE)
 
     all_geometries = []
     which = 0
-    while r.off < len(r.data) - 64:
+
+    while which < mesh_count:
         pre = _header_preface_len(data, r.off, r.be, DEFAULT_VERTEX_STRIDE)
         if pre is None:
             next_hdr = find_any_meshbuffer(data, r.off + 1, r.be, DEFAULT_VERTEX_STRIDE)
@@ -449,5 +518,4 @@ def convert_single_mdl(mdl_path: str, out_dir: str):
 
     if all_geometries:
         out_path = out_dir / mdl_path.with_suffix('.glb').name
-        write_merged_glb(out_path, all_geometries, mdl_path.stem, bones, bone_transforms)
-
+        write_merged_glb(out_path, all_geometries, mdl_path.stem, bones, bone_transforms, materials_per_mesh)

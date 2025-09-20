@@ -1,0 +1,25 @@
+# Contributing to Guild Wars Map Browser
+
+Hello, and thank you for considering contributing to the Guild Wars Map Browser. This project aspires to foster a welcoming, collaborative, and open community. Contributions from both seasoned developers and beginners are highly appreciated.
+
+## How to Contribute
+
+There are several key areas where your contributions would be most impactful:
+
+1. **Bug Reporting**: Please report any identified bugs in the issue tracker. Before reporting, ensure the bug hasn't been reported previously. Provide screenshots, details, or screen recordings if necessary.
+
+2. **Reverse Engineering**: Help with reverse engineering is required, particularly with animations, textures, and finishing the weight painting. There's also the other files, such as the scripts, levels, etc.
+
+3. **Code Reorganization**: The project could benefit from code reorganization to enhance readability and performance.
+
+4. **Feature Requests and Other Contributions**: If you have a new feature or suggestion, please share it via the issue tracker.
+
+### Submitting Changes
+
+Follow these steps to submit your changes:
+
+1. Fork the repository on GitHub.
+2. Create a new branch on your forked repository.
+3. Make your changes on this new branch.
+4. Push the changes to your fork.
+5. Submit a pull request to the 'main' branch of the original Guild Wars Map Browser repository.

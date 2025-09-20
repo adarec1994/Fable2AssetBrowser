@@ -5,6 +5,7 @@ Browse and export a variety of Fable 2 files. Included features:
 - Search and filter the internal files in the .bnk files
 - Export all of the assets.
 - Playback of audio files (WIP).
+- Exports Audio files in a usable format. 
 - Extract 3D models, textures, and more (WIP, currently exports most rigged models with UV's and skeletons. It's a little buggy, RN. NO TEXTURES YET)
 
   

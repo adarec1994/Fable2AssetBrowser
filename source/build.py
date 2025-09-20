@@ -3,7 +3,6 @@ import PyInstaller.__main__
 import os
 
 if __name__ == '__main__':
-    # --- This list contains all the arguments for PyInstaller ---
     pyinstaller_args = [
         '--onefile',
         '--windowed',
@@ -16,7 +15,6 @@ if __name__ == '__main__':
 
     print("--- Running PyInstaller from build script ---")
 
-    # This executes PyInstaller with your arguments
     PyInstaller.__main__.run(pyinstaller_args)
 
     print("--- Build script finished ---")

@@ -3,7 +3,6 @@
 convert.py
 ----------
 Conversion logic for Fable 2 .mdl files to .glb format.
-Adapted from the original f2export.py script to be used as a library.
 """
 from __future__ import annotations
 import json

@@ -10,9 +10,11 @@ import tempfile
 import shutil
 import subprocess
 from typing import List, Optional, Tuple
+from pathlib import Path
 from dearpygui import dearpygui as dpg
 import bnk_core as core
 import convert as mdl_converter
+import audio
 
 
 class State:
@@ -29,6 +31,8 @@ class State:
 
 S = State()
 
+_LAST_SELECTED_ROW_ID = None
+
 
 def _error_box(msg: str):
     dpg.set_value("error_text", str(msg))
@@ -44,7 +48,6 @@ def _filtered_bnk_paths() -> List[str]:
     if not S.bnk_filter.strip():
         return S.bnk_paths
     q = S.bnk_filter.lower()
-    # This filter is applied to an already sorted list
     return [p for p in S.bnk_paths if q in os.path.basename(p).lower()]
 
 
@@ -59,7 +62,6 @@ def _center_splash_button():
     dpg.set_item_pos("select_btn", [x, y])
 
 
-# --- Generic Progress Bar System ---
 _PROG_WIN = "progress_win"
 _PROG_BAR = "prog_bar"
 _PROG_TEXT = "prog_text"
@@ -94,9 +96,6 @@ def _progress_update(i: int, total: int, rel_path: str):
 def _progress_done():
     if dpg.does_item_exist(_PROG_WIN):
         dpg.delete_item(_PROG_WIN)
-
-
-# --- End Progress Bar System ---
 
 
 def _center_splash_button():
@@ -236,26 +235,18 @@ def _convert_to_pcm(src_path: str, dst_wav_path: str) -> bool:
 
 def _extract_and_convert_one(bnk_path: str, item: core.BNKItem, base_out_dir: str) -> bool:
     try:
-        tmp_dir = os.path.join(tempfile.gettempdir(), "bnk_convert_cache")
-        _safe_mkdir(tmp_dir)
-        tmp_name = f"{os.path.splitext(os.path.basename(bnk_path))[0]}_{item.index:05d}_{os.path.basename(item.name)}"
-        tmp_path = os.path.join(tmp_dir, tmp_name)
+        _safe_mkdir(base_out_dir)
+        dst_path = os.path.join(base_out_dir, item.name)
+        _safe_mkdir(os.path.dirname(dst_path))
 
-        core.extract_one(bnk_path, item.index, tmp_path)
+        core.extract_one(bnk_path, item.index, dst_path)
 
-        rel_no_ext, _ = os.path.splitext(item.name)
-        dst_wav_path = os.path.join(base_out_dir, rel_no_ext + ".wav")
-
-        ok = _convert_to_pcm(tmp_path, dst_wav_path)
-
-        if not ok:
-            dst_orig = os.path.join(base_out_dir, item.name)
-            _safe_mkdir(os.path.dirname(dst_orig))
+        if item.name.lower().endswith(".wav"):
             try:
-                shutil.copyfile(tmp_path, dst_orig)
+                ok = audio.convert_wav_inplace_same_name(Path(dst_path))
+                return ok
             except Exception:
-                pass
-            return False
+                return False
 
         return True
     except Exception:
@@ -263,6 +254,18 @@ def _extract_and_convert_one(bnk_path: str, item: core.BNKItem, base_out_dir: st
 
 
 def on_file_selected(sender, app_data, user_data):
+    global _LAST_SELECTED_ROW_ID
+    if _LAST_SELECTED_ROW_ID is not None and dpg.does_item_exist(_LAST_SELECTED_ROW_ID):
+        try:
+            dpg.configure_item(_LAST_SELECTED_ROW_ID, default_value=False)
+        except Exception:
+            pass
+    try:
+        dpg.configure_item(sender, default_value=True)
+    except Exception:
+        pass
+    _LAST_SELECTED_ROW_ID = sender
+
     idx = user_data
     dpg.set_value("sel_file_idx", idx)
 
@@ -299,6 +302,10 @@ def refresh_bnk_sidebar():
 def refresh_file_table():
     if dpg.does_item_exist("files_table"):
         dpg.delete_item("files_table")
+
+    # [ADDED] reset previous row selection tracker when rebuilding the table
+    global _LAST_SELECTED_ROW_ID
+    _LAST_SELECTED_ROW_ID = None
 
     with dpg.table(tag="files_table",
                    parent="right_table_container",
@@ -419,7 +426,7 @@ def on_extract_all(*_):
 
         total = len(S.files)
         _progress_open(total, "Extracting All Files...")
-        dpg.split_frame()  # Ensure the progress window is drawn before work starts
+        dpg.split_frame()
 
         for i, it in enumerate(S.files, 1):
             if S.cancel_requested:
@@ -465,7 +472,6 @@ def on_export_selected_mdl(*_):
 
 
 def on_viewport_close():
-    """Callback for when the application is closing."""
     S.cancel_requested = True
 
 

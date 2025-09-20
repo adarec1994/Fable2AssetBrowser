@@ -22,13 +22,11 @@ class BNKItem:
 
 
 def _resolve_cli() -> str:
-    # Check if running in a PyInstaller bundle
     if hasattr(sys, '_MEIPASS'):
         bundled_path = os.path.join(sys._MEIPASS, CLI_NAME)
         if os.path.isfile(bundled_path):
             return bundled_path
 
-    # Original logic for local development
     here = os.path.abspath(os.path.dirname(__file__))
     local = os.path.join(here, CLI_NAME)
     if os.path.isfile(local):
@@ -43,12 +41,9 @@ def _resolve_cli() -> str:
 def _run_cli(args: List[str]) -> subprocess.CompletedProcess:
     cli = _resolve_cli()
 
-    # --- THIS IS THE CHANGE ---
-    # On Windows, use the CREATE_NO_WINDOW flag to prevent the console from appearing.
     creation_flags = 0
     if sys.platform == "win32":
         creation_flags = subprocess.CREATE_NO_WINDOW
-    # --- END OF CHANGE ---
 
     p = subprocess.run([cli] + args, capture_output=True, text=True, encoding="utf-8", creationflags=creation_flags)
 
@@ -92,5 +87,4 @@ def find_bnks(root: str, exts: Iterable[str] = (".bnk",)) -> List[str]:
         for fn in files:
             if os.path.splitext(fn)[1].lower() in exts_lc:
                 hits.append(os.path.join(dirpath, fn))
-    # Sorting is handled in the UI layer
     return hits

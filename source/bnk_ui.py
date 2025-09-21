@@ -6,6 +6,7 @@ Made by Matthew W, free to use and update.
 """
 
 import os
+import sys
 import tempfile
 import shutil
 import subprocess
@@ -15,6 +16,28 @@ from dearpygui import dearpygui as dpg
 import bnk_core as core
 import convert as mdl_converter
 import audio
+
+
+def _silent_run_towav(towav_path: str, xma_path: Path, cwd: Path) -> bool:
+    cmd = [towav_path, str(xma_path)]
+    try:
+        if os.name == "nt":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            flags = subprocess.CREATE_NO_WINDOW
+            subprocess.run(cmd, cwd=str(cwd), startupinfo=si, creationflags=flags, check=True)
+        else:
+            subprocess.run(cmd, cwd=str(cwd), check=True)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+if not hasattr(audio, "_run_towav_patched"):
+    try:
+        audio.run_towav = _silent_run_towav
+        audio._run_towav_patched = True
+    except Exception:
+        pass
 
 
 class State:
@@ -243,8 +266,11 @@ def _extract_and_convert_one(bnk_path: str, item: core.BNKItem, base_out_dir: st
 
         if item.name.lower().endswith(".wav"):
             try:
-                ok = audio.convert_wav_inplace_same_name(Path(dst_path))
-                return ok
+                # NEW: resolve towav_dir robustly for both source and PyInstaller builds
+                base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+                towav_dir = base_dir / "tools" / "towav"
+                ok = audio.convert_wav_inplace_same_name(Path(dst_path), towav_dir=towav_dir)
+                return bool(ok)
             except Exception:
                 return False
 

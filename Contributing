@@ -1,6 +1,4 @@
-# Contributing to Guild Wars Map Browser
-
-Hello, and thank you for considering contributing to the Guild Wars Map Browser. This project aspires to foster a welcoming, collaborative, and open community. Contributions from both seasoned developers and beginners are highly appreciated.
+# Contributing
 
 ## How to Contribute
 
@@ -22,4 +20,4 @@ Follow these steps to submit your changes:
 2. Create a new branch on your forked repository.
 3. Make your changes on this new branch.
 4. Push the changes to your fork.
-5. Submit a pull request to the 'main' branch of the original Guild Wars Map Browser repository.
+5. Submit a pull request to the 'main' branch.

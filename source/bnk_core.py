@@ -1,9 +1,9 @@
 # bnk_core.py
-"""
-Thin helpers around Fable2Cli.exe + folder scanning.
 
+"""
 Made by Matthew W, free to use and update.
 """
+
 import os
 import subprocess
 import shutil

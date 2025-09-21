@@ -14,7 +14,7 @@ if __name__ == '__main__':
         f'--add-data=Fable2Cli.exe.config{sep}.',
         f'--add-data=Fable2Archives.dll{sep}.',
         f'--add-data=tools{os.sep}towav{os.sep}towav.exe{sep}tools/towav',
-        'bnk_ui.py',
+        'FABLE2.py',
     ]
 
     print('--- Running PyInstaller from build script ---')

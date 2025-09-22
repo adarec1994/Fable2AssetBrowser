@@ -2,7 +2,6 @@
 
 """
 Made by Matthew W, free to use and update.
-Optimized version with parallel extraction for non-audio files.
 """
 
 import os

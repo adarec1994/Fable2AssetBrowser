@@ -2,6 +2,7 @@
 
 """
 Made by Matthew W, free to use and update.
+Optimized version with parallel extraction for non-audio files.
 """
 
 import os
@@ -12,14 +13,18 @@ import subprocess
 import threading
 import time
 import signal
+import concurrent.futures
 from typing import List, Optional, Tuple
 from pathlib import Path
+from threading import Lock
 from dearpygui import dearpygui as dpg
 import bnk_core as core
 import convert as mdl_converter
 
+
 def _ensure_console():
     return
+
 
 class State:
     def __init__(self):
@@ -35,6 +40,8 @@ class State:
         self.active_procs: List[subprocess.Popen] = []
         self.lock = threading.Lock()
         self.monitor_thread: Optional[threading.Thread] = None
+        self.progress_lock = threading.Lock()
+        self.current_progress = 0
 
     def start_process_monitor(self):
         def monitor():
@@ -46,15 +53,22 @@ class State:
                         for proc in self.active_procs[:]:
                             try:
                                 if os.name == "nt":
+                                    # HIDE taskkill window on Windows
+                                    si = subprocess.STARTUPINFO();
+                                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                                    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
                                     subprocess.Popen(
                                         ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                                        shell=True
+                                        shell=True,
+                                        startupinfo=si,
+                                        creationflags=flags
                                     )
                                 else:
                                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                             except Exception:
                                 pass
                 time.sleep(0.05)
+
         self.monitor_thread = threading.Thread(target=monitor, daemon=True)
         self.monitor_thread.start()
 
@@ -64,21 +78,33 @@ _LAST_SELECTED_ROW_ID = None
 
 _CANCEL_BTN_TAG = "__bnk_cancel_btn"
 
+
 def _register_proc(proc):
     with S.lock:
         S.active_procs.append(proc)
+
 
 def _unregister_proc(proc):
     with S.lock:
         if proc in S.active_procs:
             S.active_procs.remove(proc)
 
+
 def _kill_all_processes():
     with S.lock:
         for proc in S.active_procs[:]:
             try:
                 if os.name == "nt":
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], timeout=1)
+                    # HIDE taskkill window on Windows
+                    si = subprocess.STARTUPINFO();
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        timeout=1,
+                        startupinfo=si,
+                        creationflags=flags
+                    )
                 else:
                     os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                     time.sleep(0.1)
@@ -90,6 +116,7 @@ def _kill_all_processes():
                 except:
                     pass
         S.active_procs.clear()
+
 
 def _find_towav() -> Optional[str]:
     base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -109,6 +136,7 @@ def _find_towav() -> Optional[str]:
             return p
     return None
 
+
 def _poll_cancel():
     try:
         if dpg.does_item_exist(_CANCEL_BTN_TAG) and dpg.is_item_clicked(_CANCEL_BTN_TAG):
@@ -117,6 +145,7 @@ def _poll_cancel():
     except Exception:
         pass
     return S.cancel_requested
+
 
 def _run_subprocess_cancelable(cmd: List[str], cwd: Optional[str] = None, timeout: int = 30) -> bool:
     if S.cancel_requested or S.exiting:
@@ -130,7 +159,11 @@ def _run_subprocess_cancelable(cmd: List[str], cwd: Optional[str] = None, timeou
         nonlocal proc
         try:
             if os.name == "nt":
-                proc = subprocess.Popen(cmd, cwd=cwd, creationflags=0)
+                # launch child hidden (no console popup)
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                proc = subprocess.Popen(cmd, cwd=cwd, startupinfo=si, creationflags=flags)
             else:
                 proc = subprocess.Popen(cmd, cwd=cwd, preexec_fn=os.setsid)
             _register_proc(proc)
@@ -158,7 +191,16 @@ def _run_subprocess_cancelable(cmd: List[str], cwd: Optional[str] = None, timeou
             if proc:
                 try:
                     if os.name == "nt":
-                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], check=False)
+                        # HIDE taskkill window on Windows
+                        si = subprocess.STARTUPINFO();
+                        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                            check=False,
+                            startupinfo=si,
+                            creationflags=flags
+                        )
                     else:
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 except Exception:
@@ -172,6 +214,7 @@ def _run_subprocess_cancelable(cmd: List[str], cwd: Optional[str] = None, timeou
         return False
     return (result[0] == 0)
 
+
 def _cli_path() -> str:
     base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     cands = [base_dir / "Fable2Cli.exe", Path("Fable2Cli.exe")]
@@ -180,19 +223,23 @@ def _cli_path() -> str:
             return str(p)
     return "Fable2Cli.exe"
 
+
 def _error_box(msg: str):
     dpg.set_value("error_text", str(msg))
     dpg.configure_item("error_modal", show=True)
 
+
 def _show_completion_box(message: str):
     dpg.set_value("completion_text", message)
     dpg.configure_item("completion_modal", show=True)
+
 
 def _filtered_bnk_paths() -> List[str]:
     if not S.bnk_filter.strip():
         return S.bnk_paths
     q = S.bnk_filter.lower()
     return [p for p in S.bnk_paths if q in os.path.basename(p).lower()]
+
 
 def _center_splash_button():
     if not dpg.does_item_exist("select_btn"):
@@ -205,9 +252,11 @@ def _center_splash_button():
     dpg.configure_item("select_btn", width=bw, height=bh)
     dpg.set_item_pos("select_btn", (x, y))
 
+
 _PROG_WIN = "progress_win"
 _PROG_BAR = "prog_bar"
 _PROG_TEXT = "prog_text"
+
 
 def on_cancel_operation(*_):
     if S.cancel_requested:
@@ -216,8 +265,10 @@ def on_cancel_operation(*_):
     _kill_all_processes()
     _progress_done()
 
+
 def _progress_open(total: int, title: str):
     S.cancel_requested = False
+    S.current_progress = 0
     if dpg.does_item_exist(_PROG_WIN):
         dpg.delete_item(_PROG_WIN)
     with dpg.window(label=title, modal=True, no_close=True, no_resize=False,
@@ -226,6 +277,7 @@ def _progress_open(total: int, title: str):
         dpg.add_progress_bar(tag=_PROG_BAR, default_value=0.0, width=-1)
         dpg.add_spacer(height=6)
         dpg.add_button(label="Cancel", callback=on_cancel_operation, width=-1, tag=_CANCEL_BTN_TAG)
+
 
 def _progress_update(i: int, total: int, rel_path: str):
     if S.cancel_requested or S.exiting:
@@ -236,21 +288,44 @@ def _progress_update(i: int, total: int, rel_path: str):
     dpg.set_value(_PROG_TEXT, f"{i}/{total}   {os.path.basename(rel_path)}")
     dpg.split_frame()
 
+
+def _progress_update_threadsafe(current: int, total: int, filename: str):
+    """Thread-safe progress update"""
+    with S.progress_lock:
+        if S.cancel_requested or S.exiting:
+            return
+        frac = current / total if total else 1.0
+        try:
+            dpg.set_value(_PROG_BAR, frac)
+            dpg.set_value(_PROG_TEXT, f"{current}/{total}   {filename}")
+        except:
+            pass
+
+
 def _progress_done():
     if dpg.does_item_exist(_PROG_WIN):
         dpg.delete_item(_PROG_WIN)
+
 
 def _show_splash():
     dpg.configure_item("splash_group", show=True)
     dpg.configure_item("browser_group", show=False)
     _center_splash_button()
 
+
 def _show_browser():
     dpg.configure_item("splash_group", show=False)
     dpg.configure_item("browser_group", show=True)
 
+
 def _safe_mkdir(path: str):
     os.makedirs(path, exist_ok=True)
+
+
+def is_audio_file(filename: str) -> bool:
+    """Check if file needs audio conversion"""
+    return filename.lower().endswith('.wav')
+
 
 def _convert_wav_file(wav_path: Path) -> bool:
     if S.cancel_requested or S.exiting:
@@ -271,32 +346,44 @@ def _convert_wav_file(wav_path: Path) -> bool:
             repaired_path = None
         if S.cancel_requested or S.exiting:
             if repaired_path and repaired_path.exists():
-                try: repaired_path.unlink()
-                except: pass
+                try:
+                    repaired_path.unlink()
+                except:
+                    pass
             return False
         towav = _find_towav()
         if not towav:
             if repaired_path and repaired_path.exists():
-                try: repaired_path.unlink()
-                except: pass
+                try:
+                    repaired_path.unlink()
+                except:
+                    pass
             return True
         work_dir = src_path.parent
         xma_path = work_dir / (src_path.stem + ".xma")
         shutil.copyfile(src_path, xma_path)
         if S.cancel_requested or S.exiting:
-            try: xma_path.unlink()
-            except: pass
+            try:
+                xma_path.unlink()
+            except:
+                pass
             if repaired_path and repaired_path.exists():
-                try: repaired_path.unlink()
-                except: pass
+                try:
+                    repaired_path.unlink()
+                except:
+                    pass
             return False
         ok = _run_subprocess_cancelable([towav, str(xma_path)], cwd=str(work_dir))
-        try: xma_path.unlink()
-        except: pass
+        try:
+            xma_path.unlink()
+        except:
+            pass
         if S.cancel_requested or S.exiting:
             if repaired_path and repaired_path.exists():
-                try: repaired_path.unlink()
-                except: pass
+                try:
+                    repaired_path.unlink()
+                except:
+                    pass
             return False
         if ok:
             produced = work_dir / (xma_path.stem + ".wav")
@@ -311,11 +398,31 @@ def _convert_wav_file(wav_path: Path) -> bool:
                 except:
                     pass
         if repaired_path and repaired_path.exists():
-            try: repaired_path.unlink()
-            except: pass
+            try:
+                repaired_path.unlink()
+            except:
+                pass
         return ok
     except Exception:
         return False
+
+
+def _extract_only(bnk_path: str, item: core.BNKItem, base_out_dir: str) -> bool:
+    """Fast extraction without conversion - for non-audio files"""
+    try:
+        if S.cancel_requested or S.exiting:
+            return False
+        _safe_mkdir(base_out_dir)
+        dst_path = os.path.join(base_out_dir, item.name)
+        _safe_mkdir(os.path.dirname(dst_path))
+        if S.cancel_requested or S.exiting:
+            return False
+        exe = _cli_path()
+        ok = _run_subprocess_cancelable([exe, "extract-one", bnk_path, str(item.index), os.path.abspath(dst_path)])
+        return ok
+    except Exception:
+        return False
+
 
 def _extract_and_convert_one(bnk_path: str, item: core.BNKItem, base_out_dir: str) -> bool:
     try:
@@ -337,7 +444,8 @@ def _extract_and_convert_one(bnk_path: str, item: core.BNKItem, base_out_dir: st
             return False
         if not ok:
             return False
-        if item.name.lower().endswith(".wav"):
+        # Only convert audio files
+        if is_audio_file(item.name):
             ok = _convert_wav_file(Path(dst_path))
             if S.cancel_requested or S.exiting:
                 try:
@@ -351,13 +459,18 @@ def _extract_and_convert_one(bnk_path: str, item: core.BNKItem, base_out_dir: st
     except Exception:
         return False
 
+
 def on_file_selected(sender, app_data, user_data):
     global _LAST_SELECTED_ROW_ID
     if _LAST_SELECTED_ROW_ID is not None and dpg.does_item_exist(_LAST_SELECTED_ROW_ID):
-        try: dpg.configure_item(_LAST_SELECTED_ROW_ID, default_value=False)
-        except Exception: pass
-    try: dpg.configure_item(sender, default_value=True)
-    except Exception: pass
+        try:
+            dpg.configure_item(_LAST_SELECTED_ROW_ID, default_value=False)
+        except Exception:
+            pass
+    try:
+        dpg.configure_item(sender, default_value=True)
+    except Exception:
+        pass
     _LAST_SELECTED_ROW_ID = sender
     idx = user_data
     dpg.set_value("sel_file_idx", idx)
@@ -368,6 +481,7 @@ def on_file_selected(sender, app_data, user_data):
             is_mdl = True
     if dpg.does_item_exist("export_mdl_btn"):
         dpg.configure_item("export_mdl_btn", show=is_mdl)
+
 
 def refresh_bnk_sidebar():
     if dpg.does_item_exist("bnk_list"):
@@ -385,6 +499,7 @@ def refresh_bnk_sidebar():
             with dpg.tooltip(selectable_tag):
                 dpg.add_text(path)
     dpg.configure_item("bnk_filter", show=bool(S.bnk_paths))
+
 
 def refresh_file_table():
     if dpg.does_item_exist("files_table"):
@@ -413,8 +528,10 @@ def refresh_file_table():
                 dpg.add_text(str(it.size))
     dpg.set_value("sel_file_idx", -1)
 
+
 def on_open_folder(*_):
     dpg.show_item("open_folder_dialog")
+
 
 def open_folder_cb(sender, app_data):
     try:
@@ -440,6 +557,7 @@ def open_folder_cb(sender, app_data):
     except Exception as e:
         _error_box(e)
 
+
 def on_pick_bnk(sender, app_data, user_data):
     if not app_data:
         return
@@ -452,15 +570,18 @@ def on_pick_bnk(sender, app_data, user_data):
     except Exception as e:
         _error_box(e)
 
+
 def on_filter_change(sender, app_data):
     S.bnk_filter = app_data or ""
     refresh_bnk_sidebar()
+
 
 def on_toggle_tooltips(sender, app_data):
     S.hide_tooltips = app_data
     refresh_bnk_sidebar()
     if S.selected_bnk:
         refresh_file_table()
+
 
 def on_extract_selected(*_):
     try:
@@ -488,7 +609,9 @@ def on_extract_selected(*_):
         S.cancel_requested = False
         _error_box(e)
 
+
 def on_extract_all(*_):
+    """Optimized parallel extraction with separate handling for audio and non-audio files"""
     try:
         if not S.selected_bnk:
             _error_box("No BNK selected.")
@@ -496,36 +619,107 @@ def on_extract_all(*_):
         if not S.files:
             _error_box("No files to extract in this BNK.")
             return
+
         base_out = os.path.join(os.getcwd(), "extracted")
         _safe_mkdir(base_out)
         total = len(S.files)
+
+        # Separate audio and non-audio files
+        audio_files = [f for f in S.files if is_audio_file(f.name)]
+        non_audio_files = [f for f in S.files if not is_audio_file(f.name)]
+
         _progress_open(total, "Extracting All Files...")
         dpg.split_frame()
+
         extracted = 0
-        for i, it in enumerate(S.files, 1):
-            if _poll_cancel() or S.exiting:
-                break
-            _progress_update(i, total, it.name)
-            for _ in range(5):
-                dpg.split_frame()
-                if _poll_cancel() or S.exiting:
-                    break
+        extracted_lock = Lock()
+        failed_files = []
+
+        def extract_file_parallel(item, needs_conversion):
+            nonlocal extracted
             if S.cancel_requested or S.exiting:
-                break
-            if _extract_and_convert_one(S.selected_bnk, it, base_out):
-                extracted += 1
-            if S.cancel_requested or S.exiting:
-                break
+                return False
+
+            try:
+                if needs_conversion:
+                    success = _extract_and_convert_one(S.selected_bnk, item, base_out)
+                else:
+                    success = _extract_only(S.selected_bnk, item, base_out)
+
+                with extracted_lock:
+                    if success:
+                        extracted += 1
+                    else:
+                        failed_files.append(item.name)
+                    current = extracted + len(failed_files)
+                    _progress_update_threadsafe(current, total, os.path.basename(item.name))
+
+                return success
+            except Exception as e:
+                with extracted_lock:
+                    failed_files.append(item.name)
+                return False
+
+        # Determine number of workers based on file types
+        # More workers for non-audio files since they don't need conversion
+        non_audio_workers = min(8, max(2, os.cpu_count() or 2))
+        audio_workers = min(4, max(1, (os.cpu_count() or 2) // 2))
+
+        # Process non-audio files first (they're typically faster)
+        if non_audio_files and not S.cancel_requested:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=non_audio_workers) as executor:
+                futures = []
+                for item in non_audio_files:
+                    if S.cancel_requested:
+                        break
+                    future = executor.submit(extract_file_parallel, item, False)
+                    futures.append(future)
+
+                # Wait for completion or cancellation
+                for future in concurrent.futures.as_completed(futures):
+                    if S.cancel_requested:
+                        executor.shutdown(wait=False)
+                        break
+
+        # Then process audio files with fewer workers
+        if audio_files and not S.cancel_requested:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=audio_workers) as executor:
+                futures = []
+                for item in audio_files:
+                    if S.cancel_requested:
+                        break
+                    future = executor.submit(extract_file_parallel, item, True)
+                    futures.append(future)
+
+                # Wait for completion or cancellation
+                for future in concurrent.futures.as_completed(futures):
+                    if S.cancel_requested:
+                        executor.shutdown(wait=False)
+                        break
+
         _progress_done()
+
+        # Prepare completion message
         if S.cancel_requested:
-            _show_completion_box(f"Extraction cancelled.\n{extracted} of {total} files extracted.\n\nOutput folder:\n{os.path.abspath(base_out)}")
+            msg = f"Extraction cancelled.\n{extracted} of {total} files extracted successfully."
         else:
-            _show_completion_box(f"Extraction complete!\n{extracted} of {total} files extracted.\n\nOutput folder:\n{os.path.abspath(base_out)}")
+            msg = f"Extraction complete!\n{extracted} of {total} files extracted successfully."
+
+        if failed_files:
+            msg += f"\n\nFailed to extract {len(failed_files)} file(s)."
+            if len(failed_files) <= 5:
+                msg += "\nFailed files:\n" + "\n".join(f"  • {f}" for f in failed_files[:5])
+
+        msg += f"\n\nOutput folder:\n{os.path.abspath(base_out)}"
+        _show_completion_box(msg)
+
         S.cancel_requested = False
+
     except Exception as e:
         _progress_done()
         S.cancel_requested = False
         _error_box(e)
+
 
 def on_export_selected_mdl(*_):
     try:
@@ -541,7 +735,8 @@ def on_export_selected_mdl(*_):
         _safe_mkdir(tmp_dir)
         mdl_path = os.path.join(tmp_dir, item.name)
         exe = _cli_path()
-        ok = _run_subprocess_cancelable([exe, "extract-one", S.selected_bnk, str(item.index), os.path.abspath(mdl_path)])
+        ok = _run_subprocess_cancelable(
+            [exe, "extract-one", S.selected_bnk, str(item.index), os.path.abspath(mdl_path)])
         if not ok:
             _error_box("Failed to extract MDL file")
             return
@@ -550,6 +745,7 @@ def on_export_selected_mdl(*_):
         _show_completion_box(f"Export to GLB complete!\n\nOutput folder:\n{os.path.abspath(out_dir)}")
     except Exception as e:
         _error_box(f"Failed to export MDL: {e}")
+
 
 def on_viewport_close():
     S.exiting = True
@@ -560,6 +756,7 @@ def on_viewport_close():
         dpg.stop_dearpygui()
     finally:
         os._exit(0)
+
 
 def build_ui():
     _ensure_console()
@@ -624,14 +821,17 @@ def build_ui():
     dpg.show_viewport()
     dpg.set_primary_window("main", True)
     _center_splash_button()
+
     def _on_resize(sender, app_data):
         _center_splash_button()
+
     dpg.set_viewport_resize_callback(_on_resize)
     dpg.set_exit_callback(on_viewport_close)
     dpg.start_dearpygui()
     dpg.destroy_context()
     _kill_all_processes()
     sys.exit(0)
+
 
 if __name__ == "__main__":
     build_ui()

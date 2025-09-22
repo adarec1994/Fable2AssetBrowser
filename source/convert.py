@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# convert.py
 """
 Conversion logic for Fable 2 .mdl files to .glb format.
 

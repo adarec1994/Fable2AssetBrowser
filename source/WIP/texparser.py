@@ -60,25 +60,21 @@ class TextureParser:
         self.parse()
 
     def read_uint32_be(self) -> int:
-        """Read a big-endian uint32 from the file."""
         data = self.file.read(4)
         if len(data) < 4:
             raise ValueError(f"Expected 4 bytes, got {len(data)} at position {self.file.tell() - len(data)}")
         return struct.unpack('>I', data)[0]
 
     def read_uint16_be(self) -> int:
-        """Read a big-endian uint16 from the file."""
         data = self.file.read(2)
         if len(data) < 2:
             raise ValueError(f"Expected 2 bytes, got {len(data)} at position {self.file.tell() - len(data)}")
         return struct.unpack('>H', data)[0]
 
     def parse(self):
-        """Parse the texture file according to the template structure."""
         if self.debug:
             print("Reading header...")
 
-        # Read header
         self.sign = self.read_uint32_be()
         if self.debug:
             print(f"Signature: 0x{self.sign:08X}")
@@ -96,12 +92,10 @@ class TextureParser:
             print(f"MipMap count: {self.mipmap_count}")
             print(f"Current position: {self.file.tell()}")
 
-        # Sanity check
         if self.mipmap_count > 100:  # Unlikely to have more than 100 mipmaps
             print(f"Warning: Unusual mipmap count: {self.mipmap_count}")
             print("File might not match expected format")
 
-        # Read mipmap offsets
         self.mipmap_offsets: List[int] = []
         for i in range(self.mipmap_count):
             offset = self.read_uint32_be()
@@ -109,13 +103,12 @@ class TextureParser:
             if self.debug:
                 print(f"MipMap {i} offset: 0x{offset:08X}")
 
-        # Read mipmap definitions
+
         self.mipmap_defs: List[MipMapDef] = []
         for i in range(self.mipmap_count):
             if self.debug:
                 print(f"\nParsing MipMap {i} at offset 0x{self.mipmap_offsets[i]:08X}")
 
-            # Check if offset is within file bounds
             if self.mipmap_offsets[i] >= self.file_size:
                 print(
                     f"Warning: MipMap {i} offset (0x{self.mipmap_offsets[i]:08X}) exceeds file size ({self.file_size})")
@@ -155,15 +148,12 @@ class TextureParser:
             print(f"  DataSize: {mipmap.data_size}")
 
         if mipmap.comp_flag == 7:
-            # Read exactly DataSize bytes for compressed data
             mipmap.mipmap_data = self.file.read(mipmap.data_size)
         else:
             mipmap.mip_width = self.read_uint16_be()
             mipmap.mip_height = self.read_uint16_be()
             mipmap.unk_data = self.file.read(440)
-            
-            # Read exactly (DataSize - 448) bytes
-            # 448 = 2 (MipWidth) + 2 (MipHeight) + 440 (UnkData) + 4 (padding for alignment)
+
             remaining_size = mipmap.data_size - 448
             if remaining_size > 0:
                 mipmap.mipmap_data = self.file.read(remaining_size)
@@ -235,7 +225,6 @@ def main():
     texture_file = sys.argv[1]
     debug_mode = '--debug' in sys.argv
 
-    # Check if file exists
     if not os.path.exists(texture_file):
         print(f"Error: File '{texture_file}' not found.")
         sys.exit(1)
@@ -253,7 +242,6 @@ def main():
             if response == 'y':
                 parser.dump_header()
 
-        # Optional: Ask if user wants to export mipmaps
         if parser.mipmap_count > 0 and len(parser.mipmap_defs) > 0:
             print("\n" + "=" * 60)
             response = input("Export mipmap data to separate files? (y/n): ").lower()

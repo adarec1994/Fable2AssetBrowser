@@ -132,7 +132,6 @@ class TextureParser:
                 break
 
     def parse_mipmap_def(self) -> MipMapDef:
-        """Parse a single mipmap definition."""
         start_pos = self.file.tell()
 
         mipmap = MipMapDef(
@@ -174,7 +173,6 @@ class TextureParser:
         return mipmap
 
     def get_info(self) -> dict:
-        """Get a dictionary with parsed information."""
         return {
             'sign': self.sign,
             'raw_data_size': self.raw_data_size,
@@ -187,7 +185,6 @@ class TextureParser:
         }
 
     def print_info(self):
-        """Print parsed information in a readable format."""
         print(f"Signature: 0x{self.sign:08X}")
         print(f"Raw Data Size: {self.raw_data_size}")
         print(f"Unknown_0: 0x{self.unknown_0:08X}")
@@ -207,7 +204,6 @@ class TextureParser:
             print(f"  MipMap Data Length: {len(mipmap.mipmap_data)}")
 
     def export_mipmaps(self, base_filename: str):
-        """Export mipmap data to separate files."""
         base_name = os.path.splitext(base_filename)[0]
         for i, mipmap in enumerate(self.mipmap_defs):
             output_file = f"{base_name}_mipmap_{i}.bin"
@@ -216,7 +212,6 @@ class TextureParser:
             print(f"Exported: {output_file} ({len(mipmap.mipmap_data)} bytes)")
 
     def dump_header(self, num_bytes: int = 256):
-        """Dump the first N bytes of the file in hex format."""
         self.file.seek(0)
         data = self.file.read(num_bytes)
         print("\nFile header dump (hex):")
@@ -226,13 +221,11 @@ class TextureParser:
             print(f"{i:08X}: {hex_str:<48} {ascii_str}")
 
     def __del__(self):
-        """Clean up file handle if needed."""
         if hasattr(self, 'should_close') and self.should_close and hasattr(self, 'file'):
             self.file.close()
 
 
 def main():
-    """Main function to handle command-line execution."""
     if len(sys.argv) < 2:
         print("Usage: texparser.py <texture_file> [--debug]")
         print("Example: texparser.py suicide_bomber_base_diffuse_merged.tex")
@@ -254,7 +247,6 @@ def main():
         parser = TextureParser(texture_file, debug=debug_mode)
         parser.print_info()
 
-        # Optional: Ask if user wants to see hex dump
         if debug_mode:
             print("\n" + "=" * 60)
             response = input("Show hex dump of file header? (y/n): ").lower()
@@ -274,7 +266,6 @@ def main():
             import traceback
             traceback.print_exc()
 
-        # Try to show hex dump for debugging
         try:
             print("\nShowing file header for debugging:")
             with open(texture_file, 'rb') as f:

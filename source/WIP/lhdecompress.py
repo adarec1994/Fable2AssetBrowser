@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Fable 2 DEFLATE Texture Decompressor
-Implements a custom DEFLATE decompressor based on the reverse-engineered
-lh_run function from the Fable 2 engine.
-"""
 
 import struct
 import sys
@@ -11,7 +6,6 @@ import os
 from typing import Optional, List, Tuple
 
 # This is a placeholder for the actual TextureParser.
-# The user's original script depends on it.
 class TextureParser:
     """A placeholder class to allow the script to run."""
     def __init__(self, file_path, debug=False):
@@ -42,29 +36,22 @@ class TextureParser:
     def print_info(self):
         print(f"Texture Info (Mock): {self.texture_width}x{self.texture_height}")
 
-# --- Custom DEFLATE Implementation ---
+# DEFLATE Implementation
 
 class Fable2Deflate:
-    """
-    A custom DEFLATE implementation that correctly handles the bitstream
-    and Huffman coding found in Fable 2's lh_run function.
-    """
 
     def __init__(self, data: bytes):
-        # Bitstream state
         self.data = data
         self.byte_pos = 0
         self.hold = 0
         self.bits = 0
 
-        # Output buffer
         self.out = bytearray()
         
-        # Fixed Huffman tables (pre-calculated)
+        # Fixed Huffman tables (pre-calculated - could be wrong)
         self.fixed_litlen_table = self._build_fixed_litlen_table()
         self.fixed_dist_table = self._build_fixed_dist_table()
-
-    # --- Bitstream Handling ---
+        
     
     def _fill_hold(self):
         """Refills the bit buffer, mirroring the game's assembly."""
@@ -76,7 +63,6 @@ class Fable2Deflate:
                 self.byte_pos += 1
 
     def _read_bits(self, n: int) -> int:
-        """Reads n bits from the LSB end of the bit buffer."""
         if self.bits < n:
             self._fill_hold()
         if self.bits < n:
@@ -89,17 +75,11 @@ class Fable2Deflate:
         return val
         
     def _align_to_byte(self):
-        """Discards bits to align to the next byte boundary."""
         self.bits -= self.bits % 8
         self.hold &= (1 << self.bits) - 1
 
-    # --- Huffman Table Generation ---
-
     def _build_huffman_table(self, code_lengths: List[int]) -> List[Tuple[int, int]]:
-        """
-        Builds a canonical Huffman code table from code lengths.
-        Returns a list of (code, length) for each symbol.
-        """
+
         if not any(code_lengths): # Handle empty/all-zero lengths
             return []
             
@@ -123,34 +103,27 @@ class Fable2Deflate:
         return table
         
     def _build_fixed_litlen_table(self):
-        """Generates the fixed Huffman table for literal/length codes."""
         lengths = ([8] * 144) + ([9] * 112) + ([7] * 24) + ([8] * 8)
         return self._build_huffman_table(lengths)
         
     def _build_fixed_dist_table(self):
-        """Generates the fixed Huffman table for distance codes."""
         return self._build_huffman_table([5] * 32)
 
-    # --- Symbol Decoding ---
-
     def _decode_symbol(self, table: List[Tuple[int, int]]) -> int:
-        """Decodes one symbol using the provided Huffman table."""
         code = 0
         length = 0
         while True:
             length += 1
             code = (code << 1) | self._read_bits(1)
-            # Find matching code at current length
             for symbol, (sym_code, sym_len) in enumerate(table):
                 if sym_len == length and sym_code == code:
                     return symbol
             if length > 15: # Max DEFLATE code length
                 raise ValueError("Invalid Huffman code found in stream.")
 
-    # --- Main Decompression Logic ---
+    # Decompression Logic
 
     def decompress(self, expected_size: int) -> bytes:
-        """Executes the main DEFLATE state machine."""
         is_last_block = False
         while not is_last_block:
             is_last_block = self._read_bits(1) == 1
@@ -179,7 +152,6 @@ class Fable2Deflate:
         if length != (~nlength & 0xFFFF):
             raise ValueError("Invalid stored block length.")
         
-        # Manually copy from any remaining bits in the hold buffer first
         while self.bits >= 8 and length > 0:
             self.out.append(self.hold & 0xFF)
             self.hold >>= 8
@@ -189,7 +161,7 @@ class Fable2Deflate:
         if self.byte_pos + length > len(self.data):
              raise ValueError("Stored block requests more data than available.")
         
-        # Then copy remaining bulk data from the source array
+        # copy remaining bulk data from the source array
         self.out.extend(self.data[self.byte_pos : self.byte_pos + length])
         self.byte_pos += length
 
@@ -241,25 +213,19 @@ class Fable2Deflate:
                 self.out.append(symbol)
             elif symbol == 256:  # End of block
                 break
-            else:  # Length/distance pair
-                # Decode length
+            else: 
                 sym_idx = symbol - 257
                 length = LEN_BASE[sym_idx] + self._read_bits(LEN_EXTRA[sym_idx])
                 
-                # Decode distance
                 dist_symbol = self._decode_symbol(dist_table)
                 dist_idx = dist_symbol
                 distance = DIST_BASE[dist_idx] + self._read_bits(DIST_EXTRA[dist_idx])
                 
-                # Copy from output buffer
                 for _ in range(length):
                     self.out.append(self.out[-distance])
 
 
 def custom_deflate(data: bytes, expected_size: int) -> Optional[bytes]:
-    """
-    Decompresses Fable 2 texture data by trying different header offsets.
-    """
     for offset in [0, 2, 4, 8, 16]:
         if offset >= len(data):
             continue
@@ -270,7 +236,6 @@ def custom_deflate(data: bytes, expected_size: int) -> Optional[bytes]:
                 print(f"  ✓ Success: Custom DEFLATE with {offset}-byte header offset")
                 return result
         except (ValueError, IndexError):
-            # This offset failed, try the next one
             pass
 
     print(f"  ✗ Custom DEFLATE failed at all attempted offsets.")
@@ -289,7 +254,6 @@ def convert_xbox_bc1_to_pc(data: bytes) -> bytes:
 
 
 def create_dds_header(width: int, height: int) -> bytes:
-    """Create a DDS header for BC1/DXT1 texture."""
     header = bytearray(128)
     struct.pack_into('<4sI', header, 0, b'DDS ', 124)
     flags = 0x1 | 0x2 | 0x4 | 0x1000  # CAPS, HEIGHT, WIDTH, PIXELFORMAT
@@ -305,7 +269,6 @@ def create_dds_header(width: int, height: int) -> bytes:
 
 
 def main():
-    """Main entry point."""
     if len(sys.argv) < 2:
         print("Usage: python fable2_deflate.py <texture_file.tex or compressed.bin>")
         sys.exit(1)
@@ -328,7 +291,6 @@ def main():
             print("Real 'texparser.py' not found. Using placeholder.")
             parser = TextureParser(texture_file)
     else:
-        # Handle raw bin files
         parser = TextureParser(texture_file) # Use placeholder to run
 
     parser.print_info()

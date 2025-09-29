@@ -1,19 +1,3 @@
-#!/usr/bin/env python3
-"""
-MDL → GLB per MeshBuffer with robust MeshBuffer re-sync, unlimited buffers,
-and 13th-byte sequential marker verification.
-
-Exports: <file>.buf0.glb, <file>.buf1.glb, ...
-
-For each MeshBuffer prints:
-- initial 13 bytes (hex)
-- vertex start offset, vertex count, stride
-- face start offset, face count, and whether strips or triangles
-
-Usage:
-  python mdl_parser_resync_glb_allbufs.py <file.mdl> [--little-endian] [--stride N] [--no-faces]
-"""
-
 from __future__ import annotations
 import json
 import math
@@ -22,17 +6,14 @@ import sys
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-# -------------------- tunables --------------------
-DEFAULT_VERTEX_STRIDE = 28     # can be overridden by CLI --stride
-SUBMESH_DESC_SIZE     = 41     # bytes per SubMeshDesc block
-INDEX_STRIDE          = 2      # WORD indices in file
-UNK16_STRIDE          = 16     # 4 floats (per vertex)
-MAX_STR_LEN           = 8192   # cap for reading C-strings defensively
+DEFAULT_VERTEX_STRIDE = 28
+SUBMESH_DESC_SIZE = 41
+INDEX_STRIDE = 2
+UNK16_STRIDE = 16
+MAX_STR_LEN = 8192
 
 _DEF_EXTS = ('.tex', '.dds', '.tga')
 _ALLOWED_START = set(range(48,58)) | set(range(65,91)) | set(range(97,123)) | {0x2F,0x5C,0x2E,0x5F,0x3A}
-
-# -------------------- half-float --------------------
 
 def _half_to_float(h: int) -> float:
     s = (h >> 15) & 0x1
@@ -54,14 +35,8 @@ def read_half_be(b: bytes) -> float:
 def read_half_le(b: bytes) -> float:
     return _half_to_float((b[1] << 8) | b[0])
 
-# -------------------- small helpers --------------------
-
 def looks_like_ascii_start(b: int) -> bool:
     return b in _ALLOWED_START
-
-def looks_like_path(s: str) -> bool:
-    ls = s.lower()
-    return any(ls.endswith(ext) or ls.endswith(ext + '.') for ext in _DEF_EXTS)
 
 def _u32_be(b: bytes, i: int) -> int:
     return struct.unpack_from('>I', b, i)[0]
@@ -69,10 +44,6 @@ def _u32_be(b: bytes, i: int) -> int:
 def _u32_le(b: bytes, i: int) -> int:
     return struct.unpack_from('<I', b, i)[0]
 
-def pad4(n: int) -> int:
-    return (n + 3) & ~3
-
-# -------------------- Reader --------------------
 class Reader:
     def __init__(self, data: bytes, big_endian: bool = True):
         self.data = data
@@ -115,8 +86,6 @@ class Reader:
 
     def rf32_arr(self, k: int):
         return [self.rf32() for _ in range(k)]
-
-# -------------------- MeshBuffer header sniffing --------------------
 
 def _plausible_meshbuffer_counts(some: int, idx: int, vtx: int, sm: int,
                                  file_len: int, at: int, preamble: int,
@@ -177,10 +146,7 @@ def find_any_meshbuffer(data: bytes, start_at: int, be: bool, vertex_stride: int
             return i
     return None
 
-# -------------------- header skip (materials kept, debug silent) --------------------
-
-def skip_to_mesh_headers(r: Reader, vertex_stride: int, quiet_mats: bool) -> int:
-    # Preamble
+def skip_to_mesh_headers(r: Reader, vertex_stride: int) -> int:
     r.ru32_arr(8)
     bone_count = r.ru32()
     for _ in range(min(bone_count, 65535)):
@@ -194,12 +160,12 @@ def skip_to_mesh_headers(r: Reader, vertex_stride: int, quiet_mats: bool) -> int
     unk6c = r.ru32()
     if 0 < unk6c < 65535:
         r.rf32_arr(unk6c)
-    _ = r.ru32()  # Unk7
+    _ = r.ru32()
 
     data = r.data
     for _mi in range(mesh_count):
-        _ = r.ru32()           # Unk1
-        _ = r.rstr()           # MeshName
+        _ = r.ru32()
+        _ = r.rstr()
         r.rf32_arr(2)
         r.rbytes(21)
         _ = r.rf32()
@@ -241,8 +207,6 @@ def skip_to_mesh_headers(r: Reader, vertex_stride: int, quiet_mats: bool) -> int
         r.off = hdr
     return mesh_count
 
-# -------------------- faces reconstruction --------------------
-
 def build_faces_from_indices(indices: List[int], vcount: int) -> List[Tuple[int,int,int]]:
     faces: List[Tuple[int,int,int]] = []
     has_restart = any(ix == 0xFFFF for ix in indices)
@@ -271,9 +235,7 @@ def build_faces_from_indices(indices: List[int], vcount: int) -> List[Tuple[int,
         si = ei + 1
     return faces
 
-# -------------------- buffer parsing --------------------
-
-def parse_buffer(r: Reader, which: int, preface_len: int, vertex_stride: int, write_faces: bool):
+def parse_buffer(r: Reader, which: int, preface_len: int, vertex_stride: int):
     start = r.off
     head13 = r.data[start:start+13]
     head13_hex = ' '.join(f"{b:02X}" for b in head13)
@@ -306,244 +268,163 @@ def parse_buffer(r: Reader, which: int, preface_len: int, vertex_stride: int, wr
         raw = r.data[vstart:vstart + vtx * vertex_stride]
         for i in range(vtx):
             base = i * vertex_stride
-            x = read_half(raw[base     : base+2])
-            y = read_half(raw[base+2   : base+4])
-            z = read_half(raw[base+4   : base+6])
-            # write as X Z Y later; keep XYZ here
+            x = read_half(raw[base      : base+2])
+            y = read_half(raw[base+2    : base+4])
+            z = read_half(raw[base+4    : base+6])
             positions.append((x, y, z))
     r.off = vstart + vtx * vertex_stride
 
     face_start = r.off
     faces: List[Tuple[int,int,int]] = []
     indices: List[int] = []
-    if write_faces and idx > 0:
-        face_bytes = idx * INDEX_STRIDE
-        avail = len(r.data) - r.off
-        read_n = min(face_bytes, max(0, avail))
-        face_blob = r.rbytes(read_n)
-        u16fmt = '>H' if r.be else '<H'
-        indices = [struct.unpack(u16fmt, face_blob[i:i+2])[0]
-                   for i in range(0, len(face_blob), 2) if i+2 <= len(face_blob)]
-        faces = build_faces_from_indices(indices, vtx)
-    else:
-        r.off += idx * INDEX_STRIDE
+    face_bytes = idx * INDEX_STRIDE
+    avail = len(r.data) - r.off
+    read_n = min(face_bytes, max(0, avail))
+    face_blob = r.rbytes(read_n)
+    u16fmt = '>H' if r.be else '<H'
+    indices = [struct.unpack(u16fmt, face_blob[i:i+2])[0]
+               for i in range(0, len(face_blob), 2) if i+2 <= len(face_blob)]
+    faces = build_faces_from_indices(indices, vtx)
 
     unk16_bytes = vtx * UNK16_STRIDE
     if r.off + unk16_bytes <= len(r.data):
         r.off += unk16_bytes
 
-    mode = "triangle strips" if (write_faces and any(ix == 0xFFFF for ix in indices)) else "triangles"
+    mode = "triangle strips" if any(ix == 0xFFFF for ix in indices) else "triangles"
     print(f"  vertex start offset = 0x{vstart:08X}")
     print(f"  vertex count        = {vtx}")
     print(f"  stride              = {vertex_stride}")
     print(f"  face start offset   = 0x{face_start:08X}")
     print(f"  face count          = {idx}")
-    if write_faces and idx > 0:
-        print(f"  mode                = {mode} (built {len(faces)} tris)")
-    else:
-        print(f"  mode                = {mode} (faces skipped)")
+    print(f"  mode                = {mode} (built {len(faces)} tris)")
 
-    return vstart, vtx, positions, faces
+    return positions, faces
 
-# -------------------- GLB writer --------------------
+def write_combined_glb(out_path: Path, buffers_data: List[dict], src_name: str):
+    if not buffers_data:
+        print("No geometry data found to export.")
+        return
 
-def write_glb(out_path: Path,
-              positions: List[Tuple[float,float,float]],
-              faces: List[Tuple[int,int,int]],
-              src_name: str, which: int):
-    """
-    Minimal GLB:
-      - scene(0) -> node(0) -> mesh(0) -> primitive(0)
-      - POSITION (float32 VEC3), indices optional
-      - If faces empty, export as POINTS (mode 0) without indices.
-    """
-    # Reorder to X Z Y as you wanted for OBJ: here we permanently store XZY
-    pos_f32 = []
-    minx = miny = minz = float('inf')
-    maxx = maxy = maxz = float('-inf')
-    for (x, y, z) in positions:
-        px, py, pz = x, z, y  # X Z Y
-        pos_f32.extend([px, py, pz])
-        if px < minx: minx = px
-        if py < miny: miny = py
-        if pz < minz: minz = pz
-        if px > maxx: maxx = px
-        if py > maxy: maxy = py
-        if pz > maxz: maxz = pz
+    bin_data = bytearray()
+    gltf_accessors = []
+    gltf_bufferViews = []
+    gltf_meshes = []
+    gltf_nodes = []
 
-    # Build flat index array from faces (convert 1-based -> 0-based)
-    flat_idx: List[int] = []
-    for a, b, c in faces:
-        flat_idx.extend([a-1, b-1, c-1])
+    for buf_data in buffers_data:
+        positions = buf_data['positions']
+        faces = buf_data['faces']
+        which = buf_data['which']
 
-    # Decide index component type
-    have_indices = len(flat_idx) > 0
-    if have_indices:
-        max_index = max(flat_idx) if flat_idx else 0
-        if max_index < 65536:
-            comp_type = 5123  # UNSIGNED_SHORT
-            idx_bytes = bytearray()
-            for i in flat_idx:
-                idx_bytes += struct.pack('<H', int(i))
+        pos_f32 = []
+        minx = miny = minz = float('inf')
+        maxx = maxy = maxz = float('-inf')
+        for (x, y, z) in positions:
+            px, py, pz = x, z, y
+            pos_f32.extend([px, py, pz])
+            minx = min(minx, px)
+            miny = min(miny, py)
+            minz = min(minz, pz)
+            maxx = max(maxx, px)
+            maxy = max(maxy, py)
+            maxz = max(maxz, pz)
+
+        pos_bytes = struct.pack('<' + 'f'*len(pos_f32), *pos_f32)
+        pos_padding = b'\x00' * ((4 - len(pos_bytes) % 4) % 4)
+        pos_offset = len(bin_data)
+        bin_data.extend(pos_bytes + pos_padding)
+
+        gltf_bufferViews.append({
+            "buffer": 0, "byteOffset": pos_offset, "byteLength": len(pos_bytes), "target": 34962
+        })
+        current_pos_bv_idx = len(gltf_bufferViews) - 1
+
+        gltf_accessors.append({
+            "bufferView": current_pos_bv_idx, "byteOffset": 0, "componentType": 5126, "count": len(positions), "type": "VEC3",
+            "min": [minx if math.isfinite(minx) else 0.0, miny if math.isfinite(miny) else 0.0, minz if math.isfinite(minz) else 0.0],
+            "max": [maxx if math.isfinite(maxx) else 0.0, maxy if math.isfinite(maxy) else 0.0, maxz if math.isfinite(maxz) else 0.0],
+        })
+        current_pos_acc_idx = len(gltf_accessors) - 1
+
+        prim = {"attributes": {"POSITION": current_pos_acc_idx}}
+        flat_idx = [i-1 for face in faces for i in face]
+        
+        if flat_idx:
+            max_index = max(flat_idx)
+            comp_type = 5123 if max_index < 65536 else 5125
+            fmt_char = 'H' if comp_type == 5123 else 'I'
+            idx_bytes = struct.pack(f'<{len(flat_idx)}{fmt_char}', *flat_idx)
+            idx_padding = b'\x00' * ((4 - len(idx_bytes) % 4) % 4)
+            idx_offset = len(bin_data)
+            bin_data.extend(idx_bytes + idx_padding)
+
+            gltf_bufferViews.append({
+                "buffer": 0, "byteOffset": idx_offset, "byteLength": len(idx_bytes), "target": 34963
+            })
+            current_idx_bv_idx = len(gltf_bufferViews) - 1
+
+            gltf_accessors.append({
+                "bufferView": current_idx_bv_idx, "byteOffset": 0, "componentType": comp_type, "count": len(flat_idx), "type": "SCALAR"
+            })
+            prim["indices"] = len(gltf_accessors) - 1
+            prim["mode"] = 4
         else:
-            comp_type = 5125  # UNSIGNED_INT
-            idx_bytes = bytearray()
-            for i in flat_idx:
-                idx_bytes += struct.pack('<I', int(i))
-    else:
-        comp_type = None
-        idx_bytes = b''
+            prim["mode"] = 0
 
-    # Build binary buffer: positions then (optional) indices
-    pos_bytes = struct.pack('<' + 'f'*len(pos_f32), *pos_f32)
-    pos_len   = len(pos_bytes)
-    pos_off   = 0
+        gltf_meshes.append({"name": f"{src_name}_buf{which}", "primitives": [prim]})
+        gltf_nodes.append({"mesh": len(gltf_meshes) - 1, "name": f"node_buf{which}"})
 
-    cur_off   = pad4(pos_len)
-    if cur_off != pos_len:
-        pos_bytes += b'\x00' * (cur_off - pos_len)
-
-    if have_indices:
-        idx_off = cur_off
-        bin_data = pos_bytes + idx_bytes
-    else:
-        idx_off = None
-        bin_data = pos_bytes
-
-    # Pad BIN to 4B
-    if len(bin_data) % 4 != 0:
-        bin_data += b'\x00' * (4 - (len(bin_data) % 4))
-
-    # Build glTF JSON
-    buffers = [{
-        "byteLength": len(bin_data)
-    }]
-
-    bufferViews = [{
-        "buffer": 0,
-        "byteOffset": pos_off,
-        "byteLength": len(pos_bytes),
-        "target": 34962  # ARRAY_BUFFER
-    }]
-
-    accessors = [{
-        "bufferView": 0,
-        "byteOffset": 0,
-        "componentType": 5126,  # FLOAT
-        "count": len(positions),
-        "type": "VEC3",
-        "min": [minx if math.isfinite(minx) else 0.0,
-                miny if math.isfinite(miny) else 0.0,
-                minz if math.isfinite(minz) else 0.0],
-        "max": [maxx if math.isfinite(maxx) else 0.0,
-                maxy if math.isfinite(maxy) else 0.0,
-                maxz if math.isfinite(maxz) else 0.0],
-    }]
-
-    prim = {
-        "attributes": {"POSITION": 0}
-    }
-
-    if have_indices:
-        bufferViews.append({
-            "buffer": 0,
-            "byteOffset": idx_off,
-            "byteLength": len(idx_bytes),
-            "target": 34963  # ELEMENT_ARRAY_BUFFER
-        })
-        accessors.append({
-            "bufferView": 1,
-            "byteOffset": 0,
-            "componentType": comp_type,
-            "count": len(flat_idx),
-            "type": "SCALAR"
-        })
-        prim["indices"] = 1
-        prim["mode"] = 4  # TRIANGLES
-    else:
-        prim["mode"] = 0  # POINTS, so it still previews
-
-    meshes = [{
-        "name": f"{src_name}#buf{which}",
-        "primitives": [prim]
-    }]
-    nodes = [{
-        "mesh": 0,
-        "name": f"node_buf{which}"
-    }]
-    scenes = [{
-        "nodes": [0]
-    }]
-
+    scene_nodes = list(range(len(gltf_nodes)))
     gltf = {
-        "asset": {"version": "2.0", "generator": "mdl_parser_resync_glb_allbufs"},
-        "scene": 0,
-        "scenes": scenes,
-        "nodes": nodes,
-        "meshes": meshes,
-        "buffers": buffers,
-        "bufferViews": bufferViews,
-        "accessors": accessors
+        "asset": {"version": "2.0", "generator": "mdl_to_glb_combined"}, "scene": 0,
+        "scenes": [{"nodes": scene_nodes}],
+        "nodes": gltf_nodes, "meshes": gltf_meshes, "buffers": [{"byteLength": len(bin_data)}],
+        "bufferViews": gltf_bufferViews, "accessors": gltf_accessors
     }
 
     json_txt = json.dumps(gltf, separators=(',', ':'))
     json_bytes = json_txt.encode('utf-8')
-    if len(json_bytes) % 4 != 0:
-        json_bytes += b' ' * (4 - (len(json_bytes) % 4))
+    json_bytes += b' ' * ((4 - len(json_bytes) % 4) % 4)
 
-    # GLB header + chunks
     total_len = 12 + (8 + len(json_bytes)) + (8 + len(bin_data))
     with open(out_path, 'wb') as f:
-        # header
-        f.write(struct.pack('<I', 0x46546C67))  # magic 'glTF'
-        f.write(struct.pack('<I', 2))           # version
-        f.write(struct.pack('<I', total_len))
-        # JSON chunk
-        f.write(struct.pack('<I', len(json_bytes)))
+        f.write(struct.pack('<IIII', 0x46546C67, 2, total_len, len(json_bytes)))
         f.write(b'JSON')
         f.write(json_bytes)
-        # BIN chunk
         f.write(struct.pack('<I', len(bin_data)))
         f.write(b'BIN\x00')
         f.write(bin_data)
-
-    print(f"  ✓ Wrote GLB: {out_path}")
-
-# -------------------- main --------------------
+    print(f"✓ Wrote combined GLB: {out_path}")
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python mdl_parser_resync_glb_allbufs.py <file.mdl> [--little-endian] [--stride N] [--no-faces]")
+        print("Usage: python mdl_to_glb_combined.py <file.mdl>")
         sys.exit(1)
 
     file_path = Path(sys.argv[1])
-    big_endian = ('--little-endian' not in sys.argv)
-    write_faces = ('--no-faces' not in sys.argv)
-
+    big_endian = True
     vstride = DEFAULT_VERTEX_STRIDE
-    if '--stride' in sys.argv:
-        try:
-            vstride = int(sys.argv[sys.argv.index('--stride')+1])
-        except Exception:
-            print("--stride requires an integer argument")
-            sys.exit(2)
 
     data = file_path.read_bytes()
     r = Reader(data, big_endian)
 
     print(f"File: {file_path.name} | Size: {len(data)} bytes | Endian: {'BE' if big_endian else 'LE'} | Stride: {vstride}")
 
-    mesh_count = skip_to_mesh_headers(r, vstride, quiet_mats=True)
+    try:
+        mesh_count = skip_to_mesh_headers(r, vstride)
+    except (ValueError, struct.error) as e:
+        print(f"Error processing file header: {e}")
+        sys.exit(1)
+        
     if mesh_count <= 0:
-        print('No meshes found')
-        return
+        print('No meshes found in header, but will scan for buffers.')
 
-    # Align first buffer to marker 0 if available
     hdr0 = find_meshbuffer_with_marker(r.data, r.off, r.be, vstride, expected_marker=0)
     if hdr0 is not None and hdr0 != r.off:
         print(f"[sync] marker-align to buffer0 @0x{hdr0:08X}")
         r.off = hdr0
 
+    all_buffers = []
     which = 0
     while True:
         here = r.off
@@ -571,13 +452,22 @@ def main():
                 break
 
         try:
-            vstart, vtx, positions, faces = parse_buffer(r, which, pre, vstride, write_faces)
-            out = file_path.with_suffix(f'.buf{which}.glb')
-            write_glb(out, positions, faces, file_path.name, which)
+            positions, faces = parse_buffer(r, which, pre, vstride)
+            if positions:
+                all_buffers.append({'positions': positions, 'faces': faces, 'which': which})
             which += 1
-        except Exception as e:
+            if r.off >= len(r.data) - 64:
+                print("Reached end of file.")
+                break
+        except (ValueError, struct.error) as e:
             print(f"Stop at buffer {which}: {e} (offset 0x{here:08X})")
             break
+
+    if all_buffers:
+        out_path = file_path.with_suffix('.glb')
+        write_combined_glb(out_path, all_buffers, file_path.stem)
+    else:
+        print("No valid mesh buffers were parsed from the file.")
 
 if __name__ == '__main__':
     main()

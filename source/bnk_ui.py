@@ -1,8 +1,7 @@
 # bnk_ui.py
-
 """
+Pure Python BNK Explorer - Debug Version
 Made by Matthew W, free to use and update.
-Refactored with nested BNK support.
 """
 
 import os
@@ -14,6 +13,7 @@ import threading
 import time
 import signal
 import concurrent.futures
+import traceback
 from typing import List, Optional
 from pathlib import Path
 from threading import Lock
@@ -112,6 +112,7 @@ def _kill_all_processes():
 
 
 def _find_towav() -> Optional[str]:
+    """Find towav.exe for audio conversion (optional)"""
     base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     towav_dir = base_dir / "tools" / "towav"
     candidates = [
@@ -139,6 +140,7 @@ def _poll_cancel():
 
 
 def _run_subprocess_cancelable(cmd: List[str], cwd: Optional[str] = None, timeout: int = 30) -> bool:
+    """Run subprocess with cancellation support (only used for audio conversion now)"""
     if S.cancel_requested or S.exiting:
         return False
 
@@ -179,15 +181,6 @@ def _run_subprocess_cancelable(cmd: List[str], cwd: Optional[str] = None, timeou
         thread.join(timeout=0.01)
 
     return (result[0] == 0)
-
-
-def _cli_path() -> str:
-    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    cands = [base_dir / "Fable2Cli.exe", Path("Fable2Cli.exe")]
-    for p in cands:
-        if p and p.exists():
-            return str(p)
-    return "Fable2Cli.exe"
 
 
 def _error_box(msg: str):
@@ -280,7 +273,7 @@ def is_bnk_file(filename: str) -> bool:
 
 
 def _extract_nested_bnks(bnk_path: str, temp_dir: str) -> List[str]:
-    """Extract and find nested BNK files"""
+    """Extract and find nested BNK files using pure Python"""
     nested_bnks = []
     try:
         files = core.list_bnk(bnk_path)
@@ -288,25 +281,28 @@ def _extract_nested_bnks(bnk_path: str, temp_dir: str) -> List[str]:
             if is_bnk_file(item.name):
                 nested_path = os.path.join(temp_dir, item.name)
                 _safe_mkdir(os.path.dirname(nested_path))
-                exe = _cli_path()
-                ok = _run_subprocess_cancelable(
-                    [exe, "extract-one", bnk_path, str(item.index), os.path.abspath(nested_path)]
-                )
-                if ok and os.path.exists(nested_path):
-                    nested_bnks.append(nested_path)
-                    # Recursively check for more nested BNKs
-                    deeper_bnks = _extract_nested_bnks(nested_path, temp_dir)
-                    nested_bnks.extend(deeper_bnks)
+                # Use core module directly (pure Python)
+                try:
+                    core.extract_one(bnk_path, item.index, nested_path)
+                    if os.path.exists(nested_path):
+                        nested_bnks.append(nested_path)
+                        # Recursively check for more nested BNKs
+                        deeper_bnks = _extract_nested_bnks(nested_path, temp_dir)
+                        nested_bnks.extend(deeper_bnks)
+                except:
+                    pass
     except:
         pass
     return nested_bnks
 
 
 def _convert_wav_file(wav_path: Path) -> bool:
+    """Convert WAV file using towav.exe if available"""
     if S.cancel_requested or S.exiting:
         return False
     if not wav_path.exists() or wav_path.suffix.lower() != ".wav":
         return False
+
     try:
         with open(wav_path, "rb") as f:
             data = f.read(min(1024, os.path.getsize(wav_path)))
@@ -330,7 +326,7 @@ def _convert_wav_file(wav_path: Path) -> bool:
         if not towav:
             if repaired_path and repaired_path.exists():
                 repaired_path.unlink()
-            return True
+            return True  # No converter available, but file extracted
 
         work_dir = src_path.parent
         xma_path = work_dir / (src_path.stem + ".xma")
@@ -363,6 +359,7 @@ def _convert_wav_file(wav_path: Path) -> bool:
 
 
 def _extract_file(bnk_path: str, item: core.BNKItem, base_out_dir: str, convert_audio: bool = True) -> bool:
+    """Extract file using pure Python implementation"""
     try:
         if S.cancel_requested or S.exiting:
             return False
@@ -371,23 +368,20 @@ def _extract_file(bnk_path: str, item: core.BNKItem, base_out_dir: str, convert_
         dst_path = os.path.join(base_out_dir, item.name)
         _safe_mkdir(os.path.dirname(dst_path))
 
-        exe = _cli_path()
-        ok = _run_subprocess_cancelable(
-            [exe, "extract-one", bnk_path, str(item.index), os.path.abspath(dst_path)]
-        )
+        # Use the pure Python core module directly
+        core.extract_one(bnk_path, item.index, dst_path)
 
-        if not ok or S.cancel_requested or S.exiting:
-            if os.path.exists(dst_path):
-                os.remove(dst_path)
+        if not os.path.exists(dst_path):
             return False
 
-        # Convert audio if needed
+        # Convert audio if needed (still uses towav.exe if available)
         if convert_audio and is_audio_file(item.name):
             ok = _convert_wav_file(Path(dst_path))
             if not ok and os.path.exists(dst_path):
-                os.remove(dst_path)
+                # Keep the file even if conversion failed
+                pass
 
-        return ok
+        return True
     except:
         return False
 
@@ -477,40 +471,65 @@ def on_open_folder(*_):
 
 
 def open_folder_cb(sender, app_data):
+    """Callback when a folder is selected - with better error handling"""
     try:
         sel = app_data.get("file_path_name", "")
         if not sel:
+            _error_box("No folder selected")
+            return
+
+        # Debug: Show what folder was selected
+        print(f"DEBUG: Selected folder: {sel}")
+
+        # Check if folder exists
+        if not os.path.exists(sel):
+            _error_box(f"Folder does not exist: {sel}")
+            return
+
+        if not os.path.isdir(sel):
+            _error_box(f"Selected path is not a directory: {sel}")
             return
 
         S.root_dir = sel
-        S.bnk_paths = core.find_bnks(sel)
 
-        if not S.bnk_paths:
-            _error_box("No .bnk files found in that folder.")
+        # Try to find BNK files with error handling
+        try:
+            print(f"DEBUG: Searching for BNK files in: {sel}")
+            S.bnk_paths = core.find_bnks(sel)
+            print(f"DEBUG: Found {len(S.bnk_paths)} BNK files")
+
+            # Debug: Print first few BNK paths
+            for i, path in enumerate(S.bnk_paths[:3]):
+                print(f"DEBUG: BNK {i}: {path}")
+
+        except Exception as e:
+            print(f"DEBUG: Error in find_bnks: {e}")
+            print(traceback.format_exc())
+            _error_box(f"Error searching for BNK files:\n{str(e)}")
             return
 
-        # Check for nested BNKs
-        temp_dir = os.path.join(tempfile.gettempdir(), "nested_bnk_scan")
-        _safe_mkdir(temp_dir)
+        if not S.bnk_paths:
+            _error_box(f"No .bnk files found in:\n{sel}\n\nPlease select a folder containing Fable 2 BNK files.")
+            return
 
-        S.nested_bnks.clear()
-        for bnk_path in S.bnk_paths[:]:
-            nested = _extract_nested_bnks(bnk_path, temp_dir)
-            for nested_bnk in nested:
-                S.nested_bnks[bnk_path] = nested_bnk
-                if nested_bnk not in S.bnk_paths:
-                    S.bnk_paths.append(nested_bnk)
+        # Skip nested BNK search for now to isolate the issue
+        print("DEBUG: Skipping nested BNK search for testing")
 
         S.bnk_paths.sort(key=lambda p: os.path.basename(p).lower())
         S.selected_bnk = ""
         S.files.clear()
 
+        print("DEBUG: Refreshing UI")
         refresh_bnk_sidebar()
         refresh_file_table()
         dpg.configure_item("export_mdl_btn", show=False)
         _show_browser()
+        print("DEBUG: Browser shown successfully")
+
     except Exception as e:
-        _error_box(e)
+        error_msg = f"Error opening folder:\n{str(e)}\n\nDetails:\n{traceback.format_exc()}"
+        print(f"DEBUG: {error_msg}")
+        _error_box(error_msg)
 
 
 def on_pick_bnk(sender, app_data, user_data):
@@ -518,12 +537,19 @@ def on_pick_bnk(sender, app_data, user_data):
         return
     try:
         S.selected_bnk = str(user_data)
+        print(f"DEBUG: Selected BNK: {S.selected_bnk}")
+
         S.files = core.list_bnk(S.selected_bnk)
+        print(f"DEBUG: Found {len(S.files)} files in BNK")
+
         S.files.sort(key=lambda it: it.name.lower())
         refresh_file_table()
         dpg.configure_item("export_mdl_btn", show=False)
     except Exception as e:
-        _error_box(e)
+        error_msg = f"Error reading BNK file:\n{str(e)}"
+        print(f"DEBUG: {error_msg}")
+        print(traceback.format_exc())
+        _error_box(error_msg)
 
 
 def on_filter_change(sender, app_data):
@@ -567,7 +593,7 @@ def on_extract_selected(*_):
     except Exception as e:
         _progress_done()
         S.cancel_requested = False
-        _error_box(e)
+        _error_box(str(e))
 
 
 def on_extract_all(*_):
@@ -637,7 +663,7 @@ def on_extract_all(*_):
     except Exception as e:
         _progress_done()
         S.cancel_requested = False
-        _error_box(e)
+        _error_box(str(e))
 
 
 def on_export_selected_mdl(*_):
@@ -656,12 +682,10 @@ def on_export_selected_mdl(*_):
         _safe_mkdir(tmp_dir)
         mdl_path = os.path.join(tmp_dir, item.name)
 
-        exe = _cli_path()
-        ok = _run_subprocess_cancelable(
-            [exe, "extract-one", S.selected_bnk, str(item.index), os.path.abspath(mdl_path)]
-        )
+        # Use pure Python extraction
+        core.extract_one(S.selected_bnk, item.index, mdl_path)
 
-        if not ok:
+        if not os.path.exists(mdl_path):
             _error_box("Failed to extract MDL file")
             return
 
@@ -669,7 +693,7 @@ def on_export_selected_mdl(*_):
         mdl_converter.convert_single_mdl(mdl_path, out_dir)
         _show_completion_box(f"Export to GLB complete!\n\nOutput folder:\n{os.path.abspath(out_dir)}")
     except Exception as e:
-        _error_box(f"Failed to export MDL: {e}")
+        _error_box(f"Failed to export MDL: {str(e)}")
 
 
 def on_viewport_close():
@@ -684,9 +708,10 @@ def on_viewport_close():
 
 
 def build_ui():
+    print("DEBUG: Starting UI build")
     S.start_process_monitor()
     dpg.create_context()
-    dpg.create_viewport(title="BNK Explorer", width=1024, height=640)
+    dpg.create_viewport(title="BNK Explorer (Debug)", width=1024, height=640)
 
     with dpg.theme() as global_theme:
         with dpg.theme_component(dpg.mvAll):

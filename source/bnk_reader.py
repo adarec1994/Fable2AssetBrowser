@@ -120,7 +120,7 @@ class BNKReader:
         self.compress_file_data = 1 if self._read_u8() != 0 else 0
         _ = self._read(7)  # padding
 
-        keep base_offset = 0
+        base_offset = 0
         self.base_offset = 0
 
         chunks_meta: List[Tuple[int, int, int]] = []  # (offset_of_data, comp_size, uncomp_size)

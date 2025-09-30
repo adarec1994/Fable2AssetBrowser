@@ -5,7 +5,7 @@ a = Analysis(
     ['bnk_ui.py'],
     pathex=[],
     binaries=[],
-    datas=[('tools/towav/towav.exe', 'tools/towav')],
+    datas=[('tools\\towav\\towav.exe', 'tools/towav')],
     hiddenimports=['dearpygui', 'bnk_core', 'convert'],
     hookspath=[],
     hooksconfig={},

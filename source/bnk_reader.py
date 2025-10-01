@@ -29,7 +29,6 @@ class BNKReader:
         self._is_v2: bool = False
         self._open_and_load()
 
-    # ---------------- open/load ----------------
     def _open_and_load(self):
         self._fh = open(self.path, "rb")
         self._fh.seek(0, os.SEEK_END)
@@ -54,7 +53,6 @@ class BNKReader:
 
         self._parse_tables()
 
-    # ---------------- low-level IO ----------------
     def _read(self, n: int) -> bytes:
         b = self._fh.read(n)
         if len(b) != n:
@@ -67,7 +65,6 @@ class BNKReader:
     def _read_u8(self) -> int:
         return self._read(1)[0]
 
-    # ---------------- V3 (your original path, unchanged) ----------------
     def _read_header_continuous_stream(self):
         self.base_offset = self._read_u32_be()  # v3: file-data base
         _ = self._read(4)                       # v3 "version-ish/unknown" field
@@ -82,7 +79,6 @@ class BNKReader:
             comp = self._read(comp_size)
             chunks.append((comp_size, decomp_size, comp))
 
-        # Continuous inflater (v3 header is one stream split over chunks)
         for wbits in (15, -15, 31):
             try:
                 self._file_table_blob = self._inflate_header_chunks_as_one_stream(chunks, wbits)
@@ -90,7 +86,6 @@ class BNKReader:
             except zlib.error:
                 pass
 
-        # Rare raw fallback
         if chunks and all(csz == dsz for csz, dsz, _ in chunks if dsz != 0):
             self._file_table_blob = b"".join(comp for _, _, comp in chunks)
             return
@@ -116,64 +111,38 @@ class BNKReader:
             out.write(tail)
         return out.getvalue()
 
-    # ---------------- V2 (faithful to your D code) ----------------
     def _read_header_v2(self, file_table_offset: int):
-        """
-        V2 layout per BNKF2.Native:
-          - FileHeaderV2 (16 bytes total):
-              u32BE offset          -> points to the *first file-table continuation header*
-              u32BE version         -> 2
-              u8    filesAreCompressed
-              u8[7] padding
-          - At [offset]: repeated FileTableContinuationHeader chunks until EOF:
-              u32BE compressedSize
-              u32BE uncompressedSize
-              u8[compressedSize] data
-          - The concatenation of the *inflated* continuation data yields the file-table bytes:
-              u32BE fileCount
-              then fileCount entries as described below.
-          - Offsets in entries are ABSOLUTE (relative to start-of-file).
-        """
-        # Basic guards
+ 
         if not (0 < file_table_offset <= self._size - 8):
             raise RuntimeError(f"V2: invalid file-table start pointer 0x{file_table_offset:08X}")
-
-        # Read V2 header fields: filesAreCompressed (1 byte) + padding (7 bytes) at 0x08..0x0F
+            
         self._fh.seek(8, os.SEEK_SET)
         self.compress_file_data = 1 if self._read_u8() != 0 else 0
         _ = self._read(7)  # padding
 
-        # For v2, entry offsets are absolute; keep base_offset = 0
+        base_offset = 0
         self.base_offset = 0
 
-        # Gather continuation chunks (headers are BE u32 pairs) until EOF
         chunks_meta: List[Tuple[int, int, int]] = []  # (offset_of_data, comp_size, uncomp_size)
         cur = file_table_offset
         while cur + 8 <= self._size:
             self._fh.seek(cur, os.SEEK_SET)
             comp_size = self._read_u32_be()
             uncomp_size = self._read_u32_be()
-
-            # For v2, the list is implicitly terminated by EOF.
-            if comp_size == 0:
-                # Zero here would indicate a v3-style terminator, but treat as end just in case.
+            if comp_size == 0: 
                 break
 
             data_off = cur + 8
             if data_off + comp_size > self._size:
-                # Truncated last chunk; stop to avoid OOB
                 break
 
             chunks_meta.append((data_off, comp_size, uncomp_size))
             cur = data_off + comp_size
 
         if not chunks_meta:
-            # Allow empty table (0 files). Decompressed blob is "fileCount=0".
             self._file_table_blob = struct.pack(">I", 0)
             return
 
-        # Inflate across all segments with one inflater (like Z_SYNC_FLUSH feeding)
-        # Try standard zlib first, then raw (-15), then gzip (31).
         last_err = None
         for wbits in (15, -15, 31):
             try:
@@ -194,7 +163,6 @@ class BNKReader:
 
         raise RuntimeError(f"V2: file-table decompression failed: {last_err}")
 
-    # ---------------- Table parsing (shared; v2/v3 semantics differ only on offset base & flag) ----------------
     def _parse_tables(self):
         bio = io.BytesIO(self._file_table_blob)
 
@@ -217,8 +185,6 @@ class BNKReader:
             return s.decode("utf-8", errors="replace")
 
         def make_offset(rel_off: int) -> int:
-            # v3: offsets are relative to file-data start (self.base_offset)
-            # v2: offsets are absolute (relative to start-of-file)
             return rel_off if self._is_v2 else (self.base_offset + rel_off)
 
         entries: List[FileEntry] = []
@@ -255,8 +221,6 @@ class BNKReader:
                 ))
 
         self.file_entries = entries
-
-    # ---------------- Public API (unchanged) ----------------
     def list_files(self) -> List[dict]:
         return [
             {
@@ -293,11 +257,8 @@ class BNKReader:
             out_fh.write(self._read(e.uncompressed_size))
             return
 
-        # Read entire compressed payload
         comp_blob = self._read(e.compressed_size)
 
-        # BNK uses 32KB logical chunks. We slice accordingly.
-        # (Matches the D constants: completeChunkSize = 32 << 10)
         chunk_size = 0x8000
         written = 0
         pos = 0
@@ -306,7 +267,6 @@ class BNKReader:
             comp_slice = comp_blob[pos:pos+chunk_size]
             pos += len(comp_slice)
 
-            # Try standard zlib first, then raw, then gzip
             chunk = None
             for wbits in (15, -15, 31):
                 try:

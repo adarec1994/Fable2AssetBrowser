@@ -1,4 +1,4 @@
-# Fable Asset Browser: Legendary Edition 2.0 (F.A.B.L.E.2)
+# Fable Asset Browser
 
 Browse and export a variety of Fable 2 files. Included features:
 

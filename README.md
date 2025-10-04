@@ -1,4 +1,4 @@
-# Fable Asset Browser
+# Fable 2 Asset Browser
 
 Browse and export a variety of Fable 2 files. Included features:
 

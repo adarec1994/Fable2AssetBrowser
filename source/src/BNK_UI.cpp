@@ -397,7 +397,7 @@ static void draw_progress_modal(){
         float frac = total>0? (float)current/(float)total : 1.0f;
         ImGui::ProgressBar(frac, ImVec2(-1,0));
         ImGui::Dummy(ImVec2(0,6));
-        if(ImGui::Button("Cancel", ImVec2(-1,0))){ S.cancel_requested=true; progress_done(); show_completion_box("Extraction cancelled by user."); }
+        if(ImGui::Button("Cancel", ImVec2(-1,0))){ S.cancel_requested=true; progress_done(); show_completion_box("Extraction cancelled."); }
         if(!S.show_progress.load()) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
@@ -452,7 +452,7 @@ static bool is_texture_bnk_selected(){
     if(S.selected_bnk.empty()) return false;
     std::string b = std::filesystem::path(S.selected_bnk).filename().string();
     std::transform(b.begin(),b.end(),b.begin(),::tolower);
-    return b=="globals_texture_headers.bnk" || b=="1024mip0_textures.bnk" || b=="global_textures.bnk";
+    return b=="globals_texture_headers.bnk" || b=="1024mip0_textures.bnk" || b=="globals_textures.bnk";
 }
 
 static std::optional<std::string> find_bnk_by_filename(const std::string& fname_lower){
@@ -467,7 +467,7 @@ static std::optional<std::string> find_bnk_by_filename(const std::string& fname_
 static void on_rebuild_and_extract(){
     auto p_headers = find_bnk_by_filename("globals_texture_headers.bnk");
     auto p_mip0    = find_bnk_by_filename("1024mip0_textures.bnk");
-    auto p_rest    = find_bnk_by_filename("global_textures.bnk");
+    auto p_rest    = find_bnk_by_filename("globals_textures.bnk");
     if(!p_headers || !p_rest){ show_error_box("Required BNKs not found."); return; }
 
     BNKReader r_headers(*p_headers);

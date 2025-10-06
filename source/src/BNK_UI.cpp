@@ -714,7 +714,7 @@ static void draw_main(HWND hwnd){
     const float inset = 8.0f;
     ImGui::SetNextWindowPos(vp->WorkPos + ImVec2(inset,inset));
     ImGui::SetNextWindowSize(vp->WorkSize - ImVec2(inset*2,inset*2));
-    ImGui::Begin("FABLE2", nullptr, ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImGui::Begin("Fable 2 Asset Browser", nullptr, ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoBringToFrontOnFocus);
     if(S.root_dir.empty()){
         ImVec2 avail = ImGui::GetContentRegionAvail();
         ImVec2 sz(320,50);
@@ -761,7 +761,7 @@ int main(){
     wc.hIconSm = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_ICON1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYICON), 0);
     wc.lpszClassName = "BNKWndClass";
     RegisterClassExA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "FABLE2", WS_OVERLAPPEDWINDOW, 100, 100, 1100, 680, NULL, NULL, wc.hInstance, NULL);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "Fable 2 Asset Browser", WS_OVERLAPPEDWINDOW, 100, 100, 1100, 680, NULL, NULL, wc.hInstance, NULL);
     HICON big = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_ICON1), IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
     HICON sml = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_ICON1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYICON), 0);
     SendMessageA(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)big);

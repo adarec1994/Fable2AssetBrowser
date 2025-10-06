@@ -1,13 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(FABLE2 CXX)
+project(Fable_2_Asset_Browser CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(APP_RES ${CMAKE_CURRENT_SOURCE_DIR}/fable.rc
-        resource.h)
+set(APP_RES ${CMAKE_CURRENT_SOURCE_DIR}/fable.rc resource.h)
 
-add_executable(FABLE2 WIN32
+add_executable(Fable_2_Asset_Browser WIN32
         src/BNK_UI.cpp
         ${APP_RES}
 )
@@ -27,7 +26,7 @@ if(NOT ZLIB_FOUND)
         add_library(ZLIB::ZLIB ALIAS zlib)
     endif()
 endif()
-target_link_libraries(FABLE2 PRIVATE ZLIB::ZLIB)
+target_link_libraries(Fable_2_Asset_Browser PRIVATE ZLIB::ZLIB)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -37,7 +36,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
-target_sources(FABLE2 PRIVATE
+target_sources(Fable_2_Asset_Browser PRIVATE
         ${imgui_SOURCE_DIR}/imgui.cpp
         ${imgui_SOURCE_DIR}/imgui_draw.cpp
         ${imgui_SOURCE_DIR}/imgui_tables.cpp
@@ -47,7 +46,7 @@ target_sources(FABLE2 PRIVATE
         ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp
 )
 
-target_include_directories(FABLE2 PRIVATE
+target_include_directories(Fable_2_Asset_Browser PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/include/towav
         ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -56,9 +55,9 @@ target_include_directories(FABLE2 PRIVATE
         ${imgui_SOURCE_DIR}/backends
 )
 
-target_link_libraries(FABLE2 PRIVATE d3d11 dxgi d3dcompiler dwmapi)
+target_link_libraries(Fable_2_Asset_Browser PRIVATE d3d11 dxgi d3dcompiler dwmapi)
 
 if(MINGW)
-    target_link_options(FABLE2 PRIVATE -static -static-libgcc -static-libstdc++)
-    target_link_libraries(FABLE2 PRIVATE -lwinpthread)
+    target_link_options(Fable_2_Asset_Browser PRIVATE -static -static-libgcc -static-libstdc++)
+    target_link_libraries(Fable_2_Asset_Browser PRIVATE -lwinpthread)
 endif()

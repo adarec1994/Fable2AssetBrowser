@@ -8,6 +8,7 @@
 #include "imgui_stdlib.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
+#include "ImGuiFileDialog.h"
 #include "BNKCore.cpp"
 #include "audio.cpp"
 #include <string>
@@ -23,6 +24,7 @@
 #include <chrono>
 #include "../resource.h"
 #include <unordered_map>
+#include <fstream>
 
 static ID3D11Device* g_pd3dDevice = nullptr;
 static ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
@@ -100,6 +102,7 @@ struct State {
     bool show_completion = false;
     std::string completion_text;
     std::string file_filter;
+    std::string last_dir;
 } S;
 
 static bool is_audio_file(const std::string& n){ std::string s=n; std::transform(s.begin(),s.end(),s.begin(),::tolower); return s.size()>=4 && s.rfind(".wav")==s.size()-4; }
@@ -263,30 +266,15 @@ static void on_export_wavs(){
     }).detach();
 }
 
-static std::string PickFolderWin32(HWND owner){
-    std::string out;
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    IFileDialog* pfd = nullptr;
-    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd)))) {
-        DWORD opts=0; pfd->GetOptions(&opts); pfd->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-        if (SUCCEEDED(pfd->Show(owner))) {
-            IShellItem* psi = nullptr;
-            if (SUCCEEDED(pfd->GetResult(&psi))) {
-                PWSTR wpath=nullptr;
-                if (SUCCEEDED(psi->GetDisplayName(SIGDN_FILESYSPATH, &wpath))) {
-                    int len = WideCharToMultiByte(CP_UTF8,0,wpath,-1,nullptr,0,nullptr,nullptr);
-                    std::string s(len-1,0);
-                    WideCharToMultiByte(CP_UTF8,0,wpath,-1,s.data(),len,nullptr,nullptr);
-                    out = s;
-                    CoTaskMemFree(wpath);
-                }
-                psi->Release();
-            }
-        }
-        pfd->Release();
-    }
-    CoUninitialize();
-    return out;
+static std::string load_last_dir(){
+    std::ifstream f("last_dir.txt");
+    std::string s;
+    if(f) std::getline(f,s);
+    return s;
+}
+static void save_last_dir(const std::string& p){
+    std::ofstream f("last_dir.txt", std::ios::trunc);
+    if(f) f<<p;
 }
 
 static std::vector<std::string> scan_bnks_recursive(const std::string& root){
@@ -309,6 +297,8 @@ static void open_folder_logic(const std::string& sel){
     if(!std::filesystem::exists(sel)){ show_error_box(std::string("Folder does not exist: ")+sel); return; }
     if(!std::filesystem::is_directory(sel)){ show_error_box(std::string("Selected path is not a directory: ")+sel); return; }
     S.root_dir=sel;
+    S.last_dir=sel;
+    save_last_dir(sel);
     try{
         S.bnk_paths = scan_bnks_recursive(sel);
         if(S.bnk_paths.empty()) S.bnk_paths = find_bnks(sel);
@@ -631,6 +621,21 @@ static void draw_file_table(){
     }
 }
 
+static void draw_folder_dialog(){
+    ImVec2 vp = ImGui::GetMainViewport()->WorkSize;
+    ImVec2 minSize(680, 440);
+    ImVec2 maxSize(vp.x * 0.9f, vp.y * 0.9f);
+    if(ImGuiFileDialog::Instance()->Display("PickDir", ImGuiWindowFlags_NoCollapse, minSize, maxSize))
+    {
+        if(ImGuiFileDialog::Instance()->IsOk())
+        {
+            std::string sel = ImGuiFileDialog::Instance()->GetCurrentPath();
+            open_folder_logic(sel);
+        }
+        ImGuiFileDialog::Instance()->Close();
+    }
+}
+
 static void draw_right_panel(){
     ImGui::BeginChild("right_panel", ImVec2(0,0), false);
 
@@ -721,9 +726,12 @@ static void draw_main(HWND hwnd){
         ImVec2 pos((avail.x - sz.x)*0.5f, (avail.y - sz.y)*0.5f);
         ImGui::SetCursorPos(pos);
         if(ImGui::Button("Select Fable 2 Directory", sz)){
-            std::string sel = PickFolderWin32(hwnd);
-            open_folder_logic(sel);
+            IGFD::FileDialogConfig cfg;
+            std::string base = (!S.last_dir.empty() && std::filesystem::exists(S.last_dir) && std::filesystem::is_directory(S.last_dir)) ? S.last_dir : ".";
+            cfg.path = base.c_str();
+            ImGuiFileDialog::Instance()->OpenDialog("PickDir", "Select Fable 2 Directory", nullptr, cfg);
         }
+        draw_folder_dialog();
     }else{
         ImGui::BeginChild("browser_group", ImVec2(0,0), false);
         ImGui::BeginGroup();
@@ -776,6 +784,7 @@ int main(){
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
     build_theme();
+    S.last_dir = load_last_dir();
 
     bool done = false;
     while (!done) {

@@ -36,6 +36,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
+FetchContent_Declare(
+        imguifiledialog
+        GIT_REPOSITORY https://github.com/aiekick/ImGuiFileDialog.git
+        GIT_TAG master
+        GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(imguifiledialog)
+
 target_sources(Fable_2_Asset_Browser PRIVATE
         ${imgui_SOURCE_DIR}/imgui.cpp
         ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -44,6 +52,7 @@ target_sources(Fable_2_Asset_Browser PRIVATE
         ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
         ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp
         ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp
+        ${imguifiledialog_SOURCE_DIR}/ImGuiFileDialog.cpp
 )
 
 target_include_directories(Fable_2_Asset_Browser PRIVATE
@@ -53,6 +62,7 @@ target_include_directories(Fable_2_Asset_Browser PRIVATE
         ${imgui_SOURCE_DIR}
         ${imgui_SOURCE_DIR}/misc/cpp
         ${imgui_SOURCE_DIR}/backends
+        ${imguifiledialog_SOURCE_DIR}
 )
 
 target_link_libraries(Fable_2_Asset_Browser PRIVATE d3d11 dxgi d3dcompiler dwmapi)

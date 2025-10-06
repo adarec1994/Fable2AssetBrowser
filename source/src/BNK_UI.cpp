@@ -22,6 +22,7 @@
 #include <condition_variable>
 #include <chrono>
 #include "../resource.h"
+#include <unordered_map>
 
 static ID3D11Device* g_pd3dDevice = nullptr;
 static ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
@@ -102,6 +103,7 @@ struct State {
 } S;
 
 static bool is_audio_file(const std::string& n){ std::string s=n; std::transform(s.begin(),s.end(),s.begin(),::tolower); return s.size()>=4 && s.rfind(".wav")==s.size()-4; }
+static bool is_tex_file(const std::string& n){ std::string s=n; std::transform(s.begin(),s.end(),s.begin(),::tolower); return s.size()>=4 && s.rfind(".tex")==s.size()-4; }
 
 static std::vector<std::string> filtered_bnk_paths(){
     if(S.bnk_filter.empty()) return S.bnk_paths;
@@ -330,13 +332,11 @@ static void open_folder_logic(const std::string& sel){
 static void draw_error_modal(){
     if(S.show_error){ ImGui::OpenPopup("error_modal"); S.show_error=false; }
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImVec2 sz(640,200);
-    ImGui::SetNextWindowSize(sz);
-    ImGui::SetNextWindowPos(vp->WorkPos + (vp->WorkSize - sz)*0.5f);
-    if(ImGui::BeginPopupModal("error_modal", nullptr, ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar)){
+    ImGui::SetNextWindowPos(vp->WorkPos + vp->WorkSize*0.5f, ImGuiCond_Always, ImVec2(0.5f,0.5f));
+    if(ImGui::BeginPopupModal("error_modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar)){
         ImGui::TextColored(ImVec4(1,0.47f,0.47f,1),"Error");
         ImGui::Separator();
-        ImGui::PushTextWrapPos(ImGui::GetWindowWidth()-40);
+        ImGui::PushTextWrapPos(ImGui::GetFontSize()*40.0f);
         ImGui::TextUnformatted(S.error_text.c_str());
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0,10));
@@ -348,13 +348,11 @@ static void draw_error_modal(){
 static void draw_completion_modal(){
     if(S.show_completion){ ImGui::OpenPopup("completion_modal"); S.show_completion=false; }
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImVec2 sz(640,220);
-    ImGui::SetNextWindowSize(sz);
-    ImGui::SetNextWindowPos(vp->WorkPos + (vp->WorkSize - sz)*0.5f);
-    if(ImGui::BeginPopupModal("completion_modal", nullptr, ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar)){
+    ImGui::SetNextWindowPos(vp->WorkPos + vp->WorkSize*0.5f, ImGuiCond_Always, ImVec2(0.5f,0.5f));
+    if(ImGui::BeginPopupModal("completion_modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar)){
         ImGui::TextColored(ImVec4(0.47f,1,0.47f,1),"Operation Status");
         ImGui::Separator();
-        ImGui::PushTextWrapPos(ImGui::GetWindowWidth()-40);
+        ImGui::PushTextWrapPos(ImGui::GetFontSize()*40.0f);
         ImGui::TextUnformatted(S.completion_text.c_str());
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0,10));
@@ -364,15 +362,38 @@ static void draw_completion_modal(){
 }
 
 static void draw_progress_modal(){
-    if(S.show_progress.load()) ImGui::OpenPopup("progress_win");
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImVec2 sz(520,140);
-    ImGui::SetNextWindowSize(sz);
-    ImGui::SetNextWindowPos(vp->WorkPos + (vp->WorkSize - sz)*0.5f);
+    float w = std::clamp(vp->WorkSize.x*0.6f, 520.0f, 900.0f);
+    const ImGuiStyle& st = ImGui::GetStyle();
+    float line = ImGui::GetTextLineHeightWithSpacing();
+    float h = st.WindowPadding.y*2.0f + line + st.ItemSpacing.y + (line*2.0f + 6.0f) + st.ItemSpacing.y + ImGui::GetFrameHeight() + st.ItemSpacing.y + ImGui::GetFrameHeight() + 12.0f;
+    if(S.show_progress.load()) ImGui::OpenPopup("progress_win");
+    ImGui::SetNextWindowSize(ImVec2(w,h), ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(vp->WorkPos + ImVec2((vp->WorkSize.x - w)*0.5f, (vp->WorkSize.y - h)*0.5f), ImGuiCond_Appearing);
     if(ImGui::BeginPopupModal("progress_win", nullptr, ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar)){
         int total, current; std::string label;
         { std::lock_guard<std::mutex> lk(S.progress_mutex); total=S.progress_total; current=S.progress_current; label=S.progress_label; }
-        ImGui::Text("%s", (std::string(std::to_string(current)+"/"+std::to_string(std::max(1,total))+"   "+label)).c_str());
+        ImGui::Text("%d/%d", current, std::max(1,total));
+        float wrap_w = ImGui::GetContentRegionAvail().x;
+        std::string two = label;
+        if(ImGui::CalcTextSize(two.c_str()).x > wrap_w){
+            size_t mid = two.size()/2;
+            auto fits=[&](size_t pos){ std::string a=two.substr(0,pos), b=two.substr(pos+1); return ImGui::CalcTextSize(a.c_str()).x<=wrap_w && ImGui::CalcTextSize(b.c_str()).x<=wrap_w; };
+            size_t cand = std::string::npos;
+            size_t l1 = two.rfind('\\', mid), l2 = two.rfind('/', mid);
+            if(l1!=std::string::npos || l2!=std::string::npos) cand = std::max(l1==std::string::npos?0:l1, l2==std::string::npos?0:l2);
+            if(cand!=std::string::npos && fits(cand)) two.insert(cand+1,"\n");
+            else{
+                size_t r1 = two.find('\\', mid), r2 = two.find('/', mid);
+                size_t r = std::min(r1==std::string::npos?two.size():r1, r2==std::string::npos?two.size():r2);
+                if(r!=two.size() && fits(r)) two.insert(r+1,"\n"); else two.insert(mid,"\n");
+            }
+        }
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+wrap_w);
+        ImGui::BeginChild("progress_label", ImVec2(0, ImGui::GetTextLineHeightWithSpacing()*2.0f + 6.0f), false, ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::TextUnformatted(two.c_str());
+        ImGui::EndChild();
+        ImGui::PopTextWrapPos();
         float frac = total>0? (float)current/(float)total : 1.0f;
         ImGui::ProgressBar(frac, ImVec2(-1,0));
         ImGui::Dummy(ImVec2(0,6));
@@ -420,6 +441,151 @@ static int count_visible_files(){
 static bool any_wav_in_bnk(){
     for(auto& f: S.files) if(is_audio_file(f.name)) return true;
     return false;
+}
+
+static bool any_tex_in_bnk(){
+    for(auto& f: S.files) if(is_tex_file(f.name)) return true;
+    return false;
+}
+
+static bool is_texture_bnk_selected(){
+    if(S.selected_bnk.empty()) return false;
+    std::string b = std::filesystem::path(S.selected_bnk).filename().string();
+    std::transform(b.begin(),b.end(),b.begin(),::tolower);
+    return b=="globals_texture_headers.bnk" || b=="1024mip0_textures.bnk" || b=="global_textures.bnk";
+}
+
+static std::optional<std::string> find_bnk_by_filename(const std::string& fname_lower){
+    for(auto& p: S.bnk_paths){
+        std::string b = std::filesystem::path(p).filename().string();
+        std::transform(b.begin(),b.end(),b.begin(),::tolower);
+        if(b==fname_lower) return p;
+    }
+    return std::nullopt;
+}
+
+static void on_rebuild_and_extract(){
+    auto p_headers = find_bnk_by_filename("globals_texture_headers.bnk");
+    auto p_mip0    = find_bnk_by_filename("1024mip0_textures.bnk");
+    auto p_rest    = find_bnk_by_filename("global_textures.bnk");
+    if(!p_headers || !p_rest){ show_error_box("Required BNKs not found."); return; }
+
+    BNKReader r_headers(*p_headers);
+    BNKReader r_rest(*p_rest);
+    std::optional<BNKReader> r_mip0;
+    if(p_mip0) r_mip0.emplace(*p_mip0);
+
+    struct Entry { int idx; std::string name; uint32_t size; };
+    std::vector<Entry> H, R, M;
+    for(size_t i=0;i<r_headers.list_files().size();++i){ auto& e=r_headers.list_files()[i]; H.push_back({(int)i, e.name, e.uncompressed_size}); }
+    for(size_t i=0;i<r_rest.list_files().size();++i){ auto& e=r_rest.list_files()[i]; R.push_back({(int)i, e.name, e.uncompressed_size}); }
+    if(r_mip0) for(size_t i=0;i<r_mip0->list_files().size();++i){ auto& e=r_mip0->list_files()[i]; M.push_back({(int)i, e.name, e.uncompressed_size}); }
+
+    std::unordered_map<std::string,int> mapH, mapR, mapM;
+    mapH.reserve(H.size()*2+1); mapR.reserve(R.size()*2+1); mapM.reserve(M.size()*2+1);
+    for(auto& e: H){ std::string k=e.name; std::transform(k.begin(),k.end(),k.begin(),::tolower); mapH.emplace(k,e.idx); }
+    for(auto& e: R){ std::string k=e.name; std::transform(k.begin(),k.end(),k.begin(),::tolower); mapR.emplace(k,e.idx); }
+    for(auto& e: M){ std::string k=e.name; std::transform(k.begin(),k.end(),k.begin(),::tolower); mapM.emplace(k,e.idx); }
+
+    std::vector<std::string> names;
+    names.reserve(std::max(H.size(),R.size()));
+    for(auto& e: H) names.push_back(e.name);
+    for(auto& e: R){ std::string k=e.name; std::transform(k.begin(),k.end(),k.begin(),::tolower); if(!mapH.count(k)) names.push_back(e.name); }
+
+    int total=(int)names.size();
+    if(total<=0){ show_error_box("No texture names found."); return; }
+
+    auto out_root = (std::filesystem::current_path() / "extracted").string();
+    progress_open(total,"Rebuilding...");
+    progress_update(0,total,"Starting...");
+    std::thread([=](){
+        int done=0;
+        auto tmpdir = std::filesystem::temp_directory_path() / "f2_tex_rebuild";
+        std::error_code ec; std::filesystem::create_directories(tmpdir, ec);
+        for(auto& name : names){
+            if(S.cancel_requested || S.exiting) break;
+            std::string key=name; std::transform(key.begin(),key.end(),key.begin(),::tolower);
+            if(!mapH.count(key) || !mapR.count(key)){ progress_update(++done,total,name); continue; }
+            auto out_path = std::filesystem::path(out_root) / name;
+            std::filesystem::create_directories(out_path.parent_path(), ec);
+
+            auto tmp_h   = tmpdir / ("h_"+std::to_string(done)+".bin");
+            auto tmp_m   = tmpdir / ("m_"+std::to_string(done)+".bin");
+            auto tmp_r   = tmpdir / ("r_"+std::to_string(done)+".bin");
+
+            try{
+                extract_one(*p_headers, mapH.at(key), tmp_h.string());
+                if(mapM.count(key) && p_mip0) extract_one(*p_mip0, mapM.at(key), tmp_m.string());
+                extract_one(*p_rest,    mapR.at(key), tmp_r.string());
+
+                std::ofstream out(out_path, std::ios::binary);
+                std::ifstream fh(tmp_h, std::ios::binary);
+                out << fh.rdbuf();
+                if(std::filesystem::exists(tmp_m)) { std::ifstream fm(tmp_m, std::ios::binary); out << fm.rdbuf(); }
+                std::ifstream fr(tmp_r, std::ios::binary);
+                out << fr.rdbuf();
+
+                std::filesystem::remove(tmp_h, ec);
+                if(std::filesystem::exists(tmp_m)) std::filesystem::remove(tmp_m, ec);
+                std::filesystem::remove(tmp_r, ec);
+            }catch(...){}
+            progress_update(++done,total,name);
+        }
+        progress_done();
+        if(!S.cancel_requested) show_completion_box(std::string("Rebuild complete.\n\nOutput folder:\n")+std::filesystem::absolute(out_root).string());
+        S.cancel_requested=false;
+    }).detach();
+}
+
+static void on_rebuild_and_extract_one(const std::string& tex_name){
+    auto p_headers = find_bnk_by_filename("globals_texture_headers.bnk");
+    auto p_mip0    = find_bnk_by_filename("1024mip0_textures.bnk");
+    auto p_rest    = find_bnk_by_filename("global_textures.bnk");
+    if(!p_headers || !p_rest){ show_error_box("Required BNKs not found."); return; }
+
+    BNKReader r_headers(*p_headers);
+    BNKReader r_rest(*p_rest);
+    std::optional<BNKReader> r_mip0;
+    if(p_mip0) r_mip0.emplace(*p_mip0);
+
+    std::unordered_map<std::string,int> mapH, mapR, mapM;
+    for(size_t i=0;i<r_headers.list_files().size();++i){ auto& e=r_headers.list_files()[i]; std::string k=e.name; std::transform(k.begin(),k.end(),k.begin(),::tolower); mapH.emplace(k,(int)i); }
+    for(size_t i=0;i<r_rest.list_files().size();++i){ auto& e=r_rest.list_files()[i]; std::string k=e.name; std::transform(k.begin(),k.end(),k.begin(),::tolower); mapR.emplace(k,(int)i); }
+    if(r_mip0) for(size_t i=0;i<r_mip0->list_files().size();++i){ auto& e=r_mip0->list_files()[i]; std::string k=e.name; std::transform(k.begin(),k.end(),k.begin(),::tolower); mapM.emplace(k,(int)i); }
+
+    std::string key=tex_name; std::transform(key.begin(),key.end(),key.begin(),::tolower);
+    if(!mapH.count(key) || !mapR.count(key)){ show_error_box("Texture not found in required BNKs."); return; }
+
+    auto out_root = (std::filesystem::current_path() / "extracted").string();
+    progress_open(1,"Rebuilding...");
+    progress_update(0,1,tex_name);
+    std::thread([=](){
+        auto tmpdir = std::filesystem::temp_directory_path() / "f2_tex_rebuild_one";
+        std::error_code ec; std::filesystem::create_directories(tmpdir, ec);
+        auto out_path = std::filesystem::path(out_root) / tex_name;
+        std::filesystem::create_directories(out_path.parent_path(), ec);
+        auto tmp_h = tmpdir / "h.bin";
+        auto tmp_m = tmpdir / "m.bin";
+        auto tmp_r = tmpdir / "r.bin";
+        try{
+            extract_one(*p_headers, mapH.at(key), tmp_h.string());
+            if(mapM.count(key) && p_mip0) extract_one(*p_mip0, mapM.at(key), tmp_m.string());
+            extract_one(*p_rest, mapR.at(key), tmp_r.string());
+            std::ofstream out(out_path, std::ios::binary);
+            std::ifstream fh(tmp_h, std::ios::binary);
+            out << fh.rdbuf();
+            if(std::filesystem::exists(tmp_m)) { std::ifstream fm(tmp_m, std::ios::binary); out << fm.rdbuf(); }
+            std::ifstream fr(tmp_r, std::ios::binary);
+            out << fr.rdbuf();
+            std::filesystem::remove(tmp_h, ec);
+            if(std::filesystem::exists(tmp_m)) std::filesystem::remove(tmp_m, ec);
+            std::filesystem::remove(tmp_r, ec);
+        }catch(...){}
+        progress_update(1,1,tex_name);
+        progress_done();
+        if(!S.cancel_requested) show_completion_box(std::string("Rebuild complete.\n\nOutput folder:\n")+std::filesystem::absolute(out_root).string());
+        S.cancel_requested=false;
+    }).detach();
 }
 
 static void draw_file_table(){
@@ -476,12 +642,20 @@ static void draw_right_panel(){
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8,0));
 
     ImGui::BeginGroup();
-    if(S.selected_file_index<0){
-        if(ImGui::Button("Dump All Files")) on_dump_all_raw();
+    if(ImGui::Button("Dump All Files")){ ImGui::OpenPopup("progress_win"); on_dump_all_raw(); }
+    if(!S.hide_tooltips && ImGui::IsItemHovered()){ ImGui::BeginTooltip(); ImGui::TextUnformatted("DUMPS ALL FILES IN THE CURRENT BANK"); ImGui::EndTooltip(); }
+    ImGui::SameLine();
+    if(any_wav_in_bnk()) if(ImGui::Button("Export WAV's")){ ImGui::OpenPopup("progress_win"); on_export_wavs(); }
+    if(any_wav_in_bnk() && !S.hide_tooltips && ImGui::IsItemHovered()){ ImGui::BeginTooltip(); ImGui::TextUnformatted("Convert and export only the .wav files"); ImGui::EndTooltip(); }
+    if(is_texture_bnk_selected() && any_tex_in_bnk()){
         ImGui::SameLine();
-        if(any_wav_in_bnk()) if(ImGui::Button("Export WAV's")) on_export_wavs();
-    }else{
-        if(ImGui::Button("Extract File")) on_extract_selected_raw();
+        if(ImGui::Button("Rebuild and Extract All")){ ImGui::OpenPopup("progress_win"); on_rebuild_and_extract(); }
+        if(!S.hide_tooltips && ImGui::IsItemHovered()){ ImGui::BeginTooltip(); ImGui::TextUnformatted("Rebuilds the .tex file bitstreams"); ImGui::EndTooltip(); }
+    }
+
+    if(S.selected_file_index>=0){
+        ImGui::SameLine();
+        if(ImGui::Button("Extract File")){ ImGui::OpenPopup("progress_win"); on_extract_selected_raw(); }
         ImGui::SameLine();
         bool can_wav=false;
         if(S.selected_file_index>=0 && S.selected_file_index<(int)S.files.size()){
@@ -490,9 +664,24 @@ static void draw_right_panel(){
             can_wav = l.size()>=4 && l.rfind(".wav")==l.size()-4;
         }
         if(can_wav){
-            if(ImGui::Button("Extract WAV")) on_extract_selected_wav();
-        }else{
-            ImGui::InvisibleButton("extract_wav_hidden", ImVec2(1,1));
+            if(ImGui::Button("Extract WAV")){ ImGui::OpenPopup("progress_win"); on_extract_selected_wav(); }
+            ImGui::SameLine();
+        }
+        bool can_tex=false;
+        if(S.selected_file_index>=0 && S.selected_file_index<(int)S.files.size()){
+            std::string n=S.files[(size_t)S.selected_file_index].name;
+            std::string l=n; std::transform(l.begin(),l.end(),l.begin(),::tolower);
+            can_tex = l.size()>=4 && l.rfind(".tex")==l.size()-4;
+        }
+        if(can_tex && is_texture_bnk_selected()){
+            if(ImGui::Button("Rebuild and Extract")) {
+                auto name = S.files[(size_t)S.selected_file_index].name;
+                ImGui::OpenPopup("progress_win");
+                on_rebuild_and_extract_one(name);
+            }
+            if(!S.hide_tooltips && ImGui::IsItemHovered()){ ImGui::BeginTooltip(); ImGui::TextUnformatted("Rebuilds the .tex file bitstreams"); ImGui::EndTooltip(); }
+        } else {
+            ImGui::InvisibleButton("rebuild_single_hidden", ImVec2(1,1));
         }
     }
     ImGui::EndGroup();
@@ -569,12 +758,12 @@ int main(){
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.hIcon   = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_ICON1), IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
-    wc.hIconSm = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_ICON1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
+    wc.hIconSm = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_ICON1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYICON), 0);
     wc.lpszClassName = "BNKWndClass";
     RegisterClassExA(&wc);
     HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "FABLE2", WS_OVERLAPPEDWINDOW, 100, 100, 1100, 680, NULL, NULL, wc.hInstance, NULL);
     HICON big = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_ICON1), IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
-    HICON sml = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_ICON1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
+    HICON sml = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_ICON1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYICON), 0);
     SendMessageA(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)big);
     SendMessageA(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)sml);
     if (!CreateDeviceD3D(hwnd)) { CleanupDeviceD3D(); UnregisterClassA(wc.lpszClassName, wc.hInstance); return 1; }
@@ -603,7 +792,6 @@ int main(){
         ImGui::NewFrame();
 
         draw_main(hwnd);
-        if(S.show_progress.load()) ImGui::OpenPopup("progress_win");
         draw_progress_modal();
         draw_error_modal();
         draw_completion_modal();

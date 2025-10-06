@@ -6,7 +6,7 @@ There are several key areas where your contributions would be most impactful:
 
 1. **Bug Reporting**: Please report any identified bugs in the issue tracker. Before reporting, ensure the bug hasn't been reported previously. Provide screenshots, details, or screen recordings if necessary.
 
-2. **Reverse Engineering**: Help with reverse engineering is required, particularly with animations, textures, and finishing the weight painting. There's also the other files, such as the scripts, levels, etc.
+2. **Reverse Engineering**: Help with reverse engineering is required, particularly with animations, textures There's also the other files, such as the levels, etc.
 
 3. **Code Reorganization**: The project could benefit from code reorganization to enhance readability and performance.
 

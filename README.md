@@ -1,4 +1,4 @@
-# Fable Asset Browser: Legendary Edition 2.0 (F.A.B.L.E.2)
+# Fable 2 Asset Browser
 
 Browse and export a variety of Fable 2 files. Included features:
 
@@ -11,12 +11,11 @@ Browse and export a variety of Fable 2 files. Included features:
   
 How to use:
 - Rip a legitimate copy of Fable 2 to your PC.
-- Download FABLE2 from releases and run it.
-- To export as GLB, select a .mdl file, then click "convert to glb"
-- Drag and drop in to blender
+- Download Fable 2 asset browser from releases and run it.
+- To export as GLB, select a .mdl file, then click "convert to glb" (currently not working due to the update to C++).
 
 Credits:
-1. ResHax, providing valuable information for getting the models out. Especially H3x3r for continuously helping woth the .tex format.
+1. ResHax, providing valuable information for getting the models out. Especially H3x3r for continuously helping with the .tex format.
 2. Fable 2 modding community for the resources that were available, giving me a good boost to start.
 3. Work, for not breathing down my neck when I have free time to work on this.
 4. Odarenkoas on Discord for making the original decoder for .wav files. I bastardized his batch file to do it.

@@ -6,7 +6,7 @@ Browse and export a variety of Fable 2 files. Included features:
 - Export all of the assets.
 - Playback of audio files (WIP).
 - Exports Audio files in a usable format. 
-- Extract 3D models, textures, and more (WIP, currently exports most rigged models with UV's and skeletons. It's a little buggy, RN. NO TEXTURES YET)
+- Extract 3d models, textures, and more (WIP, currently exports most rigged models with UV's and skeletons ~ needs to be updated to extract mdl's as glb in cpp.
 - Textures can be reconstructed when extracted. Useful for researching the compressed mipmaps (comp flag 1). Textures can be previewed in the hex view.
 
 Hex editor will provide useful information without needing to export or use external applications.

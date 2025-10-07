@@ -9,6 +9,7 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 #include "ImGuiFileDialog.h"
+#include "imgui_hex.h"
 #include "BNKCore.cpp"
 #include "audio.cpp"
 #include <string>
@@ -82,6 +83,40 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 }
 
 struct BNKItemUI { int index; std::string name; uint32_t size; };
+
+struct TexInfo {
+    uint32_t Sign;
+    uint32_t RawDataSize;
+    uint32_t Unknown_0;
+    uint32_t Unknown_1;
+    uint32_t TextureWidth;
+    uint32_t TextureHeight;
+    uint32_t PixelFormat;
+    uint32_t MipMap;
+    std::vector<uint32_t> MipMapOffset;
+    struct MipDef {
+        size_t DefOffset;
+        uint32_t CompFlag;
+        uint32_t DataOffset;
+        uint32_t DataSize;
+        uint32_t Unknown_3;
+        uint32_t Unknown_4;
+        uint32_t Unknown_5;
+        uint32_t Unknown_6;
+        uint32_t Unknown_7;
+        uint32_t Unknown_8;
+        uint32_t Unknown_9;
+        uint32_t Unknown_10;
+        uint32_t Unknown_11;
+        bool HasWH;
+        uint16_t MipWidth;
+        uint16_t MipHeight;
+        size_t MipDataOffset;
+        size_t MipDataSizeParsed;
+    };
+    std::vector<MipDef> Mips;
+};
+
 struct State {
     std::string root_dir;
     std::vector<std::string> bnk_paths;
@@ -103,10 +138,22 @@ struct State {
     std::string completion_text;
     std::string file_filter;
     std::string last_dir;
+    std::atomic<bool> hex_loading{false};
+    bool hex_open = false;
+    std::string hex_title;
+    std::vector<unsigned char> hex_data;
+    ImGuiHexEditorState hex_state;
+    bool tex_info_ok = false;
+    TexInfo tex_info;
+    size_t pending_goto = (size_t)-1;
+    bool show_preview_popup = false;
+    int preview_mip_index = -1;
+    ID3D11ShaderResourceView* preview_srv = nullptr;
 } S;
 
 static bool is_audio_file(const std::string& n){ std::string s=n; std::transform(s.begin(),s.end(),s.begin(),::tolower); return s.size()>=4 && s.rfind(".wav")==s.size()-4; }
 static bool is_tex_file(const std::string& n){ std::string s=n; std::transform(s.begin(),s.end(),s.begin(),::tolower); return s.size()>=4 && s.rfind(".tex")==s.size()-4; }
+static bool is_mdl_file(const std::string& n){ std::string s=n; std::transform(s.begin(),s.end(),s.begin(),::tolower); return s.size()>=4 && s.rfind(".mdl")==s.size()-4; }
 
 static std::vector<std::string> filtered_bnk_paths(){
     if(S.bnk_filter.empty()) return S.bnk_paths;
@@ -292,6 +339,15 @@ static std::vector<std::string> scan_bnks_recursive(const std::string& root){
     return out;
 }
 
+static std::optional<std::string> find_bnk_by_filename(const std::string& fname_lower){
+    for(auto& p: S.bnk_paths){
+        std::string b = std::filesystem::path(p).filename().string();
+        std::transform(b.begin(),b.end(),b.begin(),::tolower);
+        if(b==fname_lower) return p;
+    }
+    return std::nullopt;
+}
+
 static void open_folder_logic(const std::string& sel){
     if(sel.empty()){ show_error_box("No folder selected"); return; }
     if(!std::filesystem::exists(sel)){ show_error_box(std::string("Folder does not exist: ")+sel); return; }
@@ -317,141 +373,6 @@ static void open_folder_logic(const std::string& sel){
     S.selected_bnk.clear();
     S.files.clear();
     refresh_file_table();
-}
-
-static void draw_error_modal(){
-    if(S.show_error){ ImGui::OpenPopup("error_modal"); S.show_error=false; }
-    ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(vp->WorkPos + vp->WorkSize*0.5f, ImGuiCond_Always, ImVec2(0.5f,0.5f));
-    if(ImGui::BeginPopupModal("error_modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar)){
-        ImGui::TextColored(ImVec4(1,0.47f,0.47f,1),"Error");
-        ImGui::Separator();
-        ImGui::PushTextWrapPos(ImGui::GetFontSize()*40.0f);
-        ImGui::TextUnformatted(S.error_text.c_str());
-        ImGui::PopTextWrapPos();
-        ImGui::Dummy(ImVec2(0,10));
-        if(ImGui::Button("Close", ImVec2(-1,0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-}
-
-static void draw_completion_modal(){
-    if(S.show_completion){ ImGui::OpenPopup("completion_modal"); S.show_completion=false; }
-    ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(vp->WorkPos + vp->WorkSize*0.5f, ImGuiCond_Always, ImVec2(0.5f,0.5f));
-    if(ImGui::BeginPopupModal("completion_modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar)){
-        ImGui::TextColored(ImVec4(0.47f,1,0.47f,1),"Operation Status");
-        ImGui::Separator();
-        ImGui::PushTextWrapPos(ImGui::GetFontSize()*40.0f);
-        ImGui::TextUnformatted(S.completion_text.c_str());
-        ImGui::PopTextWrapPos();
-        ImGui::Dummy(ImVec2(0,10));
-        if(ImGui::Button("OK", ImVec2(-1,0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-}
-
-static void draw_progress_modal(){
-    ImGuiViewport* vp = ImGui::GetMainViewport();
-    float w = std::clamp(vp->WorkSize.x*0.6f, 520.0f, 900.0f);
-    const ImGuiStyle& st = ImGui::GetStyle();
-    float line = ImGui::GetTextLineHeightWithSpacing();
-    float h = st.WindowPadding.y*2.0f + line + st.ItemSpacing.y + (line*2.0f + 6.0f) + st.ItemSpacing.y + ImGui::GetFrameHeight() + st.ItemSpacing.y + ImGui::GetFrameHeight() + 12.0f;
-    if(S.show_progress.load()) ImGui::OpenPopup("progress_win");
-    ImGui::SetNextWindowSize(ImVec2(w,h), ImGuiCond_Appearing);
-    ImGui::SetNextWindowPos(vp->WorkPos + ImVec2((vp->WorkSize.x - w)*0.5f, (vp->WorkSize.y - h)*0.5f), ImGuiCond_Appearing);
-    if(ImGui::BeginPopupModal("progress_win", nullptr, ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar)){
-        int total, current; std::string label;
-        { std::lock_guard<std::mutex> lk(S.progress_mutex); total=S.progress_total; current=S.progress_current; label=S.progress_label; }
-        ImGui::Text("%d/%d", current, std::max(1,total));
-        float wrap_w = ImGui::GetContentRegionAvail().x;
-        std::string two = label;
-        if(ImGui::CalcTextSize(two.c_str()).x > wrap_w){
-            size_t mid = two.size()/2;
-            auto fits=[&](size_t pos){ std::string a=two.substr(0,pos), b=two.substr(pos+1); return ImGui::CalcTextSize(a.c_str()).x<=wrap_w && ImGui::CalcTextSize(b.c_str()).x<=wrap_w; };
-            size_t cand = std::string::npos;
-            size_t l1 = two.rfind('\\', mid), l2 = two.rfind('/', mid);
-            if(l1!=std::string::npos || l2!=std::string::npos) cand = std::max(l1==std::string::npos?0:l1, l2==std::string::npos?0:l2);
-            if(cand!=std::string::npos && fits(cand)) two.insert(cand+1,"\n");
-            else{
-                size_t r1 = two.find('\\', mid), r2 = two.find('/', mid);
-                size_t r = std::min(r1==std::string::npos?two.size():r1, r2==std::string::npos?two.size():r2);
-                if(r!=two.size() && fits(r)) two.insert(r+1,"\n"); else two.insert(mid,"\n");
-            }
-        }
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+wrap_w);
-        ImGui::BeginChild("progress_label", ImVec2(0, ImGui::GetTextLineHeightWithSpacing()*2.0f + 6.0f), false, ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
-        ImGui::TextUnformatted(two.c_str());
-        ImGui::EndChild();
-        ImGui::PopTextWrapPos();
-        float frac = total>0? (float)current/(float)total : 1.0f;
-        ImGui::ProgressBar(frac, ImVec2(-1,0));
-        ImGui::Dummy(ImVec2(0,6));
-        if(ImGui::Button("Cancel", ImVec2(-1,0))){ S.cancel_requested=true; progress_done(); show_completion_box("Extraction cancelled."); }
-        if(!S.show_progress.load()) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-}
-
-static void draw_left_panel(){
-    ImGui::BeginChild("left_panel", ImVec2(360,0), true);
-    ImGui::SetNextItemWidth(-1);
-    if(!S.bnk_paths.empty()){
-        ImGui::InputTextWithHint("##bnk_filter", "Filter", &S.bnk_filter);
-    }
-    ImGui::BeginChild("bnk_list", ImVec2(0,0), false);
-    auto paths = filtered_bnk_paths();
-    for(auto& p: paths){
-        std::string label = std::filesystem::path(p).filename().string();
-        if(ImGui::Selectable(label.c_str(), p==S.selected_bnk, ImGuiSelectableFlags_SpanAllColumns)) pick_bnk(p);
-        if(!S.hide_tooltips && ImGui::IsItemHovered()){
-            ImGui::BeginTooltip();
-            ImGui::TextUnformatted(p.c_str());
-            ImGui::EndTooltip();
-        }
-    }
-    ImGui::EndChild();
-    ImGui::EndChild();
-}
-
-static bool name_matches_filter(const std::string& name, const std::string& filter) {
-    if(filter.empty()) return true;
-    std::string n=name, f=filter;
-    std::transform(n.begin(),n.end(),n.begin(),::tolower);
-    std::transform(f.begin(),f.end(),f.begin(),::tolower);
-    return n.find(f)!=std::string::npos;
-}
-
-static int count_visible_files(){
-    int c=0;
-    for(auto& f: S.files) if(name_matches_filter(f.name, S.file_filter)) ++c;
-    return c;
-}
-
-static bool any_wav_in_bnk(){
-    for(auto& f: S.files) if(is_audio_file(f.name)) return true;
-    return false;
-}
-
-static bool any_tex_in_bnk(){
-    for(auto& f: S.files) if(is_tex_file(f.name)) return true;
-    return false;
-}
-
-static bool is_texture_bnk_selected(){
-    if(S.selected_bnk.empty()) return false;
-    std::string b = std::filesystem::path(S.selected_bnk).filename().string();
-    std::transform(b.begin(),b.end(),b.begin(),::tolower);
-    return b=="globals_texture_headers.bnk" || b=="1024mip0_textures.bnk" || b=="globals_textures.bnk";
-}
-
-static std::optional<std::string> find_bnk_by_filename(const std::string& fname_lower){
-    for(auto& p: S.bnk_paths){
-        std::string b = std::filesystem::path(p).filename().string();
-        std::transform(b.begin(),b.end(),b.begin(),::tolower);
-        if(b==fname_lower) return p;
-    }
-    return std::nullopt;
 }
 
 static void on_rebuild_and_extract(){
@@ -530,7 +451,7 @@ static void on_rebuild_and_extract(){
 static void on_rebuild_and_extract_one(const std::string& tex_name){
     auto p_headers = find_bnk_by_filename("globals_texture_headers.bnk");
     auto p_mip0    = find_bnk_by_filename("1024mip0_textures.bnk");
-    auto p_rest    = find_bnk_by_filename("global_textures.bnk");
+    auto p_rest    = find_bnk_by_filename("globals_textures.bnk");
     if(!p_headers || !p_rest){ show_error_box("Required BNKs not found."); return; }
 
     BNKReader r_headers(*p_headers);
@@ -576,6 +497,628 @@ static void on_rebuild_and_extract_one(const std::string& tex_name){
         if(!S.cancel_requested) show_completion_box(std::string("Rebuild complete.\n\nOutput folder:\n")+std::filesystem::absolute(out_root).string());
         S.cancel_requested=false;
     }).detach();
+}
+
+static std::vector<unsigned char> read_all_bytes(const std::filesystem::path& p){
+    std::vector<unsigned char> v;
+    std::error_code ec;
+    auto sz = std::filesystem::file_size(p, ec);
+    if(ec) return v;
+    v.resize((size_t)sz);
+    std::ifstream f(p, std::ios::binary);
+    f.read((char*)v.data(), (std::streamsize)sz);
+    return v;
+}
+
+static bool rd32be(const std::vector<unsigned char>& d, size_t o, uint32_t& v){
+    if(o+4>d.size()) return false;
+    v = (uint32_t(d[o])<<24)|(uint32_t(d[o+1])<<16)|(uint32_t(d[o+2])<<8)|uint32_t(d[o+3]);
+    return true;
+}
+static bool rd16be(const std::vector<unsigned char>& d, size_t o, uint16_t& v){
+    if(o+2>d.size()) return false;
+    v = (uint16_t(d[o])<<8)|uint16_t(d[o+1]);
+    return true;
+}
+static bool parse_tex_info(const std::vector<unsigned char>& d, TexInfo& out){
+    size_t off=0;
+    if(!rd32be(d,off,out.Sign)) return false; off+=4;
+    if(!rd32be(d,off,out.RawDataSize)) return false; off+=4;
+    if(!rd32be(d,off,out.Unknown_0)) return false; off+=4;
+    if(!rd32be(d,off,out.Unknown_1)) return false; off+=4;
+    if(!rd32be(d,off,out.TextureWidth)) return false; off+=4;
+    if(!rd32be(d,off,out.TextureHeight)) return false; off+=4;
+    if(!rd32be(d,off,out.PixelFormat)) return false; off+=4;
+    if(!rd32be(d,off,out.MipMap)) return false; off+=4;
+    out.MipMapOffset.clear();
+    out.Mips.clear();
+    if(out.MipMap>0x10000) return false;
+    out.MipMapOffset.resize(out.MipMap);
+    for(uint32_t i=0;i<out.MipMap;i++){
+        if(!rd32be(d,off,out.MipMapOffset[i])) return false;
+        off+=4;
+    }
+    for(uint32_t i=0;i<out.MipMap;i++){
+        size_t mo = out.MipMapOffset[i];
+        if(mo >= d.size() || mo+4*12>d.size()) return false;
+        TexInfo::MipDef md{};
+        md.DefOffset = mo;
+        size_t k=mo;
+        if(!rd32be(d,k,md.CompFlag)) return false; k+=4;
+        if(!rd32be(d,k,md.DataOffset)) return false; k+=4;
+        if(!rd32be(d,k,md.DataSize)) return false; k+=4;
+        if(!rd32be(d,k,md.Unknown_3)) return false; k+=4;
+        if(!rd32be(d,k,md.Unknown_4)) return false; k+=4;
+        if(!rd32be(d,k,md.Unknown_5)) return false; k+=4;
+        if(!rd32be(d,k,md.Unknown_6)) return false; k+=4;
+        if(!rd32be(d,k,md.Unknown_7)) return false; k+=4;
+        if(!rd32be(d,k,md.Unknown_8)) return false; k+=4;
+        if(!rd32be(d,k,md.Unknown_9)) return false; k+=4;
+        if(!rd32be(d,k,md.Unknown_10)) return false; k+=4;
+        if(!rd32be(d,k,md.Unknown_11)) return false; k+=4;
+        md.HasWH=false;
+        md.MipWidth=0;
+        md.MipHeight=0;
+        md.MipDataOffset=0;
+        md.MipDataSizeParsed=0;
+        if(md.CompFlag==7){
+            if(md.DataSize > d.size() || k + md.DataSize > d.size()) return false;
+            md.MipDataOffset = k;
+            md.MipDataSizeParsed = md.DataSize;
+        }else{
+            if(k+4+440>d.size()) return false;
+            if(!rd16be(d,k,md.MipWidth)) return false; k+=2;
+            if(!rd16be(d,k,md.MipHeight)) return false; k+=2;
+            k+=440;
+            md.HasWH=true;
+            if(md.DataSize<448) return false;
+            size_t data_sz = md.DataSize-448;
+            if(data_sz > d.size() || k + data_sz > d.size()) return false;
+            md.MipDataOffset = k;
+            md.MipDataSizeParsed = data_sz;
+        }
+        out.Mips.push_back(md);
+    }
+    return true;
+}
+
+static bool build_tex_buffer_for_name(const std::string& tex_name, std::vector<unsigned char>& out){
+    auto p_headers = find_bnk_by_filename("globals_texture_headers.bnk");
+    auto p_rest    = find_bnk_by_filename("globals_textures.bnk");
+    if(!p_headers || !p_rest) return false;
+
+    BNKReader r_headers(*p_headers);
+    BNKReader r_rest(*p_rest);
+
+    auto p_mip0 = find_bnk_by_filename("1024mip0_textures.bnk");
+    std::optional<BNKReader> r_mip0;
+    if(p_mip0) r_mip0.emplace(*p_mip0);
+
+    std::unordered_map<std::string,int> mapH, mapR, mapM;
+    for(size_t i=0;i<r_headers.list_files().size();++i){
+        auto& e=r_headers.list_files()[i];
+        std::string k=e.name;
+        std::transform(k.begin(),k.end(),k.begin(),::tolower);
+        mapH.emplace(k,(int)i);
+    }
+    for(size_t i=0;i<r_rest.list_files().size();++i){
+        auto& e=r_rest.list_files()[i];
+        std::string k=e.name;
+        std::transform(k.begin(),k.end(),k.begin(),::tolower);
+        mapR.emplace(k,(int)i);
+    }
+    if(r_mip0){
+        for(size_t i=0;i<r_mip0->list_files().size();++i){
+            auto& e=r_mip0->list_files()[i];
+            std::string k=e.name;
+            std::transform(k.begin(),k.end(),k.begin(),::tolower);
+            mapM.emplace(k,(int)i);
+        }
+    }
+
+    std::string key=tex_name;
+    std::transform(key.begin(),key.end(),key.begin(),::tolower);
+
+    if(!mapH.count(key)) return false;
+
+    auto tmpdir = std::filesystem::temp_directory_path() / "f2_tex_hex";
+    std::error_code ec;
+    std::filesystem::create_directories(tmpdir, ec);
+
+    auto tmp_h = tmpdir / ("h_" + std::to_string(std::hash<std::string>{}(tex_name)) + ".bin");
+    auto tmp_m = tmpdir / ("m_" + std::to_string(std::hash<std::string>{}(tex_name)) + ".bin");
+    auto tmp_r = tmpdir / ("r_" + std::to_string(std::hash<std::string>{}(tex_name)) + ".bin");
+
+    try{
+        extract_one(*p_headers, mapH.at(key), tmp_h.string());
+
+        bool has_mip0 = false;
+        if(mapM.count(key) && p_mip0) {
+            extract_one(*p_mip0, mapM.at(key), tmp_m.string());
+            has_mip0 = std::filesystem::exists(tmp_m);
+        }
+
+        bool has_rest = false;
+        if(mapR.count(key)) {
+            extract_one(*p_rest, mapR.at(key), tmp_r.string());
+            has_rest = std::filesystem::exists(tmp_r);
+        }
+
+        auto vh = read_all_bytes(tmp_h);
+        if(vh.empty()){
+            std::filesystem::remove(tmp_h, ec);
+            return false;
+        }
+
+        std::vector<unsigned char> vm;
+        if(has_mip0) {
+            vm = read_all_bytes(tmp_m);
+        }
+
+        std::vector<unsigned char> vr;
+        if(has_rest) {
+            vr = read_all_bytes(tmp_r);
+        }
+
+        out.clear();
+        out.reserve(vh.size() + vm.size() + vr.size());
+        out.insert(out.end(), vh.begin(), vh.end());
+        out.insert(out.end(), vm.begin(), vm.end());
+        out.insert(out.end(), vr.begin(), vr.end());
+
+        std::filesystem::remove(tmp_h, ec);
+        if(has_mip0) std::filesystem::remove(tmp_m, ec);
+        if(has_rest) std::filesystem::remove(tmp_r, ec);
+
+        return !out.empty();
+    }catch(...){
+        std::filesystem::remove(tmp_h, ec);
+        std::filesystem::remove(tmp_m, ec);
+        std::filesystem::remove(tmp_r, ec);
+        return false;
+    }
+}
+
+static bool build_mdl_buffer_for_name(const std::string& mdl_name, std::vector<unsigned char>& out){
+    auto p_headers = find_bnk_by_filename("globals_model_headers.bnk");
+    auto p_rest    = find_bnk_by_filename("globals_models.bnk");
+    if(!p_headers || !p_rest) return false;
+
+    BNKReader r_headers(*p_headers);
+    BNKReader r_rest(*p_rest);
+
+    std::unordered_map<std::string,int> mapH, mapR;
+    for(size_t i=0;i<r_headers.list_files().size();++i){ auto& e=r_headers.list_files()[i]; std::string k=e.name; std::transform(k.begin(),k.end(),k.begin(),::tolower); mapH.emplace(k,(int)i); }
+    for(size_t i=0;i<r_rest.list_files().size();++i){ auto& e=r_rest.list_files()[i]; std::string k=e.name; std::transform(k.begin(),k.end(),k.begin(),::tolower); mapR.emplace(k,(int)i); }
+
+    std::string key=mdl_name; std::transform(key.begin(),key.end(),key.begin(),::tolower);
+    if(!mapH.count(key) || !mapR.count(key)) return false;
+
+    auto tmpdir = std::filesystem::temp_directory_path() / "f2_mdl_hex";
+    std::error_code ec; std::filesystem::create_directories(tmpdir, ec);
+    auto tmp_h = tmpdir / "h.bin";
+    auto tmp_r = tmpdir / "r.bin";
+    try{
+        extract_one(*p_headers, mapH.at(key), tmp_h.string());
+        extract_one(*p_rest, mapR.at(key), tmp_r.string());
+        auto vh = read_all_bytes(tmp_h);
+        auto vr = read_all_bytes(tmp_r);
+        out.clear();
+        out.reserve(vh.size()+vr.size());
+        out.insert(out.end(), vh.begin(), vh.end());
+        out.insert(out.end(), vr.begin(), vr.end());
+        std::filesystem::remove(tmp_h, ec);
+        std::filesystem::remove(tmp_r, ec);
+    }catch(...){
+        return false;
+    }
+    return true;
+}
+
+static void open_hex_for_selected(){
+    int idx = S.selected_file_index;
+    if(idx < 0 || idx >= (int)S.files.size()){ show_error_box("No file selected."); return; }
+
+    auto name = S.files[(size_t)idx].name;
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    bool want_tex = is_tex_file(lower);
+    bool want_mdl = is_mdl_file(lower);
+    if(!want_tex && !want_mdl){ show_error_box("Hex viewer supports only .tex or .mdl"); return; }
+
+    progress_open(0, "Loading hex...");
+    S.hex_loading.store(true);
+
+    std::thread([name, want_tex, want_mdl](){
+        std::vector<unsigned char> buf;
+        bool ok = false;
+        std::string error_detail;
+
+        try {
+            if(want_tex) {
+                auto p_headers = find_bnk_by_filename("globals_texture_headers.bnk");
+                auto p_rest    = find_bnk_by_filename("globals_textures.bnk");
+
+                if(!p_headers) {
+                    error_detail = "globals_texture_headers.bnk not found";
+                } else if(!p_rest) {
+                    error_detail = "globals_textures.bnk not found";
+                } else {
+                    ok = build_tex_buffer_for_name(name, buf);
+                    if(!ok) {
+                        error_detail = "Texture '" + name + "' not found in BNK files or extraction failed";
+                    }
+                }
+            } else if(want_mdl) {
+                auto p_headers = find_bnk_by_filename("globals_model_headers.bnk");
+                auto p_rest    = find_bnk_by_filename("globals_models.bnk");
+
+                if(!p_headers) {
+                    error_detail = "globals_model_headers.bnk not found";
+                } else if(!p_rest) {
+                    error_detail = "globals_models.bnk not found";
+                } else {
+                    ok = build_mdl_buffer_for_name(name, buf);
+                    if(!ok) {
+                        error_detail = "Model '" + name + "' not found in BNK files or extraction failed";
+                    }
+                }
+            }
+        } catch(const std::exception& e) {
+            error_detail = std::string("Exception: ") + e.what();
+            ok = false;
+        } catch(...) {
+            error_detail = "Unknown exception occurred";
+            ok = false;
+        }
+
+        S.hex_data.clear();
+        if(ok) S.hex_data.swap(buf);
+
+        S.hex_title = std::string("Hex Editor - ") + name;
+        S.hex_open  = ok;
+
+        memset(&S.hex_state, 0, sizeof(S.hex_state));
+        if(ok){
+            S.hex_state.Bytes        = (void*)S.hex_data.data();
+            S.hex_state.MaxBytes     = (int)S.hex_data.size();
+            S.hex_state.ReadOnly     = true;
+            S.hex_state.ShowAscii    = true;
+            S.hex_state.ShowAddress  = true;
+            S.hex_state.BytesPerLine = 16;
+        }
+
+        S.hex_loading.store(false);
+        progress_done();
+        if(!ok) {
+            std::string msg = "Failed to load bytes for hex view.";
+            if(!error_detail.empty()) {
+                msg += "\n\nDetails:\n" + error_detail;
+            }
+            show_error_box(msg);
+        }
+    }).detach();
+}
+
+static void draw_hex_window() {
+    if(!S.hex_open) return;
+    if(S.hex_loading.load()) return;
+    if(S.hex_data.empty()){ S.hex_open = false; return; }
+
+    ImGui::SetNextWindowSize(ImVec2(900, 520), ImGuiCond_FirstUseEver);
+    if(ImGui::Begin(S.hex_title.c_str(), &S.hex_open))
+    {
+        static ImGuiHexEditorState hex{};
+        unsigned char* bytes_ptr = S.hex_data.data();
+        int max_bytes = (int)std::min<size_t>(S.hex_data.size(), (size_t)INT_MAX);
+        if(hex.Bytes != bytes_ptr || hex.MaxBytes != max_bytes){
+            hex = ImGuiHexEditorState{};
+            hex.Bytes        = (void*)bytes_ptr;
+            hex.MaxBytes     = max_bytes > 0 ? max_bytes : 1;
+            hex.ReadOnly     = true;
+            hex.ShowAscii    = true;
+            hex.ShowAddress  = true;
+            hex.BytesPerLine = 16;
+        }
+        if(hex.BytesPerLine <= 0) hex.BytesPerLine = 16;
+
+        ImGui::BeginChild("hex_and_info", ImVec2(0,0), false);
+        ImGui::BeginGroup();
+
+        float left_w = ImGui::GetContentRegionAvail().x * 0.58f;
+        if(left_w < 160.0f) left_w = ImGui::GetContentRegionAvail().x;
+        ImGui::BeginChild("hex_left", ImVec2(left_w, 0), true);
+        ImGui::BeginHexEditor("hex_view", &hex, ImVec2(0,0));
+        ImGui::EndHexEditor();
+        ImGui::EndChild();
+
+        ImGui::SameLine();
+
+        ImGui::BeginChild("hex_right", ImVec2(0,0), true);
+
+        static int cached_sel_index = -1;
+
+        bool has_sel = (S.selected_file_index>=0 && S.selected_file_index<(int)S.files.size());
+        if(has_sel){
+            if(cached_sel_index != S.selected_file_index){
+                if(S.preview_srv){ S.preview_srv->Release(); S.preview_srv = nullptr; }
+                S.preview_mip_index = -1;
+                S.show_preview_popup = false;
+                S.tex_info_ok = false;
+                cached_sel_index = S.selected_file_index;
+            }
+
+            std::string sel = S.files[(size_t)S.selected_file_index].name;
+
+            if(is_tex_file(sel)){
+                // Always attempt to parse
+                if(!S.tex_info_ok){
+                    S.tex_info_ok = parse_tex_info(S.hex_data, S.tex_info);
+                }
+
+                // Show header info even if parsing partially failed
+                ImGui::Text("Header");
+                ImGui::Separator();
+
+                if(S.hex_data.size() >= 32){
+                    uint32_t sign, rawsize, unk0, unk1, width, height, pixfmt, mipmap;
+                    size_t o=0;
+                    bool header_ok = true;
+                    header_ok &= rd32be(S.hex_data, o, sign); o+=4;
+                    header_ok &= rd32be(S.hex_data, o, rawsize); o+=4;
+                    header_ok &= rd32be(S.hex_data, o, unk0); o+=4;
+                    header_ok &= rd32be(S.hex_data, o, unk1); o+=4;
+                    header_ok &= rd32be(S.hex_data, o, width); o+=4;
+                    header_ok &= rd32be(S.hex_data, o, height); o+=4;
+                    header_ok &= rd32be(S.hex_data, o, pixfmt); o+=4;
+                    header_ok &= rd32be(S.hex_data, o, mipmap); o+=4;
+
+                    if(header_ok){
+                        ImGui::Text("Sign: 0x%08X", sign);
+                        ImGui::Text("RawDataSize: %u", rawsize);
+                        ImGui::Text("Unknown_0: %u", unk0);
+                        ImGui::Text("Unknown_1: %u", unk1);
+                        ImGui::Text("Width: %u", width);
+                        ImGui::Text("Height: %u", height);
+                        ImGui::Text("PixelFormat: 0x%08X", pixfmt);
+                        ImGui::Text("MipMap: %u", mipmap);
+                    }else{
+                        ImGui::TextColored(ImVec4(1,0.5f,0.5f,1), "Failed to read header");
+                    }
+                }else{
+                    ImGui::TextColored(ImVec4(1,0.5f,0.5f,1), "File too small (< 32 bytes)");
+                }
+
+                if(S.tex_info_ok && !S.tex_info.Mips.empty()){
+                    ImGui::Dummy(ImVec2(0,6));
+                    ImGui::Text("MipMap Definitions");
+                    ImGui::Separator();
+
+                    for(int i=0;i<(int)S.tex_info.Mips.size();++i){
+                        const auto& m = S.tex_info.Mips[i];
+                        char lbl[64]; snprintf(lbl,sizeof(lbl),"Mip %d", i);
+                        if(ImGui::TreeNode(lbl)){
+                            ImGui::Text("DefOffset: 0x%zX", m.DefOffset);
+                            ImGui::Text("CompFlag: %u", m.CompFlag);
+                            ImGui::Text("DataOffset: 0x%08X", m.DataOffset);
+                            ImGui::Text("DataSize: %u", m.DataSize);
+                            ImGui::Text("Unknown_3: %u", m.Unknown_3);
+                            ImGui::Text("Unknown_4: %u", m.Unknown_4);
+                            ImGui::Text("Unknown_5: %u", m.Unknown_5);
+                            ImGui::Text("Unknown_6: %u", m.Unknown_6);
+                            ImGui::Text("Unknown_7: %u", m.Unknown_7);
+                            ImGui::Text("Unknown_8: %u", m.Unknown_8);
+                            ImGui::Text("Unknown_9: %u", m.Unknown_9);
+                            ImGui::Text("Unknown_10: %u", m.Unknown_10);
+                            ImGui::Text("Unknown_11: %u", m.Unknown_11);
+                            if(m.HasWH){
+                                ImGui::Text("MipWidth: %u", (unsigned)m.MipWidth);
+                                ImGui::Text("MipHeight: %u", (unsigned)m.MipHeight);
+                            }else{
+                                uint32_t w = std::max(1u, S.tex_info.TextureWidth  >> i);
+                                uint32_t h = std::max(1u, S.tex_info.TextureHeight >> i);
+                                ImGui::Text("Derived Size: %ux%u", w, h);
+                            }
+                            ImGui::Text("MipMapData@ 0x%zX, Size %zu", m.MipDataOffset, m.MipDataSizeParsed);
+
+                            if(m.CompFlag == 7){
+                                if(ImGui::Button("Preview")){
+                                    S.preview_mip_index = i;
+                                    S.show_preview_popup = true;
+                                }
+                            }
+
+                            ImGui::TreePop();
+                        }
+                    }
+                }else if(S.hex_data.size() >= 32){
+                    ImGui::Dummy(ImVec2(0,6));
+                    ImGui::TextColored(ImVec4(1,0.7f,0.3f,1), "Mipmap parsing failed");
+                    ImGui::TextWrapped("Could not parse mipmap definitions. File may be corrupted or incomplete.");
+                }
+            }else if(is_mdl_file(sel)){
+                ImGui::TextUnformatted(".mdl selected");
+            }else{
+                ImGui::TextUnformatted("No parsed info");
+            }
+        }else{
+            ImGui::TextUnformatted("No file selected");
+        }
+        ImGui::EndChild();
+
+        ImGui::EndGroup();
+        ImGui::EndChild();
+    }
+    ImGui::End();
+
+    // Preview popup window - render outside the main hex window
+    if(S.show_preview_popup){
+        ImGui::OpenPopup("Mip Preview");
+        S.show_preview_popup = false; // Only open once
+    }
+
+    if(ImGui::BeginPopupModal("Mip Preview", nullptr, ImGuiWindowFlags_None)){
+        if(S.preview_mip_index >= 0 && S.preview_mip_index < (int)S.tex_info.Mips.size()){
+            const auto& m = S.tex_info.Mips[S.preview_mip_index];
+
+            if(!S.preview_srv){
+                uint32_t base_w = S.tex_info.TextureWidth;
+                uint32_t base_h = S.tex_info.TextureHeight;
+                uint32_t w = m.HasWH ? (uint32_t)std::max(1,(int)m.MipWidth)  : std::max(1u, base_w >> S.preview_mip_index);
+                uint32_t h = m.HasWH ? (uint32_t)std::max(1,(int)m.MipHeight) : std::max(1u, base_h >> S.preview_mip_index);
+
+                if(m.MipDataOffset < S.hex_data.size() && m.MipDataOffset + m.MipDataSizeParsed <= S.hex_data.size()){
+                    const uint8_t* src = S.hex_data.data() + m.MipDataOffset;
+                    size_t src_sz = m.MipDataSizeParsed;
+
+                    size_t blocks_x = (w + 3) / 4;
+                    size_t blocks_y = (h + 3) / 4;
+                    size_t bc1_sz = blocks_x * blocks_y * 8;
+                    size_t bc5_sz = blocks_x * blocks_y * 16;
+
+                    DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+                    std::vector<uint8_t> payload;
+
+                    if(src_sz == bc1_sz){
+                        payload.resize(bc1_sz);
+                        for(size_t i=0;i<bc1_sz;i+=8){
+                            uint16_t c0 = (uint16_t)((src[i+0]<<8) | src[i+1]);
+                            uint16_t c1 = (uint16_t)((src[i+2]<<8) | src[i+3]);
+                            uint32_t idx = (uint32_t)((src[i+4]<<24) | (src[i+5]<<16) | (src[i+6]<<8) | src[i+7]);
+                            payload[i+0] = (uint8_t)(c0 & 0xFF);
+                            payload[i+1] = (uint8_t)(c0 >> 8);
+                            payload[i+2] = (uint8_t)(c1 & 0xFF);
+                            payload[i+3] = (uint8_t)(c1 >> 8);
+                            payload[i+4] = (uint8_t)(idx & 0xFF);
+                            payload[i+5] = (uint8_t)((idx >> 8) & 0xFF);
+                            payload[i+6] = (uint8_t)((idx >> 16) & 0xFF);
+                            payload[i+7] = (uint8_t)((idx >> 24) & 0xFF);
+                        }
+                        fmt = DXGI_FORMAT_BC1_UNORM;
+                    }else if(src_sz == bc5_sz){
+                        payload.assign(src, src + src_sz);
+                        fmt = DXGI_FORMAT_BC5_UNORM;
+                    }
+
+                    if(fmt != DXGI_FORMAT_UNKNOWN){
+                        D3D11_TEXTURE2D_DESC td{};
+                        td.Width = w;
+                        td.Height = h;
+                        td.MipLevels = 1;
+                        td.ArraySize = 1;
+                        td.Format = fmt;
+                        td.SampleDesc.Count = 1;
+                        td.Usage = D3D11_USAGE_DEFAULT;
+                        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+                        D3D11_SUBRESOURCE_DATA srd{};
+                        srd.pSysMem = payload.data();
+                        srd.SysMemPitch = (UINT)(blocks_x * (fmt==DXGI_FORMAT_BC1_UNORM?8:16));
+                        srd.SysMemSlicePitch = (UINT)payload.size();
+
+                        ID3D11Texture2D* tex = nullptr;
+                        HRESULT hr = g_pd3dDevice->CreateTexture2D(&td, &srd, &tex);
+                        if(SUCCEEDED(hr) && tex){
+                            D3D11_SHADER_RESOURCE_VIEW_DESC srvd{};
+                            srvd.Format = td.Format;
+                            srvd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                            srvd.Texture2D.MipLevels = 1;
+
+                            hr = g_pd3dDevice->CreateShaderResourceView(tex, &srvd, &S.preview_srv);
+                            tex->Release();
+                        }
+                    }
+                }
+            }
+
+            if(S.preview_srv){
+                uint32_t base_w = S.tex_info.TextureWidth;
+                uint32_t base_h = S.tex_info.TextureHeight;
+                uint32_t w = m.HasWH ? (uint32_t)std::max(1,(int)m.MipWidth)  : std::max(1u, base_w >> S.preview_mip_index);
+                uint32_t h = m.HasWH ? (uint32_t)std::max(1,(int)m.MipHeight) : std::max(1u, base_h >> S.preview_mip_index);
+
+                ImGui::Text("Mip %d (%ux%u)", S.preview_mip_index, (unsigned)w, (unsigned)h);
+
+                ImVec2 avail = ImGui::GetContentRegionAvail();
+                avail.y -= ImGui::GetFrameHeightWithSpacing();
+
+                float aspect = (float)w / (float)h;
+                float display_w = avail.x;
+                float display_h = display_w / aspect;
+
+                if(display_h > avail.y){
+                    display_h = avail.y;
+                    display_w = display_h * aspect;
+                }
+
+                ImGui::BeginChild("preview_image", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), false);
+                ImGui::Image((ImTextureID)S.preview_srv, ImVec2(display_w, display_h));
+                ImGui::EndChild();
+            }else{
+                ImGui::Text("Preview unavailable for Mip %d", S.preview_mip_index);
+                ImGui::Dummy(ImVec2(200, 50));
+            }
+        }
+
+        if(ImGui::Button("Close", ImVec2(120, 0))){
+            if(S.preview_srv){ S.preview_srv->Release(); S.preview_srv = nullptr; }
+            S.preview_mip_index = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+static bool name_matches_filter(const std::string& name, const std::string& filter) {
+    if(filter.empty()) return true;
+    std::string n=name, f=filter;
+    std::transform(n.begin(),n.end(),n.begin(),::tolower);
+    std::transform(f.begin(),f.end(),f.begin(),::tolower);
+    return n.find(f)!=std::string::npos;
+}
+
+static int count_visible_files(){
+    int c=0;
+    for(auto& f: S.files) if(name_matches_filter(f.name, S.file_filter)) ++c;
+    return c;
+}
+
+static bool any_wav_in_bnk(){
+    for(auto& f: S.files) if(is_audio_file(f.name)) return true;
+    return false;
+}
+
+static bool any_tex_in_bnk(){
+    for(auto& f: S.files) if(is_tex_file(f.name)) return true;
+    return false;
+}
+
+static bool is_texture_bnk_selected(){
+    if(S.selected_bnk.empty()) return false;
+    std::string b = std::filesystem::path(S.selected_bnk).filename().string();
+    std::transform(b.begin(),b.end(),b.begin(),::tolower);
+    return b=="globals_texture_headers.bnk" || b=="1024mip0_textures.bnk" || b=="globals_textures.bnk";
+}
+
+static void draw_left_panel(){
+    ImGui::BeginChild("left_panel", ImVec2(360,0), true);
+    ImGui::SetNextItemWidth(-1);
+    if(!S.bnk_paths.empty()){
+        ImGui::InputTextWithHint("##bnk_filter", "Filter", &S.bnk_filter);
+    }
+    ImGui::BeginChild("bnk_list", ImVec2(0,0), false);
+    auto paths = filtered_bnk_paths();
+    for(auto& p: paths){
+        std::string label = std::filesystem::path(p).filename().string();
+        if(ImGui::Selectable(label.c_str(), p==S.selected_bnk, ImGuiSelectableFlags_SpanAllColumns)) pick_bnk(p);
+        if(!S.hide_tooltips && ImGui::IsItemHovered()){
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted(p.c_str());
+            ImGui::EndTooltip();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::EndChild();
 }
 
 static void draw_file_table(){
@@ -672,11 +1215,12 @@ static void draw_right_panel(){
             if(ImGui::Button("Extract WAV")){ ImGui::OpenPopup("progress_win"); on_extract_selected_wav(); }
             ImGui::SameLine();
         }
-        bool can_tex=false;
+        bool can_tex=false, can_mdl=false;
         if(S.selected_file_index>=0 && S.selected_file_index<(int)S.files.size()){
             std::string n=S.files[(size_t)S.selected_file_index].name;
             std::string l=n; std::transform(l.begin(),l.end(),l.begin(),::tolower);
             can_tex = l.size()>=4 && l.rfind(".tex")==l.size()-4;
+            can_mdl = l.size()>=4 && l.rfind(".mdl")==l.size()-4;
         }
         if(can_tex && is_texture_bnk_selected()){
             if(ImGui::Button("Rebuild and Extract")) {
@@ -685,8 +1229,12 @@ static void draw_right_panel(){
                 on_rebuild_and_extract_one(name);
             }
             if(!S.hide_tooltips && ImGui::IsItemHovered()){ ImGui::BeginTooltip(); ImGui::TextUnformatted("Rebuilds the .tex file bitstreams"); ImGui::EndTooltip(); }
+            ImGui::SameLine();
+        }
+        if(can_tex || can_mdl){
+            if(ImGui::Button("Hex View")){ ImGui::OpenPopup("progress_win"); open_hex_for_selected(); }
         } else {
-            ImGui::InvisibleButton("rebuild_single_hidden", ImVec2(1,1));
+            ImGui::InvisibleButton("hex_hidden", ImVec2(1,1));
         }
     }
     ImGui::EndGroup();
@@ -801,9 +1349,77 @@ int main(){
         ImGui::NewFrame();
 
         draw_main(hwnd);
-        draw_progress_modal();
-        draw_error_modal();
-        draw_completion_modal();
+        draw_folder_dialog();
+        if (S.show_progress.load()) ImGui::OpenPopup("progress_win");
+        if (S.show_error) { ImGui::OpenPopup("error_modal"); S.show_error = false; }
+        if (S.show_completion) { ImGui::OpenPopup("completion_modal"); S.show_completion = false; }
+
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        float w = std::clamp(vp->WorkSize.x*0.6f, 520.0f, 900.0f);
+        const ImGuiStyle& st = ImGui::GetStyle();
+        float line = ImGui::GetTextLineHeightWithSpacing();
+        float h = st.WindowPadding.y*2.0f + line + st.ItemSpacing.y + (line*2.0f + 6.0f) + st.ItemSpacing.y + ImGui::GetFrameHeight() + st.ItemSpacing.y + ImGui::GetFrameHeight() + 12.0f;
+        ImGui::SetNextWindowSize(ImVec2(w,h), ImGuiCond_Appearing);
+        ImGui::SetNextWindowPos(vp->WorkPos + ImVec2((vp->WorkSize.x - w)*0.5f, (vp->WorkSize.y - h)*0.5f), ImGuiCond_Appearing);
+        if(ImGui::BeginPopupModal("progress_win", nullptr, ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar)){
+            int total, current; std::string label;
+            { std::lock_guard<std::mutex> lk(S.progress_mutex); total=S.progress_total; current=S.progress_current; label=S.progress_label; }
+            ImGui::Text("%d/%d", current, std::max(1,total));
+            float wrap_w = ImGui::GetContentRegionAvail().x;
+            std::string two = label;
+            if(ImGui::CalcTextSize(two.c_str()).x > wrap_w){
+                size_t mid = two.size()/2;
+                auto fits=[&](size_t pos){ std::string a=two.substr(0,pos), b=two.substr(pos+1); return ImGui::CalcTextSize(a.c_str()).x<=wrap_w && ImGui::CalcTextSize(b.c_str()).x<=wrap_w; };
+                size_t cand = std::string::npos;
+                size_t l1 = two.rfind('\\', mid), l2 = two.rfind('/', mid);
+                if(l1!=std::string::npos || l2!=std::string::npos) cand = std::max(l1==std::string::npos?0:l1, l2==std::string::npos?0:l2);
+                if(cand!=std::string::npos && fits(cand)) two.insert(cand+1,"\n");
+                else{
+                    size_t r1 = two.find('\\', mid), r2 = two.find('/', mid);
+                    size_t r = std::min(r1==std::string::npos?two.size():r1, r2==std::string::npos?two.size():r2);
+                    if(r!=two.size() && fits(r)) two.insert(r+1,"\n"); else two.insert(mid,"\n");
+                }
+            }
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+wrap_w);
+            ImGui::BeginChild("progress_label", ImVec2(0, ImGui::GetTextLineHeightWithSpacing()*2.0f + 6.0f), false, ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+            ImGui::TextUnformatted(two.c_str());
+            ImGui::EndChild();
+            ImGui::PopTextWrapPos();
+            float frac = total>0? (float)current/(float)total : 1.0f;
+            ImGui::ProgressBar(frac, ImVec2(-1,0));
+            ImGui::Dummy(ImVec2(0,6));
+            if(ImGui::Button("Cancel", ImVec2(-1,0))){ S.cancel_requested=true; progress_done(); show_completion_box("Extraction cancelled."); }
+            if(!S.show_progress.load()) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        ImGuiViewport* vp2 = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp2->WorkPos + vp2->WorkSize*0.5f, ImGuiCond_Always, ImVec2(0.5f,0.5f));
+        if(ImGui::BeginPopupModal("error_modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar)){
+            ImGui::TextColored(ImVec4(1,0.47f,0.47f,1),"Error");
+            ImGui::Separator();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize()*40.0f);
+            ImGui::TextUnformatted(S.error_text.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0,10));
+            if(ImGui::Button("Close", ImVec2(-1,0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        ImGuiViewport* vp3 = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp3->WorkPos + vp3->WorkSize*0.5f, ImGuiCond_Always, ImVec2(0.5f,0.5f));
+        if(ImGui::BeginPopupModal("completion_modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar)){
+            ImGui::TextColored(ImVec4(0.47f,1,0.47f,1),"Operation Status");
+            ImGui::Separator();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize()*40.0f);
+            ImGui::TextUnformatted(S.completion_text.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0,10));
+            if(ImGui::Button("OK", ImVec2(-1,0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        draw_hex_window();
 
         ImGui::Render();
         const float clear_color[4] = {0.10f,0.10f,0.10f,1.0f};
@@ -821,3 +1437,4 @@ int main(){
     UnregisterClassA(wc.lpszClassName, wc.hInstance);
     return 0;
 }
+

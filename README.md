@@ -7,7 +7,7 @@ Browse and export a variety of Fable 2 files. Included features:
 - Playback of audio files (WIP).
 - Exports Audio files in a usable format. 
 - Extract 3D models, textures, and more (WIP, currently exports most rigged models with UV's and skeletons. It's a little buggy, RN. NO TEXTURES YET)
-- Textures can be reconstructed when extracted. Useful for researching the compressed mipmaps (comp flag 1).
+- Textures can be reconstructed when extracted. Useful for researching the compressed mipmaps (comp flag 1). Textures can be previewed in the hex view.
   
 How to use:
 - Rip a legitimate copy of Fable 2 to your PC.

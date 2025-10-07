@@ -11,11 +11,11 @@ Browse and export a variety of Fable 2 files. Included features:
 
 Hex editor will provide useful information without needing to export or use external applications.
 
-![img_1.png](img_1.png)
+![img_1.png](images/img_1.png)
 
 Pixel format 28 is not rendering correctly. Some textures don't load the hex, either. 
 
-![img.png](img.png)
+![img.png](images/img.png)
 
 
 How to use:

@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 
+VALIDATE = ('--validate' in sys.argv)
+
 
 VERTEX_STRIDE = 28
 UV_OFFSET = 20
@@ -299,6 +301,17 @@ def build_faces(indices: List[int], vcount: int) -> List[Tuple[int,int,int]]:
 
 def parse_buffer(r: Reader, which: int, pre: int, stride: int, write_faces: bool):
     start = r.off
+    # --- 13-byte header check: 00*8, 01, 00*3, <mesh number> ---
+    header13 = r.data[start:start+13]
+    expected13 = (b"\x00"*8) + b"\x01" + (b"\x00"*3) + bytes([which & 0xFF])
+    if len(header13) >= 13:
+        print(f" initial 13 bytes: {' '.join(f'{b:02X}' for b in header13[:13])}")
+        if header13[:13] == expected13:
+            print(f" [hdr13] OK pattern for mesh {which}.")
+        else:
+            print(f" [hdr13] MISMATCH for mesh {which}! expected: {' '.join(f'{b:02X}' for b in expected13)}")
+    else:
+        print(" [hdr13] Not enough bytes to validate header (file end).")
     print(f"\nBuffer {which} @0x{start:08X} (preface {pre})")
     print(f" initial 13 bytes: {' '.join(f'{b:02X}' for b in r.data[start:start+13])}")
     r.rbytes(pre)

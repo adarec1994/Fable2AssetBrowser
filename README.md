@@ -9,6 +9,18 @@ Browse and export a variety of Fable 2 files. Included features:
 - Extract 3d models, textures, and more (WIP, currently exports most rigged models with UV's and skeletons ~ needs to be updated to extract mdl's as glb in cpp.
 - Textures can be reconstructed when extracted. Useful for researching the compressed mipmaps (comp flag 1). Textures can be previewed in the hex view.
 
+Preview .mdl files in the browser. (Select a .mdl, go in to the hex view, then click preview).
+
+![img_2.png](images/img_2.png)
+![img_3.png](images/img_3.png)
+![img_4.png](images/img_4.png)
+_Hello cutie._
+
+And now provides details on .mdl files
+
+![img.png](images/img5.png)
+![img_1.png](images/img_6.png)
+
 Hex editor will provide useful information without needing to export or use external applications.
 
 ![img_1.png](images/img_1.png)

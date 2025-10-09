@@ -39,8 +39,8 @@ How to use:
 - To export as GLB, select a .mdl file, then click "convert to glb" (currently not working due to the update to C++).
 
 Credits:
-1. ResHax, providing valuable information for getting the models out. Especially H3x3r for continuously helping with the .tex format.
-2. Fable 2 modding community for the resources that were available, giving me a good boost to start.
+1. ResHax with help researching the .mdl file format. Especially H3x3r for continuously helping with the .tex format.
+2. Fable 2 modding community for the resources that were available, giving me a good head-start.
 3. Work, for not breathing down my neck when I have free time to work on this.
 4. Odarenkoas on Discord for making the original decoder for .wav files. I bastardized his batch file to do it.
-5. Dr. Cubed for sharing his repository detailing .bnk ver 2.
+5. Dr. Cubed for sharing his repository detailing .bnk ver 2 (such as non-English speech.bnk).

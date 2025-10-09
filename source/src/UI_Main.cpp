@@ -11,6 +11,9 @@
 #include "ImGuiFileDialog.h"
 #include <filesystem>
 #include <algorithm>
+#include "ModelPreview.h"
+
+ModelPreview g_mp;
 
 void refresh_file_table() { S.selected_file_index = -1; }
 
@@ -74,7 +77,7 @@ void open_folder_logic(const std::string &sel) {
     refresh_file_table();
 }
 
-void draw_main(HWND hwnd) {
+void draw_main(HWND hwnd, ID3D11Device* device) {
     ImGuiViewport *vp = ImGui::GetMainViewport();
     const float inset = 8.0f;
     ImGui::SetNextWindowPos(vp->WorkPos + ImVec2(inset, inset));
@@ -104,7 +107,7 @@ void draw_main(HWND hwnd) {
         draw_left_panel();
         ImGui::EndChild();
         ImGui::SameLine();
-        draw_right_panel();
+        draw_right_panel(device);
         ImGui::EndGroup();
         ImGui::EndChild();
     }

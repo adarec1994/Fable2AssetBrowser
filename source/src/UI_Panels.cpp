@@ -4,12 +4,20 @@
 #include "Operations.h"
 #include "HexView.h"
 #include "UI_Main.h"
+#include "TexParser.h"
+#include "ModelParser.h"
+#include "ModelPreview.h"
+#include "BNKCore.cpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "imgui_stdlib.h"
 #include "ImGuiFileDialog.h"
 #include <filesystem>
 #include <algorithm>
+#include <thread>
+#include "Progress.h"
+#include "files.h"
+
 
 void draw_left_panel() {
     ImGui::BeginChild("left_panel", ImVec2(360, 0), true);
@@ -90,7 +98,7 @@ void draw_folder_dialog() {
     }
 }
 
-void draw_right_panel() {
+void draw_right_panel(ID3D11Device* device) {
     ImGui::BeginChild("right_panel", ImVec2(0, 0), false);
 
     ImGui::BeginChild("extract_box", ImVec2(0, 100), true, ImGuiWindowFlags_NoScrollbar);
@@ -249,10 +257,62 @@ void draw_right_panel() {
     if (!can_preview) {
         ImGui::BeginDisabled();
     }
-    if (ImGui::Button("Preview")) {
-        ImGui::OpenPopup("progress_win");
-        open_hex_for_selected();
-    }
+if (ImGui::Button("Preview")) {
+    progress_open(0, can_mdl ? "Loading model preview..." : "Loading texture preview...");
+
+    auto item = S.files[(size_t)S.selected_file_index];
+    auto name = item.name;
+
+    std::thread([device, item, name, can_tex, can_mdl]() {
+        std::vector<unsigned char> buf;
+        bool ok = false;
+        try {
+            if (can_tex) {
+                ok = build_tex_buffer_for_name(name, buf);
+            } else if (can_mdl) {
+                ok = build_mdl_buffer_for_name(name, buf);
+            }
+
+            if (!ok) {
+                auto tmpdir = std::filesystem::temp_directory_path() / "f2_hex_view";
+                std::error_code ec;
+                std::filesystem::create_directories(tmpdir, ec);
+                auto tmp_file = tmpdir / ("hex_" + std::to_string(std::hash<std::string>{}(name)) + ".bin");
+                extract_one(S.selected_bnk, item.index, tmp_file.string());
+                buf = read_all_bytes(tmp_file);
+                ok = !buf.empty();
+                std::filesystem::remove(tmp_file, ec);
+            }
+        } catch (...) { ok = false; }
+
+        if (ok) {
+            S.hex_data = buf;
+
+            if (can_tex) {
+                S.tex_info_ok = parse_tex_info(S.hex_data, S.tex_info);
+                if (S.tex_info_ok && !S.tex_info.Mips.empty()) {
+                    S.preview_mip_index = 0;
+                    S.show_preview_popup = true;
+                }
+            } else if (can_mdl) {
+                S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info);
+                if (S.mdl_info_ok) {
+                    S.mdl_meshes.clear();
+                    parse_mdl_geometry(S.hex_data, S.mdl_info, S.mdl_meshes);
+                    extern ModelPreview g_mp;
+                    MP_Release(g_mp);
+                    MP_Init(device, g_mp, 800, 520);
+                    MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
+                    S.cam_yaw = 0.0f; S.cam_pitch = 0.2f; S.cam_dist = 3.0f;
+                    S.show_model_preview = true;
+                }
+            }
+        }
+
+        progress_done();
+        if (!ok) show_error_box("Failed to load preview.");
+    }).detach();
+}
     if (!can_preview) {
         ImGui::EndDisabled();
     }

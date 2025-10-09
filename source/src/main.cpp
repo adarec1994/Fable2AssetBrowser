@@ -158,7 +158,7 @@ int main() {
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        draw_main(hwnd);
+        draw_main(hwnd, g_pd3dDevice);
         draw_folder_dialog();
         if (S.show_progress.load()) ImGui::OpenPopup("progress_win");
         if (S.show_error) {

@@ -82,35 +82,56 @@ cbuffer CB : register(b0){
     float4x4 mvp;
     float4   lightDir;
     float4x4 mv;
-    float4   params;
+    float4   params;   // x: ambientK, y: specPower, z: unused, w: unused
 }
-Texture2D tex0 : register(t0);
-Texture2D tex1 : register(t1);
-Texture2D tex2 : register(t2);
-Texture2D tex3 : register(t3);
-Texture2D tex4 : register(t4);
+Texture2D tex0 : register(t0); // diffuse (with alpha)
+Texture2D tex1 : register(t1); // normal
+Texture2D tex2 : register(t2); // specular
+Texture2D tex3 : register(t3); // unk
+Texture2D tex4 : register(t4); // tint
 SamplerState smp : register(s0);
+
 struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
+
+float3 hemiAmbient(float3 n) {
+    // simple hemisphere ambient: up sky vs. ground
+    float up = saturate(n.y*0.5 + 0.5);
+    float3 sky    = float3(0.55, 0.65, 0.80);
+    float3 ground = float3(0.20, 0.20, 0.22);
+    return lerp(ground, sky, up);
+}
+
 float4 PS(VSOUT i) : SV_Target {
-    float3 n = normalize(i.n);
-    float3 l = normalize(lightDir.xyz);
+    float3 N_geo = normalize(i.n);
+    float3 L = normalize(lightDir.xyz);
 
-    float3 normal_map = tex1.Sample(smp, i.t).rgb;
-    normal_map = normal_map * 2.0 - 1.0;
-    normal_map = normalize(normal_map);
+    // normal map (tangent basis is approximated by using model space here,
+    // good enough for preview)
+    float3 N_m = tex1.Sample(smp, i.t).rgb * 2.0 - 1.0;
+    N_m = normalize(N_m);
+    float3 N = normalize(N_geo + N_m * 0.5);
 
-    float ndotl = max(0.0, dot(n, l));
-    float ambient = 0.6;
-    float diffuse = 0.4;
+    float3 albedo   = tex0.Sample(smp, i.t).rgb;
+    float  alpha    = tex0.Sample(smp, i.t).a;
+    float3 specTex  = tex2.Sample(smp, i.t).rgb;
+    float3 tint     = tex4.Sample(smp, i.t).rgb;
 
-    float3 albedo = tex0.Sample(smp, i.t).rgb;
-    float3 specular = tex2.Sample(smp, i.t).rgb;
-    float3 tint = tex4.Sample(smp, i.t).rgb;
+    albedo *= tint;
 
-    albedo = albedo * tint;
+    float ndotl = saturate(dot(N, L));
+    float3 amb  = hemiAmbient(N) * params.x;          // ambientK (params.x)
+    float3 diff = albedo * (0.4 * ndotl);             // a little diffuse
+    float3 V    = normalize(float3(0,0,1));           // fake view dir
+    float3 H    = normalize(L + V);
+    float  s    = pow(saturate(dot(N, H)), params.y); // spec power (params.y)
+    float3 spec = specTex * s * 0.35;
 
-    float3 color = albedo * (ambient + diffuse * ndotl) + specular * pow(max(0.0, ndotl), 32.0) * 0.3;
-    return float4(color, 1.0);
+    float3 color = albedo * amb + diff + spec;
+
+    // simple gamma-ish lift for preview readability
+    color = pow(color, 1.0/1.8);
+
+    return float4(color, alpha);
 }
 )";
 
@@ -150,7 +171,7 @@ static bool create_target(ID3D11Device* dev, ModelPreview& mp, int w, int h){
 
     ID3DBlob* vsb=nullptr; ID3DBlob* psb=nullptr;
     if(!compile_shader(g_vs,"VS","vs_5_0",&vsb)) return false;
-    if(!compile_shader(g_ps,"PS","ps_5_0",&psb)){ vsb->Release(); return false; }
+    if(!compile_shader(g_ps,"PS","ps_5_0",&psb)){ if(vsb) vsb->Release(); return false; }
     if(FAILED(dev->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &mp.vs))){ vsb->Release(); psb->Release(); return false; }
     if(FAILED(dev->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &mp.ps))){ vsb->Release(); psb->Release(); return false; }
     D3D11_INPUT_ELEMENT_DESC il[] = {
@@ -176,8 +197,23 @@ static bool create_target(ID3D11Device* dev, ModelPreview& mp, int w, int h){
     rd.MultisampleEnable = FALSE;
     if(FAILED(dev->CreateRasterizerState(&rd,&mp.rs))) return false;
 
-    D3D11_BLEND_DESC bd{}; bd.RenderTarget[0].BlendEnable=FALSE; bd.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+    // Opaque blend state
+    D3D11_BLEND_DESC bd{};
+    bd.RenderTarget[0].BlendEnable=FALSE;
+    bd.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
     if(FAILED(dev->CreateBlendState(&bd,&mp.bs))) return false;
+
+    // Alpha blend state
+    D3D11_BLEND_DESC bda{};
+    bda.RenderTarget[0].BlendEnable           = TRUE;
+    bda.RenderTarget[0].SrcBlend              = D3D11_BLEND_SRC_ALPHA;
+    bda.RenderTarget[0].DestBlend             = D3D11_BLEND_INV_SRC_ALPHA;
+    bda.RenderTarget[0].BlendOp               = D3D11_BLEND_OP_ADD;
+    bda.RenderTarget[0].SrcBlendAlpha         = D3D11_BLEND_ONE;
+    bda.RenderTarget[0].DestBlendAlpha        = D3D11_BLEND_INV_SRC_ALPHA;
+    bda.RenderTarget[0].BlendOpAlpha          = D3D11_BLEND_OP_ADD;
+    bda.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    if(FAILED(dev->CreateBlendState(&bda,&mp.bsAlpha))) return false;
 
     if(!create_white_srv(dev, &mp.default_srv)) return false;
 
@@ -366,9 +402,12 @@ static void swap_bc3_endian(uint8_t* data, size_t size) {
 
 static bool srv_from_tex_blob_auto(ID3D11Device* dev,
                                    const std::vector<unsigned char>& blob,
-                                   ID3D11ShaderResourceView** out_srv)
+                                   ID3D11ShaderResourceView** out_srv,
+                                   bool* out_has_alpha)
 {
     *out_srv=nullptr;
+    if(out_has_alpha) *out_has_alpha = false;
+
     TexInfo ti{};
     if(!parse_tex_info(blob, ti) || ti.Mips.empty()) return false;
 
@@ -383,8 +422,6 @@ static bool srv_from_tex_blob_auto(ID3D11Device* dev,
     }
 
     const auto& m = ti.Mips[best];
-    if(m.CompFlag != 7) return false;
-
     int w = m.HasWH ? (int)m.MipWidth  : std::max(1, (int)ti.TextureWidth  >> (int)best);
     int h = m.HasWH ? (int)m.MipHeight : std::max(1, (int)ti.TextureHeight >> (int)best);
     if(m.MipDataOffset + m.MipDataSizeParsed > blob.size()) return false;
@@ -396,6 +433,15 @@ static bool srv_from_tex_blob_auto(ID3D11Device* dev,
 
     std::vector<uint8_t> rgba((size_t)w*(size_t)h*4, 0xFF);
     const uint8_t* src = blob.data() + m.MipDataOffset;
+
+    auto any_alpha_lt_255 = [&](const std::vector<uint8_t>& buf)->bool{
+        const uint8_t* p = buf.data();
+        size_t n = buf.size();
+        for(size_t i=3;i<n;i+=4){
+            if(p[i] < 255){ return true; }
+        }
+        return false;
+    };
 
     if(ti.PixelFormat == 35){
         if(m.MipDataSizeParsed < sz_bc1) return false;
@@ -416,6 +462,7 @@ static bool srv_from_tex_blob_auto(ID3D11Device* dev,
                 }
             }
         }
+        if(out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
         *out_srv = create_srv_from_rgba(dev, w, h, rgba);
         return (*out_srv != nullptr);
     }
@@ -439,14 +486,18 @@ static bool srv_from_tex_blob_auto(ID3D11Device* dev,
                 }
             }
         }
+        if(out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
         *out_srv = create_srv_from_rgba(dev, w, h, rgba);
         return (*out_srv != nullptr);
     }
 
-    if(ti.PixelFormat == 40) return false;
+    if(ti.PixelFormat == 40) {
+        return false;
+    }
 
     if(m.MipDataSizeParsed < sz_raw) return false;
     memcpy(rgba.data(), src, sz_raw);
+    if(out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
     *out_srv = create_srv_from_rgba(dev, w, h, rgba);
     return (*out_srv != nullptr);
 }
@@ -458,35 +509,32 @@ static bool build_mesh_textures(ID3D11Device* dev,
                                 ID3D11ShaderResourceView** out_normal,
                                 ID3D11ShaderResourceView** out_specular,
                                 ID3D11ShaderResourceView** out_unk,
-                                ID3D11ShaderResourceView** out_tint)
+                                ID3D11ShaderResourceView** out_tint,
+                                bool* out_has_alpha)
 {
     *out_diffuse = nullptr;
     *out_normal = nullptr;
     *out_specular = nullptr;
     *out_unk = nullptr;
     *out_tint = nullptr;
+    if(out_has_alpha) *out_has_alpha = false;
 
     if (mesh_index >= info.Meshes.size()) return true;
-
     const auto& mesh = info.Meshes[mesh_index];
     if(mesh.Materials.empty()) return true;
-
     const auto& mat = mesh.Materials[0];
 
-    auto load_texture = [&](const std::string& tex_name, ID3D11ShaderResourceView** out_srv) {
+    auto load_texture = [&](const std::string& tex_name, ID3D11ShaderResourceView** out_srv, bool want_alpha){
         if(tex_name.empty()) return;
 
         std::vector<std::string> candidates;
         candidates.push_back(tex_name);
-
         std::string fname = std::filesystem::path(tex_name).filename().string();
         if(!fname.empty()) candidates.push_back(fname);
-
         if (tex_name.find(".tex") == std::string::npos) {
             candidates.push_back(tex_name + ".tex");
             if(!fname.empty()) candidates.push_back(fname + ".tex");
         }
-
         std::string basename = std::filesystem::path(tex_name).stem().string();
         if (!basename.empty()) {
             candidates.push_back(basename);
@@ -496,25 +544,31 @@ static bool build_mesh_textures(ID3D11Device* dev,
         std::vector<unsigned char> blob;
         for (const auto& candidate : candidates) {
             if (build_tex_buffer_for_name(candidate, blob)) {
-                if (srv_from_tex_blob_auto(dev, blob, out_srv)) {
+                bool hasA = false;
+                if (srv_from_tex_blob_auto(dev, blob, out_srv, &hasA)) {
+                    if(want_alpha && out_has_alpha && hasA) *out_has_alpha = true;
                     if (*out_srv) return;
                 }
             }
         }
 
         if (extract_tex_bytes_by_candidate(candidates, blob)) {
-            srv_from_tex_blob_auto(dev, blob, out_srv);
+            bool hasA = false;
+            if (srv_from_tex_blob_auto(dev, blob, out_srv, &hasA)) {
+                if(want_alpha && out_has_alpha && hasA) *out_has_alpha = true;
+            }
         }
     };
 
-    load_texture(mat.TextureName, out_diffuse);
-    load_texture(mat.NormalMapName, out_normal);
-    load_texture(mat.SpecularMapName, out_specular);
-    load_texture(mat.UnkName, out_unk);
-    load_texture(mat.TintName, out_tint);
+    load_texture(mat.TextureName,     out_diffuse, true);
+    load_texture(mat.NormalMapName,   out_normal,  false);
+    load_texture(mat.SpecularMapName, out_specular,false);
+    load_texture(mat.UnkName,         out_unk,     false);
+    load_texture(mat.TintName,        out_tint,    false);
 
     return true;
 }
+
 
 bool MP_Init(ID3D11Device* dev, ModelPreview& mp, int w, int h){
     return create_target(dev, mp, w, h);
@@ -580,16 +634,20 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         if(FAILED(dev->CreateBuffer(&ib,&isd,&m.ib))) return false;
         m.index_count = (UINT)idx.size();
 
-        build_mesh_textures(dev, info, i, &m.srv_diffuse, &m.srv_normal, &m.srv_specular, &m.srv_unk, &m.srv_tint);
+        bool hasA = false;
+        build_mesh_textures(dev, info, i, &m.srv_diffuse, &m.srv_normal, &m.srv_specular, &m.srv_unk, &m.srv_tint, &hasA);
 
         if (!m.srv_diffuse && mp.default_srv) { m.srv_diffuse = mp.default_srv; m.srv_diffuse->AddRef(); }
-        if (!m.srv_normal && mp.default_srv) { m.srv_normal = mp.default_srv; m.srv_normal->AddRef(); }
-        if (!m.srv_specular && mp.default_srv) { m.srv_specular = mp.default_srv; m.srv_specular->AddRef(); }
-        if (!m.srv_unk && mp.default_srv) { m.srv_unk = mp.default_srv; m.srv_unk->AddRef(); }
-        if (!m.srv_tint && mp.default_srv) { m.srv_tint = mp.default_srv; m.srv_tint->AddRef(); }
+        if (!m.srv_normal  && mp.default_srv) { m.srv_normal  = mp.default_srv; m.srv_normal->AddRef(); }
+        if (!m.srv_specular&& mp.default_srv) { m.srv_specular= mp.default_srv; m.srv_specular->AddRef(); }
+        if (!m.srv_unk     && mp.default_srv) { m.srv_unk     = mp.default_srv; m.srv_unk->AddRef(); }
+        if (!m.srv_tint    && mp.default_srv) { m.srv_tint    = mp.default_srv; m.srv_tint->AddRef(); }
+
+        m.has_alpha = hasA;
     }
     return true;
 }
+
 
 void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, float dist){
     ID3D11DeviceContext* ctx=nullptr; dev->GetImmediateContext(&ctx); if(!ctx) return;
@@ -597,7 +655,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, floa
     D3D11_VIEWPORT vp{}; vp.TopLeftX=0; vp.TopLeftY=0; vp.Width=(FLOAT)mp.width; vp.Height=(FLOAT)mp.height; vp.MinDepth=0; vp.MaxDepth=1;
     ctx->RSSetViewports(1,&vp);
 
-    float clear[4] = {0.10f,0.12f,0.16f,1.0f};
+    float clear[4] = {0.18f,0.22f,0.28f,1.0f};
     ctx->OMSetRenderTargets(1,&mp.rtv, mp.dsv);
     ctx->ClearRenderTargetView(mp.rtv, clear);
     ctx->ClearDepthStencilView(mp.dsv, D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL, 1.0f, 0);
@@ -607,8 +665,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, floa
     ctx->PSSetShader(mp.ps,nullptr,0);
     ctx->PSSetSamplers(0,1,&mp.sampler);
     ctx->RSSetState(mp.rs);
-    float blend[4] = {0,0,0,0};
-    ctx->OMSetBlendState(mp.bs, blend, 0xFFFFFFFF);
 
     float r = std::max(0.5f, dist) * mp.radius * 2.2f;
     float cy=cosf(yaw), sy=sinf(yaw);
@@ -636,8 +692,8 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, floa
     struct CB { XMFLOAT4X4 mvp; XMFLOAT4 lightDir; XMFLOAT4X4 mv; XMFLOAT4 params; } cb;
     XMStoreFloat4x4(&cb.mvp, MVP);
     XMStoreFloat4x4(&cb.mv,  MV);
-    cb.lightDir = XMFLOAT4(-0.4f, 0.8f, 0.6f, 0.0f);
-    cb.params   = XMFLOAT4(0.35f, 32.0f, 0.0f, 0.0f);
+    cb.lightDir = XMFLOAT4(-0.4f, 0.85f, 0.45f, 0.0f);   // a bit steeper light
+    cb.params   = XMFLOAT4(0.55f, 48.0f, 0.0f, 0.0f);    // ambientK, specPower
 
     D3D11_MAPPED_SUBRESOURCE ms{};
     if(SUCCEEDED(ctx->Map(mp.cbuffer,0,D3D11_MAP_WRITE_DISCARD,0,&ms))){
@@ -647,8 +703,13 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, floa
     ctx->VSSetConstantBuffers(0,1,&mp.cbuffer);
     ctx->PSSetConstantBuffers(0,1,&mp.cbuffer);
 
+    float blend_factor[4] = {0,0,0,0};
+
     for(const auto& m : mp.meshes){
         if(!m.vb || !m.ib || m.index_count==0) continue;
+
+        ctx->OMSetBlendState(m.has_alpha ? mp.bsAlpha : mp.bs, blend_factor, 0xFFFFFFFF);
+
         UINT stride=sizeof(MPVertex), offset=0;
         ctx->IASetVertexBuffers(0,1,&m.vb,&stride,&offset);
         ctx->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
@@ -671,3 +732,5 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, floa
 
     ctx->Release();
 }
+
+

@@ -10,7 +10,7 @@ set(APP_SOURCES
         # Main entry point
         src/main.cpp
 
-        # New modular components
+        # Modular components
         src/State.cpp
         src/Utils.cpp
         src/files.cpp
@@ -36,14 +36,12 @@ add_executable(Fable_2_Asset_Browser WIN32
         ${APP_RES}
 )
 
-# Prefer leaner Win32 headers and avoid min/max macro collisions
 target_compile_definitions(Fable_2_Asset_Browser PRIVATE
         WIN32_LEAN_AND_MEAN
         NOMINMAX
         _CRT_SECURE_NO_WARNINGS
 )
 
-# -------- Zlib (vendored if missing)
 find_package(ZLIB QUIET)
 if(NOT ZLIB_FOUND)
     include(FetchContent)
@@ -61,7 +59,6 @@ if(NOT ZLIB_FOUND)
 endif()
 target_link_libraries(Fable_2_Asset_Browser PRIVATE ZLIB::ZLIB)
 
-# -------- ImGui & helpers
 include(FetchContent)
 FetchContent_Declare(
         imgui
@@ -86,8 +83,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui_hex_editor)
 
-# -------- DirectXMath (header-only)
-# Uses official repo to ensure availability across toolchains (e.g., MinGW).
 FetchContent_Declare(
         directxmath
         GIT_REPOSITORY https://github.com/microsoft/DirectXMath.git
@@ -120,10 +115,8 @@ target_include_directories(Fable_2_Asset_Browser PRIVATE
         ${directxmath_SOURCE_DIR}/Inc
 )
 
-# D3D11 + shader compiler + DXGI + DWM
 target_link_libraries(Fable_2_Asset_Browser PRIVATE d3d11 dxgi d3dcompiler dwmapi)
 
-# MinGW static linking tweaks
 if(MINGW)
     target_link_options(Fable_2_Asset_Browser PRIVATE -static -static-libgcc -static-libstdc++)
     target_link_libraries(Fable_2_Asset_Browser PRIVATE -lwinpthread)

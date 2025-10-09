@@ -112,12 +112,14 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
     out = MDLInfo{};
     if(data.size()<8) return false;
     R r{data.data(), data.size(), 0};
+
     out.Magic.assign((const char*)r.p, 8); r.i+=8;
     uint32_t tmp32=0;
     if(!r.u32be(tmp32)) return false;
     if(!r.u32be(out.HeaderSize)) return false;
     if(!r.skip(88)) return false;
     if(!r.skip(8*4)) return false;
+
     if(!r.u32be(out.BoneCount)) return false;
     out.Bones.clear(); out.Bones.reserve(out.BoneCount);
     for(uint32_t i=0;i<out.BoneCount;i++){
@@ -126,6 +128,7 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
         MDLBoneInfo b; b.Name=nm; b.ParentID=(pid==0xFFFFFFFFu)?-1:(int)pid;
         out.Bones.push_back(std::move(b));
     }
+
     if(!r.u32be(out.BoneTransformCount)) return false;
     if(out.BoneTransformCount==out.BoneCount && out.BoneCount>0){
         for(uint32_t i=0;i<out.BoneTransformCount;i++){ float v; for(int k=0;k<11;k++) if(!r.f32be(v)) return false; }
@@ -135,15 +138,19 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
         if(!r.skip((size_t)m*44)) return false;
         out.HasBoneTransforms=false;
     }
+
     for(int k=0;k<10;k++){ float f; if(!r.f32be(f)) return false; }
+
     if(!r.u32be(out.MeshCount)) return false;
     if(!r.skip(2*4)) return false;
     if(!r.skip(13)) return false;
     if(!r.skip(5*4)) return false;
+
     if(!r.u32be(out.Unk6Count)) return false;
     if(out.Unk6Count>0 && out.Unk6Count<65535u){
         for(uint32_t i=0;i<out.Unk6Count;i++){ float f; if(!r.f32be(f)) return false; }
     }
+
     if(!r.u32be(tmp32)) return false;
 
     out.Meshes.clear(); out.Meshes.reserve(out.MeshCount);
@@ -179,8 +186,44 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
     }
 
     for(uint32_t mi=0; mi<out.MeshCount; ++mi){
-        uint32_t u8a=0,u8b=0; if(!r.u32be(u8a)) return false; if(!r.u32be(u8b)) return false;
-        uint32_t someCount1=0; if(!r.u32be(someCount1)) return false;
+        bool found = false;
+        size_t searchStart = r.i;
+        size_t searchLimit = r.n;
+
+        for(size_t searchPos = searchStart; searchPos + 28 <= searchLimit; ++searchPos){
+            uint32_t bufferID = (uint32_t(r.p[searchPos])<<24) | (uint32_t(r.p[searchPos+1])<<16) |
+                               (uint32_t(r.p[searchPos+2])<<8) | r.p[searchPos+3];
+
+            if(bufferID != mi) continue;
+
+            uint32_t someCount = (uint32_t(r.p[searchPos+8])<<24) | (uint32_t(r.p[searchPos+9])<<16) |
+                                 (uint32_t(r.p[searchPos+10])<<8) | r.p[searchPos+11];
+            uint32_t tlen = (uint32_t(r.p[searchPos+12])<<24) | (uint32_t(r.p[searchPos+13])<<16) |
+                           (uint32_t(r.p[searchPos+14])<<8) | r.p[searchPos+15];
+            uint32_t vtx = (uint32_t(r.p[searchPos+16])<<24) | (uint32_t(r.p[searchPos+17])<<16) |
+                          (uint32_t(r.p[searchPos+18])<<8) | r.p[searchPos+19];
+            uint32_t sub = (uint32_t(r.p[searchPos+20])<<24) | (uint32_t(r.p[searchPos+21])<<16) |
+                          (uint32_t(r.p[searchPos+22])<<8) | r.p[searchPos+23];
+
+            if(someCount >= 65535u || tlen >= 65535u || vtx >= 65535u || sub >= 256u) continue;
+
+            if(sub > 0){
+                uint32_t marker = (uint32_t(r.p[searchPos+24])<<24) | (uint32_t(r.p[searchPos+25])<<16) |
+                                 (uint32_t(r.p[searchPos+26])<<8) | r.p[searchPos+27];
+                if(marker != 0xFFFFFFFF) continue;
+            }
+
+            r.i = searchPos;
+            found = true;
+            break;
+        }
+
+        if(!found) return false;
+
+        uint32_t bufferID=0, bufferID_copy=0, someCount1=0;
+        if(!r.u32be(bufferID)) return false;
+        if(!r.u32be(bufferID_copy)) return false;
+        if(!r.u32be(someCount1)) return false;
         uint32_t tlen=0; if(!r.u32be(tlen)) return false;
         uint32_t vtx=0; if(!r.u32be(vtx)) return false;
         uint32_t sub=0; if(!r.u32be(sub)) return false;
@@ -199,15 +242,19 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
 
         size_t vert_off=0, face_off=0;
         if(vtx>0 && vtx<65535u){
-            vert_off=r.i; size_t vsz=(size_t)vtx*28; if(!r.skip(vsz)) return false;
+            vert_off=r.i;
+            size_t vsz=(size_t)vtx*28;
+            if(!r.skip(vsz)) return false;
         }
         if(tlen>0 && tlen<65535u){
-            face_off=r.i; size_t fsz=(size_t)tlen*2; if(!r.skip(fsz)) return false;
+            face_off=r.i;
+            size_t fsz=(size_t)tlen*2;
+            if(!r.skip(fsz)) return false;
         }
         if(vtx>0 && vtx<65535u){
-            size_t usz=(size_t)vtx*(4*4); if(!r.skip(usz)) return false;
+            size_t usz=(size_t)vtx*16;
+            if(!r.skip(usz)) return false;
         }
-        if(!r.skip(9)) return false;
 
         MDLMeshBufferInfo mb;
         mb.VertexCount=vtx;

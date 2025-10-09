@@ -1,0 +1,172 @@
+//------------------------------------------------
+//--- 010 Editor v2.0 Binary Template
+//
+//      File: MDL.bt
+//   Authors: Converted from Hex Workshop format
+//   Version: 1.3
+//   Purpose: Parse MDL model files
+//  Category: Game
+// File Mask: *.mdl
+//  ID Bytes: 
+//   History: 
+//------------------------------------------------
+BigEndian();
+
+// Structure definitions
+typedef struct {
+    string BoneName;
+    DWORD ParentID;
+} BoneEntry <optimize=false>;
+
+typedef struct {
+    // Rotation (Quaternion)
+    float QuatX;
+    float QuatY;
+    float QuatZ;
+    float QuatW;
+    
+    // Position/Translation
+    float PosX;
+    float PosY;
+    float PosZ;
+    
+    // Scale
+    float ScaleX;
+    float ScaleY;
+    float ScaleZ;
+    
+    // Unknown/Padding
+    float Padding;
+} BoneTransform <optimize=false>;
+
+typedef struct {
+    string TextureName;
+    string SpecularMapName;
+    string NormalMapName;
+    string UnkName;
+    string TintName;
+    DWORD Unk1;
+    DWORD Unk2[2];
+    
+    // Check the byte after Unk2[2]
+    local int64 checkPos = FTell();
+    BYTE checkByte;
+    
+    if (checkByte != 0x01) {
+        // If not 01, move back so the byte is read as part of next argument
+        FSeek(checkPos);
+    }
+} Material <optimize=false>;
+
+typedef struct {
+    WORD PosX;        // 0-1: Half float
+    WORD PosY;        // 2-3: Half float
+    WORD PosZ;        // 4-5: Half float
+    WORD PosW;        // 6-7: Half float
+    DWORD Normal;     // 8-11: Packed normal
+    BYTE BoneID1;     // 12
+    BYTE BoneID2;     // 13
+    BYTE BoneID3;     // 14
+    BYTE BoneID4;     // 15
+    BYTE Weight1;     // 16
+    BYTE Weight2;     // 17
+    BYTE Weight3;     // 18
+    BYTE Weight4;     // 19
+    WORD UV_U;        // 20-21: Half float
+    WORD UV_V;        // 22-23: Half float
+    DWORD Color;      // 24-27
+} Vertex <optimize=false>;
+
+typedef struct {
+    float Unks[4];
+} Unk16 <optimize=false>;
+
+typedef struct {
+    DWORD Unk1;
+    char Unk2;
+    DWORD Unk3[3];
+    float Unk4[6];
+} SubMeshDesc <optimize=false>;
+
+typedef struct {
+    DWORD Unk1;
+    string MeshName;
+    float Unk2[2];
+    char Unk3[21];
+    float Unk4;
+    DWORD Unk5[3];
+    DWORD MaterialCount;
+    if (MaterialCount > 0 && MaterialCount < 65535) {
+        Material Materials[MaterialCount] <optimize=false>;
+    }
+} Mesh <optimize=false>;
+
+typedef struct {
+    DWORD Unk8[2];
+    DWORD SomeCount1;
+    DWORD TriangleStripLength;
+    DWORD VertexCount;
+    DWORD SubMeshCount;
+    
+    if (SubMeshCount > 0 && SubMeshCount < 65535) {
+        SubMeshDesc SubMeshes[SubMeshCount] <optimize=false>;
+    }
+    
+    if (VertexCount > 0 && VertexCount < 65535) {
+        Vertex Vertices[VertexCount] <optimize=false>;
+    }
+    
+    if (TriangleStripLength > 0 && TriangleStripLength < 65535) {
+        WORD Faces[TriangleStripLength] <optimize=false>;
+    }
+    
+    if (VertexCount > 0 && VertexCount < 65535) {
+        Unk16 Unk16Array[VertexCount] <optimize=false>;
+    }
+
+    //
+    // --- THIS IS THE CORRECT FIX ---
+    // Only read if there are AT LEAST 9 bytes left in the file
+    //
+    if (FileSize() - FTell() >= 9) {
+        BYTE UnkCount[9];
+    }
+} MeshBuffer <optimize=false>;
+
+// Main file structure
+struct {
+    char MagicNumber[8];
+    DWORD Unk;
+    DWORD HeaderSize;
+    ubyte Headerst[88];
+    DWORD Unk1[8];
+    DWORD BoneCount;
+    
+    if (BoneCount > 0 && BoneCount < 65535) {
+        BoneEntry Bones[BoneCount] <optimize=false>;
+    }
+    
+    DWORD BoneTransformCount;
+    
+    if (BoneTransformCount > 0 && BoneTransformCount < 65535) {
+        BoneTransform BoneTransforms[BoneTransformCount] <optimize=false>;
+    }
+    
+    float Unk2[10];
+    DWORD MeshCount;
+    DWORD Unk3[2];
+    char Unk4[13];
+    DWORD Unk5[5];
+    DWORD Unk6Count;
+    
+    if (Unk6Count > 0 && Unk6Count < 65535) {
+        float Unk6s[Unk6Count] <optimize=false>;
+    }
+    
+    DWORD Unk7;
+    
+    if (MeshCount > 0 && MeshCount < 65535) {
+        Mesh Meshes[MeshCount] <optimize=false>;
+        MeshBuffer MeshBuffers[MeshCount] <optimize=false>;
+    }
+} MDL_File;

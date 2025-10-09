@@ -337,9 +337,29 @@ void draw_hex_window(ID3D11Device *device) {
                 if(m.MipDataOffset < S.hex_data.size() && m.MipDataOffset + m.MipDataSizeParsed <= S.hex_data.size()){
                     const uint8_t* src = S.hex_data.data() + m.MipDataOffset;
                     size_t src_sz = m.MipDataSizeParsed;
+
                     DXGI_FORMAT fmt = DXGI_FORMAT_BC1_UNORM;
+                    if(S.tex_info.PixelFormat == 39) fmt = DXGI_FORMAT_BC3_UNORM;
+                    else if(S.tex_info.PixelFormat == 40) fmt = DXGI_FORMAT_BC5_UNORM;
+
                     size_t blocks_x = (w + 3) / 4;
                     std::vector<uint8_t> payload(src, src + src_sz);
+
+                    for(size_t i = 0; i + 8 <= payload.size(); i += 8) {
+                        uint16_t c0 = (payload[i+0] << 8) | payload[i+1];
+                        uint16_t c1 = (payload[i+2] << 8) | payload[i+3];
+                        uint32_t idx = (payload[i+4] << 24) | (payload[i+5] << 16) | (payload[i+6] << 8) | payload[i+7];
+
+                        payload[i+0] = c0 & 0xFF;
+                        payload[i+1] = (c0 >> 8) & 0xFF;
+                        payload[i+2] = c1 & 0xFF;
+                        payload[i+3] = (c1 >> 8) & 0xFF;
+                        payload[i+4] = idx & 0xFF;
+                        payload[i+5] = (idx >> 8) & 0xFF;
+                        payload[i+6] = (idx >> 16) & 0xFF;
+                        payload[i+7] = (idx >> 24) & 0xFF;
+                    }
+
                     D3D11_TEXTURE2D_DESC td{};
                     td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1; td.Format = fmt;
                     td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;

@@ -11,15 +11,17 @@ Browse and export a variety of Fable 2 files. Included features:
 
 Preview .mdl files in the browser. (Select a .mdl, go in to the hex view, then click preview).
 
-![img_2.png](images/img_2.png)
-![img_3.png](images/img_3.png)
-![img_4.png](images/img_4.png)
+![img.png](images/img_5.png)
+
+![img_1.png](images/img_4.png)
 
 _Hello cutie._
 
+![img_2.png](images/img_3.png)
+
 And now provides details on .mdl files:
 
-![img.png](images/img5.png)
+![img.png](images/img_2.png)
 ![img_1.png](images/img_6.png)
 
 Hex editor will provide useful information without needing to export or use external applications.

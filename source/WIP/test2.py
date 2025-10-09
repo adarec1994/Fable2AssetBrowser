@@ -11,51 +11,6 @@ import lzo
 from typing import Optional, List
 from dataclasses import dataclass
 
-# ============= LZO Decompressor (from LZO.cpp logic) =============
-
-def decompress_lzo_chunk(data: bytes) -> Optional[bytes]:
-    """
-    Decompresses a chunk of data using LZO1X, based on the Fable LZO.cpp logic.
-    The chunk has a small header indicating the size of the compressed data.
-    """
-    if len(data) < 2:
-        return None
-
-    try:
-        # Read the 2-byte little-endian header for compressed size
-        compressed_size = struct.unpack('<H', data[0:2])[0]
-
-        if compressed_size == 0xffff:
-            # If the header is 0xffff, the actual size is in a following 4-byte integer
-            if len(data) < 6:
-                return None
-            compressed_size = struct.unpack('<I', data[2:6])[0]
-            header_size = 6
-        else:
-            header_size = 2
-            
-        # Ensure the data slice is valid
-        if header_size + compressed_size > len(data):
-            print(f"  Error: LZO chunk is truncated. Header wants {compressed_size} bytes, but only {len(data) - header_size} are available.")
-            return None
-
-        # Extract the compressed data stream
-        compressed_data = data[header_size : header_size + compressed_size]
-        
-        # Decompress using the python-lzo library
-        decompressed_data = lzo.decompress(compressed_data)
-        
-        # Any data after the compressed block is considered raw, trailing data
-        trailing_data = data[header_size + compressed_size:]
-        
-        # Return the decompressed data followed by the trailing data
-        return decompressed_data + trailing_data
-
-    except Exception as e:
-        print(f"  LZO decompression failed: {e}")
-        return None
-
-
 # ============= Texture Parser =============
 
 @dataclass
@@ -89,7 +44,7 @@ class TextureParser:
     def parse(self):
         self.sign = self.read_u32()
         self.raw_data_size = self.read_u32()
-        self.pos += 8  # Skip unknown fields
+        self.pos += 8
         self.texture_width = self.read_u32()
         self.texture_height = self.read_u32()
         self.pixel_format = self.read_u32()
@@ -111,16 +66,11 @@ class TextureParser:
             self.pos = offset + 48
             
             if comp_flag == 7:
-                # Uncompressed
                 mipmap_data = self.data[self.pos:self.pos+data_size]
                 mip_width = mip_height = None
             else:
-                # Compressed
-                mip_width = self.read_u16()
-                mip_height = self.read_u16()
-                self.pos += 440  # Skip unknown data
-                remaining = data_size - 448
-                mipmap_data = self.data[self.pos:self.pos+remaining]
+                mipmap_data = self.data[self.pos : self.pos + data_size]
+                mip_width = mip_height = None
             
             self.mipmaps.append(MipMap(
                 comp_flag, data_offset, data_size,
@@ -131,7 +81,6 @@ class TextureParser:
 # ============= DDS Conversion =============
 
 def convert_xbox_bc1_to_pc(data: bytes) -> bytes:
-    """Convert Xbox 360 BC1 (big-endian) to PC BC1 (little-endian)."""
     result = bytearray()
     for i in range(0, len(data), 8):
         if i + 8 <= len(data):
@@ -141,7 +90,6 @@ def convert_xbox_bc1_to_pc(data: bytes) -> bytes:
     return bytes(result)
 
 def create_dds_header(width: int, height: int) -> bytes:
-    """Create a DDS header for BC1/DXT1 texture."""
     header = bytearray(128)
     struct.pack_into('<4sI', header, 0, b'DDS ', 124)
     flags = 0x1 | 0x2 | 0x4 | 0x1000
@@ -187,11 +135,19 @@ def main():
         
         print(f"\nMipmap {i}: {width}x{height}")
         
-        # The parser logic identifies uncompressed mips with comp_flag == 7.
-        # We'll use that as the definitive check instead of is_compressed.
         if mipmap.comp_flag != 7:
             print("  Mipmap appears compressed. Decompressing LZO...")
-            decompressed = decompress_lzo_chunk(mipmap.mipmap_data)
+            try:
+                # FINAL CORRECTION: The LZO error indicates the stream doesn't
+                # start at byte 0. We assume a 4-byte header and skip it.
+                header_to_skip = 4
+                lzo_stream = mipmap.mipmap_data[header_to_skip:]
+                
+                decompressed = lzo.decompress(lzo_stream)
+
+            except Exception as e:
+                print(f"  LZO decompression failed: {e}")
+                decompressed = None
         else:
             print("  Mipmap is not compressed.")
             decompressed = mipmap.mipmap_data

@@ -13,8 +13,10 @@ struct MPVertex {
 struct MPPerMesh {
     ID3D11Buffer* vb = nullptr;
     ID3D11Buffer* ib = nullptr;
+    ID3D11ShaderResourceView* srv_diffuse = nullptr;
+    ID3D11ShaderResourceView* srv_normal = nullptr;
+    ID3D11ShaderResourceView* srv_specular = nullptr;
     UINT index_count = 0;
-    ID3D11ShaderResourceView* srv = nullptr;
     bool has_alpha = false;
     float center[3] = {0,0,0};
     float radius = 0.0f;

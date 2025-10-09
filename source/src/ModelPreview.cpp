@@ -21,9 +21,12 @@ using namespace DirectX;
 static void mp_release_mesh(MPPerMesh& m){
     if(m.vb){ m.vb->Release(); m.vb=nullptr; }
     if(m.ib){ m.ib->Release(); m.ib=nullptr; }
-    if(m.srv){ m.srv->Release(); m.srv=nullptr; }
+    if(m.srv_diffuse){ m.srv_diffuse->Release(); m.srv_diffuse=nullptr; }
+    if(m.srv_normal){ m.srv_normal->Release(); m.srv_normal=nullptr; }
+    if(m.srv_specular){ m.srv_specular->Release(); m.srv_specular=nullptr; }
     m.index_count = 0;
 }
+
 static void mp_release(ModelPreview& mp){
     for(auto& m: mp.meshes) mp_release_mesh(m);
     mp.meshes.clear();
@@ -77,18 +80,29 @@ cbuffer CB : register(b0){
     float4x4 mvp;
     float4   lightDir;
     float4x4 mv;
-    float4   params; // x=ambient
+    float4   params;
 }
 Texture2D tex0 : register(t0);
+Texture2D tex1 : register(t1);
+Texture2D tex2 : register(t2);
 SamplerState smp : register(s0);
 struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
 float4 PS(VSOUT i) : SV_Target {
     float3 n = normalize(i.n);
     float3 l = normalize(lightDir.xyz);
-    float ndotl = max(0, dot(n,l));
+
+    float3 normal_map = tex1.Sample(smp, i.t).rgb;
+    normal_map = normal_map * 2.0 - 1.0;
+    normal_map = normalize(normal_map);
+
+    float ndotl = max(0.0, dot(n, l));
+    float ambient = 0.6;
+    float diffuse = 0.4;
+
     float3 albedo = tex0.Sample(smp, i.t).rgb;
-    float ambient = params.x;
-    float3 color = albedo * (ambient + (1.0 - ambient) * ndotl);
+    float3 specular = tex2.Sample(smp, i.t).rgb;
+
+    float3 color = albedo * (ambient + diffuse * ndotl) + specular * pow(max(0.0, ndotl), 32.0) * 0.3;
     return float4(color, 1.0);
 }
 )";
@@ -198,10 +212,20 @@ static bool extract_tex_bytes_by_candidate(const std::vector<std::string>& candi
     std::vector<std::string> wanted;
     for(const auto& c : candidates){
         if(c.empty()) continue;
-        wanted.push_back(tolower_copy(std::filesystem::path(c).filename().string()));
-        wanted.push_back(tolower_copy(std::filesystem::path(force_tex_ext(c)).filename().string()));
+
+        wanted.push_back(tolower_copy(c));
+
+        std::string fname = std::filesystem::path(c).filename().string();
+        wanted.push_back(tolower_copy(fname));
+
+        wanted.push_back(tolower_copy(force_tex_ext(c)));
+        wanted.push_back(tolower_copy(force_tex_ext(fname)));
+
         wanted.push_back(basename_lower_noext(c));
     }
+
+    std::sort(wanted.begin(), wanted.end());
+    wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
 
     int best_idx = -1;
     size_t best_area = 0;
@@ -214,7 +238,10 @@ static bool extract_tex_bytes_by_candidate(const std::vector<std::string>& candi
 
         bool match = false;
         for(const auto& w : wanted){
-            if(fn_low == w || fn_base_noext == w){ match = true; break; }
+            if(fn_low == w || fn_base_noext == w){
+                match = true;
+                break;
+            }
         }
         if(!match) continue;
 
@@ -231,6 +258,16 @@ static bool extract_tex_bytes_by_candidate(const std::vector<std::string>& candi
 
         TexInfo ti{};
         if(!parse_tex_info(blob, ti)) continue;
+
+        bool has_uncompressed = false;
+        for(const auto& mip : ti.Mips){
+            if(mip.CompFlag == 7){
+                has_uncompressed = true;
+                break;
+            }
+        }
+        if(!has_uncompressed) continue;
+
         size_t area = (size_t)ti.TextureWidth * (size_t)ti.TextureHeight;
         if(area > best_area){
             best_area = area; best_idx = (int)i; out.swap(blob);
@@ -248,13 +285,13 @@ static void decode_bc1_block(const uint8_t* b, uint32_t* outRGBA) {
     uint8_t r0=ex5((c0>>11)&31), g0=ex6((c0>>5)&63),  b0=ex5(c0&31);
     uint8_t r1=ex5((c1>>11)&31), g1=ex6((c1>>5)&63),  b1=ex5(c1&31);
     uint32_t cols[4];
-    cols[0] = (0xFFu<<24) | (b0<<16) | (g0<<8) | r0;
-    cols[1] = (0xFFu<<24) | (b1<<16) | (g1<<8) | r1;
+    cols[0] = (0xFFu<<24) | (r0<<16) | (g0<<8) | b0;
+    cols[1] = (0xFFu<<24) | (r1<<16) | (g1<<8) | b1;
     if(c0 > c1){
-        cols[2] = (0xFFu<<24) | (((2*b0+b1)/3)<<16) | (((2*g0+g1)/3)<<8) | ((2*r0+r1)/3);
-        cols[3] = (0xFFu<<24) | (((b0+2*b1)/3)<<16) | (((g0+2*g1)/3)<<8) | ((r0+2*r1)/3);
+        cols[2] = (0xFFu<<24) | (((2*r0+r1)/3)<<16) | (((2*g0+g1)/3)<<8) | ((2*b0+b1)/3);
+        cols[3] = (0xFFu<<24) | (((r0+2*r1)/3)<<16) | (((g0+2*g1)/3)<<8) | ((b0+2*b1)/3);
     }else{
-        cols[2] = (0xFFu<<24) | (((b0+b1)>>1)<<16) | (((g0+g1)>>1)<<8) | ((r0+r1)>>1);
+        cols[2] = (0xFFu<<24) | (((r0+r1)>>1)<<16) | (((g0+g1)>>1)<<8) | ((b0+b1)>>1);
         cols[3] = 0x00000000u;
     }
     const uint32_t idx = b[4] | (b[5]<<8) | (b[6]<<16) | (b[7]<<24);
@@ -283,49 +320,86 @@ static void decode_bc3_block(const uint8_t* b, uint32_t* outRGBA){
     for(int i=0;i<16;++i) outRGBA[i]=color[i];
 }
 
+static void swap_bc1_endian(uint8_t* data, size_t size) {
+    for(size_t i = 0; i + 8 <= size; i += 8) {
+        uint16_t c0 = (data[i+0] << 8) | data[i+1];
+        uint16_t c1 = (data[i+2] << 8) | data[i+3];
+        uint32_t idx = (data[i+4] << 24) | (data[i+5] << 16) | (data[i+6] << 8) | data[i+7];
+
+        data[i+0] = c0 & 0xFF;
+        data[i+1] = (c0 >> 8) & 0xFF;
+        data[i+2] = c1 & 0xFF;
+        data[i+3] = (c1 >> 8) & 0xFF;
+        data[i+4] = idx & 0xFF;
+        data[i+5] = (idx >> 8) & 0xFF;
+        data[i+6] = (idx >> 16) & 0xFF;
+        data[i+7] = (idx >> 24) & 0xFF;
+    }
+}
+
+static void swap_bc3_endian(uint8_t* data, size_t size) {
+    for(size_t i = 0; i + 16 <= size; i += 16) {
+        uint64_t alpha_bits = 0;
+        for(int j = 0; j < 6; j++) {
+            alpha_bits |= ((uint64_t)data[i+2+j]) << (j*8);
+        }
+
+        uint64_t alpha_swapped = 0;
+        for(int j = 0; j < 6; j++) {
+            alpha_swapped |= ((alpha_bits >> (j*8)) & 0xFF) << ((5-j)*8);
+        }
+
+        for(int j = 0; j < 6; j++) {
+            data[i+2+j] = (alpha_swapped >> (j*8)) & 0xFF;
+        }
+
+        swap_bc1_endian(data + i + 8, 8);
+    }
+}
+
 static bool srv_from_tex_blob_auto(ID3D11Device* dev,
                                    const std::vector<unsigned char>& blob,
                                    ID3D11ShaderResourceView** out_srv)
 {
     *out_srv=nullptr;
     TexInfo ti{};
-    if(!parse_tex_info(blob, ti) || ti.Mips.empty()) return true;
+    if(!parse_tex_info(blob, ti) || ti.Mips.empty()) return false;
 
     size_t best = 0;
     for(size_t i=1;i<ti.Mips.size();++i){
+        if(ti.Mips[i].CompFlag != 7) continue;
         int w = ti.Mips[i].HasWH ? (int)ti.Mips[i].MipWidth  : std::max(1, (int)ti.TextureWidth  >> (int)i);
         int h = ti.Mips[i].HasWH ? (int)ti.Mips[i].MipHeight : std::max(1, (int)ti.TextureHeight >> (int)i);
         int bw = ti.Mips[best].HasWH ? (int)ti.Mips[best].MipWidth  : std::max(1, (int)ti.TextureWidth  >> (int)best);
         int bh = ti.Mips[best].HasWH ? (int)ti.Mips[best].MipHeight : std::max(1, (int)ti.TextureHeight >> (int)best);
-        if(w*h > bw*bh) best = i;
+        if(ti.Mips[best].CompFlag != 7 || w*h > bw*bh) best = i;
     }
 
     const auto& m = ti.Mips[best];
+    if(m.CompFlag != 7) return false;
+
     int w = m.HasWH ? (int)m.MipWidth  : std::max(1, (int)ti.TextureWidth  >> (int)best);
     int h = m.HasWH ? (int)m.MipHeight : std::max(1, (int)ti.TextureHeight >> (int)best);
-    if(m.MipDataOffset + m.MipDataSizeParsed > blob.size()) return true;
-
-    if(m.CompFlag != 7){
-        size_t need = (size_t)w*(size_t)h*4;
-        if(m.MipDataSizeParsed < need) return true;
-        std::vector<uint8_t> rgba(need);
-        memcpy(rgba.data(), blob.data()+m.MipDataOffset, need);
-        *out_srv = create_srv_from_rgba(dev, w, h, rgba);
-        return true;
-    }
+    if(m.MipDataOffset + m.MipDataSizeParsed > blob.size()) return false;
 
     size_t bx = (size_t)((w+3)/4), by = (size_t)((h+3)/4);
-    size_t sz_bc1 = bx*by*8, sz_bc3 = bx*by*16;
+    size_t sz_bc1 = bx*by*8;
+    size_t sz_bc3 = bx*by*16;
+    size_t sz_raw = (size_t)w*(size_t)h*4;
 
     std::vector<uint8_t> rgba((size_t)w*(size_t)h*4, 0xFF);
     const uint8_t* src = blob.data() + m.MipDataOffset;
 
-    if(m.MipDataSizeParsed == sz_bc1){
+    if(ti.PixelFormat == 35){
+        if(m.MipDataSizeParsed < sz_bc1) return false;
+        std::vector<uint8_t> swapped(src, src + sz_bc1);
+        swap_bc1_endian(swapped.data(), swapped.size());
+
         size_t off=0;
         for(size_t byy=0; byy<by; ++byy){
             for(size_t bxx=0; bxx<bx; ++bxx){
                 uint32_t block[16];
-                decode_bc1_block(src+off, block); off += 8;
+                decode_bc1_block(swapped.data()+off, block); off += 8;
                 for(int py=0; py<4; ++py){
                     int yy = (int)byy*4 + py; if(yy>=h) break;
                     for(int px=0; px<4; ++px){
@@ -336,15 +410,19 @@ static bool srv_from_tex_blob_auto(ID3D11Device* dev,
             }
         }
         *out_srv = create_srv_from_rgba(dev, w, h, rgba);
-        return true;
+        return (*out_srv != nullptr);
     }
 
-    if(m.MipDataSizeParsed == sz_bc3){
+    if(ti.PixelFormat == 39){
+        if(m.MipDataSizeParsed < sz_bc3) return false;
+        std::vector<uint8_t> swapped(src, src + sz_bc3);
+        swap_bc3_endian(swapped.data(), swapped.size());
+
         size_t off=0;
         for(size_t byy=0; byy<by; ++byy){
             for(size_t bxx=0; bxx<bx; ++bxx){
                 uint32_t block[16];
-                decode_bc3_block(src+off, block); off += 16;
+                decode_bc3_block(swapped.data()+off, block); off += 16;
                 for(int py=0; py<4; ++py){
                     int yy = (int)byy*4 + py; if(yy>=h) break;
                     for(int px=0; px<4; ++px){
@@ -355,36 +433,74 @@ static bool srv_from_tex_blob_auto(ID3D11Device* dev,
             }
         }
         *out_srv = create_srv_from_rgba(dev, w, h, rgba);
-        return true;
+        return (*out_srv != nullptr);
     }
 
-    return true;
+    if(ti.PixelFormat == 40) return false;
+
+    if(m.MipDataSizeParsed < sz_raw) return false;
+    memcpy(rgba.data(), src, sz_raw);
+    *out_srv = create_srv_from_rgba(dev, w, h, rgba);
+    return (*out_srv != nullptr);
 }
 
-static bool build_mesh_diffuse_srv(ID3D11Device* dev,
-                                   const MDLInfo& info,
-                                   size_t mesh_index,
-                                   ID3D11ShaderResourceView** out_srv)
+static bool build_mesh_textures(ID3D11Device* dev,
+                                const MDLInfo& info,
+                                size_t mesh_index,
+                                ID3D11ShaderResourceView** out_diffuse,
+                                ID3D11ShaderResourceView** out_normal,
+                                ID3D11ShaderResourceView** out_specular)
 {
-    *out_srv = nullptr;
+    *out_diffuse = nullptr;
+    *out_normal = nullptr;
+    *out_specular = nullptr;
+
     if (mesh_index >= info.Meshes.size()) return true;
 
-    std::string wanted;
     const auto& mesh = info.Meshes[mesh_index];
-    for (const auto& mat : mesh.Materials){
-        if (!mat.TextureName.empty()){
-            wanted = std::filesystem::path(mat.TextureName).filename().string();
-            break;
-        }
-    }
-    if (wanted.empty()) return true;
+    if(mesh.Materials.empty()) return true;
 
-    std::vector<unsigned char> blob;
-    if (!build_tex_buffer_for_name(wanted, blob)){
-        std::vector<std::string> cands{wanted};
-        if (!extract_tex_bytes_by_candidate(cands, blob)) return true;
-    }
-    return srv_from_tex_blob_auto(dev, blob, out_srv);
+    const auto& mat = mesh.Materials[0];
+
+    auto load_texture = [&](const std::string& tex_name, ID3D11ShaderResourceView** out_srv) {
+        if(tex_name.empty()) return;
+
+        std::vector<std::string> candidates;
+        candidates.push_back(tex_name);
+
+        std::string fname = std::filesystem::path(tex_name).filename().string();
+        if(!fname.empty()) candidates.push_back(fname);
+
+        if (tex_name.find(".tex") == std::string::npos) {
+            candidates.push_back(tex_name + ".tex");
+            if(!fname.empty()) candidates.push_back(fname + ".tex");
+        }
+
+        std::string basename = std::filesystem::path(tex_name).stem().string();
+        if (!basename.empty()) {
+            candidates.push_back(basename);
+            candidates.push_back(basename + ".tex");
+        }
+
+        std::vector<unsigned char> blob;
+        for (const auto& candidate : candidates) {
+            if (build_tex_buffer_for_name(candidate, blob)) {
+                if (srv_from_tex_blob_auto(dev, blob, out_srv)) {
+                    if (*out_srv) return;
+                }
+            }
+        }
+
+        if (extract_tex_bytes_by_candidate(candidates, blob)) {
+            srv_from_tex_blob_auto(dev, blob, out_srv);
+        }
+    };
+
+    load_texture(mat.TextureName, out_diffuse);
+    load_texture(mat.NormalMapName, out_normal);
+    load_texture(mat.SpecularMapName, out_specular);
+
+    return true;
 }
 
 bool MP_Init(ID3D11Device* dev, ModelPreview& mp, int w, int h){
@@ -396,7 +512,13 @@ void MP_Release(ModelPreview& mp){
 }
 
 bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp){
-    for(auto& m : mp.meshes){ if(m.vb){m.vb->Release();} if(m.ib){m.ib->Release();} if(m.srv){m.srv->Release();} }
+    for(auto& m : mp.meshes){
+        if(m.vb){m.vb->Release();}
+        if(m.ib){m.ib->Release();}
+        if(m.srv_diffuse){m.srv_diffuse->Release();}
+        if(m.srv_normal){m.srv_normal->Release();}
+        if(m.srv_specular){m.srv_specular->Release();}
+    }
     mp.meshes.clear();
 
     float minx=1e9f,miny=1e9f,minz=1e9f,maxx=-1e9f,maxy=-1e9f,maxz=-1e9f;
@@ -443,8 +565,20 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         if(FAILED(dev->CreateBuffer(&ib,&isd,&m.ib))) return false;
         m.index_count = (UINT)idx.size();
 
-        build_mesh_diffuse_srv(dev, info, i, &m.srv);
-        if (!m.srv) m.srv = mp.default_srv;
+        build_mesh_textures(dev, info, i, &m.srv_diffuse, &m.srv_normal, &m.srv_specular);
+
+        if (!m.srv_diffuse && mp.default_srv) {
+            m.srv_diffuse = mp.default_srv;
+            m.srv_diffuse->AddRef();
+        }
+        if (!m.srv_normal && mp.default_srv) {
+            m.srv_normal = mp.default_srv;
+            m.srv_normal->AddRef();
+        }
+        if (!m.srv_specular && mp.default_srv) {
+            m.srv_specular = mp.default_srv;
+            m.srv_specular->AddRef();
+        }
     }
     return true;
 }
@@ -511,11 +645,18 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, floa
         ctx->IASetVertexBuffers(0,1,&m.vb,&stride,&offset);
         ctx->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ID3D11ShaderResourceView* srv = m.srv ? m.srv : mp.default_srv;
-        ctx->PSSetShaderResources(0,1,&srv);
+
+        ID3D11ShaderResourceView* srvs[3] = {
+            m.srv_diffuse ? m.srv_diffuse : mp.default_srv,
+            m.srv_normal ? m.srv_normal : mp.default_srv,
+            m.srv_specular ? m.srv_specular : mp.default_srv
+        };
+        ctx->PSSetShaderResources(0, 3, srvs);
+
         ctx->DrawIndexed(m.index_count,0,0);
-        ID3D11ShaderResourceView* nullsrv=nullptr;
-        ctx->PSSetShaderResources(0,1,&nullsrv);
+
+        ID3D11ShaderResourceView* nullsrvs[3] = {nullptr, nullptr, nullptr};
+        ctx->PSSetShaderResources(0, 3, nullsrvs);
     }
 
     ctx->Release();

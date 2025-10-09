@@ -248,10 +248,9 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
             g.positions[v*3+1]=half_to_float(hy);
             g.positions[v*3+2]=half_to_float(hz);
 
-            int8_t nx=(int8_t)p[8], ny=(int8_t)p[9], nz=(int8_t)p[10];
-            float fnx=(float)nx/127.0f, fny=(float)ny/127.0f, fnz=(float)nz/127.0f;
-            float nl=std::sqrt(fnx*fnx+fny*fny+fnz*fnz); if(nl>1e-6f){ fnx/=nl; fny/=nl; fnz/=nl; }
-            g.normals[v*3+0]=fnx; g.normals[v*3+1]=fny; g.normals[v*3+2]=fnz;
+            g.normals[v*3+0]=0.0f;
+            g.normals[v*3+1]=1.0f;
+            g.normals[v*3+2]=0.0f;
 
             uint16_t uu=(uint16_t(p[20])<<8)|p[21];
             uint16_t vv=(uint16_t(p[22])<<8)|p[23];
@@ -271,12 +270,7 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
             for(size_t t=0;t<triCount;t++){ g.indices[t*3+0]=strip[t*3+0]; g.indices[t*3+1]=strip[t*3+1]; g.indices[t*3+2]=strip[t*3+2]; }
         }
 
-        bool normals_ok=true;
-        for(uint32_t v=0; v<mb.VertexCount; ++v){
-            float x=g.normals[v*3+0], y=g.normals[v*3+1], z=g.normals[v*3+2];
-            float l=std::sqrt(x*x+y*y+z*z); if(!(l>0.1f)){ normals_ok=false; break; }
-        }
-        if(!normals_ok) compute_smooth_normals(mb.VertexCount, g.indices, g.positions, g.normals);
+        compute_smooth_normals(mb.VertexCount, g.indices, g.positions, g.normals);
 
         out.push_back(std::move(g));
     }

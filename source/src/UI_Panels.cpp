@@ -93,7 +93,7 @@ void draw_folder_dialog() {
 void draw_right_panel() {
     ImGui::BeginChild("right_panel", ImVec2(0, 0), false);
 
-    ImGui::BeginChild("extract_box", ImVec2(0, 80), true, ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("extract_box", ImVec2(0, 100), true, ImGuiWindowFlags_NoScrollbar);
     ImGui::BeginGroup();
     ImGui::PushItemWidth(-1);
 
@@ -109,6 +109,24 @@ void draw_right_panel() {
         ImGui::BeginTooltip();
         ImGui::TextUnformatted("DUMPS ALL FILES IN THE CURRENT BANK");
         ImGui::EndTooltip();
+    }
+
+    ImGui::SameLine();
+    bool has_selection = (S.selected_file_index >= 0 && S.selected_file_index < (int)S.files.size());
+    if (!has_selection) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Dump File")) {
+        ImGui::OpenPopup("progress_win");
+        on_extract_selected_raw();
+    }
+    if (!S.hide_tooltips && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted("Dump the selected file raw");
+        ImGui::EndTooltip();
+    }
+    if (!has_selection) {
+        ImGui::EndDisabled();
     }
 
     ImGui::SameLine();
@@ -130,7 +148,7 @@ void draw_right_panel() {
         }
         if (!S.hide_tooltips && ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
-            ImGui::TextUnformatted("Rebuilds the .tex file bitstreams");
+            ImGui::TextUnformatted("Rebuilds every .tex file bitstream");
             ImGui::EndTooltip();
         }
     }
@@ -143,18 +161,12 @@ void draw_right_panel() {
         }
         if (!S.hide_tooltips && ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
-            ImGui::TextUnformatted("Rebuilds the .mdl file bitstreams");
+            ImGui::TextUnformatted("Rebuilds every .mdl file bitstream");
             ImGui::EndTooltip();
         }
     }
 
     if (S.selected_file_index >= 0) {
-        ImGui::SameLine();
-        if (ImGui::Button("Extract File")) {
-            ImGui::OpenPopup("progress_win");
-            on_extract_selected_raw();
-        }
-        ImGui::SameLine();
         bool can_wav = false;
         if (S.selected_file_index >= 0 && S.selected_file_index < (int) S.files.size()) {
             std::string n = S.files[(size_t) S.selected_file_index].name;
@@ -163,11 +175,11 @@ void draw_right_panel() {
             can_wav = l.size() >= 4 && l.rfind(".wav") == l.size() - 4;
         }
         if (can_wav) {
+            ImGui::SameLine();
             if (ImGui::Button("Extract WAV")) {
                 ImGui::OpenPopup("progress_win");
                 on_extract_selected_wav();
             }
-            ImGui::SameLine();
         }
         bool can_tex = false, can_mdl = false;
         if (S.selected_file_index >= 0 && S.selected_file_index < (int) S.files.size()) {
@@ -179,6 +191,7 @@ void draw_right_panel() {
         }
 
         if (can_tex && is_texture_bnk_selected()) {
+            ImGui::SameLine();
             if (ImGui::Button("Rebuild and Extract (.tex)")) {
                 auto name = S.files[(size_t) S.selected_file_index].name;
                 ImGui::OpenPopup("progress_win");
@@ -189,10 +202,10 @@ void draw_right_panel() {
                 ImGui::TextUnformatted("Rebuilds the .tex file bitstreams");
                 ImGui::EndTooltip();
             }
-            ImGui::SameLine();
         }
 
         if (can_mdl && is_model_bnk_selected()) {
+            ImGui::SameLine();
             if (ImGui::Button("Rebuild and Extract (.mdl)")) {
                 auto name = S.files[(size_t) S.selected_file_index].name;
                 ImGui::OpenPopup("progress_win");
@@ -203,19 +216,46 @@ void draw_right_panel() {
                 ImGui::TextUnformatted("Rebuilds the .mdl file bitstreams");
                 ImGui::EndTooltip();
             }
-            ImGui::SameLine();
-        }
-
-        if (can_tex || can_mdl) {
-            if (ImGui::Button("Hex View")) {
-                ImGui::OpenPopup("progress_win");
-                open_hex_for_selected();
-            }
-        } else {
-            ImGui::InvisibleButton("hex_hidden", ImVec2(1, 1));
         }
     }
     ImGui::EndGroup();
+
+    ImGui::Dummy(ImVec2(0, 8));
+
+    if (!has_selection) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Hex View")) {
+        ImGui::OpenPopup("progress_win");
+        open_hex_for_selected();
+    }
+    if (!has_selection) {
+        ImGui::EndDisabled();
+    }
+
+    ImGui::SameLine();
+
+    bool can_preview = false;
+    bool can_tex = false, can_mdl = false;
+    if (has_selection) {
+        std::string n = S.files[(size_t)S.selected_file_index].name;
+        std::string l = n;
+        std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+        can_tex = l.size() >= 4 && l.rfind(".tex") == l.size() - 4;
+        can_mdl = l.size() >= 4 && l.rfind(".mdl") == l.size() - 4;
+        can_preview = can_tex || can_mdl;
+    }
+
+    if (!can_preview) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Preview")) {
+        ImGui::OpenPopup("progress_win");
+        open_hex_for_selected();
+    }
+    if (!can_preview) {
+        ImGui::EndDisabled();
+    }
 
     ImGui::PopStyleVar();
     ImGui::EndGroup();

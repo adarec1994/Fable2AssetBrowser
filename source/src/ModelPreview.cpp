@@ -24,6 +24,8 @@ static void mp_release_mesh(MPPerMesh& m){
     if(m.srv_diffuse){ m.srv_diffuse->Release(); m.srv_diffuse=nullptr; }
     if(m.srv_normal){ m.srv_normal->Release(); m.srv_normal=nullptr; }
     if(m.srv_specular){ m.srv_specular->Release(); m.srv_specular=nullptr; }
+    if(m.srv_unk){ m.srv_unk->Release(); m.srv_unk=nullptr; }
+    if(m.srv_tint){ m.srv_tint->Release(); m.srv_tint=nullptr; }
     m.index_count = 0;
 }
 
@@ -85,6 +87,8 @@ cbuffer CB : register(b0){
 Texture2D tex0 : register(t0);
 Texture2D tex1 : register(t1);
 Texture2D tex2 : register(t2);
+Texture2D tex3 : register(t3);
+Texture2D tex4 : register(t4);
 SamplerState smp : register(s0);
 struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
 float4 PS(VSOUT i) : SV_Target {
@@ -101,6 +105,9 @@ float4 PS(VSOUT i) : SV_Target {
 
     float3 albedo = tex0.Sample(smp, i.t).rgb;
     float3 specular = tex2.Sample(smp, i.t).rgb;
+    float3 tint = tex4.Sample(smp, i.t).rgb;
+
+    albedo = albedo * tint;
 
     float3 color = albedo * (ambient + diffuse * ndotl) + specular * pow(max(0.0, ndotl), 32.0) * 0.3;
     return float4(color, 1.0);
@@ -449,11 +456,15 @@ static bool build_mesh_textures(ID3D11Device* dev,
                                 size_t mesh_index,
                                 ID3D11ShaderResourceView** out_diffuse,
                                 ID3D11ShaderResourceView** out_normal,
-                                ID3D11ShaderResourceView** out_specular)
+                                ID3D11ShaderResourceView** out_specular,
+                                ID3D11ShaderResourceView** out_unk,
+                                ID3D11ShaderResourceView** out_tint)
 {
     *out_diffuse = nullptr;
     *out_normal = nullptr;
     *out_specular = nullptr;
+    *out_unk = nullptr;
+    *out_tint = nullptr;
 
     if (mesh_index >= info.Meshes.size()) return true;
 
@@ -499,6 +510,8 @@ static bool build_mesh_textures(ID3D11Device* dev,
     load_texture(mat.TextureName, out_diffuse);
     load_texture(mat.NormalMapName, out_normal);
     load_texture(mat.SpecularMapName, out_specular);
+    load_texture(mat.UnkName, out_unk);
+    load_texture(mat.TintName, out_tint);
 
     return true;
 }
@@ -518,6 +531,8 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         if(m.srv_diffuse){m.srv_diffuse->Release();}
         if(m.srv_normal){m.srv_normal->Release();}
         if(m.srv_specular){m.srv_specular->Release();}
+        if(m.srv_unk){m.srv_unk->Release();}
+        if(m.srv_tint){m.srv_tint->Release();}
     }
     mp.meshes.clear();
 
@@ -565,20 +580,13 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         if(FAILED(dev->CreateBuffer(&ib,&isd,&m.ib))) return false;
         m.index_count = (UINT)idx.size();
 
-        build_mesh_textures(dev, info, i, &m.srv_diffuse, &m.srv_normal, &m.srv_specular);
+        build_mesh_textures(dev, info, i, &m.srv_diffuse, &m.srv_normal, &m.srv_specular, &m.srv_unk, &m.srv_tint);
 
-        if (!m.srv_diffuse && mp.default_srv) {
-            m.srv_diffuse = mp.default_srv;
-            m.srv_diffuse->AddRef();
-        }
-        if (!m.srv_normal && mp.default_srv) {
-            m.srv_normal = mp.default_srv;
-            m.srv_normal->AddRef();
-        }
-        if (!m.srv_specular && mp.default_srv) {
-            m.srv_specular = mp.default_srv;
-            m.srv_specular->AddRef();
-        }
+        if (!m.srv_diffuse && mp.default_srv) { m.srv_diffuse = mp.default_srv; m.srv_diffuse->AddRef(); }
+        if (!m.srv_normal && mp.default_srv) { m.srv_normal = mp.default_srv; m.srv_normal->AddRef(); }
+        if (!m.srv_specular && mp.default_srv) { m.srv_specular = mp.default_srv; m.srv_specular->AddRef(); }
+        if (!m.srv_unk && mp.default_srv) { m.srv_unk = mp.default_srv; m.srv_unk->AddRef(); }
+        if (!m.srv_tint && mp.default_srv) { m.srv_tint = mp.default_srv; m.srv_tint->AddRef(); }
     }
     return true;
 }
@@ -646,17 +654,19 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, floa
         ctx->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-        ID3D11ShaderResourceView* srvs[3] = {
+        ID3D11ShaderResourceView* srvs[5] = {
             m.srv_diffuse ? m.srv_diffuse : mp.default_srv,
             m.srv_normal ? m.srv_normal : mp.default_srv,
-            m.srv_specular ? m.srv_specular : mp.default_srv
+            m.srv_specular ? m.srv_specular : mp.default_srv,
+            m.srv_unk ? m.srv_unk : mp.default_srv,
+            m.srv_tint ? m.srv_tint : mp.default_srv
         };
-        ctx->PSSetShaderResources(0, 3, srvs);
+        ctx->PSSetShaderResources(0, 5, srvs);
 
         ctx->DrawIndexed(m.index_count,0,0);
 
-        ID3D11ShaderResourceView* nullsrvs[3] = {nullptr, nullptr, nullptr};
-        ctx->PSSetShaderResources(0, 3, nullsrvs);
+        ID3D11ShaderResourceView* nullsrvs[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+        ctx->PSSetShaderResources(0, 5, nullsrvs);
     }
 
     ctx->Release();

@@ -16,6 +16,8 @@ struct MPPerMesh {
     ID3D11ShaderResourceView* srv_diffuse = nullptr;
     ID3D11ShaderResourceView* srv_normal = nullptr;
     ID3D11ShaderResourceView* srv_specular = nullptr;
+    ID3D11ShaderResourceView* srv_unk = nullptr;
+    ID3D11ShaderResourceView* srv_tint = nullptr;
     UINT index_count = 0;
     bool has_alpha = false;
     float center[3] = {0,0,0};

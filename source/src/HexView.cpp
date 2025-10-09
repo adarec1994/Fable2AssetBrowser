@@ -55,10 +55,7 @@ void open_hex_for_selected() {
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
     bool want_tex = is_tex_file(lower);
     bool want_mdl = is_mdl_file(lower);
-    if (!want_tex && !want_mdl) {
-        show_error_box("Hex viewer supports only .tex or .mdl");
-        return;
-    }
+
     progress_open(0, "Loading hex.");
     S.hex_loading.store(true);
     std::thread([item, name, want_tex, want_mdl]() {
@@ -70,6 +67,7 @@ void open_hex_for_selected() {
             } else if (want_mdl) {
                 ok = build_mdl_buffer_for_name(name, buf);
             }
+
             if (!ok) {
                 auto tmpdir = std::filesystem::temp_directory_path() / "f2_hex_view";
                 std::error_code ec;
@@ -241,13 +239,19 @@ void draw_hex_window(ID3D11Device *device) {
                     ImGui::Text("MeshCount: %u", S.mdl_info.MeshCount);
 
                     if(ImGui::Button("Preview")){
-                        S.mdl_meshes.clear();
-                        parse_mdl_geometry(S.hex_data, S.mdl_info, S.mdl_meshes);
-                        MP_Release(g_mp);
-                        MP_Init(device, g_mp, 800, 520);
-                        MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
-                        S.cam_yaw = 0.0f; S.cam_pitch = 0.2f; S.cam_dist = 3.0f;
-                        S.show_model_preview = true;
+                        progress_open(0, "Loading model preview...");
+
+                        std::thread([device]() {
+                            S.mdl_meshes.clear();
+                            parse_mdl_geometry(S.hex_data, S.mdl_info, S.mdl_meshes);
+                            MP_Release(g_mp);
+                            MP_Init(device, g_mp, 800, 520);
+                            MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
+                            S.cam_yaw = 0.0f; S.cam_pitch = 0.2f; S.cam_dist = 3.0f;
+
+                            progress_done();
+                            S.show_model_preview = true;
+                        }).detach();
                     }
 
                     if(!S.mdl_info.Bones.empty()){

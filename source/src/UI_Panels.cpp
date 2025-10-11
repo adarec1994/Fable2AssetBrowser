@@ -403,10 +403,10 @@ void draw_right_panel(ID3D11Device* device) {
         ImGui::BeginDisabled();
     }
     if (ImGui::Button("Preview")) {
-        ImGui::OpenPopup("progress_win");
-
         auto item = S.files[(size_t)S.selected_file_index];
         auto name = item.name;
+
+        progress_open(0, "Loading preview...");
 
         std::thread([device, item, name, can_tex, can_mdl]() {
             std::vector<unsigned char> buf;
@@ -542,6 +542,115 @@ void draw_right_panel(ID3D11Device* device) {
         draw_file_table();
     }
     ImGui::EndChild();
+
+    if(S.show_preview_popup){
+        ImGui::OpenPopup("Mip Preview");
+        S.show_preview_popup = false;
+    }
+
+    if(ImGui::BeginPopupModal("Mip Preview", nullptr, ImGuiWindowFlags_None)){
+        if(S.preview_mip_index >= 0 && S.preview_mip_index < (int)S.tex_info.Mips.size()){
+            const auto& m = S.tex_info.Mips[S.preview_mip_index];
+            if(!S.preview_srv){
+                uint32_t base_w = S.tex_info.TextureWidth;
+                uint32_t base_h = S.tex_info.TextureHeight;
+                uint32_t w = m.HasWH ? (uint32_t)std::max(1,(int)m.MipWidth)  : std::max(1u, base_w >> S.preview_mip_index);
+                uint32_t h = m.HasWH ? (uint32_t)std::max(1,(int)m.MipHeight) : std::max(1u, base_h >> S.preview_mip_index);
+                if(m.MipDataOffset < S.hex_data.size() && m.MipDataOffset + m.MipDataSizeParsed <= S.hex_data.size()){
+                    const uint8_t* src = S.hex_data.data() + m.MipDataOffset;
+                    size_t src_sz = m.MipDataSizeParsed;
+
+                    DXGI_FORMAT fmt = DXGI_FORMAT_BC1_UNORM;
+                    if(S.tex_info.PixelFormat == 39) fmt = DXGI_FORMAT_BC3_UNORM;
+                    else if(S.tex_info.PixelFormat == 40) fmt = DXGI_FORMAT_BC5_UNORM;
+
+                    size_t blocks_x = (w + 3) / 4;
+                    std::vector<uint8_t> payload(src, src + src_sz);
+
+                    for(size_t i = 0; i + 8 <= payload.size(); i += 8) {
+                        uint16_t c0 = (payload[i+0] << 8) | payload[i+1];
+                        uint16_t c1 = (payload[i+2] << 8) | payload[i+3];
+                        uint32_t idx = (payload[i+4] << 24) | (payload[i+5] << 16) | (payload[i+6] << 8) | payload[i+7];
+
+                        payload[i+0] = c0 & 0xFF;
+                        payload[i+1] = (c0 >> 8) & 0xFF;
+                        payload[i+2] = c1 & 0xFF;
+                        payload[i+3] = (c1 >> 8) & 0xFF;
+                        payload[i+4] = idx & 0xFF;
+                        payload[i+5] = (idx >> 8) & 0xFF;
+                        payload[i+6] = (idx >> 16) & 0xFF;
+                        payload[i+7] = (idx >> 24) & 0xFF;
+                    }
+
+                    D3D11_TEXTURE2D_DESC td{};
+                    td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1; td.Format = fmt;
+                    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                    D3D11_SUBRESOURCE_DATA sd{}; sd.pSysMem = payload.data(); sd.SysMemPitch = (UINT)(blocks_x * 8);
+                    ID3D11Texture2D* tex = nullptr;
+                    if(device->CreateTexture2D(&td, &sd, &tex) == S_OK){
+                        D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+                        svd.Format = td.Format; svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; svd.Texture2D.MipLevels = 1;
+                        device->CreateShaderResourceView(tex, &svd, &S.preview_srv); tex->Release();
+                    }
+                }
+            }
+            if(S.preview_srv) ImGui::Image((ImTextureID)S.preview_srv, ImVec2(512, 512));
+            else ImGui::TextUnformatted("Preview unsupported or failed.");
+        }else{
+            ImGui::TextUnformatted("No mip selected");
+        }
+        if(ImGui::Button("Close", ImVec2(-1,0))) {
+            if(S.preview_srv) { S.preview_srv->Release(); S.preview_srv = nullptr; }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    {
+        if(S.show_model_preview){ ImGui::OpenPopup("Model Preview"); S.show_model_preview = false; }
+
+        const ImVec2 canvas(960, 640);
+        const ImVec2 win_size(canvas.x + 32.0f, canvas.y + 110.0f);
+
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowSize(win_size, ImGuiCond_Always);
+        ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+
+        if(ImGui::BeginPopupModal("Model Preview", nullptr, ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings))
+        {
+            extern ModelPreview g_mp;
+            MP_Render(device, g_mp, S.cam_yaw, S.cam_pitch, S.cam_dist);
+
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            if(g_mp.srv) ImGui::GetWindowDrawList()->AddImage((ImTextureID)g_mp.srv, pos, ImVec2(pos.x + canvas.x, pos.y + canvas.y));
+            ImGui::InvisibleButton("model_canvas", canvas);
+
+            float dt = ImGui::GetIO().DeltaTime;
+            S.cam_yaw += dt * 0.6f;
+            if(S.cam_yaw > 6.2831853f) S.cam_yaw -= 6.2831853f;
+
+            if(ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup)){
+                float wheel = ImGui::GetIO().MouseWheel;
+                if(fabsf(wheel) > 0.0001f) S.cam_dist *= (wheel > 0.f ? 0.9f : 1.1f);
+            }
+
+            if(ImGui::Button("Zoom -", ImVec2(90,0))) S.cam_dist *= 1.1f;
+            ImGui::SameLine();
+            if(ImGui::Button("Zoom +", ImVec2(90,0))) S.cam_dist *= 0.9f;
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(220);
+            ImGui::SliderFloat("##zoom", &S.cam_dist, 0.3f, 50.0f, "Dist %.2f");
+            if(S.cam_dist < 0.3f)  S.cam_dist = 0.3f;
+            if(S.cam_dist > 50.0f) S.cam_dist = 50.0f;
+
+            ImGui::Dummy(ImVec2(0,6));
+            if(ImGui::Button("Close", ImVec2(-1,0))) {
+                MP_Release(g_mp);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
 
     ImGui::EndChild();
 }

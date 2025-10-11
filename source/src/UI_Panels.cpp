@@ -436,8 +436,23 @@ void draw_right_panel(ID3D11Device* device) {
                 if (can_tex) {
                     S.tex_info_ok = parse_tex_info(S.hex_data, S.tex_info);
                     if (S.tex_info_ok && !S.tex_info.Mips.empty()) {
-                        S.preview_mip_index = 0;
-                        S.show_preview_popup = true;
+                        int best_mip = -1;
+                        size_t best_area = 0;
+                        for (int i = 0; i < (int)S.tex_info.Mips.size(); ++i) {
+                            if (S.tex_info.Mips[i].CompFlag == 7) {
+                                int w = S.tex_info.Mips[i].HasWH ? (int)S.tex_info.Mips[i].MipWidth : std::max(1, (int)S.tex_info.TextureWidth >> i);
+                                int h = S.tex_info.Mips[i].HasWH ? (int)S.tex_info.Mips[i].MipHeight : std::max(1, (int)S.tex_info.TextureHeight >> i);
+                                size_t area = (size_t)w * (size_t)h;
+                                if (area > best_area) {
+                                    best_area = area;
+                                    best_mip = i;
+                                }
+                            }
+                        }
+                        if (best_mip >= 0) {
+                            S.preview_mip_index = best_mip;
+                            S.show_preview_popup = true;
+                        }
                     }
                 } else if (can_mdl) {
                     S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info);

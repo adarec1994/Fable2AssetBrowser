@@ -68,6 +68,7 @@ struct State {
     bool show_completion = false;
     std::string completion_text;
     std::string file_filter;
+    std::string global_search;
     std::string last_dir;
     std::atomic<bool> hex_loading{false};
     bool hex_open = false;

@@ -57,7 +57,7 @@ void on_extract_selected_wav() {
         return;
     }
     if (S.selected_bnk.empty()) {
-show_error_box("No BNK selected.");
+        show_error_box("No BNK selected.");
         return;
     }
     auto item = S.files[(size_t) idx];
@@ -544,6 +544,307 @@ void on_rebuild_and_extract_one_mdl(const std::string &mdl_name) {
         } catch (...) {}
 
         progress_update(1, 1, mdl_name);
+        progress_done();
+        if (!S.cancel_requested)
+            show_completion_box(std::string("Model rebuild complete.\n\nOutput folder:\n") + std::filesystem::absolute(out_root).string());
+        S.cancel_requested = false;
+    }).detach();
+}
+
+void on_dump_all_global(const std::vector<GlobalHit>& hits) {
+    if (hits.empty()) {
+        show_error_box("No files to dump.");
+        return;
+    }
+
+    auto base_out = (std::filesystem::current_path() / "extracted").string();
+    int total = (int)hits.size();
+    progress_open(total, "Dumping...");
+    progress_update(0, total, "Starting...");
+
+    std::thread([hits, base_out, total]() {
+        std::atomic<int> dumped{0};
+        std::mutex fail_m;
+        std::vector<std::string> failed;
+
+        auto work = [&](const GlobalHit &h) {
+            if (S.cancel_requested || S.exiting) return;
+            try {
+                BNKItemUI item;
+                item.index = h.index;
+                item.name = h.file_name;
+                item.size = h.size;
+                extract_file_one(h.bnk_path, item, base_out, false);
+            } catch (...) {
+                std::lock_guard<std::mutex> lk(fail_m);
+                failed.push_back(h.file_name);
+            }
+            int cur = ++dumped;
+            progress_update(cur, total, std::filesystem::path(h.file_name).filename().string());
+        };
+
+        if (!S.cancel_requested) {
+            std::vector<std::thread> pool;
+            int n = std::min(8, std::max(1, (int)std::thread::hardware_concurrency()));
+            std::atomic<size_t> i{0};
+            for (int t = 0; t < n; ++t) pool.emplace_back([&]() {
+                for (;;) {
+                    size_t k = i.fetch_add(1);
+                    if (k >= hits.size()) break;
+                    work(hits[k]);
+                }
+            });
+            for (auto &th: pool) th.join();
+        }
+
+        progress_done();
+        std::string msg = std::string("Dump complete.\n\nOutput folder:\n") + std::filesystem::absolute(base_out).string();
+        if (!failed.empty()) {
+            msg += std::string("\nFailed: ") + std::to_string((int)failed.size());
+        }
+        show_completion_box(msg);
+        S.cancel_requested = false;
+    }).detach();
+}
+
+void on_export_wavs_global(const std::vector<GlobalHit>& hits) {
+    std::vector<GlobalHit> audio_files;
+    for (auto &h: hits) if (is_audio_file(h.file_name)) audio_files.push_back(h);
+
+    if (audio_files.empty()) {
+        show_error_box("No .wav files in filtered results.");
+        return;
+    }
+
+    auto base_out = (std::filesystem::current_path() / "extracted").string();
+    int total = (int)audio_files.size();
+    progress_open(total, "Exporting WAVs...");
+    progress_update(0, total, "Starting...");
+
+    std::thread([audio_files, base_out, total]() {
+        std::atomic<int> done{0};
+        std::mutex fail_m;
+        std::vector<std::string> failed;
+
+        auto work = [&](const GlobalHit &h) {
+            if (S.cancel_requested || S.exiting) return;
+            try {
+                BNKItemUI item;
+                item.index = h.index;
+                item.name = h.file_name;
+                item.size = h.size;
+                extract_file_one(h.bnk_path, item, base_out, true);
+            } catch (...) {
+                std::lock_guard<std::mutex> lk(fail_m);
+                failed.push_back(h.file_name);
+            }
+            int cur = ++done;
+            progress_update(cur, total, std::filesystem::path(h.file_name).filename().string());
+        };
+
+        if (!S.cancel_requested) {
+            std::vector<std::thread> pool;
+            int n = std::min(4, std::max(1, (int)std::thread::hardware_concurrency() / 2));
+            std::atomic<size_t> i{0};
+            for (int t = 0; t < n; ++t) pool.emplace_back([&]() {
+                for (;;) {
+                    size_t k = i.fetch_add(1);
+                    if (k >= audio_files.size()) break;
+                    work(audio_files[k]);
+                }
+            });
+            for (auto &th: pool) th.join();
+        }
+
+        progress_done();
+        std::string msg = std::string("WAV export complete.\n\nOutput folder:\n") + std::filesystem::absolute(base_out).string();
+        if (!failed.empty()) {
+            msg += std::string("\nFailed: ") + std::to_string((int)failed.size());
+        }
+        show_completion_box(msg);
+        S.cancel_requested = false;
+    }).detach();
+}
+
+void on_rebuild_and_extract_global_tex(const std::vector<GlobalHit>& hits) {
+    auto p_headers = find_bnk_by_filename("globals_texture_headers.bnk");
+    auto p_mip0 = find_bnk_by_filename("1024mip0_textures.bnk");
+    auto p_rest = find_bnk_by_filename("globals_textures.bnk");
+    if (!p_headers || !p_rest) {
+        show_error_box("Required BNKs not found.");
+        return;
+    }
+
+    std::vector<GlobalHit> tex_files;
+    for (auto &h: hits) if (is_tex_file(h.file_name)) tex_files.push_back(h);
+
+    if (tex_files.empty()) {
+        show_error_box("No .tex files in filtered results.");
+        return;
+    }
+
+    auto out_root = (std::filesystem::current_path() / "extracted").string();
+    int total = (int)tex_files.size();
+    progress_open(total, "Rebuilding...");
+    progress_update(0, total, "Starting...");
+
+    std::thread([tex_files, out_root, total, p_headers, p_mip0, p_rest]() {
+        BNKReader r_headers(*p_headers);
+        BNKReader r_rest(*p_rest);
+        std::optional<BNKReader> r_mip0;
+        if (p_mip0) r_mip0.emplace(*p_mip0);
+
+        std::unordered_map<std::string, int> mapH, mapR, mapM;
+        for (size_t i = 0; i < r_headers.list_files().size(); ++i) {
+            auto &e = r_headers.list_files()[i];
+            std::string fname = std::filesystem::path(e.name).filename().string();
+            std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+            mapH.emplace(fname, (int)i);
+        }
+        for (size_t i = 0; i < r_rest.list_files().size(); ++i) {
+            auto &e = r_rest.list_files()[i];
+            std::string fname = std::filesystem::path(e.name).filename().string();
+            std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+            mapR.emplace(fname, (int)i);
+        }
+        if (r_mip0) {
+            for (size_t i = 0; i < r_mip0->list_files().size(); ++i) {
+                auto &e = r_mip0->list_files()[i];
+                std::string fname = std::filesystem::path(e.name).filename().string();
+                std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+                mapM.emplace(fname, (int)i);
+            }
+        }
+
+        int done = 0;
+        auto tmpdir = std::filesystem::temp_directory_path() / "f2_tex_rebuild_global";
+        std::error_code ec;
+        std::filesystem::create_directories(tmpdir, ec);
+
+        for (auto &h : tex_files) {
+            if (S.cancel_requested || S.exiting) break;
+
+            std::string fname = std::filesystem::path(h.file_name).filename().string();
+            std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+
+            if (!mapH.count(fname) || !mapR.count(fname)) {
+                progress_update(++done, total, h.file_name);
+                continue;
+            }
+
+            auto out_path = std::filesystem::path(out_root) / h.file_name;
+            std::filesystem::create_directories(out_path.parent_path(), ec);
+
+            auto tmp_h = tmpdir / ("h_" + std::to_string(done) + ".bin");
+            auto tmp_m = tmpdir / ("m_" + std::to_string(done) + ".bin");
+            auto tmp_r = tmpdir / ("r_" + std::to_string(done) + ".bin");
+
+            try {
+                extract_one(*p_headers, mapH.at(fname), tmp_h.string());
+                if (mapM.count(fname) && p_mip0) extract_one(*p_mip0, mapM.at(fname), tmp_m.string());
+                extract_one(*p_rest, mapR.at(fname), tmp_r.string());
+
+                std::ofstream out(out_path, std::ios::binary);
+                std::ifstream fh(tmp_h, std::ios::binary);
+                out << fh.rdbuf();
+                if (std::filesystem::exists(tmp_m)) {
+                    std::ifstream fm(tmp_m, std::ios::binary);
+                    out << fm.rdbuf();
+                }
+                std::ifstream fr(tmp_r, std::ios::binary);
+                out << fr.rdbuf();
+
+                std::filesystem::remove(tmp_h, ec);
+                if (std::filesystem::exists(tmp_m)) std::filesystem::remove(tmp_m, ec);
+                std::filesystem::remove(tmp_r, ec);
+            } catch (...) {}
+
+            progress_update(++done, total, h.file_name);
+        }
+
+        progress_done();
+        if (!S.cancel_requested)
+            show_completion_box(std::string("Rebuild complete.\n\nOutput folder:\n") + std::filesystem::absolute(out_root).string());
+        S.cancel_requested = false;
+    }).detach();
+}
+
+void on_rebuild_and_extract_global_mdl(const std::vector<GlobalHit>& hits) {
+    auto p_headers = find_bnk_by_filename("globals_model_headers.bnk");
+    auto p_rest = find_bnk_by_filename("globals_models.bnk");
+    if (!p_headers || !p_rest) {
+        show_error_box("Required BNKs not found.");
+        return;
+    }
+
+    std::vector<GlobalHit> mdl_files;
+    for (auto &h: hits) if (is_mdl_file(h.file_name)) mdl_files.push_back(h);
+
+    if (mdl_files.empty()) {
+        show_error_box("No .mdl files in filtered results.");
+        return;
+    }
+
+    auto out_root = (std::filesystem::current_path() / "extracted").string();
+    int total = (int)mdl_files.size();
+    progress_open(total, "Rebuilding models...");
+    progress_update(0, total, "Starting...");
+
+    std::thread([mdl_files, out_root, total, p_headers, p_rest]() {
+        BNKReader r_headers(*p_headers);
+        BNKReader r_rest(*p_rest);
+
+        std::unordered_map<std::string, int> mapH, mapR;
+        for (size_t i = 0; i < r_headers.list_files().size(); ++i) {
+            auto &e = r_headers.list_files()[i];
+            std::string fname = std::filesystem::path(e.name).filename().string();
+            std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+            mapH.emplace(fname, (int)i);
+        }
+        for (size_t i = 0; i < r_rest.list_files().size(); ++i) {
+            auto &e = r_rest.list_files()[i];
+            std::string fname = std::filesystem::path(e.name).filename().string();
+            std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+            mapR.emplace(fname, (int)i);
+        }
+
+        int done = 0;
+        auto tmpdir = std::filesystem::temp_directory_path() / "f2_mdl_rebuild_global";
+        std::error_code ec;
+        std::filesystem::create_directories(tmpdir, ec);
+
+        for (auto &h : mdl_files) {
+            if (S.cancel_requested || S.exiting) break;
+
+            std::string fname = std::filesystem::path(h.file_name).filename().string();
+            std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+
+            if (!mapH.count(fname) || !mapR.count(fname)) {
+                progress_update(++done, total, h.file_name);
+                continue;
+            }
+
+            auto out_path = std::filesystem::path(out_root) / h.file_name;
+            std::filesystem::create_directories(out_path.parent_path(), ec);
+
+            auto tmp_h = tmpdir / ("h_" + std::to_string(done) + ".bin");
+            auto tmp_r = tmpdir / ("r_" + std::to_string(done) + ".bin");
+
+            try {
+                extract_one(*p_headers, mapH.at(fname), tmp_h.string());
+                extract_one(*p_rest, mapR.at(fname), tmp_r.string());
+
+                std::ofstream out(out_path, std::ios::binary);
+                { std::ifstream fh(tmp_h, std::ios::binary); out << fh.rdbuf(); }
+                { std::ifstream fr(tmp_r, std::ios::binary); out << fr.rdbuf(); }
+
+                std::filesystem::remove(tmp_h, ec);
+                std::filesystem::remove(tmp_r, ec);
+            } catch (...) {}
+
+            progress_update(++done, total, h.file_name);
+        }
+
         progress_done();
         if (!S.cancel_requested)
             show_completion_box(std::string("Model rebuild complete.\n\nOutput folder:\n") + std::filesystem::absolute(out_root).string());

@@ -1,0 +1,158 @@
+//------------------------------------------------
+//--- 010 Editor v2.0 Binary Template
+//
+//      File: MDL.bt
+//   Version: 6.2 (Permanent scope error fix)
+//   Purpose: Parse MDL model files
+//------------------------------------------------
+BigEndian();
+
+// Structure definitions
+typedef struct {
+    string BoneName;
+    DWORD ParentID;
+} BoneEntry <optimize=false>;
+
+typedef struct {
+    float QuatX, QuatY, QuatZ, QuatW;
+    float PosX, PosY, PosZ;
+    float ScaleX, ScaleY, ScaleZ;
+    float Padding;
+} BoneTransform <optimize=false>;
+
+typedef struct {
+    string TextureName;
+    string SpecularMapName;
+    string NormalMapName;
+    string UnkName;
+    string TintName;
+    DWORD Unk1;
+    DWORD Unk2[2];
+    local int64 checkPos = FTell();
+    BYTE checkByte;
+    if (checkByte != 0x01) FSeek(checkPos);
+} Material <optimize=false>;
+
+typedef struct {
+    WORD PosX, PosY, PosZ, PosW;
+    DWORD Normal;
+    BYTE BoneID1, BoneID2, BoneID3, BoneID4;
+    BYTE Weight1, Weight2, Weight3, Weight4;
+    WORD UV_U, UV_V;
+    DWORD Color;
+} Vertex <optimize=false>;
+
+typedef struct {
+    float Unks[4];
+} Unk16 <optimize=false>;
+
+typedef struct {
+    DWORD Unk1;
+    char Unk2;
+    DWORD Unk3[3];
+    float Unk4[6];
+} SubMeshDesc <optimize=false>;
+
+typedef struct {
+    DWORD Unk1;
+    string MeshName;
+    float Unk2[2];
+    char Unk3[21];
+    float Unk4;
+    DWORD Unk5[3];
+    DWORD MaterialCount;
+    if (MaterialCount > 0) Material Materials[MaterialCount];
+} Mesh <optimize=false>;
+
+// The MeshBuffer structs are now simple definitions with NO internal scanning.
+
+// VERSION 1: For when the optional string IS NOT present.
+typedef struct {
+    DWORD MeshBufferID;
+    DWORD MeshBufferID_Copy;
+    DWORD SomeCount1;
+    DWORD TriangleStripLength;
+    DWORD VertexCount;
+    DWORD SubMeshCount;
+    if (SubMeshCount > 0) SubMeshDesc SubMeshes[SubMeshCount];
+    if (VertexCount > 0) Vertex Vertices[VertexCount];
+    if (TriangleStripLength > 0) WORD Faces[TriangleStripLength];
+    if (VertexCount > 0) Unk16 Unk16Array[VertexCount];
+} MeshBuffer_Normal <optimize=false>;
+
+
+// VERSION 2: For when the optional string IS present.
+typedef struct {
+    DWORD MeshBufferID;
+    DWORD MeshBufferID_Copy;
+    DWORD SomeCount1;
+    DWORD TriangleStripLength;
+    DWORD VertexCount;
+    SubMeshDesc TheSubmesh;
+    if (VertexCount > 0) Vertex Vertices[VertexCount];
+    if (TriangleStripLength > 0) WORD Faces[TriangleStripLength];
+    if (VertexCount > 0) Unk16 Unk16Array[VertexCount];
+} MeshBuffer_Alt <optimize=false>;
+
+
+// Main file structure
+struct {
+    char MagicNumber[8];
+    DWORD Unk;
+    DWORD HeaderSize;
+    ubyte Headerst[88];
+    DWORD Unk1[8];
+    DWORD BoneCount;
+    if (BoneCount > 0) BoneEntry Bones[BoneCount];
+    
+    DWORD BoneTransformCount;
+    if (BoneTransformCount > 0) BoneTransform BoneTransforms[BoneTransformCount];
+    
+    float Unk2[10];
+    DWORD MeshCount;
+    DWORD Unk3[2];
+    char Unk4[13];
+    DWORD Unk5[5];
+    DWORD Unk6Count;
+    if (Unk6Count > 0) float Unk6s[Unk6Count];
+    
+    DWORD Unk7;
+    
+    if (MeshCount > 0) {
+        Mesh Meshes[MeshCount];
+
+        local int wasStringFound = 0;
+        if (FTell() < FileSize()) {
+            local byte nextByte = ReadByte(FTell());
+            if (nextByte >= 32 && nextByte < 127) {
+                wasStringFound = 1;
+                string OptionalStringAfterMeshes;
+                BYTE   FollowsOptionalString <comment="Should be 0x01">;
+            }
+        }
+        
+        // --- FIX IS HERE: Variables declared ONCE before the loop starts ---
+        local int i;
+        local int64 searchPos; 
+        
+        for (i = 0; i < MeshCount; i++)
+        {
+            if (i > 0) {
+                while(FTell() < FileSize() - 4) {
+                    searchPos = FTell(); 
+                    if (ReadUInt() == 0xFFFFFFFF) {
+                        FSeek(searchPos - 24);
+                        break;
+                    }
+                    FSeek(searchPos + 1); 
+                }
+            }
+
+            if (wasStringFound) {
+                MeshBuffer_Alt buffer <name="Mesh Buffer [Alt]">;
+            } else {
+                MeshBuffer_Normal buffer <name="Mesh Buffer [Normal]">;
+            }
+        }
+    }
+} MDL_File;

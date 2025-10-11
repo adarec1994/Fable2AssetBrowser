@@ -51,8 +51,10 @@ struct TexInfo {
 struct State {
     std::string root_dir;
     std::vector<std::string> bnk_paths;
+    std::vector<std::string> adb_paths;
     std::string bnk_filter;
     std::string selected_bnk;
+    bool viewing_adb = false;
     std::vector<BNKItemUI> files;
     int selected_file_index = -1;
     bool hide_tooltips = false;

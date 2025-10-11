@@ -1,4 +1,4 @@
-#define IMGUI_DEFINE_MATH_OPERATORS  // ← Must be first, before any includes
+#define IMGUI_DEFINE_MATH_OPERATORS
 #include "UI_Main.h"
 #include "State.h"
 #include "Utils.h"
@@ -56,6 +56,8 @@ void open_folder_logic(const std::string &sel) {
     try {
         S.bnk_paths = scan_bnks_recursive(sel);
         if (S.bnk_paths.empty()) S.bnk_paths = find_bnks(sel);
+
+        S.adb_paths = scan_adbs_recursive(sel);
     } catch (...) {
         show_error_box("Error searching for BNK files");
         return;
@@ -72,6 +74,14 @@ void open_folder_logic(const std::string &sel) {
         std::transform(B.begin(), B.end(), B.begin(), ::tolower);
         return A < B;
     });
+
+    std::sort(S.adb_paths.begin(), S.adb_paths.end(), [](const std::string &a, const std::string &b) {
+        std::string A = std::filesystem::path(a).filename().string(), B = std::filesystem::path(b).filename().string();
+        std::transform(A.begin(), A.end(), A.begin(), ::tolower);
+        std::transform(B.begin(), B.end(), B.begin(), ::tolower);
+        return A < B;
+    });
+
     S.selected_bnk.clear();
     S.files.clear();
     refresh_file_table();

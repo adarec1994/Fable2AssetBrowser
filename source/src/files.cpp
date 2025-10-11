@@ -26,7 +26,23 @@ std::vector<std::string> scan_bnks_recursive(const std::string &root) {
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
             if (ext == ".bnk") out.push_back(p.string());
         }
-         }
+    }
+    return out;
+}
+
+std::vector<std::string> scan_adbs_recursive(const std::string &root) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    for (auto it = std::filesystem::recursive_directory_iterator(
+             root, std::filesystem::directory_options::skip_permission_denied, ec);
+         it != std::filesystem::recursive_directory_iterator(); ++it) {
+        if (it->is_regular_file(ec)) {
+            auto p = it->path();
+            auto ext = p.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext == ".adb") out.push_back(p.string());
+        }
+    }
     return out;
 }
 

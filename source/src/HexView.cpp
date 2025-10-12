@@ -128,10 +128,19 @@ void open_hex_for_selected() {
         show_error_box("No file selected.");
         return;
     }
-    if (S.selected_bnk.empty()) {
+
+    std::string bnk_to_use;
+    if (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty()) {
+        bnk_to_use = S.selected_nested_temp_path;
+    } else {
+        bnk_to_use = S.selected_bnk;
+    }
+
+    if (bnk_to_use.empty()) {
         show_error_box("No BNK selected.");
         return;
     }
+
     auto item = S.files[(size_t) idx];
     auto name = item.name;
     std::string lower = name;
@@ -141,15 +150,12 @@ void open_hex_for_selected() {
 
     progress_open(0, "Loading hex.");
     S.hex_loading.store(true);
-    std::thread([item, name, want_tex, want_mdl]() {
+    std::thread([item, name, want_tex, want_mdl, bnk_to_use]() {
         std::vector<unsigned char> buf;
         bool ok = false;
         try {
             if (want_tex) {
-                ok = build_tex_buffer_for_name(name, buf);
-                if (!ok) {
-                    ok = build_gui_tex_buffer_for_name(name, buf);
-                }
+                ok = build_any_tex_buffer_for_name(name, buf);
             } else if (want_mdl) {
                 ok = build_mdl_buffer_for_name(name, buf);
             }
@@ -159,7 +165,7 @@ void open_hex_for_selected() {
                 std::error_code ec;
                 std::filesystem::create_directories(tmpdir, ec);
                 auto tmp_file = tmpdir / ("hex_" + std::to_string(std::hash<std::string>{}(name)) + ".bin");
-                extract_one(S.selected_bnk, item.index, tmp_file.string());
+                extract_one(bnk_to_use, item.index, tmp_file.string());
                 buf = read_all_bytes(tmp_file);
                 ok = !buf.empty();
                 std::filesystem::remove(tmp_file, ec);
@@ -328,15 +334,22 @@ void draw_hex_window(ID3D11Device *device) {
                         progress_open(0, "Loading model preview...");
 
                         std::thread([device]() {
-                            S.mdl_meshes.clear();
-                            parse_mdl_geometry(S.hex_data, S.mdl_info, S.mdl_meshes);
-                            MP_Release(g_mp);
-                            MP_Init(device, g_mp, 800, 520);
-                            MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
-                            S.cam_yaw = 0.0f; S.cam_pitch = 0.2f; S.cam_dist = 3.0f;
+                            if(!S.mdl_info_ok){
+                                S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info);
+                            }
+
+                            if(S.mdl_info_ok){
+                                S.mdl_meshes.clear();
+                                parse_mdl_geometry(S.hex_data, S.mdl_info, S.mdl_meshes);
+                                MP_Release(g_mp);
+                                MP_Init(device, g_mp, 800, 520);
+                                MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
+                                S.cam_yaw = 0.0f; S.cam_pitch = 0.2f; S.cam_dist = 3.0f;
+                                S.show_model_preview = true;
+                            }
 
                             progress_done();
-                            S.show_model_preview = true;
+                            if(!S.mdl_info_ok) show_error_box("Failed to parse model data.");
                         }).detach();
                     }
 

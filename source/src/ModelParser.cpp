@@ -110,15 +110,25 @@ static void compute_smooth_normals(size_t vcount, const std::vector<uint32_t>& i
 
 bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
     out = MDLInfo{};
-    if(data.size()<8) return false;
+    if(data.size() < 8) return false;
     R r{data.data(), data.size(), 0};
 
-    out.Magic.assign((const char*)r.p, 8); r.i+=8;
-    uint32_t tmp32=0;
-    if(!r.u32be(tmp32)) return false;
-    if(!r.u32be(out.HeaderSize)) return false;
-    if(!r.skip(88)) return false;
-    if(!r.skip(8*4)) return false;
+    out.Magic.assign((const char*)r.p, 8);
+
+    bool has_magic = (out.Magic.size() >= 4 &&
+                      (out.Magic[0] == 'M' || out.Magic[0] == 'S' || out.Magic[0] == 'R'));
+
+    if(has_magic) {
+        r.i += 8;
+        uint32_t tmp32=0;
+        if(!r.u32be(tmp32)) return false;
+        if(!r.u32be(out.HeaderSize)) return false;
+        if(!r.skip(88)) return false;
+        if(!r.skip(8*4)) return false;
+    } else {
+        r.i = 0;
+        out.Magic.clear();
+    }
 
     if(!r.u32be(out.BoneCount)) return false;
     out.Bones.clear(); out.Bones.reserve(out.BoneCount);
@@ -151,6 +161,7 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
         for(uint32_t i=0;i<out.Unk6Count;i++){ float f; if(!r.f32be(f)) return false; }
     }
 
+    uint32_t tmp32=0;
     if(!r.u32be(tmp32)) return false;
 
     out.Meshes.clear(); out.Meshes.reserve(out.MeshCount);

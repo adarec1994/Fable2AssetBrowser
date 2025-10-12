@@ -58,6 +58,7 @@ struct State {
     std::string selected_nested_bnk;
     std::set<std::string> expanded_bnks;
     int selected_nested_index = -1;
+    std::string selected_nested_temp_path;
     bool viewing_adb = false;
     std::vector<BNKItemUI> files;
     int selected_file_index = -1;

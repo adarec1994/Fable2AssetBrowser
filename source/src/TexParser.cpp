@@ -118,7 +118,7 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
                 continue;
             }
             size_t start = k + extra_hdr_bytes;
-            size_t header_bytes_total = 4 /*W/H*/ + extra_hdr_bytes;
+            size_t header_bytes_total = 4 + extra_hdr_bytes;
             size_t data_declared = (md.DataSize >= header_bytes_total) ? (md.DataSize - header_bytes_total) : 0;
             size_t max_sz = (start < d.size()) ? (d.size() - start) : 0;
             size_t use = std::min(data_declared, max_sz);
@@ -322,6 +322,159 @@ bool build_gui_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
     } catch (...) {
         std::filesystem::remove(tmp_h, ec);
         std::filesystem::remove(tmp_r, ec);
+        return false;
+    }
+}
+
+bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsigned char> &out) {
+    std::string key = std::filesystem::path(tex_name).filename().string();
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+
+    std::string header_bnk_path;
+    int header_idx = -1;
+
+    for (const auto& bnk_path : S.bnk_paths) {
+        std::string fname = std::filesystem::path(bnk_path).filename().string();
+        std::string fname_lower = fname;
+        std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
+
+        if (fname_lower.find("header") != std::string::npos && fname_lower.find("texture") != std::string::npos) {
+            try {
+                BNKReader reader(bnk_path);
+                for (size_t i = 0; i < reader.list_files().size(); ++i) {
+                    std::string file_lower = reader.list_files()[i].name;
+                    std::transform(file_lower.begin(), file_lower.end(), file_lower.begin(), ::tolower);
+                    std::string file_base = std::filesystem::path(file_lower).filename().string();
+
+                    if (file_base == key) {
+                        header_bnk_path = bnk_path;
+                        header_idx = (int)i;
+                        break;
+                    }
+                }
+            } catch (...) {}
+
+            if (header_idx != -1) break;
+        }
+    }
+
+    if (header_idx == -1) {
+        return false;
+    }
+
+    std::string mip0_bnk_path;
+    int mip0_idx = -1;
+
+    for (const auto& bnk_path : S.bnk_paths) {
+        std::string fname = std::filesystem::path(bnk_path).filename().string();
+        std::string fname_lower = fname;
+        std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
+
+        if (fname_lower.find("1024mip0") != std::string::npos && fname_lower.find("texture") != std::string::npos) {
+            try {
+                BNKReader reader(bnk_path);
+                for (size_t i = 0; i < reader.list_files().size(); ++i) {
+                    std::string file_lower = reader.list_files()[i].name;
+                    std::transform(file_lower.begin(), file_lower.end(), file_lower.begin(), ::tolower);
+                    std::string file_base = std::filesystem::path(file_lower).filename().string();
+
+                    if (file_base == key) {
+                        mip0_bnk_path = bnk_path;
+                        mip0_idx = (int)i;
+                        break;
+                    }
+                }
+            } catch (...) {}
+
+            if (mip0_idx != -1) break;
+        }
+    }
+
+    std::string body_bnk_path;
+    int body_idx = -1;
+
+    for (const auto& bnk_path : S.bnk_paths) {
+        std::string fname = std::filesystem::path(bnk_path).filename().string();
+        std::string fname_lower = fname;
+        std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
+
+        if (fname_lower.find("texture") != std::string::npos &&
+            fname_lower.find("header") == std::string::npos &&
+            fname_lower.find("1024mip0") == std::string::npos) {
+            try {
+                BNKReader reader(bnk_path);
+                for (size_t i = 0; i < reader.list_files().size(); ++i) {
+                    std::string file_lower = reader.list_files()[i].name;
+                    std::transform(file_lower.begin(), file_lower.end(), file_lower.begin(), ::tolower);
+                    std::string file_base = std::filesystem::path(file_lower).filename().string();
+
+                    if (file_base == key) {
+                        body_bnk_path = bnk_path;
+                        body_idx = (int)i;
+                        break;
+                    }
+                }
+            } catch (...) {}
+
+            if (body_idx != -1) break;
+        }
+    }
+
+    auto tmpdir = std::filesystem::temp_directory_path() / "f2_tex_rebuild";
+    std::error_code ec;
+    std::filesystem::create_directories(tmpdir, ec);
+
+    auto tmp_h = tmpdir / ("h_" + std::to_string(std::hash<std::string>{}(tex_name)) + ".bin");
+    auto tmp_m = tmpdir / ("m_" + std::to_string(std::hash<std::string>{}(tex_name)) + ".bin");
+    auto tmp_b = tmpdir / ("b_" + std::to_string(std::hash<std::string>{}(tex_name)) + ".bin");
+
+    try {
+        extract_one(header_bnk_path, header_idx, tmp_h.string());
+        auto vh = read_all_bytes(tmp_h);
+
+        if (vh.empty()) {
+            std::filesystem::remove(tmp_h, ec);
+            return false;
+        }
+
+        std::vector<unsigned char> vm;
+        bool has_mip0 = false;
+        if (mip0_idx != -1) {
+            extract_one(mip0_bnk_path, mip0_idx, tmp_m.string());
+            vm = read_all_bytes(tmp_m);
+            has_mip0 = !vm.empty();
+        }
+
+        std::vector<unsigned char> vb;
+        bool has_body = false;
+        if (body_idx != -1) {
+            extract_one(body_bnk_path, body_idx, tmp_b.string());
+            vb = read_all_bytes(tmp_b);
+            has_body = !vb.empty();
+        }
+
+        out.clear();
+        out.reserve(vh.size() + vm.size() + vb.size());
+        out.insert(out.end(), vh.begin(), vh.end());
+
+        if (has_mip0) {
+            out.insert(out.end(), vm.begin(), vm.end());
+        }
+
+        if (has_body) {
+            out.insert(out.end(), vb.begin(), vb.end());
+        }
+
+        std::filesystem::remove(tmp_h, ec);
+        if (has_mip0) std::filesystem::remove(tmp_m, ec);
+        if (has_body) std::filesystem::remove(tmp_b, ec);
+
+        return !out.empty();
+
+    } catch (...) {
+        std::filesystem::remove(tmp_h, ec);
+        std::filesystem::remove(tmp_m, ec);
+        std::filesystem::remove(tmp_b, ec);
         return false;
     }
 }

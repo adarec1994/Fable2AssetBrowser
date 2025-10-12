@@ -127,6 +127,8 @@ void draw_left_panel() {
 
                             extract_one(p, (int)i, tmp_nested.string());
 
+                            S.selected_nested_temp_path = tmp_nested.string();  // ADD THIS LINE
+
                             BNKReader nested_reader(tmp_nested.string());
                             const auto& nested_files = nested_reader.list_files();
                             S.files.reserve(nested_files.size());
@@ -584,10 +586,7 @@ void draw_right_panel(ID3D11Device* device) {
             bool ok = false;
             try {
                 if (can_tex) {
-                    ok = build_tex_buffer_for_name(name, buf);
-                    if (!ok) {
-                        ok = build_gui_tex_buffer_for_name(name, buf);
-                    }
+                    ok = build_any_tex_buffer_for_name(name, buf);
                 } else if (can_mdl) {
                     ok = build_mdl_buffer_for_name(name, buf);
                 }

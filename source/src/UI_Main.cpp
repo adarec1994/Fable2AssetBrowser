@@ -19,6 +19,7 @@ void refresh_file_table() { S.selected_file_index = -1; }
 
 void pick_bnk(const std::string &path) {
     S.selected_bnk = path;
+    S.selected_nested_temp_path.clear();
     S.files.clear();
     S.file_filter.clear();
     BNKReader reader(path);

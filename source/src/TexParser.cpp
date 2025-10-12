@@ -232,3 +232,96 @@ bool build_tex_buffer_for_name(const std::string &tex_name, std::vector<unsigned
         return false;
     }
 }
+
+bool build_gui_tex_buffer_for_name(const std::string &tex_name, std::vector<unsigned char> &out) {
+    std::vector<std::string> all_headers, all_bodies;
+    for (const auto& path : S.bnk_paths) {
+        std::string fname = std::filesystem::path(path).filename().string();
+        std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+        if (fname == "gui_texture_headers.bnk") {
+            all_headers.push_back(path);
+        } else if (fname == "gui_textures.bnk") {
+            all_bodies.push_back(path);
+        }
+    }
+
+    if (all_headers.empty() || all_bodies.empty()) {
+        return false;
+    }
+
+    std::string key = tex_name;
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+
+    int header_idx = -1;
+    std::string found_header_bnk;
+    for (const auto& header_path : all_headers) {
+        BNKReader r_headers(header_path);
+        for (size_t i = 0; i < r_headers.list_files().size(); ++i) {
+            auto &e = r_headers.list_files()[i];
+            std::string fname_lower = e.name;
+            std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
+            if (fname_lower == key) {
+                header_idx = (int)i;
+                found_header_bnk = header_path;
+                break;
+            }
+        }
+        if (header_idx != -1) break;
+    }
+
+    int body_idx = -1;
+    std::string found_body_bnk;
+    for (const auto& body_path : all_bodies) {
+        BNKReader r_rest(body_path);
+        for (size_t i = 0; i < r_rest.list_files().size(); ++i) {
+            auto &e = r_rest.list_files()[i];
+            std::string fname_lower = e.name;
+            std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
+            if (fname_lower == key) {
+                body_idx = (int)i;
+                found_body_bnk = body_path;
+                break;
+            }
+        }
+        if (body_idx != -1) break;
+    }
+
+    if (header_idx == -1 || body_idx == -1) {
+        return false;
+    }
+
+    auto tmpdir = std::filesystem::temp_directory_path() / "f2_tex_hex";
+    std::error_code ec;
+    std::filesystem::create_directories(tmpdir, ec);
+
+    auto tmp_h = tmpdir / ("gui_h_" + std::to_string(std::hash<std::string>{}(tex_name)) + ".bin");
+    auto tmp_r = tmpdir / ("gui_r_" + std::to_string(std::hash<std::string>{}(tex_name)) + ".bin");
+
+    try {
+        extract_one(found_header_bnk, header_idx, tmp_h.string());
+        extract_one(found_body_bnk, body_idx, tmp_r.string());
+
+        auto vh = read_all_bytes(tmp_h);
+        auto vr = read_all_bytes(tmp_r);
+
+        if (vh.empty() || vr.empty()) {
+            std::filesystem::remove(tmp_h, ec);
+            std::filesystem::remove(tmp_r, ec);
+            return false;
+        }
+
+        out.clear();
+        out.reserve(vh.size() + vr.size());
+        out.insert(out.end(), vh.begin(), vh.end());
+        out.insert(out.end(), vr.begin(), vr.end());
+
+        std::filesystem::remove(tmp_h, ec);
+        std::filesystem::remove(tmp_r, ec);
+
+        return true;
+    } catch (...) {
+        std::filesystem::remove(tmp_h, ec);
+        std::filesystem::remove(tmp_r, ec);
+        return false;
+    }
+}

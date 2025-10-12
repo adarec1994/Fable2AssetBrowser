@@ -32,7 +32,8 @@ bool is_texture_bnk_selected() {
     if (S.selected_bnk.empty()) return false;
     std::string b = std::filesystem::path(S.selected_bnk).filename().string();
     std::transform(b.begin(), b.end(), b.begin(), ::tolower);
-    return b == "globals_texture_headers.bnk" || b == "1024mip0_textures.bnk" || b == "globals_textures.bnk";
+    return b == "globals_texture_headers.bnk" || b == "1024mip0_textures.bnk" || b == "globals_textures.bnk" ||
+           b == "gui_texture_headers.bnk" || b == "gui_textures.bnk";
 }
 
 std::vector<std::string> filtered_bnk_paths() {
@@ -87,3 +88,4 @@ std::optional<std::string> find_bnk_by_filename(const std::string &fname_lower) 
     }
     return std::nullopt;
 }
+

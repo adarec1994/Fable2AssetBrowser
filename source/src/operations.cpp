@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <optional>
+#include "HexView.h"
 
 void extract_file_one(const std::string &bnk_path, const BNKItemUI &item, const std::string &base_out_dir,
                              bool convert_audio) {
@@ -848,6 +849,108 @@ void on_rebuild_and_extract_global_mdl(const std::vector<GlobalHit>& hits) {
         progress_done();
         if (!S.cancel_requested)
             show_completion_box(std::string("Model rebuild complete.\n\nOutput folder:\n") + std::filesystem::absolute(out_root).string());
+        S.cancel_requested = false;
+    }).detach();
+}
+
+// operations.cpp - Add these functions at the end of the file
+void on_extract_adb_selected() {
+    int idx = S.selected_file_index;
+    if (idx < 0 || idx >= (int)S.files.size()) {
+        show_error_box("No file selected.");
+        return;
+    }
+    if (!S.viewing_adb) {
+        show_error_box("Not viewing Audio Database.");
+        return;
+    }
+
+    auto item = S.files[(size_t)idx];
+    auto base_out = (std::filesystem::current_path() / "extracted" / "audio_database").string();
+
+    progress_open(1, "Extracting ADB...");
+    progress_update(0, 1, item.name);
+
+    std::thread([item, base_out]() {
+        if (!S.cancel_requested && !S.exiting) {
+            try {
+                std::filesystem::create_directories(base_out);
+                auto entries = decompress_adb(item.name);
+
+                for (const auto& entry : entries) {
+                    auto output_path = std::filesystem::path(base_out) / entry.name;
+                    std::ofstream out(output_path, std::ios::binary);
+                    out.write((char*)entry.data.data(), entry.data.size());
+                }
+            } catch (...) {}
+        }
+        progress_update(1, 1, item.name);
+        progress_done();
+        if (!S.cancel_requested) show_completion_box(
+            std::string("ADB extraction complete.\n\nOutput folder:\n") + std::filesystem::absolute(base_out).string());
+        S.cancel_requested = false;
+    }).detach();
+}
+
+void on_extract_all_adb() {
+    if (!S.viewing_adb) {
+        show_error_box("Not viewing Audio Database.");
+        return;
+    }
+    if (S.files.empty()) {
+        show_error_box("No ADB files to extract.");
+        return;
+    }
+
+    auto base_out = (std::filesystem::current_path() / "extracted" / "audio_database").string();
+    int total = (int)S.files.size();
+    progress_open(total, "Extracting ADB files...");
+    progress_update(0, total, "Starting...");
+
+    std::thread([base_out, total]() {
+        std::atomic<int> extracted{0};
+        std::mutex fail_m;
+        std::vector<std::string> failed;
+
+        auto work = [&](const BNKItemUI &it) {
+            if (S.cancel_requested || S.exiting) return;
+            try {
+                std::filesystem::create_directories(base_out);
+                auto entries = decompress_adb(it.name);
+
+                for (const auto& entry : entries) {
+                    auto output_path = std::filesystem::path(base_out) / entry.name;
+                    std::ofstream out(output_path, std::ios::binary);
+                    out.write((char*)entry.data.data(), entry.data.size());
+                }
+            } catch (...) {
+                std::lock_guard<std::mutex> lk(fail_m);
+                failed.push_back(it.name);
+            }
+            int cur = ++extracted;
+            progress_update(cur, total, std::filesystem::path(it.name).filename().string());
+        };
+
+        if (!S.cancel_requested) {
+            std::vector<std::thread> pool;
+            int n = std::min(4, std::max(1, (int)std::thread::hardware_concurrency() / 2));
+            std::atomic<size_t> i{0};
+            for (int t = 0; t < n; ++t) pool.emplace_back([&]() {
+                for (;;) {
+                    size_t k = i.fetch_add(1);
+                    if (k >= S.files.size()) break;
+                    work(S.files[k]);
+                }
+            });
+            for (auto &th: pool) th.join();
+        }
+
+        progress_done();
+        std::string msg = std::string("ADB extraction complete.\n\nOutput folder:\n") + std::filesystem::absolute(base_out).string();
+        if (!failed.empty()) {
+            msg += std::string("\nFailed: ") + std::to_string((int)failed.size());
+        }
+        show_completion_box(msg);
         S.cancel_requested = false;
     }).detach();
 }

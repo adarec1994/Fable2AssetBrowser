@@ -36,6 +36,7 @@ void draw_left_panel() {
     auto paths = filtered_bnk_paths();
 
     if (!S.adb_paths.empty()) {
+        ImGui::PushID("adb_entry");
         bool selected = S.viewing_adb;
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.4f, 1.0f));
         if (ImGui::Selectable("Audio Database", selected, ImGuiSelectableFlags_SpanAllColumns)) {
@@ -59,9 +60,12 @@ void draw_left_panel() {
             ImGui::Text("Audio Database Files (%d)", (int)S.adb_paths.size());
             ImGui::EndTooltip();
         }
+        ImGui::PopID();
     }
 
-    for (auto &p: paths) {
+    for (size_t idx = 0; idx < paths.size(); ++idx) {
+        auto &p = paths[idx];
+        ImGui::PushID((int)idx);
         std::string label = std::filesystem::path(p).filename().string();
         bool selected = (p == S.selected_bnk && !S.viewing_adb);
         if (ImGui::Selectable(label.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
@@ -74,6 +78,7 @@ void draw_left_panel() {
             ImGui::TextUnformatted(p.c_str());
             ImGui::EndTooltip();
         }
+        ImGui::PopID();
     }
     ImGui::EndChild();
     ImGui::EndChild();
@@ -99,6 +104,7 @@ void draw_file_table() {
         while (clipper.Step()) {
             for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r) {
                 int i = vis[r];
+                ImGui::PushID(i);
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 bool selected = (i == S.selected_file_index);
@@ -112,6 +118,7 @@ void draw_file_table() {
                 }
                 ImGui::TableSetColumnIndex(1);
                 ImGui::Text("%u", S.files[i].size);
+                ImGui::PopID();
             }
         }
         clipper.End();
@@ -155,13 +162,14 @@ void draw_global_results_table() {
                 int i = vis[r];
                 const auto& hit = g_global_hits[i];
 
+                ImGui::PushID(i);
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
 
                 bool selected = (i == g_selected_global);
                 std::string base = std::filesystem::path(hit.file_name).filename().string();
 
-                if (ImGui::Selectable((base + "##globalrow" + std::to_string(i)).c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+                if (ImGui::Selectable(base.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
                     g_selected_global = i;
                     S.viewing_adb = false;
                     pick_bnk(hit.bnk_path);
@@ -191,6 +199,7 @@ void draw_global_results_table() {
 
                 ImGui::TableSetColumnIndex(2);
                 ImGui::Text("%u", hit.size);
+                ImGui::PopID();
             }
         }
         clipper.End();
@@ -404,6 +413,34 @@ void draw_right_panel(ID3D11Device* device) {
                 }
             }
         }
+    } else {
+        if (ImGui::Button("Extract All Uncompressed")) {
+            ImGui::OpenPopup("progress_win");
+            on_extract_all_adb();
+        }
+        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted("Extract all ADB files uncompressed to /extracted/audio_database/");
+            ImGui::EndTooltip();
+        }
+
+        ImGui::SameLine();
+        bool has_selection = (S.selected_file_index >= 0 && S.selected_file_index < (int)S.files.size());
+        if (!has_selection) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button("Extract Uncompressed")) {
+            ImGui::OpenPopup("progress_win");
+            on_extract_adb_selected();
+        }
+        if (!S.hide_tooltips && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted("Extract selected ADB file uncompressed");
+            ImGui::EndTooltip();
+        }
+        if (!has_selection) {
+            ImGui::EndDisabled();
+        }
     }
 
     ImGui::EndGroup();
@@ -419,16 +456,23 @@ void draw_right_panel(ID3D11Device* device) {
         ImGui::OpenPopup("progress_win");
         if (S.viewing_adb) {
             auto item = S.files[(size_t)S.selected_file_index];
-            progress_open(0, "Loading hex view...");
+            progress_open(0, "Decompressing ADB...");
             std::thread([item]() {
-                auto buf = read_all_bytes(item.name);
-                if (!buf.empty()) {
-                    S.hex_data = buf;
-                    S.hex_title = std::filesystem::path(item.name).filename().string();
+                auto entries = decompress_adb(item.name);
+                if (!entries.empty() && !entries[0].data.empty()) {
+                    S.hex_data = entries[0].data;
+                    S.hex_title = "Hex Editor - " + std::filesystem::path(item.name).filename().string() + " (decompressed)";
                     S.hex_open = true;
+                    memset(&S.hex_state, 0, sizeof(S.hex_state));
+                    S.hex_state.Bytes = (void*)S.hex_data.data();
+                    S.hex_state.MaxBytes = (int)S.hex_data.size();
+                    S.hex_state.ReadOnly = true;
+                    S.hex_state.ShowAscii = true;
+                    S.hex_state.ShowAddress = true;
+                    S.hex_state.BytesPerLine = 16;
                 }
                 progress_done();
-                if (buf.empty()) show_error_box("Failed to load file.");
+                if (entries.empty() || entries[0].data.empty()) show_error_box("Failed to decompress ADB file.");
             }).detach();
         } else {
             open_hex_for_selected();
@@ -466,6 +510,9 @@ void draw_right_panel(ID3D11Device* device) {
             try {
                 if (can_tex) {
                     ok = build_tex_buffer_for_name(name, buf);
+                    if (!ok) {
+                        ok = build_gui_tex_buffer_for_name(name, buf);
+                    }
                 } else if (can_mdl) {
                     ok = build_mdl_buffer_for_name(name, buf);
                 }

@@ -569,7 +569,6 @@ static bool build_mesh_textures(ID3D11Device* dev,
     return true;
 }
 
-
 bool MP_Init(ID3D11Device* dev, ModelPreview& mp, int w, int h){
     return create_target(dev, mp, w, h);
 }
@@ -647,7 +646,6 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     }
     return true;
 }
-
 
 void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, float dist){
     ID3D11DeviceContext* ctx=nullptr; dev->GetImmediateContext(&ctx); if(!ctx) return;

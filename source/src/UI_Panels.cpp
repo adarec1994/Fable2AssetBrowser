@@ -579,9 +579,43 @@ void draw_right_panel(ID3D11Device* device) {
         auto item = S.files[(size_t)S.selected_file_index];
         auto name = item.name;
 
+        // Determine which BNK to use
+        std::string bnk_to_use;
+        std::string nested_temp_copy;
+
+        if (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty()) {
+            auto tmpdir = std::filesystem::temp_directory_path() / "f2_preview";
+            std::error_code ec;
+            std::filesystem::create_directories(tmpdir, ec);
+
+            auto unique_temp = tmpdir / ("nested_" + std::to_string(std::hash<std::string>{}(S.selected_nested_temp_path + std::to_string(std::time(nullptr)))) + ".bnk");
+
+            try {
+                if (!std::filesystem::exists(S.selected_nested_temp_path)) {
+                    show_error_box("Nested BNK source file does not exist");
+                    goto skip_preview;
+                }
+
+                std::filesystem::copy_file(S.selected_nested_temp_path, unique_temp,
+                                          std::filesystem::copy_options::overwrite_existing, ec);
+                if (!ec) {
+                    nested_temp_copy = unique_temp.string();
+                    bnk_to_use = nested_temp_copy;
+                } else {
+                    show_error_box("Failed to copy nested BNK: " + ec.message());
+                    goto skip_preview;
+                }
+            } catch (const std::exception& e) {
+                show_error_box(std::string("Exception copying nested BNK: ") + e.what());
+                goto skip_preview;
+            }
+        } else {
+            bnk_to_use = S.selected_bnk;
+        }
+
         progress_open(0, "Loading preview...");
 
-        std::thread([device, item, name, can_tex, can_mdl]() {
+        std::thread([device, item, name, can_tex, can_mdl, bnk_to_use, nested_temp_copy]() {
             std::vector<unsigned char> buf;
             bool ok = false;
             try {
@@ -592,16 +626,30 @@ void draw_right_panel(ID3D11Device* device) {
                 }
 
                 if (!ok) {
-                    auto tmpdir = std::filesystem::temp_directory_path() / "f2_hex_view";
+                    auto tmpdir = std::filesystem::temp_directory_path() / "f2_preview";
                     std::error_code ec;
                     std::filesystem::create_directories(tmpdir, ec);
-                    auto tmp_file = tmpdir / ("hex_" + std::to_string(std::hash<std::string>{}(name)) + ".bin");
-                    extract_one(S.selected_bnk, item.index, tmp_file.string());
-                    buf = read_all_bytes(tmp_file);
-                    ok = !buf.empty();
-                    std::filesystem::remove(tmp_file, ec);
+                    auto tmp_file = tmpdir / ("preview_" + std::to_string(std::hash<std::string>{}(name + std::to_string(std::time(nullptr)))) + ".bin");
+
+                    try {
+                        extract_one(bnk_to_use, item.index, tmp_file.string());
+                        buf = read_all_bytes(tmp_file);
+                        ok = !buf.empty();
+                        std::filesystem::remove(tmp_file, ec);
+                    } catch (...) {
+                        std::filesystem::remove(tmp_file, ec);
+                        throw;
+                    }
                 }
-            } catch (...) { ok = false; }
+            } catch (...) {
+                ok = false;
+            }
+
+            // Clean up nested temp copy
+            if (!nested_temp_copy.empty()) {
+                std::error_code ec;
+                std::filesystem::remove(nested_temp_copy, ec);
+            }
 
             if (ok) {
                 S.hex_data = buf;
@@ -645,6 +693,8 @@ void draw_right_panel(ID3D11Device* device) {
             progress_done();
             if (!ok) show_error_box("Failed to load preview.");
         }).detach();
+
+        skip_preview:;
     }
     if (!can_preview) {
         ImGui::EndDisabled();

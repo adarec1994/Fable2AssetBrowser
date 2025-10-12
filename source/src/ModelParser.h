@@ -32,6 +32,7 @@ struct MDLMeshBufferInfo {
     uint32_t FaceCount = 0;
     size_t   FaceOffset = 0;
     uint32_t SubMeshCount = 0;
+    bool     IsAltPath = false;
 };
 
 struct MDLInfo {

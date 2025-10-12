@@ -15,6 +15,8 @@
 #include <optional>
 #include "HexView.h"
 
+
+
 void extract_file_one(const std::string &bnk_path, const BNKItemUI &item, const std::string &base_out_dir,
                              bool convert_audio) {
     std::filesystem::create_directories(base_out_dir);
@@ -30,7 +32,15 @@ void on_extract_selected_raw() {
         show_error_box("No file selected.");
         return;
     }
-    if (S.selected_bnk.empty()) {
+
+    std::string bnk_to_use;
+    if (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty()) {
+        bnk_to_use = S.selected_nested_temp_path;
+    } else {
+        bnk_to_use = S.selected_bnk;
+    }
+
+    if (bnk_to_use.empty()) {
         show_error_box("No BNK selected.");
         return;
     }
@@ -38,9 +48,9 @@ void on_extract_selected_raw() {
     auto base_out = (std::filesystem::current_path() / "extracted").string();
     progress_open(1, "Extracting File...");
     progress_update(0, 1, item.name);
-    std::thread([item,base_out]() {
+    std::thread([item,base_out,bnk_to_use]() {
         if (!S.cancel_requested && !S.exiting) {
-            try { extract_file_one(S.selected_bnk, item, base_out, false); } catch (...) {
+            try { extract_file_one(bnk_to_use, item, base_out, false); } catch (...) {
             }
         }
         progress_update(1, 1, item.name);
@@ -83,7 +93,14 @@ void on_extract_selected_wav() {
 }
 
 void on_dump_all_raw() {
-    if (S.selected_bnk.empty()) {
+    std::string bnk_to_use;
+    if (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty()) {
+        bnk_to_use = S.selected_nested_temp_path;
+    } else {
+        bnk_to_use = S.selected_bnk;
+    }
+
+    if (bnk_to_use.empty()) {
         show_error_box("No BNK selected.");
         return;
     }
@@ -95,13 +112,13 @@ void on_dump_all_raw() {
     int total = (int) S.files.size();
     progress_open(total, "Dumping...");
     progress_update(0, total, "Starting...");
-    std::thread([base_out,total]() {
+    std::thread([base_out,total,bnk_to_use]() {
         std::atomic<int> dumped{0};
         std::mutex fail_m;
         std::vector<std::string> failed;
         auto work = [&](const BNKItemUI &it) {
             if (S.cancel_requested || S.exiting) return;
-            try { extract_file_one(S.selected_bnk, it, base_out, false); } catch (...) {
+            try { extract_file_one(bnk_to_use, it, base_out, false); } catch (...) {
                 std::lock_guard<std::mutex> lk(fail_m);
                 failed.push_back(it.name);
             }

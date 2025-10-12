@@ -19,7 +19,11 @@
 #include <fstream>
 #include <cstring>
 #include <zlib.h>
-#include <filesystem>
+#include <ctime>
+#include <mutex>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
 
 static ModelPreview g_mp;
 
@@ -122,6 +126,20 @@ std::vector<ADBEntry> decompress_adb(const std::string& path) {
     return result;
 }
 
+static std::mutex g_debug_mutex;
+
+static void debug_log(const std::string& msg) {
+    std::lock_guard<std::mutex> lock(g_debug_mutex);
+    std::ofstream f("hex_debug.txt", std::ios::app);
+    if (f) {
+        auto now = std::chrono::system_clock::now();
+        auto time = std::chrono::system_clock::to_time_t(now);
+        std::stringstream ss;
+        ss << std::put_time(std::localtime(&time), "%Y-%m-%d %H:%M:%S");
+        f << "[" << ss.str() << "] " << msg << std::endl;
+    }
+}
+
 void open_hex_for_selected() {
     int idx = S.selected_file_index;
     if (idx < 0 || idx >= (int) S.files.size()) {
@@ -130,8 +148,34 @@ void open_hex_for_selected() {
     }
 
     std::string bnk_to_use;
+    std::string nested_temp_copy;
+
     if (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty()) {
-        bnk_to_use = S.selected_nested_temp_path;
+        auto tmpdir = std::filesystem::temp_directory_path() / "f2_hex_view";
+        std::error_code ec;
+        std::filesystem::create_directories(tmpdir, ec);
+
+        auto unique_temp = tmpdir / ("nested_" + std::to_string(std::hash<std::string>{}(S.selected_nested_temp_path + std::to_string(std::time(nullptr)))) + ".bnk");
+
+        try {
+            if (!std::filesystem::exists(S.selected_nested_temp_path)) {
+                show_error_box("Nested BNK source file does not exist");
+                return;
+            }
+
+            std::filesystem::copy_file(S.selected_nested_temp_path, unique_temp,
+                                      std::filesystem::copy_options::overwrite_existing, ec);
+            if (!ec) {
+                nested_temp_copy = unique_temp.string();
+                bnk_to_use = nested_temp_copy;
+            } else {
+                show_error_box("Failed to copy nested BNK: " + ec.message());
+                return;
+            }
+        } catch (const std::exception& e) {
+            show_error_box(std::string("Exception copying nested BNK: ") + e.what());
+            return;
+        }
     } else {
         bnk_to_use = S.selected_bnk;
     }
@@ -150,9 +194,11 @@ void open_hex_for_selected() {
 
     progress_open(0, "Loading hex.");
     S.hex_loading.store(true);
-    std::thread([item, name, want_tex, want_mdl, bnk_to_use]() {
+
+    std::thread([item, name, want_tex, want_mdl, bnk_to_use, nested_temp_copy]() {
         std::vector<unsigned char> buf;
         bool ok = false;
+
         try {
             if (want_tex) {
                 ok = build_any_tex_buffer_for_name(name, buf);
@@ -164,13 +210,28 @@ void open_hex_for_selected() {
                 auto tmpdir = std::filesystem::temp_directory_path() / "f2_hex_view";
                 std::error_code ec;
                 std::filesystem::create_directories(tmpdir, ec);
-                auto tmp_file = tmpdir / ("hex_" + std::to_string(std::hash<std::string>{}(name)) + ".bin");
-                extract_one(bnk_to_use, item.index, tmp_file.string());
-                buf = read_all_bytes(tmp_file);
-                ok = !buf.empty();
-                std::filesystem::remove(tmp_file, ec);
+                auto tmp_file = tmpdir / ("hex_" + std::to_string(std::hash<std::string>{}(name + std::to_string(std::time(nullptr)))) + ".bin");
+
+                try {
+                    extract_one(bnk_to_use, item.index, tmp_file.string());
+                    buf = read_all_bytes(tmp_file);
+                    ok = !buf.empty();
+                    std::filesystem::remove(tmp_file, ec);
+                } catch (...) {
+                    std::error_code ec2;
+                    std::filesystem::remove(tmp_file, ec2);
+                    throw;
+                }
             }
-        } catch (...) { ok = false; }
+        } catch (...) {
+            ok = false;
+        }
+
+        if (!nested_temp_copy.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(nested_temp_copy, ec);
+        }
+
         S.hex_data.clear();
         if (ok) S.hex_data.swap(buf);
         S.hex_title = std::string("Hex Editor - ") + name;
@@ -201,6 +262,7 @@ void draw_hex_window(ID3D11Device *device) {
         static ImGuiHexEditorState hex{};
         unsigned char* bytes_ptr = S.hex_data.data();
         int max_bytes = (int)std::min<size_t>(S.hex_data.size(), (size_t)INT_MAX);
+
         if(hex.Bytes != bytes_ptr || hex.MaxBytes != max_bytes){
             hex = ImGuiHexEditorState{};
             hex.Bytes        = (void*)bytes_ptr;
@@ -228,6 +290,7 @@ void draw_hex_window(ID3D11Device *device) {
 
         static int cached_sel_index = -1;
         bool has_sel = (S.selected_file_index>=0 && S.selected_file_index<(int)S.files.size());
+
         if(has_sel){
             if(cached_sel_index != S.selected_file_index){
                 reset_preview_resources();

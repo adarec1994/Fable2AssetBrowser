@@ -115,8 +115,7 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
 
     out.Magic.assign((const char*)r.p, 8);
 
-    bool has_magic = (out.Magic.size() >= 4 &&
-                      (out.Magic[0] == 'M' || out.Magic[0] == 'S' || out.Magic[0] == 'R'));
+    bool has_magic = (out.Magic == "MeshFile");
 
     if(has_magic) {
         r.i += 8;
@@ -126,7 +125,7 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
         if(!r.skip(88)) return false;
         if(!r.skip(8*4)) return false;
     } else {
-        r.i = 0;
+        r.i = 136;
         out.Magic.clear();
     }
 

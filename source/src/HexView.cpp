@@ -393,29 +393,6 @@ void draw_hex_window(ID3D11Device *device) {
                     ImGui::Text("Unk6Count: %u", S.mdl_info.Unk6Count);
                     ImGui::Text("MeshCount: %u", S.mdl_info.MeshCount);
 
-                    if(ImGui::Button("Preview")){
-                        progress_open(0, "Loading model preview...");
-
-                        std::thread([device]() {
-                            if(!S.mdl_info_ok){
-                                S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info);
-                            }
-
-                            if(S.mdl_info_ok){
-                                S.mdl_meshes.clear();
-                                parse_mdl_geometry(S.hex_data, S.mdl_info, S.mdl_meshes);
-                                MP_Release(g_mp);
-                                MP_Init(device, g_mp, 800, 520);
-                                MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
-                                S.cam_yaw = 0.0f; S.cam_pitch = 0.2f; S.cam_dist = 3.0f;
-                                S.show_model_preview = true;
-                            }
-
-                            progress_done();
-                            if(!S.mdl_info_ok) show_error_box("Failed to parse model data.");
-                        }).detach();
-                    }
-
                     if(!S.mdl_info.Bones.empty()){
                         ImGui::Dummy(ImVec2(0,6));
                         ImGui::Text("Bones");

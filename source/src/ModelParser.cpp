@@ -219,15 +219,23 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
     for(uint32_t mi=0; mi<out.MeshCount; ++mi){
         if(mi > 0 && wasStringFound){
             bool found = false;
-            for(size_t searchPos = r.i; searchPos + 4 <= r.n; ++searchPos){
-                uint32_t marker = (uint32_t(r.p[searchPos])<<24) | (uint32_t(r.p[searchPos+1])<<16) |
-                                 (uint32_t(r.p[searchPos+2])<<8) | r.p[searchPos+3];
-
-                if(marker == 0xFFFFFFFF){
-                    if(searchPos >= 24){
-                        r.i = searchPos - 24;
-                        found = true;
-                        break;
+            for(size_t searchPos = r.i; searchPos < r.n; ++searchPos){
+                uint8_t nextByte = r.p[searchPos];
+                if(nextByte >= 32 && nextByte < 127){
+                    r.i = searchPos;
+                    std::string optStr;
+                    if(r.strz(optStr)){
+                        uint8_t followByte = 0;
+                        if(r.u8(followByte)){
+                            if(followByte == 0x01) {
+                                if(!r.skip(8)) return false;
+                                found = true;
+                                break;
+                            } else {
+                                r.i = searchPos + 1;
+                                continue;
+                            }
+                        }
                     }
                 }
             }
@@ -245,12 +253,10 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
             if(!r.u32be(vtx)) return false;
 
             bool markerFound = false;
-            size_t submeshStart = 0;
             for(size_t searchPos = r.i; searchPos + 4 <= r.n && searchPos < r.i + 1000; ++searchPos){
                 uint32_t marker = (uint32_t(r.p[searchPos])<<24) | (uint32_t(r.p[searchPos+1])<<16) |
                                  (uint32_t(r.p[searchPos+2])<<8) | r.p[searchPos+3];
                 if(marker == 0xFFFFFFFF){
-                    submeshStart = searchPos;
                     r.i = searchPos;
                     markerFound = true;
                     break;
@@ -259,13 +265,17 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
 
             if(!markerFound) return false;
 
-            uint32_t S1; uint8_t S2; uint32_t S3a,S3b,S3c; float F4[6];
-            if(!r.u32be(S1)) return false;
-            if(!r.u8(S2)) return false;
-            if(!r.u32be(S3a)) return false;
-            if(!r.u32be(S3b)) return false;
-            if(!r.u32be(S3c)) return false;
-            for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
+            if(!r.skip(41)) return false;
+
+            while(r.i + 4 <= r.n){
+                uint32_t check = (uint32_t(r.p[r.i])<<24) | (uint32_t(r.p[r.i+1])<<16) |
+                                (uint32_t(r.p[r.i+2])<<8) | r.p[r.i+3];
+                if(check == 0xFFFFFFFF){
+                    if(!r.skip(41)) return false;
+                } else {
+                    break;
+                }
+            }
 
             size_t vert_off=0, face_off=0;
             if(vtx>0 && vtx<65535u){
@@ -277,10 +287,6 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
                 face_off=r.i;
                 size_t fsz=(size_t)tlen*2;
                 if(!r.skip(fsz)) return false;
-            }
-            if(vtx>0 && vtx<65535u){
-                size_t usz=(size_t)vtx*16;
-                if(!r.skip(usz)) return false;
             }
 
             MDLMeshBufferInfo mb;

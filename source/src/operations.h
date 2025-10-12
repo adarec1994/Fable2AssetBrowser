@@ -25,3 +25,6 @@ void on_rebuild_and_extract_global_tex(const std::vector<GlobalHit>& hits);
 void on_rebuild_and_extract_global_mdl(const std::vector<GlobalHit>& hits);
 void on_extract_adb_selected();
 void on_extract_all_adb();
+void on_export_mdl_to_glb();
+void on_export_all_mdl_to_glb();
+void on_export_global_mdl_to_glb(const std::vector<GlobalHit>& hits);

@@ -96,8 +96,8 @@ struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
 float3 hemiAmbient(float3 n) {
     // simple hemisphere ambient: up sky vs. ground
     float up = saturate(n.y*0.5 + 0.5);
-    float3 sky    = float3(0.55, 0.65, 0.80);
-    float3 ground = float3(0.20, 0.20, 0.22);
+    float3 sky    = float3(0.65, 0.67, 0.70);
+    float3 ground = float3(0.25, 0.24, 0.23);
     return lerp(ground, sky, up);
 }
 
@@ -120,7 +120,7 @@ float4 PS(VSOUT i) : SV_Target {
 
     float ndotl = saturate(dot(N, L));
     float3 amb  = hemiAmbient(N) * params.x;          // ambientK (params.x)
-    float3 diff = albedo * (0.4 * ndotl);             // a little diffuse
+    float3 diff = albedo * (0.6 * ndotl);             // increased diffuse contribution
     float3 V    = normalize(float3(0,0,1));           // fake view dir
     float3 H    = normalize(L + V);
     float  s    = pow(saturate(dot(N, H)), params.y); // spec power (params.y)
@@ -691,7 +691,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, floa
     XMStoreFloat4x4(&cb.mvp, MVP);
     XMStoreFloat4x4(&cb.mv,  MV);
     cb.lightDir = XMFLOAT4(-0.4f, 0.85f, 0.45f, 0.0f);   // a bit steeper light
-    cb.params   = XMFLOAT4(0.55f, 48.0f, 0.0f, 0.0f);    // ambientK, specPower
+    cb.params   = XMFLOAT4(0.4f, 48.0f, 0.0f, 0.0f);    // ambientK, specPower
 
     D3D11_MAPPED_SUBRESOURCE ms{};
     if(SUCCEEDED(ctx->Map(mp.cbuffer,0,D3D11_MAP_WRITE_DISCARD,0,&ms))){

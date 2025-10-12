@@ -14,8 +14,7 @@
 #include <algorithm>
 #include <optional>
 #include "HexView.h"
-
-
+#include "mdl_converter.h"
 
 void extract_file_one(const std::string &bnk_path, const BNKItemUI &item, const std::string &base_out_dir,
                              bool convert_audio) {
@@ -964,6 +963,218 @@ void on_extract_all_adb() {
 
         progress_done();
         std::string msg = std::string("ADB extraction complete.\n\nOutput folder:\n") + std::filesystem::absolute(base_out).string();
+        if (!failed.empty()) {
+            msg += std::string("\nFailed: ") + std::to_string((int)failed.size());
+        }
+        show_completion_box(msg);
+        S.cancel_requested = false;
+    }).detach();
+}
+
+void on_export_mdl_to_glb() {
+    int idx = S.selected_file_index;
+    if (idx < 0 || idx >= (int)S.files.size()) {
+        show_error_box("No file selected.");
+        return;
+    }
+
+    auto item = S.files[(size_t)idx];
+    std::string name = item.name;
+    std::string name_lower = name;
+    std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+
+    if (name_lower.size() < 4 || name_lower.substr(name_lower.size() - 4) != ".mdl") {
+        show_error_box("Selected file is not .mdl");
+        return;
+    }
+
+    auto base_out = (std::filesystem::current_path() / "exported_glb").string();
+    progress_open(1, "Exporting GLB...");
+    progress_update(0, 1, name);
+
+    std::thread([item, name, base_out]() {
+        if (!S.cancel_requested && !S.exiting) {
+            try {
+                std::vector<unsigned char> mdl_buf;
+                if (!build_mdl_buffer_for_name(name, mdl_buf)) {
+                    progress_done();
+                    show_error_box("Failed to build MDL buffer");
+                    return;
+                }
+
+                std::string out_name = std::filesystem::path(name).stem().string() + ".glb";
+                auto out_path = std::filesystem::path(base_out) / out_name;
+                std::filesystem::create_directories(out_path.parent_path());
+
+                std::string err;
+                if (!mdl_to_glb_full(mdl_buf, out_path.string(), err)) {
+                    progress_done();
+                    show_error_box("GLB export failed: " + err);
+                    return;
+                }
+            } catch (...) {
+                progress_done();
+                show_error_box("Exception during export");
+                return;
+            }
+        }
+        progress_update(1, 1, name);
+        progress_done();
+        if (!S.cancel_requested) {
+            show_completion_box(
+                std::string("GLB export complete.\n\nOutput folder:\n") +
+                std::filesystem::absolute(base_out).string());
+        }
+        S.cancel_requested = false;
+    }).detach();
+}
+
+void on_export_all_mdl_to_glb() {
+    std::vector<BNKItemUI> mdl_files;
+    for (auto &f: S.files) {
+        std::string name_lower = f.name;
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+        if (name_lower.size() >= 4 && name_lower.substr(name_lower.size() - 4) == ".mdl") {
+            mdl_files.push_back(f);
+        }
+    }
+
+    if (mdl_files.empty()) {
+        show_error_box("No .mdl files in this BNK.");
+        return;
+    }
+
+    auto base_out = (std::filesystem::current_path() / "exported_glb").string();
+    int total = (int)mdl_files.size();
+    progress_open(total, "Exporting GLBs...");
+    progress_update(0, total, "Starting...");
+
+    std::thread([mdl_files, base_out, total]() {
+        std::atomic<int> done{0};
+        std::mutex fail_m;
+        std::vector<std::string> failed;
+
+        auto work = [&](const BNKItemUI &it) {
+            if (S.cancel_requested || S.exiting) return;
+            try {
+                std::vector<unsigned char> mdl_buf;
+                if (!build_mdl_buffer_for_name(it.name, mdl_buf)) {
+                    std::lock_guard<std::mutex> lk(fail_m);
+                    failed.push_back(it.name);
+                    return;
+                }
+
+                std::string out_name = std::filesystem::path(it.name).stem().string() + ".glb";
+                auto out_path = std::filesystem::path(base_out) / out_name;
+                std::filesystem::create_directories(out_path.parent_path());
+
+                std::string err;
+                if (!mdl_to_glb_full(mdl_buf, out_path.string(), err)) {
+                    std::lock_guard<std::mutex> lk(fail_m);
+                    failed.push_back(it.name);
+                }
+            } catch (...) {
+                std::lock_guard<std::mutex> lk(fail_m);
+                failed.push_back(it.name);
+            }
+            int cur = ++done;
+            progress_update(cur, total, std::filesystem::path(it.name).filename().string());
+        };
+
+        if (!S.cancel_requested) {
+            std::vector<std::thread> pool;
+            int n = std::min(4, std::max(1, (int)std::thread::hardware_concurrency() / 2));
+            std::atomic<size_t> i{0};
+            for (int t = 0; t < n; ++t) pool.emplace_back([&]() {
+                for (;;) {
+                    size_t k = i.fetch_add(1);
+                    if (k >= mdl_files.size()) break;
+                    work(mdl_files[k]);
+                }
+            });
+            for (auto &th: pool) th.join();
+        }
+
+        progress_done();
+        std::string msg = std::string("GLB export complete.\n\nOutput folder:\n") +
+                         std::filesystem::absolute(base_out).string();
+        if (!failed.empty()) {
+            msg += std::string("\nFailed: ") + std::to_string((int)failed.size());
+        }
+        show_completion_box(msg);
+        S.cancel_requested = false;
+    }).detach();
+}
+
+void on_export_global_mdl_to_glb(const std::vector<GlobalHit>& hits) {
+    std::vector<GlobalHit> mdl_files;
+    for (auto &h: hits) {
+        std::string name_lower = h.file_name;
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+        if (name_lower.size() >= 4 && name_lower.substr(name_lower.size() - 4) == ".mdl") {
+            mdl_files.push_back(h);
+        }
+    }
+
+    if (mdl_files.empty()) {
+        show_error_box("No .mdl files in filtered results.");
+        return;
+    }
+
+    auto base_out = (std::filesystem::current_path() / "exported_glb").string();
+    int total = (int)mdl_files.size();
+    progress_open(total, "Exporting GLBs...");
+    progress_update(0, total, "Starting...");
+
+    std::thread([mdl_files, base_out, total]() {
+        std::atomic<int> done{0};
+        std::mutex fail_m;
+        std::vector<std::string> failed;
+
+        auto work = [&](const GlobalHit &h) {
+            if (S.cancel_requested || S.exiting) return;
+            try {
+                std::vector<unsigned char> mdl_buf;
+                if (!build_mdl_buffer_for_name(h.file_name, mdl_buf)) {
+                    std::lock_guard<std::mutex> lk(fail_m);
+                    failed.push_back(h.file_name);
+                    return;
+                }
+
+                std::string out_name = std::filesystem::path(h.file_name).stem().string() + ".glb";
+                auto out_path = std::filesystem::path(base_out) / out_name;
+                std::filesystem::create_directories(out_path.parent_path());
+
+                std::string err;
+                if (!mdl_to_glb_full(mdl_buf, out_path.string(), err)) {
+                    std::lock_guard<std::mutex> lk(fail_m);
+                    failed.push_back(h.file_name);
+                }
+            } catch (...) {
+                std::lock_guard<std::mutex> lk(fail_m);
+                failed.push_back(h.file_name);
+            }
+            int cur = ++done;
+            progress_update(cur, total, std::filesystem::path(h.file_name).filename().string());
+        };
+
+        if (!S.cancel_requested) {
+            std::vector<std::thread> pool;
+            int n = std::min(4, std::max(1, (int)std::thread::hardware_concurrency() / 2));
+            std::atomic<size_t> i{0};
+            for (int t = 0; t < n; ++t) pool.emplace_back([&]() {
+                for (;;) {
+                    size_t k = i.fetch_add(1);
+                    if (k >= mdl_files.size()) break;
+                    work(mdl_files[k]);
+                }
+            });
+            for (auto &th: pool) th.join();
+        }
+
+        progress_done();
+        std::string msg = std::string("GLB export complete.\n\nOutput folder:\n") +
+                         std::filesystem::absolute(base_out).string();
         if (!failed.empty()) {
             msg += std::string("\nFailed: ") + std::to_string((int)failed.size());
         }

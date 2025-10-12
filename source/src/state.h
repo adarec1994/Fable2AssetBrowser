@@ -3,6 +3,7 @@
 #include <vector>
 #include <atomic>
 #include <mutex>
+#include <set>
 #include <d3d11.h>
 #include "imgui_hex.h"
 #include "ModelParser.h"
@@ -54,6 +55,9 @@ struct State {
     std::vector<std::string> adb_paths;
     std::string bnk_filter;
     std::string selected_bnk;
+    std::string selected_nested_bnk;
+    std::set<std::string> expanded_bnks;
+    int selected_nested_index = -1;
     bool viewing_adb = false;
     std::vector<BNKItemUI> files;
     int selected_file_index = -1;

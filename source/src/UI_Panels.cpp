@@ -66,11 +66,31 @@ void draw_left_panel() {
     for (size_t idx = 0; idx < paths.size(); ++idx) {
         auto &p = paths[idx];
         ImGui::PushID((int)idx);
+
         std::string label = std::filesystem::path(p).filename().string();
-        bool selected = (p == S.selected_bnk && !S.viewing_adb);
+        std::string label_lower = label;
+        std::transform(label_lower.begin(), label_lower.end(), label_lower.begin(), ::tolower);
+
+        bool is_nested_bnk = (label_lower == "levels.bnk" || label_lower == "streaming.bnk");
+        bool is_expanded = S.expanded_bnks.count(p) > 0;
+
+        if (is_nested_bnk) {
+            label = (is_expanded ? "- " : "+ ") + label;
+        }
+
+        bool selected = (p == S.selected_bnk && !S.viewing_adb && S.selected_nested_index == -1);
         if (ImGui::Selectable(label.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+            if (is_nested_bnk) {
+                if (is_expanded) {
+                    S.expanded_bnks.erase(p);
+                } else {
+                    S.expanded_bnks.insert(p);
+                }
+            }
             S.viewing_adb = false;
             S.global_search.clear();
+            S.selected_nested_bnk.clear();
+            S.selected_nested_index = -1;
             pick_bnk(p);
         }
         if (!S.hide_tooltips && ImGui::IsItemHovered()) {
@@ -78,6 +98,61 @@ void draw_left_panel() {
             ImGui::TextUnformatted(p.c_str());
             ImGui::EndTooltip();
         }
+
+        if (is_nested_bnk && is_expanded) {
+            try {
+                BNKReader reader(p);
+                const auto& files = reader.list_files();
+                for (size_t i = 0; i < files.size(); ++i) {
+                    const auto& file = files[i];
+                    std::string fname_lower = file.name;
+                    std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
+                    if (fname_lower.size() >= 4 && fname_lower.substr(fname_lower.size() - 4) == ".bnk") {
+                        ImGui::PushID((int)i + 100000);
+                        std::string nested_label = "    " + std::filesystem::path(file.name).filename().string();
+                        bool nested_selected = (S.selected_nested_bnk == p && S.selected_nested_index == (int)i);
+                        if (ImGui::Selectable(nested_label.c_str(), nested_selected, ImGuiSelectableFlags_SpanAllColumns)) {
+                            S.viewing_adb = false;
+                            S.selected_bnk = p;
+                            S.selected_nested_bnk = p;
+                            S.selected_nested_index = (int)i;
+                            S.global_search.clear();
+                            S.files.clear();
+                            S.selected_file_index = -1;
+
+                            auto tmpdir = std::filesystem::temp_directory_path() / "f2_nested_bnk";
+                            std::error_code ec;
+                            std::filesystem::create_directories(tmpdir, ec);
+                            auto tmp_nested = tmpdir / (std::to_string(std::hash<std::string>{}(file.name)) + ".bnk");
+
+                            extract_one(p, (int)i, tmp_nested.string());
+
+                            BNKReader nested_reader(tmp_nested.string());
+                            const auto& nested_files = nested_reader.list_files();
+                            S.files.reserve(nested_files.size());
+                            for (size_t j = 0; j < nested_files.size(); ++j) {
+                                S.files.push_back({(int)j, nested_files[j].name, nested_files[j].uncompressed_size});
+                            }
+
+                            std::sort(S.files.begin(), S.files.end(), [](const BNKItemUI &a, const BNKItemUI &b) {
+                                std::string x = std::filesystem::path(a.name).filename().string();
+                                std::string y = std::filesystem::path(b.name).filename().string();
+                                std::transform(x.begin(), x.end(), x.begin(), ::tolower);
+                                std::transform(y.begin(), y.end(), y.begin(), ::tolower);
+                                return x < y;
+                            });
+                        }
+                        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                            ImGui::BeginTooltip();
+                            ImGui::TextUnformatted(file.name.c_str());
+                            ImGui::EndTooltip();
+                        }
+                        ImGui::PopID();
+                    }
+                }
+            } catch (...) {}
+        }
+
         ImGui::PopID();
     }
     ImGui::EndChild();

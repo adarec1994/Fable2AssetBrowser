@@ -424,25 +424,32 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
             g.normals[v*3+1]=1.0f;
             g.normals[v*3+2]=0.0f;
 
-            if(!mb.IsAltPath && vertex_stride >= 28){
-                uint8_t b0 = p[12];
-                uint8_t b1 = p[13];
-                uint8_t b2 = p[14];
-                uint8_t b3 = p[15];
-                uint8_t w0 = p[16];
-                uint8_t w1 = p[17];
-                uint8_t w2 = p[18];
-                uint8_t w3 = p[19];
+            if(!mb.IsAltPath && vertex_stride >= 20){
+                uint8_t bone_idx = p[15];
+                uint8_t weight_val = p[19];
 
-                g.bone_ids[v*4+0] = b0;
-                g.bone_ids[v*4+1] = b1;
-                g.bone_ids[v*4+2] = b2;
-                g.bone_ids[v*4+3] = b3;
+                if(bone_idx < 255){
+                    g.bone_ids[v*4+0] = bone_idx;
+                    g.bone_ids[v*4+1] = 0;
+                    g.bone_ids[v*4+2] = 0;
+                    g.bone_ids[v*4+3] = 0;
 
-                g.bone_weights[v*4+0] = w0 / 255.0f;
-                g.bone_weights[v*4+1] = w1 / 255.0f;
-                g.bone_weights[v*4+2] = w2 / 255.0f;
-                g.bone_weights[v*4+3] = w3 / 255.0f;
+                    float w = (weight_val > 0) ? (weight_val / 255.0f) : 1.0f;
+                    g.bone_weights[v*4+0] = w;
+                    g.bone_weights[v*4+1] = 0.0f;
+                    g.bone_weights[v*4+2] = 0.0f;
+                    g.bone_weights[v*4+3] = 0.0f;
+                } else {
+                    g.bone_ids[v*4+0] = 0;
+                    g.bone_ids[v*4+1] = 0;
+                    g.bone_ids[v*4+2] = 0;
+                    g.bone_ids[v*4+3] = 0;
+
+                    g.bone_weights[v*4+0] = 1.0f;
+                    g.bone_weights[v*4+1] = 0.0f;
+                    g.bone_weights[v*4+2] = 0.0f;
+                    g.bone_weights[v*4+3] = 0.0f;
+                }
             } else {
                 g.bone_ids[v*4+0] = 0;
                 g.bone_ids[v*4+1] = 0;

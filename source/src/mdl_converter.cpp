@@ -1,3 +1,4 @@
+// mdl_converter.cpp
 #include "mdl_converter.h"
 #include "ModelParser.h"
 #include "TexParser.h"
@@ -32,6 +33,110 @@ static inline std::string json_escape(const std::string& s){
     }
     return o;
 }
+
+struct Matrix4 {
+    float m[16];
+    
+    Matrix4() {
+        for(int i=0;i<16;++i) m[i]=0.0f;
+        m[0]=m[5]=m[10]=m[15]=1.0f;
+    }
+    
+    static Matrix4 fromTRS(float qx, float qy, float qz, float qw,
+                           float tx, float ty, float tz,
+                           float sx, float sy, float sz) {
+        Matrix4 mat;
+        float x2 = qx + qx, y2 = qy + qy, z2 = qz + qz;
+        float xx = qx * x2, yy = qy * y2, zz = qz * z2;
+        float xy = qx * y2, xz = qx * z2, yz = qy * z2;
+        float wx = qw * x2, wy = qw * y2, wz = qw * z2;
+        
+        mat.m[0] = (1.0f - (yy + zz)) * sx;
+        mat.m[1] = (xy + wz) * sx;
+        mat.m[2] = (xz - wy) * sx;
+        mat.m[3] = 0.0f;
+        
+        mat.m[4] = (xy - wz) * sy;
+        mat.m[5] = (1.0f - (xx + zz)) * sy;
+        mat.m[6] = (yz + wx) * sy;
+        mat.m[7] = 0.0f;
+        
+        mat.m[8] = (xz + wy) * sz;
+        mat.m[9] = (yz - wx) * sz;
+        mat.m[10] = (1.0f - (xx + yy)) * sz;
+        mat.m[11] = 0.0f;
+        
+        mat.m[12] = tx;
+        mat.m[13] = ty;
+        mat.m[14] = tz;
+        mat.m[15] = 1.0f;
+        
+        return mat;
+    }
+    
+    Matrix4 operator*(const Matrix4& other) const {
+        Matrix4 result;
+        for(int c=0; c<4; ++c) {
+            for(int r=0; r<4; ++r) {
+                result.m[c*4+r] = 
+                    m[0*4+r] * other.m[c*4+0] +
+                    m[1*4+r] * other.m[c*4+1] +
+                    m[2*4+r] * other.m[c*4+2] +
+                    m[3*4+r] * other.m[c*4+3];
+            }
+        }
+        return result;
+    }
+    
+    Matrix4 inverse() const {
+        float r0[3] = {m[0], m[1], m[2]};
+        float r1[3] = {m[4], m[5], m[6]};
+        float r2[3] = {m[8], m[9], m[10]};
+        float t[3] = {m[12], m[13], m[14]};
+        
+        float a=r0[0], b=r0[1], c=r0[2];
+        float d=r1[0], e=r1[1], f=r1[2];
+        float g=r2[0], h=r2[1], i=r2[2];
+        
+        float A = e*i - f*h;
+        float B = -(d*i - f*g);
+        float C = d*h - e*g;
+        float det = a*A + b*B + c*C;
+        
+        if(std::abs(det) < 1e-8f) {
+            Matrix4 result;
+            result.m[12] = -t[0];
+            result.m[13] = -t[1];
+            result.m[14] = -t[2];
+            return result;
+        }
+        
+        float invdet = 1.0f / det;
+        Matrix4 result;
+        
+        result.m[0] = A * invdet;
+        result.m[1] = (c*h - b*i) * invdet;
+        result.m[2] = (b*f - c*e) * invdet;
+        result.m[3] = 0.0f;
+        
+        result.m[4] = B * invdet;
+        result.m[5] = (a*i - c*g) * invdet;
+        result.m[6] = (c*d - a*f) * invdet;
+        result.m[7] = 0.0f;
+        
+        result.m[8] = C * invdet;
+        result.m[9] = (b*g - a*h) * invdet;
+        result.m[10] = (a*e - b*d) * invdet;
+        result.m[11] = 0.0f;
+        
+        result.m[12] = -(result.m[0]*t[0] + result.m[4]*t[1] + result.m[8]*t[2]);
+        result.m[13] = -(result.m[1]*t[0] + result.m[5]*t[1] + result.m[9]*t[2]);
+        result.m[14] = -(result.m[2]*t[0] + result.m[6]*t[1] + result.m[10]*t[2]);
+        result.m[15] = 1.0f;
+        
+        return result;
+    }
+};
 
 static inline uint8_t ex5(uint16_t v){ return (uint8_t)((v<<3)|(v>>2)); }
 static inline uint8_t ex6(uint16_t v){ return (uint8_t)((v<<2)|(v>>4)); }
@@ -375,7 +480,6 @@ static bool decode_texture_to_png(const std::vector<unsigned char>& tex_buf, std
 
     return true;
 }
-
 }
 
 bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
@@ -460,6 +564,7 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
 
     std::vector<std::vector<int>> bone_children(valid_bones.size());
     std::vector<int> scene_root_bone_nodes;
+    std::vector<int> node_parents(valid_bones.size(), -1);
 
     for (size_t i = 0; i < valid_bones.size(); ++i) {
         int parent_orig = valid_bones[i].parent_original;
@@ -467,10 +572,39 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
             int parent_node = original_to_node[parent_orig];
             if (parent_node >= 0 && parent_node != valid_bones[i].node_index) {
                 bone_children[parent_node].push_back(valid_bones[i].node_index);
+                node_parents[valid_bones[i].node_index] = parent_node;
                 continue;
             }
         }
         scene_root_bone_nodes.push_back(valid_bones[i].node_index);
+    }
+
+    std::vector<Matrix4> local_transforms(valid_bones.size());
+    for (size_t i = 0; i < valid_bones.size(); ++i) {
+        if (!valid_bones[i].transform.empty() && valid_bones[i].transform.size() >= 10) {
+            const auto& tf = valid_bones[i].transform;
+            local_transforms[i] = Matrix4::fromTRS(
+                tf[0], tf[1], tf[2], tf[3],
+                tf[4], tf[5], tf[6],
+                tf[7], tf[8], tf[9]
+            );
+        }
+    }
+
+    std::vector<Matrix4> global_transforms(valid_bones.size());
+    for (size_t i = 0; i < valid_bones.size(); ++i) {
+        std::vector<int> chain;
+        int cur = i;
+        while (cur >= 0) {
+            chain.push_back(cur);
+            cur = node_parents[cur];
+        }
+
+        Matrix4 m;
+        for (int j = (int)chain.size() - 1; j >= 0; --j) {
+            m = m * local_transforms[chain[j]];
+        }
+        global_transforms[i] = m;
     }
 
     for (size_t i = 0; i < valid_bones.size(); ++i) {
@@ -505,8 +639,11 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
     int ibm_acc = -1;
     if (!valid_bones.empty()) {
         std::vector<float> ibm_data;
-        for (size_t i = 0; i < joint_indices.size(); ++i) {
-            ibm_data.insert(ibm_data.end(), {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1});
+        for (size_t i = 0; i < valid_bones.size(); ++i) {
+            Matrix4 inv = global_transforms[i].inverse();
+            for(int j=0; j<16; ++j) {
+                ibm_data.push_back(inv.m[j]);
+            }
         }
 
         size_t ibm_offset = add_data(ibm_data.data(), ibm_data.size() * sizeof(float));
@@ -527,35 +664,35 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
 
         size_t vcount = geom.positions.size() / 3;
 
-        std::vector<float> positions_xzy;
-        positions_xzy.reserve(geom.positions.size());
+        std::vector<float> positions_xyz;
+        positions_xyz.reserve(geom.positions.size());
         for (size_t i = 0; i < vcount; ++i) {
-            positions_xzy.push_back(geom.positions[i*3+0]);
-            positions_xzy.push_back(geom.positions[i*3+2]);
-            positions_xzy.push_back(geom.positions[i*3+1]);
+            positions_xyz.push_back(geom.positions[i*3+0]);
+            positions_xyz.push_back(geom.positions[i*3+1]);
+            positions_xyz.push_back(geom.positions[i*3+2]);
         }
 
-        std::vector<float> normals_xzy;
-        normals_xzy.reserve(geom.normals.size());
+        std::vector<float> normals_xyz;
+        normals_xyz.reserve(geom.normals.size());
         for (size_t i = 0; i < vcount; ++i) {
-            normals_xzy.push_back(geom.normals[i*3+0]);
-            normals_xzy.push_back(geom.normals[i*3+2]);
-            normals_xzy.push_back(geom.normals[i*3+1]);
+            normals_xyz.push_back(geom.normals[i*3+0]);
+            normals_xyz.push_back(geom.normals[i*3+1]);
+            normals_xyz.push_back(geom.normals[i*3+2]);
         }
 
         float pos_min[3] = {1e9f, 1e9f, 1e9f};
         float pos_max[3] = {-1e9f, -1e9f, -1e9f};
         for (size_t i = 0; i < vcount; ++i) {
             for (int j = 0; j < 3; ++j) {
-                float v = positions_xzy[i*3+j];
+                float v = positions_xyz[i*3+j];
                 if (v < pos_min[j]) pos_min[j] = v;
                 if (v > pos_max[j]) pos_max[j] = v;
             }
         }
 
-        size_t pos_offset = add_data(positions_xzy.data(), positions_xzy.size() * sizeof(float));
+        size_t pos_offset = add_data(positions_xyz.data(), positions_xyz.size() * sizeof(float));
         if (bv_count > 0) bufferViews << ",";
-        bufferViews << "{\"buffer\":0,\"byteOffset\":" << pos_offset << ",\"byteLength\":" << (positions_xzy.size() * sizeof(float)) << ",\"target\":34962}";
+        bufferViews << "{\"buffer\":0,\"byteOffset\":" << pos_offset << ",\"byteLength\":" << (positions_xyz.size() * sizeof(float)) << ",\"target\":34962}";
         int pos_bv = bv_count++;
 
         if (acc_count > 0) accessors << ",";
@@ -564,9 +701,9 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
         accessors << ",\"max\":[" << pos_max[0] << "," << pos_max[1] << "," << pos_max[2] << "]}";
         int pos_acc = acc_count++;
 
-        size_t norm_offset = add_data(normals_xzy.data(), normals_xzy.size() * sizeof(float));
+        size_t norm_offset = add_data(normals_xyz.data(), normals_xyz.size() * sizeof(float));
         if (bv_count > 0) bufferViews << ",";
-        bufferViews << "{\"buffer\":0,\"byteOffset\":" << norm_offset << ",\"byteLength\":" << (normals_xzy.size() * sizeof(float)) << ",\"target\":34962}";
+        bufferViews << "{\"buffer\":0,\"byteOffset\":" << norm_offset << ",\"byteLength\":" << (normals_xyz.size() * sizeof(float)) << ",\"target\":34962}";
         int norm_bv = bv_count++;
 
         if (acc_count > 0) accessors << ",";
@@ -581,6 +718,43 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
         if (acc_count > 0) accessors << ",";
         accessors << "{\"bufferView\":" << uv_bv << ",\"componentType\":5126,\"count\":" << (geom.uvs.size()/2) << ",\"type\":\"VEC2\"}";
         int uv_acc = acc_count++;
+
+        int joints_acc = -1;
+        int weights_acc = -1;
+
+        if (!geom.bone_ids.empty() && !geom.bone_weights.empty() && !valid_bones.empty()) {
+            std::vector<uint16_t> remapped_joints;
+            remapped_joints.reserve(geom.bone_ids.size());
+
+            for (size_t i = 0; i < geom.bone_ids.size(); ++i) {
+                uint16_t orig_bone = geom.bone_ids[i];
+                int node_idx = (orig_bone < original_to_node.size()) ? original_to_node[orig_bone] : -1;
+
+                if (node_idx >= 0) {
+                    remapped_joints.push_back((uint16_t)node_idx);
+                } else {
+                    remapped_joints.push_back(0);
+                }
+            }
+
+            size_t joints_offset = add_data(remapped_joints.data(), remapped_joints.size() * sizeof(uint16_t));
+            if (bv_count > 0) bufferViews << ",";
+            bufferViews << "{\"buffer\":0,\"byteOffset\":" << joints_offset << ",\"byteLength\":" << (remapped_joints.size() * sizeof(uint16_t)) << ",\"target\":34962}";
+            int joints_bv = bv_count++;
+
+            if (acc_count > 0) accessors << ",";
+            accessors << "{\"bufferView\":" << joints_bv << ",\"componentType\":5123,\"count\":" << (remapped_joints.size()/4) << ",\"type\":\"VEC4\"}";
+            joints_acc = acc_count++;
+
+            size_t weights_offset = add_data(geom.bone_weights.data(), geom.bone_weights.size() * sizeof(float));
+            if (bv_count > 0) bufferViews << ",";
+            bufferViews << "{\"buffer\":0,\"byteOffset\":" << weights_offset << ",\"byteLength\":" << (geom.bone_weights.size() * sizeof(float)) << ",\"target\":34962}";
+            int weights_bv = bv_count++;
+
+            if (acc_count > 0) accessors << ",";
+            accessors << "{\"bufferView\":" << weights_bv << ",\"componentType\":5126,\"count\":" << (geom.bone_weights.size()/4) << ",\"type\":\"VEC4\"}";
+            weights_acc = acc_count++;
+        }
 
         size_t idx_offset = add_data(geom.indices.data(), geom.indices.size() * sizeof(uint32_t));
         if (bv_count > 0) bufferViews << ",";
@@ -652,6 +826,12 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
         meshes << "\"POSITION\":" << pos_acc << ",";
         meshes << "\"NORMAL\":" << norm_acc << ",";
         meshes << "\"TEXCOORD_0\":" << uv_acc;
+
+        if (joints_acc >= 0 && weights_acc >= 0) {
+            meshes << ",\"JOINTS_0\":" << joints_acc;
+            meshes << ",\"WEIGHTS_0\":" << weights_acc;
+        }
+
         meshes << "},";
         meshes << "\"indices\":" << idx_acc;
         if (mat_idx >= 0) {
@@ -662,24 +842,22 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
     }
 
     int first_mesh_node = bone_node_count;
+
+    int root_wrapper_node = bone_node_count + mesh_count;
+    std::vector<int> wrapper_children = scene_root_bone_nodes;
     for (int i = 0; i < mesh_count; ++i) {
-        scene_root_bone_nodes.push_back(first_mesh_node + i);
+        wrapper_children.push_back(first_mesh_node + i);
     }
 
     json << "{";
     json << "\"asset\":{\"version\":\"2.0\",\"generator\":\"fable2_exporter\"},";
     json << "\"scene\":0,";
-    json << "\"scenes\":[{\"nodes\":[";
-    for (size_t i = 0; i < scene_root_bone_nodes.size(); ++i) {
-        if (i > 0) json << ",";
-        json << scene_root_bone_nodes[i];
-    }
-    json << "]}],";
+    json << "\"scenes\":[{\"nodes\":[" << root_wrapper_node << "]}],";
 
     json << "\"nodes\":[";
     if (!bone_nodes.str().empty()) {
         json << bone_nodes.str();
-        if (mesh_count > 0) json << ",";
+        json << ",";
     }
     for (int i = 0; i < mesh_count; ++i) {
         if (i > 0) json << ",";
@@ -689,6 +867,12 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
         }
         json << "}";
     }
+    json << ",{\"name\":\"Root\",\"rotation\":[-0.7071068,0,0,0.7071068],\"children\":[";
+    for (size_t i = 0; i < wrapper_children.size(); ++i) {
+        if (i > 0) json << ",";
+        json << wrapper_children[i];
+    }
+    json << "]}";
     json << "],";
 
     json << "\"meshes\":[" << meshes.str() << "],";

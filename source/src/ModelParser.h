@@ -41,6 +41,7 @@ struct MDLInfo {
     uint32_t BoneCount = 0;
     uint32_t BoneTransformCount = 0;
     std::vector<MDLBoneInfo> Bones;
+    std::vector<std::vector<float>> BoneTransforms;
     bool HasBoneTransforms = false;
     uint32_t Unk6Count = 0;
     uint32_t MeshCount = 0;
@@ -53,6 +54,8 @@ struct MDLMeshGeom {
     std::vector<float> normals;
     std::vector<float> uvs;
     std::vector<uint32_t> indices;
+    std::vector<uint16_t> bone_ids;
+    std::vector<float> bone_weights;
     std::string diffuse_tex_name;
 };
 

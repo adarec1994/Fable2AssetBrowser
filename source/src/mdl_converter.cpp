@@ -411,6 +411,7 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
     std::ostringstream textures;
     std::ostringstream materials;
     std::ostringstream meshes;
+    std::ostringstream bone_nodes;
 
     int bv_count = 0;
     int acc_count = 0;
@@ -426,6 +427,99 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
         while (bin_data.size() & 3) bin_data.push_back(0);
         return offset;
     };
+
+    struct ValidBone {
+        int original_index;
+        int node_index;
+        std::string name;
+        int parent_original;
+        std::vector<float> transform;
+    };
+
+    std::vector<ValidBone> valid_bones;
+    std::vector<int> original_to_node(info.BoneCount, -1);
+    int bone_node_count = 0;
+
+    for (size_t i = 0; i < info.Bones.size(); ++i) {
+        const auto& bone = info.Bones[i];
+        if (bone.Name.find("Rig_Asset") != std::string::npos) continue;
+
+        ValidBone vb;
+        vb.original_index = (int)i;
+        vb.node_index = bone_node_count++;
+        vb.name = bone.Name;
+        vb.parent_original = bone.ParentID;
+
+        if (i < info.BoneTransforms.size() && info.BoneTransforms[i].size() >= 10) {
+            vb.transform = info.BoneTransforms[i];
+        }
+
+        original_to_node[i] = vb.node_index;
+        valid_bones.push_back(vb);
+    }
+
+    std::vector<std::vector<int>> bone_children(valid_bones.size());
+    std::vector<int> scene_root_bone_nodes;
+
+    for (size_t i = 0; i < valid_bones.size(); ++i) {
+        int parent_orig = valid_bones[i].parent_original;
+        if (parent_orig >= 0 && parent_orig < (int)original_to_node.size()) {
+            int parent_node = original_to_node[parent_orig];
+            if (parent_node >= 0 && parent_node != valid_bones[i].node_index) {
+                bone_children[parent_node].push_back(valid_bones[i].node_index);
+                continue;
+            }
+        }
+        scene_root_bone_nodes.push_back(valid_bones[i].node_index);
+    }
+
+    for (size_t i = 0; i < valid_bones.size(); ++i) {
+        if (i > 0) bone_nodes << ",";
+        bone_nodes << "{\"name\":\"" << json_escape(valid_bones[i].name) << "\"";
+
+        if (!bone_children[i].empty()) {
+            bone_nodes << ",\"children\":[";
+            for (size_t j = 0; j < bone_children[i].size(); ++j) {
+                if (j > 0) bone_nodes << ",";
+                bone_nodes << bone_children[i][j];
+            }
+            bone_nodes << "]";
+        }
+
+        if (!valid_bones[i].transform.empty() && valid_bones[i].transform.size() >= 10) {
+            const auto& tf = valid_bones[i].transform;
+            bone_nodes << ",\"rotation\":[" << tf[0] << "," << tf[1] << "," << tf[2] << "," << tf[3] << "]";
+            bone_nodes << ",\"translation\":[" << tf[4] << "," << tf[5] << "," << tf[6] << "]";
+            bone_nodes << ",\"scale\":[" << tf[7] << "," << tf[8] << "," << tf[9] << "]";
+        }
+
+        bone_nodes << "}";
+    }
+
+    std::vector<int> joint_indices;
+    for (const auto& vb : valid_bones) {
+        joint_indices.push_back(vb.node_index);
+    }
+
+    int skin_idx = -1;
+    int ibm_acc = -1;
+    if (!valid_bones.empty()) {
+        std::vector<float> ibm_data;
+        for (size_t i = 0; i < joint_indices.size(); ++i) {
+            ibm_data.insert(ibm_data.end(), {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1});
+        }
+
+        size_t ibm_offset = add_data(ibm_data.data(), ibm_data.size() * sizeof(float));
+        if (bv_count > 0) bufferViews << ",";
+        bufferViews << "{\"buffer\":0,\"byteOffset\":" << ibm_offset << ",\"byteLength\":" << (ibm_data.size() * sizeof(float)) << "}";
+        int ibm_bv = bv_count++;
+
+        if (acc_count > 0) accessors << ",";
+        accessors << "{\"bufferView\":" << ibm_bv << ",\"componentType\":5126,\"count\":" << joint_indices.size() << ",\"type\":\"MAT4\"}";
+        ibm_acc = acc_count++;
+
+        skin_idx = 0;
+    }
 
     for (size_t gi = 0; gi < geoms.size(); ++gi) {
         const auto& geom = geoms[gi];
@@ -567,19 +661,33 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
         mesh_count++;
     }
 
+    int first_mesh_node = bone_node_count;
+    for (int i = 0; i < mesh_count; ++i) {
+        scene_root_bone_nodes.push_back(first_mesh_node + i);
+    }
+
     json << "{";
     json << "\"asset\":{\"version\":\"2.0\",\"generator\":\"fable2_exporter\"},";
     json << "\"scene\":0,";
-    json << "\"scenes\":[{\"nodes\":[0]}],";
-    json << "\"nodes\":[{\"name\":\"" << json_escape(model_name) << "\",\"children\":[";
-    for (int i = 0; i < mesh_count; ++i) {
-        if (i) json << ",";
-        json << (i+1);
+    json << "\"scenes\":[{\"nodes\":[";
+    for (size_t i = 0; i < scene_root_bone_nodes.size(); ++i) {
+        if (i > 0) json << ",";
+        json << scene_root_bone_nodes[i];
     }
-    json << "]}";
+    json << "]}],";
 
+    json << "\"nodes\":[";
+    if (!bone_nodes.str().empty()) {
+        json << bone_nodes.str();
+        if (mesh_count > 0) json << ",";
+    }
     for (int i = 0; i < mesh_count; ++i) {
-        json << ",{\"mesh\":" << i << "}";
+        if (i > 0) json << ",";
+        json << "{\"mesh\":" << i;
+        if (skin_idx >= 0) {
+            json << ",\"skin\":" << skin_idx;
+        }
+        json << "}";
     }
     json << "],";
 
@@ -595,6 +703,16 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
 
     if (mat_count > 0) {
         json << ",\"materials\":[" << materials.str() << "]";
+    }
+
+    if (skin_idx >= 0 && ibm_acc >= 0) {
+        json << ",\"skins\":[{\"inverseBindMatrices\":" << ibm_acc;
+        json << ",\"joints\":[";
+        for (size_t i = 0; i < joint_indices.size(); ++i) {
+            if (i > 0) json << ",";
+            json << joint_indices[i];
+        }
+        json << "]}]";
     }
 
     json << "}";

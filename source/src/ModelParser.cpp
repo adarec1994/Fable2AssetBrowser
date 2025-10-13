@@ -140,8 +140,14 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
     }
 
     if(!r.u32be(out.BoneTransformCount)) return false;
+    out.BoneTransforms.clear();
     if(out.BoneTransformCount==out.BoneCount && out.BoneCount>0){
-        for(uint32_t i=0;i<out.BoneTransformCount;i++){ float v; for(int k=0;k<11;k++) if(!r.f32be(v)) return false; }
+        out.BoneTransforms.reserve(out.BoneTransformCount);
+        for(uint32_t i=0;i<out.BoneTransformCount;i++){
+            std::vector<float> tf(11);
+            for(int k=0;k<11;k++) if(!r.f32be(tf[k])) return false;
+            out.BoneTransforms.push_back(std::move(tf));
+        }
         out.HasBoneTransforms=true;
     }else{
         uint32_t m=out.BoneTransformCount; if(m>65535u) m=65535u;
@@ -401,6 +407,8 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
         g.positions.resize((size_t)mb.VertexCount*3);
         g.normals.resize((size_t)mb.VertexCount*3);
         g.uvs.resize((size_t)mb.VertexCount*2);
+        g.bone_ids.resize((size_t)mb.VertexCount*4);
+        g.bone_weights.resize((size_t)mb.VertexCount*4);
 
         const uint8_t* vp=r.p+mb.VertexOffset;
         for(uint32_t v=0; v<mb.VertexCount; ++v){
@@ -415,6 +423,37 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
             g.normals[v*3+0]=0.0f;
             g.normals[v*3+1]=1.0f;
             g.normals[v*3+2]=0.0f;
+
+            if(!mb.IsAltPath && vertex_stride >= 28){
+                uint8_t b0 = p[12];
+                uint8_t b1 = p[13];
+                uint8_t b2 = p[14];
+                uint8_t b3 = p[15];
+                uint8_t w0 = p[16];
+                uint8_t w1 = p[17];
+                uint8_t w2 = p[18];
+                uint8_t w3 = p[19];
+
+                g.bone_ids[v*4+0] = b0;
+                g.bone_ids[v*4+1] = b1;
+                g.bone_ids[v*4+2] = b2;
+                g.bone_ids[v*4+3] = b3;
+
+                g.bone_weights[v*4+0] = w0 / 255.0f;
+                g.bone_weights[v*4+1] = w1 / 255.0f;
+                g.bone_weights[v*4+2] = w2 / 255.0f;
+                g.bone_weights[v*4+3] = w3 / 255.0f;
+            } else {
+                g.bone_ids[v*4+0] = 0;
+                g.bone_ids[v*4+1] = 0;
+                g.bone_ids[v*4+2] = 0;
+                g.bone_ids[v*4+3] = 0;
+
+                g.bone_weights[v*4+0] = 1.0f;
+                g.bone_weights[v*4+1] = 0.0f;
+                g.bone_weights[v*4+2] = 0.0f;
+                g.bone_weights[v*4+3] = 0.0f;
+            }
 
             size_t uv_offset = mb.IsAltPath ? 12 : 20;
             uint16_t uu=(uint16_t(p[uv_offset+0])<<8)|p[uv_offset+1];

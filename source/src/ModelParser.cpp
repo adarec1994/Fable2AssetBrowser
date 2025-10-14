@@ -114,21 +114,22 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
     if(data.size() < 8) return false;
     R r{data.data(), data.size(), 0};
 
-    out.Magic.assign((const char*)r.p, 8);
+    std::string magic((const char*)r.p, 8);
+    bool has_magic = (magic == "MeshFile");
 
-    bool has_magic = (out.Magic == "MeshFile");
-
-    if(has_magic) {
+    if(has_magic){
+        out.Magic = magic;
         r.i += 8;
         uint32_t tmp32=0;
         if(!r.u32be(tmp32)) return false;
         if(!r.u32be(out.HeaderSize)) return false;
         if(!r.skip(88)) return false;
-        if(!r.skip(8*4)) return false;
     } else {
-        r.i = 136;
+        r.i = 0;
         out.Magic.clear();
     }
+
+    if(!r.skip(8*4)) return false;
 
     if(!r.u32be(out.BoneCount)) return false;
     out.Bones.clear(); out.Bones.reserve(out.BoneCount);
@@ -501,7 +502,6 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
     }
     return true;
 }
-
 
 bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& info, std::vector<MDLMeshGeom>& out){
     out.clear();

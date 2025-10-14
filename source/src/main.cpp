@@ -1,4 +1,4 @@
-// main.cpp - Entry point and window management
+// main.cpp
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include <windows.h>
 #include <d3d11.h>
@@ -18,13 +18,11 @@
 #include <mutex>
 #include <algorithm>
 
-// D3D11 globals
 static ID3D11Device *g_pd3dDevice = nullptr;
 static ID3D11DeviceContext *g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain *g_pSwapChain = nullptr;
 static ID3D11RenderTargetView *g_mainRenderTargetView = nullptr;
 
-// Forward declarations
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
 static void CreateRenderTarget() {

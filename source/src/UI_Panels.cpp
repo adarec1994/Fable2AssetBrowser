@@ -96,139 +96,306 @@ static std::atomic<bool> g_cancel_search(false);
 static std::string g_last_global_search;
 static int g_selected_global = -1;
 
+struct TreeNode {
+    std::string name;
+    bool is_file;
+    std::string full_path;
+    std::string bnk_source;
+    int bnk_index;
+    uint32_t file_size;
+    std::map<std::string, TreeNode> children;
+};
+
+static void build_unified_file_tree(TreeNode& root) {
+    root.children.clear();
+
+    for (const auto& bnk_path : S.bnk_paths) {
+        try {
+            BNKReader reader(bnk_path);
+            const auto& files = reader.list_files();
+
+            for (size_t i = 0; i < files.size(); ++i) {
+                const auto& file = files[i];
+                std::string path = file.name;
+
+                std::replace(path.begin(), path.end(), '\\', '/');
+
+                std::vector<std::string> parts;
+                size_t start = 0;
+                size_t end = path.find('/');
+
+                while (end != std::string::npos) {
+                    parts.push_back(path.substr(start, end - start));
+                    start = end + 1;
+                    end = path.find('/', start);
+                }
+                parts.push_back(path.substr(start));
+
+                TreeNode* current = &root;
+                for (size_t j = 0; j < parts.size(); ++j) {
+                    const std::string& part = parts[j];
+                    if (part.empty()) continue;
+
+                    bool is_last = (j == parts.size() - 1);
+
+                    TreeNode& child = current->children[part];
+                    child.name = part;
+                    child.is_file = is_last;
+
+                    if (is_last) {
+                        child.full_path = file.name;
+                        child.bnk_source = bnk_path;
+                        child.bnk_index = (int)i;
+                        child.file_size = file.uncompressed_size;
+                    }
+
+                    current = &child;
+                }
+            }
+        } catch (...) {
+            continue;
+        }
+    }
+}
+
+static void draw_tree_node(TreeNode& node) {
+    if (node.is_file) {
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+
+        bool selected = false;
+        if (!S.viewing_adb && S.selected_bnk == node.bnk_source) {
+            for (size_t i = 0; i < S.files.size(); ++i) {
+                if (S.files[i].index == node.bnk_index) {
+                    selected = (S.selected_file_index == (int)i);
+                    break;
+                }
+            }
+        }
+
+        if (selected) {
+            flags |= ImGuiTreeNodeFlags_Selected;
+        }
+
+        std::string label = node.name;
+        ImGui::TreeNodeEx(label.c_str(), flags);
+
+        if (ImGui::IsItemClicked()) {
+            if (S.selected_bnk != node.bnk_source) {
+                S.viewing_adb = false;
+                S.global_search.clear();
+                S.selected_nested_bnk.clear();
+                S.selected_nested_index = -1;
+                pick_bnk(node.bnk_source);
+            }
+
+            for (size_t i = 0; i < S.files.size(); ++i) {
+                if (S.files[i].index == node.bnk_index) {
+                    S.selected_file_index = (int)i;
+                    break;
+                }
+            }
+        }
+
+        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::Text("%s", node.full_path.c_str());
+            ImGui::Text("Size: %u bytes", node.file_size);
+            ImGui::Text("BNK: %s", std::filesystem::path(node.bnk_source).filename().string().c_str());
+            ImGui::EndTooltip();
+        }
+    } else {
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
+
+        if (node.children.empty()) {
+            flags |= ImGuiTreeNodeFlags_Leaf;
+        }
+
+        bool node_open = ImGui::TreeNodeEx(node.name.c_str(), flags);
+
+        if (node_open) {
+            std::vector<std::pair<std::string, TreeNode*>> sorted_children;
+            for (auto& pair : node.children) {
+                sorted_children.push_back({pair.first, &pair.second});
+            }
+
+            std::sort(sorted_children.begin(), sorted_children.end(),
+                [](const auto& a, const auto& b) {
+                    if (a.second->is_file != b.second->is_file) {
+                        return !a.second->is_file;
+                    }
+                    return a.first < b.first;
+                });
+
+            for (auto& pair : sorted_children) {
+                draw_tree_node(*pair.second);
+            }
+
+            ImGui::TreePop();
+        }
+    }
+}
+
 void draw_left_panel() {
     ImGui::BeginChild("left_panel", ImVec2(360, 0), true);
-    ImGui::SetNextItemWidth(-1);
-    if (!S.bnk_paths.empty()) {
-        ImGui::InputTextWithHint("##bnk_filter", "Filter", &S.bnk_filter);
-    }
-    ImGui::BeginChild("bnk_list", ImVec2(0, 0), false);
 
-    auto paths = filtered_bnk_paths();
-
-    if (!S.adb_paths.empty()) {
-        ImGui::PushID("adb_entry");
-        bool selected = S.viewing_adb;
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.4f, 1.0f));
-        if (ImGui::Selectable("Audio Database", selected, ImGuiSelectableFlags_SpanAllColumns)) {
-            S.viewing_adb = true;
-            S.selected_bnk.clear();
-            S.global_search.clear();
-            S.files.clear();
-            S.selected_file_index = -1;
-
-            for (size_t i = 0; i < S.adb_paths.size(); ++i) {
-                std::string fname = S.adb_paths[i];
-                std::error_code ec;
-                auto fsize = std::filesystem::file_size(fname, ec);
-                uint32_t size = ec ? 0 : (uint32_t)fsize;
-                S.files.push_back({(int)i, fname, size});
+    if (ImGui::BeginTabBar("LeftPanelTabs", ImGuiTabBarFlags_None)) {
+        if (ImGui::BeginTabItem("BNK List")) {
+            ImGui::SetNextItemWidth(-1);
+            if (!S.bnk_paths.empty()) {
+                ImGui::InputTextWithHint("##bnk_filter", "Filter", &S.bnk_filter);
             }
-        }
-        ImGui::PopStyleColor();
-        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
-            ImGui::BeginTooltip();
-            ImGui::Text("Audio Database Files (%d)", (int)S.adb_paths.size());
-            ImGui::EndTooltip();
-        }
-        ImGui::PopID();
-    }
+            ImGui::BeginChild("bnk_list", ImVec2(0, 0), false);
 
-    for (size_t idx = 0; idx < paths.size(); ++idx) {
-        auto &p = paths[idx];
-        ImGui::PushID((int)idx);
+            auto paths = filtered_bnk_paths();
 
-        std::string label = std::filesystem::path(p).filename().string();
-        std::string label_lower = label;
-        std::transform(label_lower.begin(), label_lower.end(), label_lower.begin(), ::tolower);
+            if (!S.adb_paths.empty()) {
+                ImGui::PushID("adb_entry");
+                bool selected = S.viewing_adb;
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.4f, 1.0f));
+                if (ImGui::Selectable("Audio Database", selected, ImGuiSelectableFlags_SpanAllColumns)) {
+                    S.viewing_adb = true;
+                    S.selected_bnk.clear();
+                    S.global_search.clear();
+                    S.files.clear();
+                    S.selected_file_index = -1;
 
-        bool is_nested_bnk = (label_lower == "levels.bnk" || label_lower == "streaming.bnk");
-        bool is_expanded = S.expanded_bnks.count(p) > 0;
-
-        if (is_nested_bnk) {
-            label = (is_expanded ? "- " : "+ ") + label;
-        }
-
-        bool selected = (p == S.selected_bnk && !S.viewing_adb && S.selected_nested_index == -1);
-        if (ImGui::Selectable(label.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
-            if (is_nested_bnk) {
-                if (is_expanded) {
-                    S.expanded_bnks.erase(p);
-                } else {
-                    S.expanded_bnks.insert(p);
-                }
-            }
-            S.viewing_adb = false;
-            S.global_search.clear();
-            S.selected_nested_bnk.clear();
-            S.selected_nested_index = -1;
-            pick_bnk(p);
-        }
-        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
-            ImGui::BeginTooltip();
-            ImGui::TextUnformatted(p.c_str());
-            ImGui::EndTooltip();
-        }
-
-        if (is_nested_bnk && is_expanded) {
-            try {
-                BNKReader reader(p);
-                const auto& files = reader.list_files();
-                for (size_t i = 0; i < files.size(); ++i) {
-                    const auto& file = files[i];
-                    std::string fname_lower = file.name;
-                    std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
-                    if (fname_lower.size() >= 4 && fname_lower.substr(fname_lower.size() - 4) == ".bnk") {
-                        ImGui::PushID((int)i + 100000);
-                        std::string nested_label = "    " + std::filesystem::path(file.name).filename().string();
-                        bool nested_selected = (S.selected_nested_bnk == p && S.selected_nested_index == (int)i);
-                        if (ImGui::Selectable(nested_label.c_str(), nested_selected, ImGuiSelectableFlags_SpanAllColumns)) {
-                            S.viewing_adb = false;
-                            S.selected_bnk = p;
-                            S.selected_nested_bnk = p;
-                            S.selected_nested_index = (int)i;
-                            S.global_search.clear();
-                            S.files.clear();
-                            S.selected_file_index = -1;
-
-                            auto tmpdir = std::filesystem::temp_directory_path() / "f2_nested_bnk";
-                            std::error_code ec;
-                            std::filesystem::create_directories(tmpdir, ec);
-                            auto tmp_nested = tmpdir / (std::to_string(std::hash<std::string>{}(file.name)) + ".bnk");
-
-                            extract_one(p, (int)i, tmp_nested.string());
-
-                            S.selected_nested_temp_path = tmp_nested.string();  // ADD THIS LINE
-
-                            BNKReader nested_reader(tmp_nested.string());
-                            const auto& nested_files = nested_reader.list_files();
-                            S.files.reserve(nested_files.size());
-                            for (size_t j = 0; j < nested_files.size(); ++j) {
-                                S.files.push_back({(int)j, nested_files[j].name, nested_files[j].uncompressed_size});
-                            }
-
-                            std::sort(S.files.begin(), S.files.end(), [](const BNKItemUI &a, const BNKItemUI &b) {
-                                std::string x = std::filesystem::path(a.name).filename().string();
-                                std::string y = std::filesystem::path(b.name).filename().string();
-                                std::transform(x.begin(), x.end(), x.begin(), ::tolower);
-                                std::transform(y.begin(), y.end(), y.begin(), ::tolower);
-                                return x < y;
-                            });
-                        }
-                        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
-                            ImGui::BeginTooltip();
-                            ImGui::TextUnformatted(file.name.c_str());
-                            ImGui::EndTooltip();
-                        }
-                        ImGui::PopID();
+                    for (size_t i = 0; i < S.adb_paths.size(); ++i) {
+                        std::string fname = S.adb_paths[i];
+                        std::error_code ec;
+                        auto fsize = std::filesystem::file_size(fname, ec);
+                        uint32_t size = ec ? 0 : (uint32_t)fsize;
+                        S.files.push_back({(int)i, fname, size});
                     }
                 }
-            } catch (...) {}
+                ImGui::PopStyleColor();
+                if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                    ImGui::BeginTooltip();
+                    ImGui::Text("Audio Database Files (%d)", (int)S.adb_paths.size());
+                    ImGui::EndTooltip();
+                }
+                ImGui::PopID();
+            }
+
+            for (size_t idx = 0; idx < paths.size(); ++idx) {
+                auto &p = paths[idx];
+                ImGui::PushID((int)idx);
+
+                std::string label = std::filesystem::path(p).filename().string();
+                std::string label_lower = label;
+                std::transform(label_lower.begin(), label_lower.end(), label_lower.begin(), ::tolower);
+
+                bool is_nested_bnk = (label_lower == "levels.bnk" || label_lower == "streaming.bnk");
+                bool is_expanded = S.expanded_bnks.count(p) > 0;
+
+                if (is_nested_bnk) {
+                    label = (is_expanded ? "- " : "+ ") + label;
+                }
+
+                bool selected = (p == S.selected_bnk && !S.viewing_adb && S.selected_nested_index == -1);
+                if (ImGui::Selectable(label.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+                    if (is_nested_bnk) {
+                        if (is_expanded) {
+                            S.expanded_bnks.erase(p);
+                        } else {
+                            S.expanded_bnks.insert(p);
+                        }
+                    }
+                    S.viewing_adb = false;
+                    S.global_search.clear();
+                    S.selected_nested_bnk.clear();
+                    S.selected_nested_index = -1;
+                    pick_bnk(p);
+                }
+                if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(p.c_str());
+                    ImGui::EndTooltip();
+                }
+
+                if (is_nested_bnk && is_expanded) {
+                    try {
+                        BNKReader reader(p);
+                        const auto& files = reader.list_files();
+                        for (size_t i = 0; i < files.size(); ++i) {
+                            const auto& file = files[i];
+                            std::string fname_lower = file.name;
+                            std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
+                            if (fname_lower.size() >= 4 && fname_lower.substr(fname_lower.size() - 4) == ".bnk") {
+                                ImGui::PushID((int)i + 100000);
+                                std::string nested_label = "    " + std::filesystem::path(file.name).filename().string();
+                                bool nested_selected = (S.selected_nested_bnk == p && S.selected_nested_index == (int)i);
+                                if (ImGui::Selectable(nested_label.c_str(), nested_selected, ImGuiSelectableFlags_SpanAllColumns)) {
+                                    S.viewing_adb = false;
+                                    S.selected_bnk = p;
+                                    S.selected_nested_bnk = p;
+                                    S.selected_nested_index = (int)i;
+                                    S.global_search.clear();
+                                    S.files.clear();
+                                    S.selected_file_index = -1;
+
+                                    auto tmpdir = std::filesystem::temp_directory_path() / "f2_nested_bnk";
+                                    std::error_code ec;
+                                    std::filesystem::create_directories(tmpdir, ec);
+                                    auto tmp_nested = tmpdir / (std::to_string(std::hash<std::string>{}(file.name)) + ".bnk");
+
+                                    extract_one(p, (int)i, tmp_nested.string());
+
+                                    S.selected_nested_temp_path = tmp_nested.string();
+
+                                    BNKReader nested_reader(tmp_nested.string());
+                                    const auto& nested_files = nested_reader.list_files();
+                                    S.files.reserve(nested_files.size());
+                                    for (size_t j = 0; j < nested_files.size(); ++j) {
+                                        S.files.push_back({(int)j, nested_files[j].name, nested_files[j].uncompressed_size});
+                                    }
+
+                                    std::sort(S.files.begin(), S.files.end(), [](const BNKItemUI &a, const BNKItemUI &b) {
+                                        std::string x = std::filesystem::path(a.name).filename().string();
+                                        std::string y = std::filesystem::path(b.name).filename().string();
+                                        std::transform(x.begin(), x.end(), x.begin(), ::tolower);
+                                        std::transform(y.begin(), y.end(), y.begin(), ::tolower);
+                                        return x < y;
+                                    });
+                                }
+                                if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                                    ImGui::BeginTooltip();
+                                    ImGui::TextUnformatted(file.name.c_str());
+                                    ImGui::EndTooltip();
+                                }
+                                ImGui::PopID();
+                            }
+                        }
+                    } catch (...) {}
+                }
+
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+            ImGui::EndTabItem();
         }
 
-        ImGui::PopID();
+        if (ImGui::BeginTabItem("File Tree")) {
+            ImGui::BeginChild("file_tree", ImVec2(0, 0), false);
+
+            static TreeNode root;
+            static bool tree_built = false;
+
+            if (!tree_built && !S.bnk_paths.empty()) {
+                build_unified_file_tree(root);
+                tree_built = true;
+            }
+
+            for (auto& pair : root.children) {
+                draw_tree_node(pair.second);
+            }
+
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+
+        ImGui::EndTabBar();
     }
-    ImGui::EndChild();
+
     ImGui::EndChild();
 }
 

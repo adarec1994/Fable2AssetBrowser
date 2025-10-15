@@ -4,7 +4,7 @@ Browse and export a variety of Fable 2 files. Included features:
 
 - Search and filter the internal files in the .bnk files
 - Export all of the assets.
-- Preview and export all .mdl files in global_models.bnk.
+- Preview and export all .mdl files (with the exception of foliage).
 - Exports Audio files in a usable format. 
 - Textures can be reconstructed when extracted. Useful for researching the compressed mipmaps (comp flag 1). Textures can be previewed in the hex view.
 - And more!

@@ -49,6 +49,75 @@ static bool is_bc_format(uint32_t comp_flag, DXGI_FORMAT& out_fmt) {
     return false;
 }
 
+static bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index, std::vector<unsigned char>& out) {
+    try {
+        BNKReader nested_reader(nested_bnk_path);
+        const auto& files = nested_reader.list_files();
+        if (file_index < 0 || file_index >= (int)files.size()) return false;
+
+        std::string mdl_name = files[file_index].name;
+
+        auto tmpdir = std::filesystem::temp_directory_path() / "f2_nested_mdl_reconstruct";
+        std::error_code ec;
+        std::filesystem::create_directories(tmpdir, ec);
+
+        auto tmp_body = tmpdir / "body.bin";
+        extract_one(nested_bnk_path, file_index, tmp_body.string());
+        auto body_data = read_all_bytes(tmp_body);
+        std::filesystem::remove(tmp_body, ec);
+
+        if (body_data.empty()) return false;
+
+        auto p_headers = find_bnk_by_filename("globals_model_headers.bnk");
+        if (!p_headers) {
+            out = body_data;
+            return true;
+        }
+
+        BNKReader r_headers(*p_headers);
+        const auto& header_files = r_headers.list_files();
+
+        std::string mdl_filename = std::filesystem::path(mdl_name).filename().string();
+        std::string mdl_lower = mdl_filename;
+        std::transform(mdl_lower.begin(), mdl_lower.end(), mdl_lower.begin(), ::tolower);
+
+        int header_idx = -1;
+        for (size_t i = 0; i < header_files.size(); ++i) {
+            std::string hname = std::filesystem::path(header_files[i].name).filename().string();
+            std::string hname_lower = hname;
+            std::transform(hname_lower.begin(), hname_lower.end(), hname_lower.begin(), ::tolower);
+            if (hname_lower == mdl_lower) {
+                header_idx = (int)i;
+                break;
+            }
+        }
+
+        if (header_idx == -1) {
+            out = body_data;
+            return true;
+        }
+
+        auto tmp_header = tmpdir / "header.bin";
+        extract_one(*p_headers, header_idx, tmp_header.string());
+        auto header_data = read_all_bytes(tmp_header);
+        std::filesystem::remove(tmp_header, ec);
+
+        if (header_data.empty()) {
+            out = body_data;
+            return true;
+        }
+
+        out.clear();
+        out.reserve(header_data.size() + body_data.size());
+        out.insert(out.end(), header_data.begin(), header_data.end());
+        out.insert(out.end(), body_data.begin(), body_data.end());
+
+        return true;
+
+    } catch (...) {
+        return false;
+    }
+}
 
 std::vector<ADBEntry> decompress_adb(const std::string& path) {
     std::vector<ADBEntry> result;
@@ -149,8 +218,10 @@ void open_hex_for_selected() {
 
     std::string bnk_to_use;
     std::string nested_temp_copy;
+    bool is_nested = false;
 
     if (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty()) {
+        is_nested = true;
         auto tmpdir = std::filesystem::temp_directory_path() / "f2_hex_view";
         std::error_code ec;
         std::filesystem::create_directories(tmpdir, ec);
@@ -195,7 +266,7 @@ void open_hex_for_selected() {
     progress_open(0, "Loading hex.");
     S.hex_loading.store(true);
 
-    std::thread([item, name, want_tex, want_mdl, bnk_to_use, nested_temp_copy]() {
+    std::thread([item, name, want_tex, want_mdl, bnk_to_use, nested_temp_copy, is_nested]() {
         std::vector<unsigned char> buf;
         bool ok = false;
 
@@ -203,7 +274,11 @@ void open_hex_for_selected() {
             if (want_tex) {
                 ok = build_any_tex_buffer_for_name(name, buf);
             } else if (want_mdl) {
-                ok = build_mdl_buffer_for_name(name, buf);
+                if (is_nested) {
+                    ok = reconstruct_nested_mdl(bnk_to_use, item.index, buf);
+                } else {
+                    ok = build_mdl_buffer_for_name(name, buf);
+                }
             }
 
             if (!ok) {

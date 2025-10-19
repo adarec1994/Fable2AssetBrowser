@@ -88,6 +88,7 @@ struct State {
     bool show_preview_popup = false;
     int preview_mip_index = -1;
     ID3D11ShaderResourceView *preview_srv = nullptr;
+    std::string hex_file_path;
 
     bool mdl_info_ok = false;
     MDLInfo mdl_info;

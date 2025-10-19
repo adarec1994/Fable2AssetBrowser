@@ -310,6 +310,7 @@ void open_hex_for_selected() {
         S.hex_data.clear();
         if (ok) S.hex_data.swap(buf);
         S.hex_title = std::string("Hex Editor - ") + name;
+        S.hex_file_path = name;
         S.hex_open = ok;
         memset(&S.hex_state, 0, sizeof(S.hex_state));
         if (ok) {
@@ -453,7 +454,7 @@ void draw_hex_window(ID3D11Device *device) {
 
             }else if(is_mdl_file(sel)){
                 if(!S.mdl_info_ok){
-                    S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info);
+                    S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info, S.hex_file_path);
                 }
 
                 if(!S.mdl_info_ok){

@@ -484,12 +484,13 @@ static bool decode_texture_to_png(const std::vector<unsigned char>& tex_buf, std
 
 bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
                      const std::string& glb_path,
+                     const std::string& mdl_source_path,
                      std::string& err_msg)
 {
     err_msg.clear();
 
     MDLInfo info;
-    if (!parse_mdl_info(mdl_data, info)) {
+    if (!parse_mdl_info(mdl_data, info, mdl_source_path)) {
         err_msg = "Failed to parse MDL info";
         return false;
     }

@@ -3,8 +3,6 @@
 #include <vector>
 #include <cstdint>
 
-bool build_mdl_buffer_for_name(const std::string &mdl_name, std::vector<unsigned char> &out);
-
 struct MDLBoneInfo {
     std::string Name;
     int ParentID;
@@ -59,5 +57,7 @@ struct MDLMeshGeom {
     std::string diffuse_tex_name;
 };
 
+bool build_mdl_buffer_for_name(const std::string &mdl_name, std::vector<unsigned char> &out);
 bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out);
+bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const std::string& file_path);
 bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& info, std::vector<MDLMeshGeom>& out);

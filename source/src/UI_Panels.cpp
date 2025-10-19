@@ -90,6 +90,13 @@ static bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_
     }
 }
 
+static bool is_in_audio_folder(const std::string& path) {
+    std::string lower_path = path;
+    std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
+    return lower_path.find("/audio/") != std::string::npos ||
+           lower_path.find("\\audio\\") != std::string::npos;
+}
+
 static std::vector<GlobalHit> g_global_hits;
 static std::atomic<bool> g_global_busy(false);
 static std::atomic<bool> g_cancel_search(false);
@@ -247,6 +254,17 @@ void draw_left_panel() {
             ImGui::BeginChild("bnk_list", ImVec2(0, 0), false);
 
             auto paths = filtered_bnk_paths();
+
+            std::vector<std::string> audio_bnks;
+            std::vector<std::string> other_bnks;
+
+            for (const auto& p : paths) {
+                if (is_in_audio_folder(p)) {
+                    audio_bnks.push_back(p);
+                } else {
+                    other_bnks.push_back(p);
+                }
+            }
 
             if (!S.adb_paths.empty()) {
                 ImGui::PushID("adb_entry");
@@ -918,7 +936,7 @@ if (!can_preview) {
                         }
                     }
                 } else if (can_mdl) {
-                    S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info);
+                    S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info, name);
                     if (S.mdl_info_ok) {
                         S.mdl_meshes.clear();
                         parse_mdl_geometry(S.hex_data, S.mdl_info, S.mdl_meshes);

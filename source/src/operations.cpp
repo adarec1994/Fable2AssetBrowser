@@ -1007,7 +1007,7 @@ void on_export_mdl_to_glb() {
                 std::filesystem::create_directories(out_path.parent_path());
 
                 std::string err;
-                if (!mdl_to_glb_full(mdl_buf, out_path.string(), err)) {
+                if (!mdl_to_glb_full(mdl_buf, out_path.string(), name, err)) {
                     progress_done();
                     show_error_box("GLB export failed: " + err);
                     return;
@@ -1069,7 +1069,7 @@ void on_export_all_mdl_to_glb() {
                 std::filesystem::create_directories(out_path.parent_path());
 
                 std::string err;
-                if (!mdl_to_glb_full(mdl_buf, out_path.string(), err)) {
+                if (!mdl_to_glb_full(mdl_buf, out_path.string(), it.name, err)) {
                     std::lock_guard<std::mutex> lk(fail_m);
                     failed.push_back(it.name);
                 }
@@ -1146,7 +1146,7 @@ void on_export_global_mdl_to_glb(const std::vector<GlobalHit>& hits) {
                 std::filesystem::create_directories(out_path.parent_path());
 
                 std::string err;
-                if (!mdl_to_glb_full(mdl_buf, out_path.string(), err)) {
+                if (!mdl_to_glb_full(mdl_buf, out_path.string(), h.file_name, err)) {
                     std::lock_guard<std::mutex> lk(fail_m);
                     failed.push_back(h.file_name);
                 }

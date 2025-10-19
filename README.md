@@ -19,16 +19,11 @@ _Hello cutie._
 
 ![img_2.png](images/img_3.png)
 
-And now provides details on .mdl files:
-
 ![img.png](images/img_2.png)
+
 ![img_1.png](images/img_6.png)
 
-Hex editor will provide useful information without needing to export or use external applications.
-
-![img_1.png](images/img_1.png)
-
-Pixel format 28 is not rendering correctly. Some textures don't load the hex, either. 
+![img_1.png](images/img_1.png) 
 
 ![img.png](images/img.png)
 

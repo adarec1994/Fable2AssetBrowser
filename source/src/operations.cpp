@@ -16,6 +16,31 @@
 #include "HexView.h"
 #include "mdl_converter.h"
 
+static std::string apply_folder_prefix_to_filename(const std::string& full_path, const std::string& extension) {
+    std::string lower_path = full_path;
+    std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
+
+    std::filesystem::path p(full_path);
+    std::string filename = p.stem().string();
+    std::string filename_lower = filename;
+    std::transform(filename_lower.begin(), filename_lower.end(), filename_lower.begin(), ::tolower);
+
+    if (filename_lower != "interior" && filename_lower != "exterior") {
+        return p.filename().string();
+    }
+
+    std::filesystem::path parent = p.parent_path();
+    if (parent.empty()) {
+        return p.filename().string();
+    }
+
+    std::string folder_name = parent.filename().string();
+
+    std::string result = folder_name + "_" + filename + extension;
+
+    return result;
+}
+
 void extract_file_one(const std::string &bnk_path, const BNKItemUI &item, const std::string &base_out_dir,
                              bool convert_audio) {
     std::filesystem::create_directories(base_out_dir);
@@ -392,7 +417,9 @@ void on_rebuild_and_extract_models() {
                 continue;
             }
 
-            auto out_path = std::filesystem::path(out_root) / name;
+            std::string output_filename = apply_folder_prefix_to_filename(name, ".mdl");
+            auto out_dir = std::filesystem::path(out_root) / std::filesystem::path(name).parent_path();
+            auto out_path = out_dir / output_filename;
             std::filesystem::create_directories(out_path.parent_path(), ec);
 
             auto tmp_h = tmpdir / ("h_" + std::to_string(done) + ".bin");
@@ -542,7 +569,9 @@ void on_rebuild_and_extract_one_mdl(const std::string &mdl_name) {
         std::error_code ec;
         std::filesystem::create_directories(tmpdir, ec);
 
-        auto out_path = std::filesystem::path(out_root) / mdl_name;
+        std::string output_filename = apply_folder_prefix_to_filename(mdl_name, ".mdl");
+        auto out_dir = std::filesystem::path(out_root) / std::filesystem::path(mdl_name).parent_path();
+        auto out_path = out_dir / output_filename;
         std::filesystem::create_directories(out_path.parent_path(), ec);
 
         auto tmp_h = tmpdir / "h.bin";
@@ -787,18 +816,24 @@ void on_rebuild_and_extract_global_tex(const std::vector<GlobalHit>& hits) {
 }
 
 void on_rebuild_and_extract_global_mdl(const std::vector<GlobalHit>& hits) {
-    auto p_headers = find_bnk_by_filename("globals_model_headers.bnk");
-    auto p_rest = find_bnk_by_filename("globals_models.bnk");
-    if (!p_headers || !p_rest) {
-        show_error_box("Required BNKs not found.");
-        return;
-    }
-
     std::vector<GlobalHit> mdl_files;
-    for (auto &h: hits) if (is_mdl_file(h.file_name)) mdl_files.push_back(h);
+    for (auto &h: hits) {
+        std::string name_lower = h.file_name;
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+        if (name_lower.size() >= 4 && name_lower.substr(name_lower.size() - 4) == ".mdl") {
+            mdl_files.push_back(h);
+        }
+    }
 
     if (mdl_files.empty()) {
         show_error_box("No .mdl files in filtered results.");
+        return;
+    }
+
+    auto p_headers = find_bnk_by_filename("globals_model_headers.bnk");
+    auto p_rest    = find_bnk_by_filename("globals_models.bnk");
+    if (!p_headers || !p_rest) {
+        show_error_box("Required BNKs not found.");
         return;
     }
 
@@ -841,7 +876,9 @@ void on_rebuild_and_extract_global_mdl(const std::vector<GlobalHit>& hits) {
                 continue;
             }
 
-            auto out_path = std::filesystem::path(out_root) / h.file_name;
+            std::string output_filename = apply_folder_prefix_to_filename(h.file_name, ".mdl");
+            auto out_dir = std::filesystem::path(out_root) / std::filesystem::path(h.file_name).parent_path();
+            auto out_path = out_dir / output_filename;
             std::filesystem::create_directories(out_path.parent_path(), ec);
 
             auto tmp_h = tmpdir / ("h_" + std::to_string(done) + ".bin");
@@ -869,7 +906,6 @@ void on_rebuild_and_extract_global_mdl(const std::vector<GlobalHit>& hits) {
     }).detach();
 }
 
-// operations.cpp - Add these functions at the end of the file
 void on_extract_adb_selected() {
     int idx = S.selected_file_index;
     if (idx < 0 || idx >= (int)S.files.size()) {
@@ -1002,8 +1038,8 @@ void on_export_mdl_to_glb() {
                     return;
                 }
 
-                std::string out_name = std::filesystem::path(name).stem().string() + ".glb";
-                auto out_path = std::filesystem::path(base_out) / out_name;
+                std::string output_filename = apply_folder_prefix_to_filename(name, ".glb");
+                auto out_path = std::filesystem::path(base_out) / output_filename;
                 std::filesystem::create_directories(out_path.parent_path());
 
                 std::string err;
@@ -1064,8 +1100,8 @@ void on_export_all_mdl_to_glb() {
                     return;
                 }
 
-                std::string out_name = std::filesystem::path(it.name).stem().string() + ".glb";
-                auto out_path = std::filesystem::path(base_out) / out_name;
+                std::string output_filename = apply_folder_prefix_to_filename(it.name, ".glb");
+                auto out_path = std::filesystem::path(base_out) / output_filename;
                 std::filesystem::create_directories(out_path.parent_path());
 
                 std::string err;
@@ -1141,8 +1177,8 @@ void on_export_global_mdl_to_glb(const std::vector<GlobalHit>& hits) {
                     return;
                 }
 
-                std::string out_name = std::filesystem::path(h.file_name).stem().string() + ".glb";
-                auto out_path = std::filesystem::path(base_out) / out_name;
+                std::string output_filename = apply_folder_prefix_to_filename(h.file_name, ".glb");
+                auto out_path = std::filesystem::path(base_out) / output_filename;
                 std::filesystem::create_directories(out_path.parent_path());
 
                 std::string err;

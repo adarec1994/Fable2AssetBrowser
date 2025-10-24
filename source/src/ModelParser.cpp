@@ -231,114 +231,101 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
 
     debug_file << "Current position after meshes: " << r.i << std::endl;
 
-        if(is_foliage){
-        debug_file << "ENTERING FOLIAGE PATH" << std::endl;
-        uint16_t unk2bytes = 0;
-        if(!r.u16be(unk2bytes)) {
-            debug_file << "Failed to read unk2bytes" << std::endl;
+if(is_foliage){
+    debug_file << "ENTERING FOLIAGE PATH" << std::endl;
+    uint16_t unk2bytes = 0;
+    if(!r.u16be(unk2bytes)) {
+        debug_file << "Failed to read unk2bytes" << std::endl;
+        debug_file.close();
+        return false;
+    }
+    debug_file << "unk2bytes: 0x" << std::hex << unk2bytes << std::dec << std::endl;
+
+    for(uint32_t mi=0; mi<out.MeshCount; ++mi){
+        debug_file << "Processing foliage mesh buffer " << mi << std::endl;
+        uint32_t meshBufferID = 0;
+        if(!r.u32be(meshBufferID)) {
+            debug_file << "Failed to read meshBufferID" << std::endl;
             debug_file.close();
             return false;
         }
-        debug_file << "unk2bytes: 0x" << std::hex << unk2bytes << std::dec << std::endl;
+        debug_file << "meshBufferID: " << meshBufferID << std::endl;
 
-        for(uint32_t mi=0; mi<out.MeshCount; ++mi){
-            debug_file << "Processing foliage mesh buffer " << mi << std::endl;
-            uint32_t meshBufferID = 0;
-            if(!r.u32be(meshBufferID)) {
-                debug_file << "Failed to read meshBufferID" << std::endl;
-                debug_file.close();
-                return false;
-            }
-            debug_file << "meshBufferID: " << meshBufferID << std::endl;
-
-            uint32_t someCount1 = 0;
-            if(!r.u32be(someCount1)) {
-                debug_file << "Failed to read someCount1" << std::endl;
-                debug_file.close();
-                return false;
-            }
-            debug_file << "someCount1: " << someCount1 << std::endl;
-
-            uint32_t vtx = 0;
-            if(!r.u32be(vtx)) {
-                debug_file << "Failed to read vtx (actually face count)" << std::endl;
-                debug_file.close();
-                return false;
-            }
-            debug_file << "vtx (actually face count): " << vtx << std::endl;
-
-            uint32_t tlen = 0;
-            if(!r.u32be(tlen)) {
-                debug_file << "Failed to read tlen (actually vertex count)" << std::endl;
-                debug_file.close();
-                return false;
-            }
-            debug_file << "tlen (actually vertex count): " << tlen << std::endl;
-
-            uint32_t sub = 0;
-            if(!r.u32be(sub)) {
-                debug_file << "Failed to read sub" << std::endl;
-                debug_file.close();
-                return false;
-            }
-            debug_file << "sub: " << sub << std::endl;
-
-            if(sub > 0 && sub < 65535u){
-                for(uint32_t s = 0; s < sub; s++){
-                    uint32_t S1; uint8_t S2; uint32_t S3a, S3b, S3c; float F4[6];
-                    if(!r.u32be(S1)) return false;
-                    if(!r.u8(S2)) return false;
-                    if(!r.u32be(S3a)) return false;
-                    if(!r.u32be(S3b)) return false;
-                    if(!r.u32be(S3c)) return false;
-                    for(int k = 0; k < 6; k++) if(!r.f32be(F4[k])) return false;
-                }
-            }
-
-            size_t vert_off = 0, face_off = 0;
-            if(tlen > 0 && tlen < 65535u){
-                vert_off = r.i;
-                size_t vsz = (size_t)tlen * 28;
-                if(!r.skip(vsz)) {
-                    debug_file << "Failed to skip vertices" << std::endl;
-                    debug_file.close();
-                    return false;
-                }
-            }
-
-            if(vtx > 0 && vtx < 65535u){
-                face_off = r.i;
-                size_t fsz = (size_t)vtx * 2;
-                if(!r.skip(fsz)) {
-                    debug_file << "Failed to skip faces" << std::endl;
-                    debug_file.close();
-                    return false;
-                }
-            }
-
-            if(tlen > 0 && tlen < 65535u){
-                size_t usz = (size_t)tlen * 16;
-                if(!r.skip(usz)) {
-                    debug_file << "Failed to skip unk data" << std::endl;
-                    debug_file.close();
-                    return false;
-                }
-            }
-
-            MDLMeshBufferInfo mb;
-            mb.VertexCount = tlen;
-            mb.VertexOffset = vert_off;
-            mb.FaceCount = vtx;
-            mb.FaceOffset = face_off;
-            mb.SubMeshCount = sub;
-            mb.IsAltPath = false;
-            out.MeshBuffers.push_back(mb);
-            debug_file << "Added foliage mesh buffer, position now: " << r.i << std::endl;
+        uint32_t someCount1 = 0;
+        if(!r.u32be(someCount1)) {
+            debug_file << "Failed to read someCount1" << std::endl;
+            debug_file.close();
+            return false;
         }
-        debug_file << "FOLIAGE PATH SUCCESS" << std::endl;
-        debug_file.close();
-        return true;
+        debug_file << "someCount1: " << someCount1 << std::endl;
+
+        uint32_t vtx = 0;
+        if(!r.u32be(vtx)) {
+            debug_file << "Failed to read vtx" << std::endl;
+            debug_file.close();
+            return false;
+        }
+        debug_file << "vtx: " << vtx << std::endl;
+
+        uint32_t tlen = 0;
+        if(!r.u32be(tlen)) {
+            debug_file << "Failed to read tlen" << std::endl;
+            debug_file.close();
+            return false;
+        }
+        debug_file << "tlen: " << tlen << std::endl;
+
+        if(!r.skip(41)) {
+            debug_file << "Failed to skip 41 bytes" << std::endl;
+            debug_file.close();
+            return false;
+        }
+        debug_file << "Skipped 41 bytes" << std::endl;
+
+        size_t vert_off = 0, face_off = 0;
+        if(vtx > 0 && vtx < 65535u){
+            vert_off = r.i;
+            size_t vsz = (size_t)vtx * 28;
+            if(!r.skip(vsz)) {
+                debug_file << "Failed to skip vertices" << std::endl;
+                debug_file.close();
+                return false;
+            }
+        }
+
+        if(tlen > 0 && tlen < 65535u){
+            face_off = r.i;
+            size_t fsz = (size_t)tlen * 2;
+            if(!r.skip(fsz)) {
+                debug_file << "Failed to skip faces" << std::endl;
+                debug_file.close();
+                return false;
+            }
+        }
+
+        if(vtx > 0 && vtx < 65535u){
+            size_t usz = (size_t)vtx * 16;
+            if(!r.skip(usz)) {
+                debug_file << "Failed to skip unk data" << std::endl;
+                debug_file.close();
+                return false;
+            }
+        }
+
+        MDLMeshBufferInfo mb;
+        mb.VertexCount = vtx;
+        mb.VertexOffset = vert_off;
+        mb.FaceCount = tlen;
+        mb.FaceOffset = face_off;
+        mb.SubMeshCount = 1;
+        mb.IsAltPath = false;
+        out.MeshBuffers.push_back(mb);
+        debug_file << "Added foliage mesh buffer, position now: " << r.i << std::endl;
     }
+    debug_file << "FOLIAGE PATH SUCCESS" << std::endl;
+    debug_file.close();
+    return true;
+}
 
     if(StringBlockCount>0){
         debug_file << "ENTERING STRINGBLOCK PATH" << std::endl;

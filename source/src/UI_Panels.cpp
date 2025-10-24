@@ -20,6 +20,8 @@
 #include "Progress.h"
 #include "files.h"
 
+
+
 static bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index, std::vector<unsigned char>& out) {
     try {
         BNKReader nested_reader(nested_bnk_path);
@@ -97,6 +99,8 @@ static bool is_in_audio_folder(const std::string& path) {
            lower_path.find("\\audio\\") != std::string::npos;
 }
 
+bool can_tex = false, can_mdl = false;
+
 static std::vector<GlobalHit> g_global_hits;
 static std::atomic<bool> g_global_busy(false);
 static std::atomic<bool> g_cancel_search(false);
@@ -112,6 +116,40 @@ struct TreeNode {
     uint32_t file_size;
     std::map<std::string, TreeNode> children;
 };
+
+static TreeNode g_tree_root;
+
+static bool find_mdl_files_in_folder(TreeNode& root, const std::string& folder_name, std::vector<std::pair<std::string, std::string>>& out_mdl_paths) {
+    out_mdl_paths.clear();
+
+    std::function<TreeNode*(TreeNode&, const std::string&)> find_folder = [&](TreeNode& node, const std::string& name) -> TreeNode* {
+        if (!node.is_file && node.name == name) {
+            return &node;
+        }
+        for (auto& pair : node.children) {
+            if (!pair.second.is_file) {
+                TreeNode* result = find_folder(pair.second, name);
+                if (result) return result;
+            }
+        }
+        return nullptr;
+    };
+
+    TreeNode* folder = find_folder(root, folder_name);
+    if (!folder) return false;
+
+    for (auto& pair : folder->children) {
+        if (pair.second.is_file) {
+            std::string fname = pair.first;
+            std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+            if (fname == "interior.mdl" || fname == "exterior.mdl") {
+                out_mdl_paths.push_back({pair.second.full_path, pair.second.bnk_source});
+            }
+        }
+    }
+
+    return !out_mdl_paths.empty();
+}
 
 static void build_unified_file_tree(TreeNode& root) {
     root.children.clear();
@@ -253,6 +291,8 @@ static void draw_tree_node(TreeNode& node, ID3D11Device* device) {
         ImGui::TreeNodeEx(label.c_str(), flags);
 
         if (ImGui::IsItemClicked()) {
+            S.selected_folder_path.clear();
+
             if (S.selected_bnk != node.bnk_source) {
                 S.viewing_adb = false;
                 S.global_search.clear();
@@ -277,7 +317,7 @@ static void draw_tree_node(TreeNode& node, ID3D11Device* device) {
             ImGui::EndTooltip();
         }
     } else {
-        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick | ImGuiTreeNodeFlags_SpanAvailWidth;
 
         if (node.children.empty()) {
             flags |= ImGuiTreeNodeFlags_Leaf;
@@ -286,82 +326,8 @@ static void draw_tree_node(TreeNode& node, ID3D11Device* device) {
         bool node_open = ImGui::TreeNodeEx(node.name.c_str(), flags);
 
         if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
-            std::vector<TreeNode*> mdl_files;
-            for (auto& pair : node.children) {
-                if (pair.second.is_file) {
-                    std::string fname = pair.first;
-                    std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
-                    if (fname == "interior.mdl" || fname == "exterior.mdl") {
-                        mdl_files.push_back(&pair.second);
-                    }
-                }
-            }
-
-            if (!mdl_files.empty()) {
-                progress_open(0, "Loading preview...");
-
-                std::vector<std::string> mdl_paths;
-                std::vector<std::string> bnk_sources;
-                std::vector<int> bnk_indices;
-
-                for (auto* mdl_node : mdl_files) {
-                    mdl_paths.push_back(mdl_node->full_path);
-                    bnk_sources.push_back(mdl_node->bnk_source);
-                    bnk_indices.push_back(mdl_node->bnk_index);
-                }
-
-                ID3D11Device* device_ptr = device;
-
-                std::thread([device_ptr, mdl_paths, bnk_sources, bnk_indices]() {
-                    std::vector<MDLMeshGeom> all_meshes;
-                    MDLInfo combined_info;
-                    bool any_success = false;
-
-                    for (size_t idx = 0; idx < mdl_paths.size(); ++idx) {
-                        std::vector<unsigned char> buf;
-                        bool ok = false;
-
-                        try {
-                            ok = build_mdl_buffer_for_name(mdl_paths[idx], buf);
-                        } catch (...) {}
-
-                        if (ok && !buf.empty()) {
-                            MDLInfo mdl_info;
-                            if (parse_mdl_info(buf, mdl_info, mdl_paths[idx])) {
-                                std::vector<MDLMeshGeom> meshes;
-                                if (parse_mdl_geometry(buf, mdl_info, meshes)) {
-                                    all_meshes.insert(all_meshes.end(), meshes.begin(), meshes.end());
-                                    if (!any_success) {
-                                        combined_info = mdl_info;
-                                        any_success = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (any_success && !all_meshes.empty()) {
-                        S.hex_data.clear();
-                        S.mdl_info_ok = true;
-                        S.mdl_info = combined_info;
-                        S.mdl_meshes = all_meshes;
-
-                        extern ModelPreview g_mp;
-                        MP_Release(g_mp);
-                        MP_Init(device_ptr, g_mp, 800, 520);
-                        MP_Build(device_ptr, all_meshes, combined_info, g_mp);
-                        S.cam_yaw = 0.0f;
-                        S.cam_pitch = 0.2f;
-                        S.cam_dist = 3.0f;
-                        S.show_model_preview = true;
-                    }
-
-                    progress_done();
-                    if (!any_success) {
-                        show_error_box("Failed to load preview.");
-                    }
-                }).detach();
-            }
+            S.selected_file_index = -1;
+            S.selected_folder_path = node.name;
         }
 
         if (node_open) {
@@ -535,6 +501,66 @@ void draw_left_panel(ID3D11Device* device) {
             }
             ImGui::EndChild();
             ImGui::EndTabItem();
+
+        if (ImGui::BeginTabItem("File Tree")) {
+            ImGui::BeginChild("file_tree", ImVec2(0, 0), false);
+
+            static bool tree_built = false;
+            static bool tree_building = false;
+            static std::atomic<bool> build_complete(false);
+            static float build_start_time = 0.0f;
+
+            if (!tree_built && !tree_building && !S.bnk_paths.empty()) {
+                tree_building = true;
+                build_complete = false;
+                build_start_time = ImGui::GetTime();
+
+                TreeNode* root_ptr = &g_tree_root;
+                std::atomic<bool>* complete_ptr = &build_complete;
+
+                std::thread([root_ptr, complete_ptr]() {
+                    build_unified_file_tree(*root_ptr);
+                    complete_ptr->store(true);
+                }).detach();
+            }
+
+            if (tree_building) {
+                if (build_complete) {
+                    tree_building = false;
+                    tree_built = true;
+                } else {
+                    ImVec2 avail = ImGui::GetContentRegionAvail();
+                    float elapsed = ImGui::GetTime() - build_start_time;
+
+                    float dot_cycle = fmodf(elapsed * 2.0f, 4.0f);
+                    int dot_count = (int)dot_cycle;
+                    std::string dots(dot_count, '.');
+                    std::string loading_text = "Loading file tree" + dots;
+
+                    ImVec2 text_size = ImGui::CalcTextSize(loading_text.c_str());
+                    ImVec2 pos((avail.x - text_size.x) * 0.5f, (avail.y - text_size.y) * 0.5f);
+                    if (pos.x < 0) pos.x = 0;
+                    if (pos.y < 0) pos.y = 0;
+                    ImGui::SetCursorPos(pos);
+                    ImGui::TextUnformatted(loading_text.c_str());
+
+                    if (elapsed > 10.0f) {
+                        ImVec2 warning_size = ImGui::CalcTextSize("(this may take some time)");
+                        ImVec2 warning_pos((avail.x - warning_size.x) * 0.5f, pos.y + text_size.y + 10.0f);
+                        if (warning_pos.x < 0) warning_pos.x = 0;
+                        ImGui::SetCursorPos(warning_pos);
+                        ImGui::TextUnformatted("(this may take some time)");
+                    }
+                }
+            } else if (tree_built) {
+                for (auto& pair : g_tree_root.children) {
+                    draw_tree_node(pair.second, device);
+                }
+            }
+
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
         }
 
         if (ImGui::BeginTabItem("File Tree")) {
@@ -568,8 +594,8 @@ void draw_left_panel(ID3D11Device* device) {
                     ImVec2 avail = ImGui::GetContentRegionAvail();
                     float elapsed = ImGui::GetTime() - build_start_time;
 
-                    float dot_cycle = fmodf(elapsed * 2.0f, 3.0f);
-                    int dot_count = (int)dot_cycle + 1;
+                    float dot_cycle = fmodf(elapsed * 2.0f, 4.0f);
+                    int dot_count = (int)dot_cycle;
                     std::string dots(dot_count, '.');
                     std::string loading_text = "Loading file tree" + dots;
 
@@ -1006,6 +1032,8 @@ void draw_right_panel(ID3D11Device* device) {
 
     bool can_preview = false;
     bool can_tex = false, can_mdl = false;
+    bool can_folder_preview = false;
+
     if (has_selection && !S.viewing_adb) {
         std::string n = S.files[(size_t)S.selected_file_index].name;
         std::string l = n;
@@ -1013,12 +1041,74 @@ void draw_right_panel(ID3D11Device* device) {
         can_tex = l.size() >= 4 && l.rfind(".tex") == l.size() - 4;
         can_mdl = l.size() >= 4 && l.rfind(".mdl") == l.size() - 4;
         can_preview = can_tex || can_mdl;
+    } else if (!S.selected_folder_path.empty()) {
+        std::vector<std::pair<std::string, std::string>> mdl_paths;
+        can_folder_preview = find_mdl_files_in_folder(g_tree_root, S.selected_folder_path, mdl_paths);
+        can_preview = can_folder_preview;
     }
 
 if (!can_preview) {
         ImGui::BeginDisabled();
     }
     if (ImGui::Button("Preview")) {
+        if (can_folder_preview && !S.selected_folder_path.empty()) {
+            std::vector<std::pair<std::string, std::string>> mdl_paths;
+            if (find_mdl_files_in_folder(g_tree_root, S.selected_folder_path, mdl_paths)) {
+                progress_open(0, "Loading preview...");
+
+                ID3D11Device* device_ptr = device;
+
+                std::thread([device_ptr, mdl_paths]() {
+                    std::vector<MDLMeshGeom> all_meshes;
+                    MDLInfo combined_info;
+                    bool any_success = false;
+
+                    for (const auto& [mdl_path, bnk_source] : mdl_paths) {
+                        std::vector<unsigned char> buf;
+                        bool ok = false;
+
+                        try {
+                            ok = build_mdl_buffer_for_name(mdl_path, buf);
+                        } catch (...) {}
+
+                        if (ok && !buf.empty()) {
+                            MDLInfo mdl_info;
+                            if (parse_mdl_info(buf, mdl_info, mdl_path)) {
+                                std::vector<MDLMeshGeom> meshes;
+                                if (parse_mdl_geometry(buf, mdl_info, meshes)) {
+                                    all_meshes.insert(all_meshes.end(), meshes.begin(), meshes.end());
+                                    if (!any_success) {
+                                        combined_info = mdl_info;
+                                        any_success = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (any_success && !all_meshes.empty()) {
+                        S.hex_data.clear();
+                        S.mdl_info_ok = true;
+                        S.mdl_info = combined_info;
+                        S.mdl_meshes = all_meshes;
+
+                        extern ModelPreview g_mp;
+                        MP_Release(g_mp);
+                        MP_Init(device_ptr, g_mp, 800, 520);
+                        MP_Build(device_ptr, all_meshes, combined_info, g_mp);
+                        S.cam_yaw = 0.0f;
+                        S.cam_pitch = 0.2f;
+                        S.cam_dist = 3.0f;
+                        S.show_model_preview = true;
+                    }
+
+                    progress_done();
+                    if (!any_success) {
+                        show_error_box("Failed to load preview.");
+                    }
+                }).detach();
+            }
+        } else {
         auto item = S.files[(size_t)S.selected_file_index];
         auto name = item.name;
 
@@ -1143,6 +1233,7 @@ if (!can_preview) {
 
         skip_preview:;
     }
+        }
     if (!can_preview) {
         ImGui::EndDisabled();
     }

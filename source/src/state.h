@@ -77,6 +77,7 @@ struct State {
     std::string file_filter;
     std::string global_search;
     std::string last_dir;
+    std::string selected_folder_path;
     std::atomic<bool> hex_loading{false};
     bool hex_open = false;
     std::string hex_title;

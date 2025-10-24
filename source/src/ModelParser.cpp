@@ -21,18 +21,21 @@ bool build_mdl_buffer_for_name(const std::string &mdl_name, std::vector<unsigned
     std::unordered_map<std::string,int> mapH, mapR;
     for(size_t i=0;i<r_headers.list_files().size();++i){
         auto &e=r_headers.list_files()[i];
-        std::string f=std::filesystem::path(e.name).filename().string();
+        std::string f=e.name;
         std::transform(f.begin(),f.end(),f.begin(),::tolower);
+        std::replace(f.begin(), f.end(), '\\', '/');
         mapH.emplace(f,(int)i);
     }
     for(size_t i=0;i<r_rest.list_files().size();++i){
         auto &e=r_rest.list_files()[i];
-        std::string f=std::filesystem::path(e.name).filename().string();
+        std::string f=e.name;
         std::transform(f.begin(),f.end(),f.begin(),::tolower);
+        std::replace(f.begin(), f.end(), '\\', '/');
         mapR.emplace(f,(int)i);
     }
-    std::string key=std::filesystem::path(mdl_name).filename().string();
+    std::string key=mdl_name;
     std::transform(key.begin(),key.end(),key.begin(),::tolower);
+    std::replace(key.begin(), key.end(), '\\', '/');
     if(!mapH.count(key) || !mapR.count(key)) return false;
 
     auto tmpdir = std::filesystem::temp_directory_path() / "f2_mdl_hex";

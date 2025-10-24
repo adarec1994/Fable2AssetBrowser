@@ -116,56 +116,122 @@ struct TreeNode {
 static void build_unified_file_tree(TreeNode& root) {
     root.children.clear();
 
+    auto is_header_bnk = [](const std::string& bnk_path) -> bool {
+        std::string lower_path = bnk_path;
+        std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
+        std::string filename = std::filesystem::path(lower_path).filename().string();
+        return filename.find("header") != std::string::npos;
+    };
+
+    auto is_nested_bnk = [](const std::string& filename) -> bool {
+        std::string lower = filename;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        return lower.size() >= 4 && lower.substr(lower.size() - 4) == ".bnk";
+    };
+
+    auto add_to_tree = [&root](const std::string& path, const std::string& bnk_source,
+                               int bnk_index, uint32_t file_size, bool is_nested = false) {
+        std::string normalized_path = path;
+        std::replace(normalized_path.begin(), normalized_path.end(), '\\', '/');
+
+        std::vector<std::string> parts;
+        size_t start = 0;
+        size_t end = normalized_path.find('/');
+
+        while (end != std::string::npos) {
+            parts.push_back(normalized_path.substr(start, end - start));
+            start = end + 1;
+            end = normalized_path.find('/', start);
+        }
+        parts.push_back(normalized_path.substr(start));
+
+        TreeNode* current = &root;
+        for (size_t j = 0; j < parts.size(); ++j) {
+            const std::string& part = parts[j];
+            if (part.empty()) continue;
+
+            bool is_last = (j == parts.size() - 1);
+
+            TreeNode& child = current->children[part];
+            child.name = part;
+            child.is_file = is_last;
+
+            if (is_last) {
+                child.full_path = path;
+                child.bnk_source = bnk_source;
+                child.bnk_index = bnk_index;
+                child.file_size = file_size;
+            }
+
+            current = &child;
+        }
+    };
+
+    std::vector<std::pair<std::string, int>> nested_bnks;
+
     for (const auto& bnk_path : S.bnk_paths) {
+        if (is_header_bnk(bnk_path)) {
+            continue;
+        }
+
         try {
             BNKReader reader(bnk_path);
             const auto& files = reader.list_files();
 
             for (size_t i = 0; i < files.size(); ++i) {
                 const auto& file = files[i];
-                std::string path = file.name;
 
-                std::replace(path.begin(), path.end(), '\\', '/');
+                add_to_tree(file.name, bnk_path, (int)i, file.uncompressed_size);
 
-                std::vector<std::string> parts;
-                size_t start = 0;
-                size_t end = path.find('/');
-
-                while (end != std::string::npos) {
-                    parts.push_back(path.substr(start, end - start));
-                    start = end + 1;
-                    end = path.find('/', start);
-                }
-                parts.push_back(path.substr(start));
-
-                TreeNode* current = &root;
-                for (size_t j = 0; j < parts.size(); ++j) {
-                    const std::string& part = parts[j];
-                    if (part.empty()) continue;
-
-                    bool is_last = (j == parts.size() - 1);
-
-                    TreeNode& child = current->children[part];
-                    child.name = part;
-                    child.is_file = is_last;
-
-                    if (is_last) {
-                        child.full_path = file.name;
-                        child.bnk_source = bnk_path;
-                        child.bnk_index = (int)i;
-                        child.file_size = file.uncompressed_size;
-                    }
-
-                    current = &child;
+                if (is_nested_bnk(file.name)) {
+                    nested_bnks.push_back({bnk_path, (int)i});
                 }
             }
         } catch (...) {
             continue;
         }
     }
+
+    for (const auto& [parent_bnk_path, nested_index] : nested_bnks) {
+        try {
+            BNKReader parent_reader(parent_bnk_path);
+            const auto& parent_files = parent_reader.list_files();
+
+            if (nested_index < 0 || nested_index >= (int)parent_files.size()) {
+                continue;
+            }
+
+            const auto& nested_file = parent_files[nested_index];
+            std::string nested_path = nested_file.name;
+
+            auto tmpdir = std::filesystem::temp_directory_path() / "f2_nested_bnk_tree";
+            std::error_code ec;
+            std::filesystem::create_directories(tmpdir, ec);
+
+            std::string temp_name = "nested_" + std::to_string(std::hash<std::string>{}(parent_bnk_path + nested_path)) + ".bnk";
+            auto temp_bnk_path = tmpdir / temp_name;
+
+            extract_one(parent_bnk_path, nested_index, temp_bnk_path.string());
+
+            BNKReader nested_reader(temp_bnk_path.string());
+            const auto& nested_files = nested_reader.list_files();
+
+            std::filesystem::path nested_parent = std::filesystem::path(nested_path).parent_path();
+            std::string prefix = nested_parent.empty() ? "" : nested_parent.string() + "/";
+
+            for (size_t i = 0; i < nested_files.size(); ++i) {
+                const auto& file = nested_files[i];
+                std::string full_nested_path = prefix + file.name;
+                add_to_tree(full_nested_path, temp_bnk_path.string(), (int)i, file.uncompressed_size, true);
+            }
+
+        } catch (...) {
+            continue;
+        }
+    }
 }
 
-static void draw_tree_node(TreeNode& node) {
+static void draw_tree_node(TreeNode& node, ID3D11Device* device) {
     if (node.is_file) {
         ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
 
@@ -219,6 +285,85 @@ static void draw_tree_node(TreeNode& node) {
 
         bool node_open = ImGui::TreeNodeEx(node.name.c_str(), flags);
 
+        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+            std::vector<TreeNode*> mdl_files;
+            for (auto& pair : node.children) {
+                if (pair.second.is_file) {
+                    std::string fname = pair.first;
+                    std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+                    if (fname == "interior.mdl" || fname == "exterior.mdl") {
+                        mdl_files.push_back(&pair.second);
+                    }
+                }
+            }
+
+            if (!mdl_files.empty()) {
+                progress_open(0, "Loading preview...");
+
+                std::vector<std::string> mdl_paths;
+                std::vector<std::string> bnk_sources;
+                std::vector<int> bnk_indices;
+
+                for (auto* mdl_node : mdl_files) {
+                    mdl_paths.push_back(mdl_node->full_path);
+                    bnk_sources.push_back(mdl_node->bnk_source);
+                    bnk_indices.push_back(mdl_node->bnk_index);
+                }
+
+                ID3D11Device* device_ptr = device;
+
+                std::thread([device_ptr, mdl_paths, bnk_sources, bnk_indices]() {
+                    std::vector<MDLMeshGeom> all_meshes;
+                    MDLInfo combined_info;
+                    bool any_success = false;
+
+                    for (size_t idx = 0; idx < mdl_paths.size(); ++idx) {
+                        std::vector<unsigned char> buf;
+                        bool ok = false;
+
+                        try {
+                            ok = build_mdl_buffer_for_name(mdl_paths[idx], buf);
+                        } catch (...) {}
+
+                        if (ok && !buf.empty()) {
+                            MDLInfo mdl_info;
+                            if (parse_mdl_info(buf, mdl_info, mdl_paths[idx])) {
+                                std::vector<MDLMeshGeom> meshes;
+                                if (parse_mdl_geometry(buf, mdl_info, meshes)) {
+                                    all_meshes.insert(all_meshes.end(), meshes.begin(), meshes.end());
+                                    if (!any_success) {
+                                        combined_info = mdl_info;
+                                        any_success = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (any_success && !all_meshes.empty()) {
+                        S.hex_data.clear();
+                        S.mdl_info_ok = true;
+                        S.mdl_info = combined_info;
+                        S.mdl_meshes = all_meshes;
+
+                        extern ModelPreview g_mp;
+                        MP_Release(g_mp);
+                        MP_Init(device_ptr, g_mp, 800, 520);
+                        MP_Build(device_ptr, all_meshes, combined_info, g_mp);
+                        S.cam_yaw = 0.0f;
+                        S.cam_pitch = 0.2f;
+                        S.cam_dist = 3.0f;
+                        S.show_model_preview = true;
+                    }
+
+                    progress_done();
+                    if (!any_success) {
+                        show_error_box("Failed to load preview.");
+                    }
+                }).detach();
+            }
+        }
+
         if (node_open) {
             std::vector<std::pair<std::string, TreeNode*>> sorted_children;
             for (auto& pair : node.children) {
@@ -234,7 +379,7 @@ static void draw_tree_node(TreeNode& node) {
                 });
 
             for (auto& pair : sorted_children) {
-                draw_tree_node(*pair.second);
+                draw_tree_node(*pair.second, device);
             }
 
             ImGui::TreePop();
@@ -242,7 +387,7 @@ static void draw_tree_node(TreeNode& node) {
     }
 }
 
-void draw_left_panel() {
+void draw_left_panel(ID3D11Device* device) {
     ImGui::BeginChild("left_panel", ImVec2(360, 0), true);
 
     if (ImGui::BeginTabBar("LeftPanelTabs", ImGuiTabBarFlags_None)) {
@@ -397,14 +542,56 @@ void draw_left_panel() {
 
             static TreeNode root;
             static bool tree_built = false;
+            static bool tree_building = false;
+            static std::atomic<bool> build_complete(false);
+            static float build_start_time = 0.0f;
 
-            if (!tree_built && !S.bnk_paths.empty()) {
-                build_unified_file_tree(root);
-                tree_built = true;
+            if (!tree_built && !tree_building && !S.bnk_paths.empty()) {
+                tree_building = true;
+                build_complete = false;
+                build_start_time = ImGui::GetTime();
+
+                TreeNode* root_ptr = &root;
+                std::atomic<bool>* complete_ptr = &build_complete;
+
+                std::thread([root_ptr, complete_ptr]() {
+                    build_unified_file_tree(*root_ptr);
+                    complete_ptr->store(true);
+                }).detach();
             }
 
-            for (auto& pair : root.children) {
-                draw_tree_node(pair.second);
+            if (tree_building) {
+                if (build_complete) {
+                    tree_building = false;
+                    tree_built = true;
+                } else {
+                    ImVec2 avail = ImGui::GetContentRegionAvail();
+                    float elapsed = ImGui::GetTime() - build_start_time;
+
+                    float dot_cycle = fmodf(elapsed * 2.0f, 3.0f);
+                    int dot_count = (int)dot_cycle + 1;
+                    std::string dots(dot_count, '.');
+                    std::string loading_text = "Loading file tree" + dots;
+
+                    ImVec2 text_size = ImGui::CalcTextSize(loading_text.c_str());
+                    ImVec2 pos((avail.x - text_size.x) * 0.5f, (avail.y - text_size.y) * 0.5f);
+                    if (pos.x < 0) pos.x = 0;
+                    if (pos.y < 0) pos.y = 0;
+                    ImGui::SetCursorPos(pos);
+                    ImGui::TextUnformatted(loading_text.c_str());
+
+                    if (elapsed > 10.0f) {
+                        ImVec2 warning_size = ImGui::CalcTextSize("(this may take some time)");
+                        ImVec2 warning_pos((avail.x - warning_size.x) * 0.5f, pos.y + text_size.y + 10.0f);
+                        if (warning_pos.x < 0) warning_pos.x = 0;
+                        ImGui::SetCursorPos(warning_pos);
+                        ImGui::TextUnformatted("(this may take some time)");
+                    }
+                }
+            } else if (tree_built) {
+                for (auto& pair : root.children) {
+                    draw_tree_node(pair.second, device);
+                }
             }
 
             ImGui::EndChild();
@@ -1059,8 +1246,25 @@ if (!can_preview) {
                     std::string needle = search_term;
                     std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
 
+                    auto is_header_bnk = [](const std::string& bnk_path) -> bool {
+                        std::string lower_path = bnk_path;
+                        std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
+                        std::string filename = std::filesystem::path(lower_path).filename().string();
+                        return filename.find("header") != std::string::npos;
+                    };
+
+                    auto is_nested_bnk = [](const std::string& filename) -> bool {
+                        std::string lower = filename;
+                        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                        return lower.size() >= 4 && lower.substr(lower.size() - 4) == ".bnk";
+                    };
+
                     try {
                         for (const auto& bnk_path : S.bnk_paths) {
+                            if (is_header_bnk(bnk_path)) {
+                                continue;
+                            }
+
                             BNKReader reader(bnk_path);
                             const auto& files = reader.list_files();
 
@@ -1076,6 +1280,41 @@ if (!can_preview) {
                                         (int)i,
                                         files[i].uncompressed_size
                                     });
+                                }
+
+                                if (is_nested_bnk(fname)) {
+                                    try {
+                                        auto tmpdir = std::filesystem::temp_directory_path() / "f2_global_search_nested";
+                                        std::error_code ec;
+                                        std::filesystem::create_directories(tmpdir, ec);
+
+                                        std::string temp_name = "search_nested_" + std::to_string(std::hash<std::string>{}(bnk_path + fname)) + ".bnk";
+                                        auto temp_bnk_path = tmpdir / temp_name;
+
+                                        extract_one(bnk_path, (int)i, temp_bnk_path.string());
+
+                                        BNKReader nested_reader(temp_bnk_path.string());
+                                        const auto& nested_files = nested_reader.list_files();
+
+                                        std::filesystem::path nested_parent = std::filesystem::path(fname).parent_path();
+                                        std::string prefix = nested_parent.empty() ? "" : nested_parent.string() + "/";
+
+                                        for (size_t j = 0; j < nested_files.size(); ++j) {
+                                            const auto& nested_file = nested_files[j];
+                                            std::string nested_fname = prefix + nested_file.name;
+                                            std::string nested_fname_lower = nested_fname;
+                                            std::transform(nested_fname_lower.begin(), nested_fname_lower.end(), nested_fname_lower.begin(), ::tolower);
+
+                                            if (nested_fname_lower.find(needle) != std::string::npos) {
+                                                local_hits.push_back({
+                                                    temp_bnk_path.string(),
+                                                    nested_fname,
+                                                    (int)j,
+                                                    nested_files[j].uncompressed_size
+                                                });
+                                            }
+                                        }
+                                    } catch (...) {}
                                 }
                             }
                         }

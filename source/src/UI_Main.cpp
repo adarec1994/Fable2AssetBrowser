@@ -115,7 +115,7 @@ void draw_main(HWND hwnd, ID3D11Device* device) {
         ImGui::BeginChild("browser_group", ImVec2(0, 0), false);
         ImGui::BeginGroup();
         ImGui::BeginChild("left_panel_wrap", ImVec2(360, 0), false);
-        draw_left_panel();
+        draw_left_panel(device);
         ImGui::EndChild();
         ImGui::SameLine();
         draw_right_panel(device);

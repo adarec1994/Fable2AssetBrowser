@@ -94,19 +94,14 @@ SamplerState smp : register(s0);
 struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
 
 float3 hemiAmbient(float3 n) {
-    // simple hemisphere ambient: up sky vs. ground
     float up = saturate(n.y*0.5 + 0.5);
-    float3 sky    = float3(0.65, 0.67, 0.70);
-    float3 ground = float3(0.25, 0.24, 0.23);
+    float3 sky    = float3(0.75, 0.77, 0.80);
+    float3 ground = float3(0.50, 0.48, 0.46);
     return lerp(ground, sky, up);
 }
 
 float4 PS(VSOUT i) : SV_Target {
     float3 N_geo = normalize(i.n);
-    float3 L = normalize(lightDir.xyz);
-
-    // normal map (tangent basis is approximated by using model space here,
-    // good enough for preview)
     float3 N_m = tex1.Sample(smp, i.t).rgb * 2.0 - 1.0;
     N_m = normalize(N_m);
     float3 N = normalize(N_geo + N_m * 0.5);
@@ -118,18 +113,10 @@ float4 PS(VSOUT i) : SV_Target {
 
     albedo *= tint;
 
-    float ndotl = saturate(dot(N, L));
-    float3 amb  = hemiAmbient(N) * params.x;          // ambientK (params.x)
-    float3 diff = albedo * (0.6 * ndotl);             // increased diffuse contribution
-    float3 V    = normalize(float3(0,0,1));           // fake view dir
-    float3 H    = normalize(L + V);
-    float  s    = pow(saturate(dot(N, H)), params.y); // spec power (params.y)
-    float3 spec = specTex * s * 0.35;
+    float3 gi = hemiAmbient(N);
+    float3 color = albedo * gi;
 
-    float3 color = albedo * amb + diff + spec;
-
-    // simple gamma-ish lift for preview readability
-    color = pow(color, 1.0/1.8);
+    color = pow(color, 1.0/2.2);
 
     return float4(color, alpha);
 }
@@ -730,5 +717,3 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, floa
 
     ctx->Release();
 }
-
-

@@ -501,66 +501,6 @@ void draw_left_panel(ID3D11Device* device) {
             }
             ImGui::EndChild();
             ImGui::EndTabItem();
-
-        if (ImGui::BeginTabItem("File Tree")) {
-            ImGui::BeginChild("file_tree", ImVec2(0, 0), false);
-
-            static bool tree_built = false;
-            static bool tree_building = false;
-            static std::atomic<bool> build_complete(false);
-            static float build_start_time = 0.0f;
-
-            if (!tree_built && !tree_building && !S.bnk_paths.empty()) {
-                tree_building = true;
-                build_complete = false;
-                build_start_time = ImGui::GetTime();
-
-                TreeNode* root_ptr = &g_tree_root;
-                std::atomic<bool>* complete_ptr = &build_complete;
-
-                std::thread([root_ptr, complete_ptr]() {
-                    build_unified_file_tree(*root_ptr);
-                    complete_ptr->store(true);
-                }).detach();
-            }
-
-            if (tree_building) {
-                if (build_complete) {
-                    tree_building = false;
-                    tree_built = true;
-                } else {
-                    ImVec2 avail = ImGui::GetContentRegionAvail();
-                    float elapsed = ImGui::GetTime() - build_start_time;
-
-                    float dot_cycle = fmodf(elapsed * 2.0f, 4.0f);
-                    int dot_count = (int)dot_cycle;
-                    std::string dots(dot_count, '.');
-                    std::string loading_text = "Loading file tree" + dots;
-
-                    ImVec2 text_size = ImGui::CalcTextSize(loading_text.c_str());
-                    ImVec2 pos((avail.x - text_size.x) * 0.5f, (avail.y - text_size.y) * 0.5f);
-                    if (pos.x < 0) pos.x = 0;
-                    if (pos.y < 0) pos.y = 0;
-                    ImGui::SetCursorPos(pos);
-                    ImGui::TextUnformatted(loading_text.c_str());
-
-                    if (elapsed > 10.0f) {
-                        ImVec2 warning_size = ImGui::CalcTextSize("(this may take some time)");
-                        ImVec2 warning_pos((avail.x - warning_size.x) * 0.5f, pos.y + text_size.y + 10.0f);
-                        if (warning_pos.x < 0) warning_pos.x = 0;
-                        ImGui::SetCursorPos(warning_pos);
-                        ImGui::TextUnformatted("(this may take some time)");
-                    }
-                }
-            } else if (tree_built) {
-                for (auto& pair : g_tree_root.children) {
-                    draw_tree_node(pair.second, device);
-                }
-            }
-
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
         }
 
         if (ImGui::BeginTabItem("File Tree")) {

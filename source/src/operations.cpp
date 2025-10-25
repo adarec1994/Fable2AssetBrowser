@@ -577,27 +577,31 @@ void on_rebuild_and_extract_one(const std::string &tex_name) {
     std::unordered_map<std::string, int> mapH, mapR, mapM;
     for (size_t i = 0; i < r_headers.list_files().size(); ++i) {
         auto &e = r_headers.list_files()[i];
-        std::string fname = std::filesystem::path(e.name).filename().string();
+        std::string fname = e.name;
         std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+        std::replace(fname.begin(), fname.end(), '\\', '/');
         mapH.emplace(fname, (int) i);
     }
     for (size_t i = 0; i < r_rest.list_files().size(); ++i) {
         auto &e = r_rest.list_files()[i];
-        std::string fname = std::filesystem::path(e.name).filename().string();
+        std::string fname = e.name;
         std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+        std::replace(fname.begin(), fname.end(), '\\', '/');
         mapR.emplace(fname, (int) i);
     }
     if (r_mip0)
         for (size_t i = 0; i < r_mip0->list_files().size(); ++i) {
             auto &e = r_mip0->list_files()[i];
-            std::string fname = std::filesystem::path(e.name).filename().string();
+            std::string fname = e.name;
             std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+            std::replace(fname.begin(), fname.end(), '\\', '/');
             mapM.emplace(fname, (int) i);
         }
 
-    std::string fname = std::filesystem::path(tex_name).filename().string();
-    std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
-    if (!mapH.count(fname) || !mapR.count(fname)) {
+    std::string key = tex_name;
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    std::replace(key.begin(), key.end(), '\\', '/');
+    if (!mapH.count(key) || !mapR.count(key)) {
         show_error_box("Texture not found in required BNKs.");
         return;
     }
@@ -615,9 +619,9 @@ void on_rebuild_and_extract_one(const std::string &tex_name) {
         auto tmp_m = tmpdir / "m.bin";
         auto tmp_r = tmpdir / "r.bin";
         try {
-            extract_one(*p_headers, mapH.at(fname), tmp_h.string());
-            if (mapM.count(fname) && p_mip0) extract_one(*p_mip0, mapM.at(fname), tmp_m.string());
-            extract_one(*p_rest, mapR.at(fname), tmp_r.string());
+            extract_one(*p_headers, mapH.at(key), tmp_h.string());
+            if (mapM.count(key) && p_mip0) extract_one(*p_mip0, mapM.at(key), tmp_m.string());
+            extract_one(*p_rest, mapR.at(key), tmp_r.string());
             std::ofstream out(out_path, std::ios::binary);
             std::ifstream fh(tmp_h, std::ios::binary);
             out << fh.rdbuf();
@@ -657,15 +661,17 @@ void on_rebuild_and_extract_one_mdl(const std::string &mdl_name) {
         return;
     }
 
-    std::string key = std::filesystem::path(mdl_name).filename().string();
+    std::string key = mdl_name;
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    std::replace(key.begin(), key.end(), '\\', '/');
 
     BNKReader r_headers(*p_headers);
     std::unordered_map<std::string, int> mapH;
     for (size_t i = 0; i < r_headers.list_files().size(); ++i) {
         auto &e = r_headers.list_files()[i];
-        std::string fname = std::filesystem::path(e.name).filename().string();
+        std::string fname = e.name;
         std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+        std::replace(fname.begin(), fname.end(), '\\', '/');
         mapH.emplace(fname, (int)i);
     }
 
@@ -684,8 +690,9 @@ void on_rebuild_and_extract_one_mdl(const std::string &mdl_name) {
         std::unordered_map<std::string, int> mapR;
         for (size_t i = 0; i < r_rest.list_files().size(); ++i) {
             auto &e = r_rest.list_files()[i];
-            std::string fname = std::filesystem::path(e.name).filename().string();
+            std::string fname = e.name;
             std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+            std::replace(fname.begin(), fname.end(), '\\', '/');
             mapR.emplace(fname, (int)i);
         }
         if (!mapR.count(key)) {

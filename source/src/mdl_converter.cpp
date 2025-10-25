@@ -773,12 +773,33 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
             if (!info.Meshes[gi].MeshName.empty()) {
                 mesh_name = info.Meshes[gi].MeshName;
             }
+        }
 
-            if (!info.Meshes[gi].Materials.empty()) {
-                const auto& mat = info.Meshes[gi].Materials[0];
+        if (mesh_count > 0) meshes << ",";
+        meshes << "{\"name\":\"" << json_escape(mesh_name) << "\",\"primitives\":[";
 
-                int tex_idx = -1;
-                bool has_alpha = false;
+        size_t num_materials = (gi < info.Meshes.size()) ? info.Meshes[gi].Materials.size() : 0;
+        if (num_materials == 0) num_materials = 1;
+
+        for (size_t mat_i = 0; mat_i < num_materials; ++mat_i) {
+            if (mat_i > 0) meshes << ",";
+
+            int tex_idx = -1;
+            bool has_alpha = false;
+            int this_mat_idx = -1;
+            std::string material_name = "material_" + std::to_string(mat_i);
+
+            if (gi < info.Meshes.size() && mat_i < info.Meshes[gi].Materials.size()) {
+                const auto& mat = info.Meshes[gi].Materials[mat_i];
+
+                if (!mat.TextureName.empty()) {
+                    material_name = std::filesystem::path(mat.TextureName).stem().string();
+                } else if (!mat.NormalMapName.empty()) {
+                    material_name = std::filesystem::path(mat.NormalMapName).stem().string();
+                } else if (!mat.SpecularMapName.empty()) {
+                    material_name = std::filesystem::path(mat.SpecularMapName).stem().string();
+                }
+
                 if (!mat.TextureName.empty()) {
                     std::vector<unsigned char> tex_buf;
                     if (build_any_tex_buffer_for_name(mat.TextureName, tex_buf)) {
@@ -807,7 +828,7 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
                 }
 
                 if (mat_count > 0) materials << ",";
-                materials << "{\"name\":\"" << json_escape(mesh_name + "_material") << "\"";
+                materials << "{\"name\":\"" << json_escape(material_name) << "\"";
                 materials << ",\"doubleSided\":true";
                 if (has_alpha) {
                     materials << ",\"alphaMode\":\"BLEND\"";
@@ -817,28 +838,29 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
                     materials << "\"baseColorTexture\":{\"index\":" << tex_idx << "},";
                 }
                 materials << "\"metallicFactor\":0.0,\"roughnessFactor\":0.9}}";
-                mat_idx = mat_count++;
+                this_mat_idx = mat_count++;
             }
+
+            meshes << "{";
+            meshes << "\"attributes\":{";
+            meshes << "\"POSITION\":" << pos_acc << ",";
+            meshes << "\"NORMAL\":" << norm_acc << ",";
+            meshes << "\"TEXCOORD_0\":" << uv_acc;
+
+            if (joints_acc >= 0 && weights_acc >= 0) {
+                meshes << ",\"JOINTS_0\":" << joints_acc;
+                meshes << ",\"WEIGHTS_0\":" << weights_acc;
+            }
+
+            meshes << "},";
+            meshes << "\"indices\":" << idx_acc;
+            if (this_mat_idx >= 0) {
+                meshes << ",\"material\":" << this_mat_idx;
+            }
+            meshes << "}";
         }
 
-        if (mesh_count > 0) meshes << ",";
-        meshes << "{\"name\":\"" << json_escape(mesh_name) << "\",\"primitives\":[{";
-        meshes << "\"attributes\":{";
-        meshes << "\"POSITION\":" << pos_acc << ",";
-        meshes << "\"NORMAL\":" << norm_acc << ",";
-        meshes << "\"TEXCOORD_0\":" << uv_acc;
-
-        if (joints_acc >= 0 && weights_acc >= 0) {
-            meshes << ",\"JOINTS_0\":" << joints_acc;
-            meshes << ",\"WEIGHTS_0\":" << weights_acc;
-        }
-
-        meshes << "},";
-        meshes << "\"indices\":" << idx_acc;
-        if (mat_idx >= 0) {
-            meshes << ",\"material\":" << mat_idx;
-        }
-        meshes << "}]}";
+        meshes << "]}";
         mesh_count++;
     }
 

@@ -492,6 +492,7 @@ static bool srv_from_tex_blob_auto(ID3D11Device* dev,
 static bool build_mesh_textures(ID3D11Device* dev,
                                 const MDLInfo& info,
                                 size_t mesh_index,
+                                size_t material_index,
                                 ID3D11ShaderResourceView** out_diffuse,
                                 ID3D11ShaderResourceView** out_normal,
                                 ID3D11ShaderResourceView** out_specular,
@@ -508,8 +509,8 @@ static bool build_mesh_textures(ID3D11Device* dev,
 
     if (mesh_index >= info.Meshes.size()) return true;
     const auto& mesh = info.Meshes[mesh_index];
-    if(mesh.Materials.empty()) return true;
-    const auto& mat = mesh.Materials[0];
+    if(material_index >= mesh.Materials.size()) return true;
+    const auto& mat = mesh.Materials[material_index];
 
     auto load_texture = [&](const std::string& tex_name, ID3D11ShaderResourceView** out_srv, bool want_alpha){
         if(tex_name.empty()) return;
@@ -588,10 +589,8 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     mp.center[0]=(minx+maxx)*0.5f; mp.center[1]=(miny+maxy)*0.5f; mp.center[2]=(minz+maxz)*0.5f;
     mp.radius = std::max(std::max(maxx-minx,maxy-miny),maxz-minz)*0.5f; if(mp.radius<0.0001f) mp.radius=1.0f;
 
-    mp.meshes.resize(geoms.size());
     for(size_t i=0;i<geoms.size();++i){
         const auto& g = geoms[i];
-        auto& m = mp.meshes[i];
 
         size_t vcount = g.positions.size()/3;
         if(vcount==0 || g.indices.empty()) continue;
@@ -610,26 +609,38 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             vtx[v].v  = hasT ? g.uvs[v*2+1] : 0.0f;
         }
 
-        D3D11_BUFFER_DESC vb{}; vb.BindFlags=D3D11_BIND_VERTEX_BUFFER; vb.ByteWidth=(UINT)(vtx.size()*sizeof(MPVertex)); vb.Usage=D3D11_USAGE_IMMUTABLE;
-        D3D11_SUBRESOURCE_DATA vsd{}; vsd.pSysMem=vtx.data();
-        if(FAILED(dev->CreateBuffer(&vb,&vsd,&m.vb))) return false;
-
         std::vector<uint32_t> idx = g.indices;
-        D3D11_BUFFER_DESC ib{}; ib.BindFlags=D3D11_BIND_INDEX_BUFFER; ib.ByteWidth=(UINT)(idx.size()*sizeof(uint32_t)); ib.Usage=D3D11_USAGE_IMMUTABLE;
-        D3D11_SUBRESOURCE_DATA isd{}; isd.pSysMem=idx.data();
-        if(FAILED(dev->CreateBuffer(&ib,&isd,&m.ib))) return false;
-        m.index_count = (UINT)idx.size();
 
-        bool hasA = false;
-        build_mesh_textures(dev, info, i, &m.srv_diffuse, &m.srv_normal, &m.srv_specular, &m.srv_unk, &m.srv_tint, &hasA);
+        size_t mat_count = 1;
+        if(i < info.Meshes.size()){
+            mat_count = info.Meshes[i].Materials.size();
+            if(mat_count == 0) mat_count = 1;
+        }
 
-        if (!m.srv_diffuse && mp.default_srv) { m.srv_diffuse = mp.default_srv; m.srv_diffuse->AddRef(); }
-        if (!m.srv_normal  && mp.default_srv) { m.srv_normal  = mp.default_srv; m.srv_normal->AddRef(); }
-        if (!m.srv_specular&& mp.default_srv) { m.srv_specular= mp.default_srv; m.srv_specular->AddRef(); }
-        if (!m.srv_unk     && mp.default_srv) { m.srv_unk     = mp.default_srv; m.srv_unk->AddRef(); }
-        if (!m.srv_tint    && mp.default_srv) { m.srv_tint    = mp.default_srv; m.srv_tint->AddRef(); }
+        for(size_t mat_idx = 0; mat_idx < mat_count; ++mat_idx){
+            MPPerMesh m;
 
-        m.has_alpha = hasA;
+            D3D11_BUFFER_DESC vb{}; vb.BindFlags=D3D11_BIND_VERTEX_BUFFER; vb.ByteWidth=(UINT)(vtx.size()*sizeof(MPVertex)); vb.Usage=D3D11_USAGE_IMMUTABLE;
+            D3D11_SUBRESOURCE_DATA vsd{}; vsd.pSysMem=vtx.data();
+            if(FAILED(dev->CreateBuffer(&vb,&vsd,&m.vb))) continue;
+
+            D3D11_BUFFER_DESC ib{}; ib.BindFlags=D3D11_BIND_INDEX_BUFFER; ib.ByteWidth=(UINT)(idx.size()*sizeof(uint32_t)); ib.Usage=D3D11_USAGE_IMMUTABLE;
+            D3D11_SUBRESOURCE_DATA isd{}; isd.pSysMem=idx.data();
+            if(FAILED(dev->CreateBuffer(&ib,&isd,&m.ib))) { m.vb->Release(); continue; }
+            m.index_count = (UINT)idx.size();
+
+            bool hasA = false;
+            build_mesh_textures(dev, info, i, mat_idx, &m.srv_diffuse, &m.srv_normal, &m.srv_specular, &m.srv_unk, &m.srv_tint, &hasA);
+
+            if (!m.srv_diffuse && mp.default_srv) { m.srv_diffuse = mp.default_srv; m.srv_diffuse->AddRef(); }
+            if (!m.srv_normal  && mp.default_srv) { m.srv_normal  = mp.default_srv; m.srv_normal->AddRef(); }
+            if (!m.srv_specular&& mp.default_srv) { m.srv_specular= mp.default_srv; m.srv_specular->AddRef(); }
+            if (!m.srv_unk     && mp.default_srv) { m.srv_unk     = mp.default_srv; m.srv_unk->AddRef(); }
+            if (!m.srv_tint    && mp.default_srv) { m.srv_tint    = mp.default_srv; m.srv_tint->AddRef(); }
+
+            m.has_alpha = hasA;
+            mp.meshes.push_back(m);
+        }
     }
     return true;
 }

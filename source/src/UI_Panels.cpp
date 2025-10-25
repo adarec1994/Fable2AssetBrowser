@@ -1112,6 +1112,100 @@ if (!can_preview) {
         auto item = S.files[(size_t)S.selected_file_index];
         auto name = item.name;
 
+        // Check if this is interior.mdl or exterior.mdl
+        {
+            std::string filename = std::filesystem::path(name).filename().string();
+            std::string filename_lower = filename;
+            std::transform(filename_lower.begin(), filename_lower.end(), filename_lower.begin(), ::tolower);
+            bool is_interior_or_exterior = (filename_lower == "interior.mdl" || filename_lower == "exterior.mdl");
+
+            // If it's interior/exterior, try to load both from the same folder
+            if (is_interior_or_exterior && can_mdl) {
+                // Extract the parent folder path
+                std::filesystem::path full_path(name);
+                std::string folder_path = full_path.parent_path().string();
+
+                // Search for both interior.mdl and exterior.mdl in the same folder
+                std::vector<std::pair<std::string, int>> mdl_files; // name, index
+
+                for (size_t i = 0; i < S.files.size(); ++i) {
+                    const auto& file = S.files[i];
+                    std::filesystem::path file_path(file.name);
+                    std::string file_folder = file_path.parent_path().string();
+                    std::string file_name_lower = file_path.filename().string();
+                    std::transform(file_name_lower.begin(), file_name_lower.end(), file_name_lower.begin(), ::tolower);
+
+                    // Check if it's in the same folder and is interior/exterior.mdl
+                    if (file_folder == folder_path &&
+                        (file_name_lower == "interior.mdl" || file_name_lower == "exterior.mdl")) {
+                        mdl_files.push_back({file.name, file.index});
+                    }
+                }
+
+                if (mdl_files.size() > 0) {
+                    // Use the folder preview path (load both interior and exterior)
+                    progress_open(0, "Loading preview...");
+
+                    ID3D11Device* device_ptr = device;
+
+                    std::thread([device_ptr, mdl_files]() {
+                        std::vector<MDLMeshGeom> all_meshes;
+                        MDLInfo combined_info;
+                        bool any_success = false;
+
+                        for (const auto& [mdl_name, mdl_index] : mdl_files) {
+                            std::vector<unsigned char> buf;
+                            bool ok = false;
+
+                            try {
+                                ok = build_mdl_buffer_for_name(mdl_name, buf);
+                            } catch (...) {}
+
+                            if (ok && !buf.empty()) {
+                                MDLInfo mdl_info;
+                                if (parse_mdl_info(buf, mdl_info, mdl_name)) {
+                                    std::vector<MDLMeshGeom> meshes;
+                                    if (parse_mdl_geometry(buf, mdl_info, meshes)) {
+                                        all_meshes.insert(all_meshes.end(), meshes.begin(), meshes.end());
+                                        if (!any_success) {
+                                            combined_info = mdl_info;
+                                            any_success = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (any_success && !all_meshes.empty()) {
+                            S.hex_data.clear();
+                            S.mdl_info_ok = true;
+                            S.mdl_info = combined_info;
+                            S.mdl_meshes = all_meshes;
+
+                            extern ModelPreview g_mp;
+                            MP_Release(g_mp);
+                            MP_Init(device_ptr, g_mp, 800, 520);
+                            MP_Build(device_ptr, all_meshes, combined_info, g_mp);
+                            S.cam_yaw = 0.0f;
+                            S.cam_pitch = 0.2f;
+                            S.cam_dist = 3.0f;
+                            S.show_model_preview = true;
+                        }
+
+                        progress_done();
+                        if (!any_success) {
+                            show_error_box("Failed to load preview.");
+                        }
+                    }).detach();
+
+                    goto skip_preview;
+                }
+                // If no sibling MDL files found, fall through to single-file preview
+            }
+        }
+
+        // Original single-file preview code
+        {
         std::string bnk_to_use;
         std::string nested_temp_copy;
         bool is_nested = false;
@@ -1230,6 +1324,7 @@ if (!can_preview) {
             progress_done();
             if (!ok) show_error_box("Failed to load preview.");
         }).detach();
+        }
 
         skip_preview:;
     }

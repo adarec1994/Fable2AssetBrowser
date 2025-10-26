@@ -456,7 +456,10 @@ if(is_foliage){
                         wasStringFound = false;
                         r.i -= 1;
                     } else {
-                        if(!r.skip(8)) return false;
+                        uint32_t mesh_id = 0;
+                        if(!r.u32be(mesh_id)) return false;
+                        uint32_t mesh_id_copy = 0;
+                        if(!r.u32be(mesh_id_copy)) return false;
                     }
                 }
             }
@@ -475,7 +478,10 @@ if(is_foliage){
                         uint8_t followByte = 0;
                         if(r.u8(followByte)){
                             if(followByte == 0x01) {
-                                if(!r.skip(8)) return false;
+                                uint32_t mesh_id = 0;
+                                if(!r.u32be(mesh_id)) return false;
+                                uint32_t mesh_id_copy = 0;
+                                if(!r.u32be(mesh_id_copy)) return false;
                                 found = true;
                                 break;
                             } else {
@@ -498,6 +504,12 @@ if(is_foliage){
 
             uint32_t vtx=0;
             if(!r.u32be(vtx)) return false;
+
+            size_t sub_count_offset = r.i;
+            uint32_t sub_count = 0;
+            if(!r.u32be(sub_count)) return false;
+
+            debug_file << "sub_count offset: 0x" << std::hex << sub_count_offset << std::dec << ", sub_count: " << sub_count << std::endl;
 
             bool markerFound = false;
             for(size_t searchPos = r.i; searchPos + 4 <= r.n && searchPos < r.i + 1000; ++searchPos){
@@ -541,7 +553,7 @@ if(is_foliage){
             mb.VertexOffset=vert_off;
             mb.FaceCount=tlen;
             mb.FaceOffset=face_off;
-            mb.SubMeshCount=1;
+            mb.SubMeshCount=sub_count;
             mb.IsAltPath=true;
             out.MeshBuffers.push_back(mb);
 

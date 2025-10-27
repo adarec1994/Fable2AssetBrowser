@@ -11,6 +11,7 @@
 #include "ImGuiFileDialog.h"
 #include <filesystem>
 #include <algorithm>
+#include <vector>
 #include "ModelPreview.h"
 #include <d3d11.h>
 
@@ -20,9 +21,81 @@
 ModelPreview g_mp;
 
 static ID3D11ShaderResourceView* g_splash_texture = nullptr;
+static ID3D11ShaderResourceView* g_logo_texture = nullptr;
+static ID3D11ShaderResourceView* g_button_texture = nullptr;
+static ID3D11ShaderResourceView* g_sparkle_textures[8] = {nullptr};
 static float g_splash_scroll_offset = 0.0f;
 static int g_splash_width = 0;
 static int g_splash_height = 0;
+static int g_logo_width = 0;
+static int g_logo_height = 0;
+static int g_button_width = 0;
+static int g_button_height = 0;
+static int g_sparkle_widths[8] = {0};
+static int g_sparkle_heights[8] = {0};
+static float g_splash_time_elapsed = 0.0f;
+static const float g_fade_in_delay = 5.0f;
+static const float g_fade_in_duration = 2.0f;
+
+static const char* g_logo_map[] = {
+"                                                                                                                                              i                                                         ",
+"                                                                                                                                              iBPi                                                      ",
+"           rYrrrvvvLLvvvrrrrrrrrrvsJuqBI                                                                                                       iBBBBZPPSIuUuJjuukSVUU vqusUVVXbqkjUISkuvi               ",
+"           LBBBBQgRbjuKMBBQBBQBBBBBdKJvBi                                                                                                        UQQZqIusrvsuVdgRPugBvSBBBBPQBuYBBBBBBBBBBQi            ",
+"            iDBkvui iSRBBBBQQQBBBBQMBB BU                                                                                                          vPRBBQgVbBBBJiiPQRu iPBvbIi XQMEqkJvvvUgBv           ",
+"              BivsiiBBPjrii   iivSZirBrBs       sSPPQBMu          Jvrrvvvriiiiiii          isrrvvvvrrrri           UvrvLsYvrrrrrrvvvsId                ivuKqQuQsivMI    iBiqUiuBI           i           ",
+"              Bivu iBu               QkBL     rBvr gQgQBBv        QBBZgkvudgBBBBBBBgi      iBBBgMMgBBBBBBQu        BBgsuvLJVdRQZBBBMRjsI                    dirrivRv     BLks vQr                       ",
+"              BvvkiiBL               PDBv    iB LBYiBi  ir         ugii vQBRgEEDBQqBBP       MUi  gRbSkuJuEu        dI   IQBQgDZEDgQZUrRi                   QiiiivRv     Brqk rQr                       ",
+"              BuSZriBv               ZBgi    B uBBBivS              Qvr MZi     rbiv QU      Iqi iQu                rqi idbi      irisKgi                   RrvrvvRL     Qisu vQr                       ",
+"              BkvS  Bj               BqV    B vBIkBQ QX             Bir Zu      uv   QRi     udi iBv                vqi idv          ugZ                    QiviiiQL    iQiuv vBr                       ",
+"              BvigBPBZEDRQMPui      iiLi   BiiBP  kBPiQL            Bii Rdi iijgv vKRZv      UKi iBv                vqi  BX          UII                    RivvirBL    iQiJu rQr                       ",
+"              BriJvi YSdMBBBBBBQi         BL BX    PBI Bi          iBri qBBBBBMukggRBP       IXiivBv         qk     vP JuVjKMMMPr    ivi                    givrirMY    igiJL vQr                       ",
+"              Bvvr  BBBREqVkUVPQBX       gP BBSiii  PBsiBi          Bi  ggusuSERBBBZEBBr     IUi iBv          RB    vDii vKgQMQBBQv                         QiiiiiRs    iBiYv vQr                       ",
+"              BurkiiBSi          ii     bR  uVdBBBBbvRBsiB         iQi  ZX       iUBXDiBv    Sk   Bv           BE    Rvi ZDLiiiiivji                        M ri iQs    iBivv rQr                       ",
+"              BrrSiiBs                 dg ikQBMdXVSPqVBgirB         Qri gU        iP i vBi   Usi iQv           Uqu   ZPv uk                                 Z rv iQs    iDirr iQr                       ",
+"              Bviui BU                gB iBBki        iRKvVB        BiVuBBi   irkDBv   MBr   Jv irBJ        u rIqX   iBBqLBv           r                    b rv  Qs    iQivi iEi                       ",
+"              BviJi BU               BS  BQi          rP viqBi     Mk IQkuVSXRBBBbi iUBBk   iQrirYKPKUuuuKBBQVu KK    iQBbudgkriiiiiLPPvi                   Riii iMv     R iZ vBr                       ",
+"              Bvvi iBu             iQY  iSBgv        JBuvuJjgBv   BBXqqKUjJkKKXPbDBBBgr   vBBXdIkuuqEDBgbEZQBSvEP     iqgPuIVPgQQgRQbUji      r           VV iviUBJ    uK iMBBBBRPji                   ",
+"              Bvr  uBs           iISiiKBBBQZIi        rMBQQRgQgi  iXQQRMRQQQRMMggZPkvi      iZQQQQRRRMMgggDEZDQBBb       iUZQQQQQQQgqsi        iMBDIjJuIqqZv  iiikbQJ rBJ        iJXgBRBSi              ",
+"              Brr  BQr      irvubZuuBBBdvi                                                                                    iiii               uQBBBBQgPbdggDMggZdBUqDdQQggZPPbgDZZbPBBBBi            ",
+"             SBr  XBq       rQBBMRBBPr                                                                                                             irvsuUkkIIVIkUuuuUsirkkkkUkkUUuuUkVKPdgBBk           ",
+"             Bj  kBMi         iLUJi                                                                                                                                                       ivgJ          ",
+"            Qg  ZBMi                                                                                                                                                                                    ",
+"           dBisBBPi                                                                                                                                                                                     ",
+"          BBEBBDr                                                                                                                                                                                       ",
+"        vQPKMXi                                                                                                                                                                                         ",
+"          ii                                                                                                                                                                                           "
+};
+
+static std::vector<std::pair<float, float>> g_letter_positions;
+static bool g_letter_positions_built = false;
+
+static void build_letter_positions() {
+    if (g_letter_positions_built) return;
+
+    for (int y = 0; y < 27; ++y) {
+        const char* line = g_logo_map[y];
+        for (int x = 0; x < 200 && line[x] != '\0'; ++x) {
+            if (line[x] != ' ') {
+                g_letter_positions.push_back({(float)x / 200.0f, (float)y / 27.0f});
+            }
+        }
+    }
+    g_letter_positions_built = true;
+}
+
+struct Sparkle {
+    float x, y;
+    float start_y;
+    int texture_index;
+    float life_time;
+    float max_life;
+    bool active;
+    bool falls;
+};
+
+static Sparkle g_sparkles[400];
+static bool g_sparkles_initialized = false;
 
 static bool LoadTextureFromFile(const char* filename, ID3D11Device* device, ID3D11ShaderResourceView** out_srv, int* out_width, int* out_height) {
     int width, height, channels;
@@ -146,13 +219,26 @@ void draw_main(HWND hwnd, ID3D11Device* device) {
         if (!g_splash_texture) {
             LoadTextureFromFile("../include/image/splash_pano.png", device, &g_splash_texture, &g_splash_width, &g_splash_height);
         }
+        if (!g_logo_texture) {
+            LoadTextureFromFile("../include/image/f2_logo.png", device, &g_logo_texture, &g_logo_width, &g_logo_height);
+        }
 
-        if (g_splash_texture) {
-            g_splash_scroll_offset += ImGui::GetIO().DeltaTime * 20.0f;
-            if (g_splash_scroll_offset >= g_splash_width) {
-                g_splash_scroll_offset -= g_splash_width;
+        for (int i = 0; i < 8; ++i) {
+            if (!g_sparkle_textures[i]) {
+                std::string path = "../include/image/sparkle_" + std::to_string(i + 1) + ".png";
+                LoadTextureFromFile(path.c_str(), device, &g_sparkle_textures[i], &g_sparkle_widths[i], &g_sparkle_heights[i]);
             }
+        }
 
+        g_splash_time_elapsed += ImGui::GetIO().DeltaTime;
+
+        float alpha = 0.0f;
+        if (g_splash_time_elapsed > g_fade_in_delay) {
+            float fade_progress = (g_splash_time_elapsed - g_fade_in_delay) / g_fade_in_duration;
+            alpha = (fade_progress > 1.0f) ? 1.0f : fade_progress;
+        }
+
+        if (g_splash_texture && alpha > 0.0f) {
             ImVec2 window_pos = ImGui::GetWindowPos();
             ImVec2 window_size = ImGui::GetWindowSize();
             ImDrawList* draw_list = ImGui::GetWindowDrawList();
@@ -166,20 +252,134 @@ void draw_main(HWND hwnd, ID3D11Device* device) {
                 display_height = display_width * aspect;
             }
 
-            float offset = -g_splash_scroll_offset;
-            while (offset < window_size.x) {
-                ImVec2 p_min(window_pos.x + offset, window_pos.y);
-                ImVec2 p_max(window_pos.x + offset + display_width, window_pos.y + display_height);
-                draw_list->AddImage((ImTextureID)g_splash_texture, p_min, p_max);
-                offset += display_width;
+            g_splash_scroll_offset += ImGui::GetIO().DeltaTime * 20.0f;
+            if (g_splash_scroll_offset >= display_width) {
+                g_splash_scroll_offset -= display_width;
             }
+
+            float x1 = window_pos.x - g_splash_scroll_offset;
+            float x2 = x1 + display_width;
+
+            ImU32 col = IM_COL32(255, 255, 255, (int)(alpha * 255));
+
+            ImVec2 p1_min(x1, window_pos.y);
+            ImVec2 p1_max(x1 + display_width, window_pos.y + display_height);
+            draw_list->AddImage((ImTextureID)g_splash_texture, p1_min, p1_max, ImVec2(0,0), ImVec2(1,1), col);
+
+            ImVec2 p2_min(x2, window_pos.y);
+            ImVec2 p2_max(x2 + display_width, window_pos.y + display_height);
+            draw_list->AddImage((ImTextureID)g_splash_texture, p2_min, p2_max, ImVec2(0,0), ImVec2(1,1), col);
+        }
+
+        if (g_logo_texture) {
+            ImVec2 window_pos = ImGui::GetWindowPos();
+            ImVec2 window_size = ImGui::GetWindowSize();
+            ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+            float logo_scale = window_size.x / (g_logo_width * 1.5f);
+            float scaled_width = g_logo_width * logo_scale;
+            float scaled_height = g_logo_height * logo_scale;
+
+            float logo_x = window_pos.x + (window_size.x - scaled_width) * 0.5f;
+            float logo_y = window_pos.y + window_size.y * 0.33f - scaled_height * 0.5f;
+
+            build_letter_positions();
+
+            if (!g_sparkles_initialized) {
+                for (int i = 0; i < 400; ++i) {
+                    if (g_letter_positions.empty()) break;
+
+                    int pos_index = rand() % g_letter_positions.size();
+                    float norm_x = g_letter_positions[pos_index].first;
+                    float norm_y = g_letter_positions[pos_index].second - 0.08f;
+
+                    float jitter_x = (((float)rand() / RAND_MAX) - 0.5f) * 0.08f;
+                    float jitter_y = (((float)rand() / RAND_MAX) - 0.5f) * 0.06f;
+
+                    g_sparkles[i].x = logo_x + (norm_x + jitter_x) * scaled_width;
+                    g_sparkles[i].start_y = logo_y + (norm_y + jitter_y) * scaled_height;
+                    g_sparkles[i].y = g_sparkles[i].start_y;
+                    g_sparkles[i].texture_index = rand() % 8;
+                    g_sparkles[i].life_time = ((float)rand() / RAND_MAX) * (0.4f + ((float)rand() / RAND_MAX) * 0.4f);
+                    g_sparkles[i].max_life = 0.4f + ((float)rand() / RAND_MAX) * 0.4f;
+                    g_sparkles[i].active = true;
+                    g_sparkles[i].falls = (rand() % 100) < 70;
+                }
+                g_sparkles_initialized = true;
+            }
+
+            for (int i = 0; i < 400; ++i) {
+                if (!g_sparkles[i].active) continue;
+
+                g_sparkles[i].life_time += ImGui::GetIO().DeltaTime;
+                if (g_sparkles[i].life_time >= g_sparkles[i].max_life) {
+                    g_sparkles[i].life_time = 0.0f;
+
+                    if (!g_letter_positions.empty()) {
+                        int pos_index = rand() % g_letter_positions.size();
+                        float norm_x = g_letter_positions[pos_index].first;
+                        float norm_y = g_letter_positions[pos_index].second - 0.08f;
+
+                        float jitter_x = (((float)rand() / RAND_MAX) - 0.5f) * 0.08f;
+                        float jitter_y = (((float)rand() / RAND_MAX) - 0.5f) * 0.06f;
+
+                        g_sparkles[i].x = logo_x + (norm_x + jitter_x) * scaled_width;
+                        g_sparkles[i].start_y = logo_y + (norm_y + jitter_y) * scaled_height;
+                        g_sparkles[i].y = g_sparkles[i].start_y;
+                        g_sparkles[i].texture_index = rand() % 8;
+                        g_sparkles[i].max_life = 0.4f + ((float)rand() / RAND_MAX) * 0.4f;
+                        g_sparkles[i].falls = (rand() % 100) < 70;
+                    }
+                }
+
+                float phase = g_sparkles[i].life_time / g_sparkles[i].max_life;
+
+                if (g_sparkles[i].falls) {
+                    float fall_distance = 30.0f;
+                    g_sparkles[i].y = g_sparkles[i].start_y + (phase * fall_distance);
+                } else {
+                    g_sparkles[i].y = g_sparkles[i].start_y;
+                }
+
+                int tex_idx = g_sparkles[i].texture_index;
+                if (!g_sparkle_textures[tex_idx]) continue;
+
+                float sparkle_alpha = 0.0f;
+                if (phase < 0.5f) {
+                    sparkle_alpha = phase * 2.0f;
+                } else {
+                    sparkle_alpha = (1.0f - phase) * 2.0f;
+                }
+
+                sparkle_alpha *= 0.7f;
+
+                float sparkle_size = 32.0f;
+                ImU32 col = IM_COL32(255, 255, 255, (int)(sparkle_alpha * 255));
+
+                float center_x = g_sparkles[i].x;
+                float center_y = g_sparkles[i].y;
+                float half_size = sparkle_size * 0.5f;
+
+                ImVec2 sp_min(center_x - half_size, center_y - half_size);
+                ImVec2 sp_max(center_x + half_size, center_y + half_size);
+                draw_list->AddImage((ImTextureID)g_sparkle_textures[tex_idx], sp_min, sp_max, ImVec2(0,0), ImVec2(1,1), col);
+
+                float glow_size = sparkle_size * 1.3f;
+                float glow_half = glow_size * 0.5f;
+                ImU32 glow_col = IM_COL32(255, 255, 200, (int)(sparkle_alpha * 100));
+                ImVec2 glow_min(center_x - glow_half, center_y - glow_half);
+                ImVec2 glow_max(center_x + glow_half, center_y + glow_half);
+                draw_list->AddImage((ImTextureID)g_sparkle_textures[tex_idx], glow_min, glow_max, ImVec2(0,0), ImVec2(1,1), glow_col);
+            }
+
+            ImVec2 logo_min(logo_x, logo_y);
+            ImVec2 logo_max(logo_x + scaled_width, logo_y + scaled_height);
+            draw_list->AddImage((ImTextureID)g_logo_texture, logo_min, logo_max);
         }
 
         ImVec2 avail = ImGui::GetContentRegionAvail();
-        ImVec2 sz(320, 50);
-        ImVec2 pos((avail.x - sz.x) * 0.5f, (avail.y - sz.y) * 0.33f);
-        ImGui::SetCursorPos(pos);
-        if (ImGui::Button("Select Fable 2 Directory", sz)) {
+        ImGui::InvisibleButton("splash_click_area", avail);
+        if (ImGui::IsItemClicked()) {
             IGFD::FileDialogConfig cfg;
             std::string base = (!S.last_dir.empty() && std::filesystem::exists(S.last_dir) &&
                                 std::filesystem::is_directory(S.last_dir))

@@ -128,12 +128,6 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
                       (path_lower.find("/foliage\\") != std::string::npos) ||
                       (path_lower.find("\\foliage/") != std::string::npos);
 
-    std::ofstream debug_file("parser_debug.txt", std::ios::app);
-    debug_file << "=== NEW PARSE ===" << std::endl;
-    debug_file << "File path: " << file_path << std::endl;
-    debug_file << "is_foliage: " << is_foliage << std::endl;
-    debug_file << "Data size: " << data.size() << std::endl;
-
     std::string magic((const char*)r.p, 8);
     bool has_magic = (magic == "MeshFile");
 
@@ -196,9 +190,6 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
         }
     }
 
-    debug_file << "MeshCount: " << out.MeshCount << std::endl;
-    debug_file << "StringBlockCount: " << StringBlockCount << std::endl;
-
     out.Meshes.clear(); out.Meshes.reserve(out.MeshCount);
     out.MeshBuffers.clear(); out.MeshBuffers.reserve(out.MeshCount);
 
@@ -211,7 +202,6 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
         uint32_t u5[3]; for(int k=0;k<3;k++) if(!r.u32be(u5[k])) return false;
         uint32_t mcount=0; if(!r.u32be(mcount)) return false;
         MDLMeshInfo mesh; mesh.MeshName=meshName; mesh.MaterialCount=mcount;
-        debug_file << "Mesh " << mi << " name: " << meshName << std::endl;
         if(mcount>0 && mcount<65535u){
             mesh.Materials.reserve(mcount);
             for(uint32_t j=0;j<mcount;j++){
@@ -232,66 +222,42 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
         out.Meshes.push_back(std::move(mesh));
     }
 
-    debug_file << "Current position after meshes: " << r.i << std::endl;
-
 if(is_foliage){
-    debug_file << "ENTERING FOLIAGE PATH" << std::endl;
     uint16_t unk2bytes = 0;
     if(!r.u16be(unk2bytes)) {
-        debug_file << "Failed to read unk2bytes" << std::endl;
-        debug_file.close();
         return false;
     }
-    debug_file << "unk2bytes: 0x" << std::hex << unk2bytes << std::dec << std::endl;
 
     for(uint32_t mi=0; mi<out.MeshCount; ++mi){
-        debug_file << "Processing foliage mesh buffer " << mi << std::endl;
         uint32_t meshBufferID = 0;
         if(!r.u32be(meshBufferID)) {
-            debug_file << "Failed to read meshBufferID" << std::endl;
-            debug_file.close();
             return false;
         }
-        debug_file << "meshBufferID: " << meshBufferID << std::endl;
 
         uint32_t someCount1 = 0;
         if(!r.u32be(someCount1)) {
-            debug_file << "Failed to read someCount1" << std::endl;
-            debug_file.close();
             return false;
         }
-        debug_file << "someCount1: " << someCount1 << std::endl;
 
         uint32_t vtx = 0;
         if(!r.u32be(vtx)) {
-            debug_file << "Failed to read vtx" << std::endl;
-            debug_file.close();
             return false;
         }
-        debug_file << "vtx: " << vtx << std::endl;
 
         uint32_t tlen = 0;
         if(!r.u32be(tlen)) {
-            debug_file << "Failed to read tlen" << std::endl;
-            debug_file.close();
             return false;
         }
-        debug_file << "tlen: " << tlen << std::endl;
 
         if(!r.skip(41)) {
-            debug_file << "Failed to skip 41 bytes" << std::endl;
-            debug_file.close();
             return false;
         }
-        debug_file << "Skipped 41 bytes" << std::endl;
 
         size_t vert_off = 0, face_off = 0;
         if(vtx > 0 && vtx < 65535u){
             vert_off = r.i;
             size_t vsz = (size_t)vtx * 28;
             if(!r.skip(vsz)) {
-                debug_file << "Failed to skip vertices" << std::endl;
-                debug_file.close();
                 return false;
             }
         }
@@ -300,8 +266,6 @@ if(is_foliage){
             face_off = r.i;
             size_t fsz = (size_t)tlen * 2;
             if(!r.skip(fsz)) {
-                debug_file << "Failed to skip faces" << std::endl;
-                debug_file.close();
                 return false;
             }
         }
@@ -309,8 +273,6 @@ if(is_foliage){
         if(vtx > 0 && vtx < 65535u){
             size_t usz = (size_t)vtx * 16;
             if(!r.skip(usz)) {
-                debug_file << "Failed to skip unk data" << std::endl;
-                debug_file.close();
                 return false;
             }
         }
@@ -323,15 +285,11 @@ if(is_foliage){
         mb.SubMeshCount = 1;
         mb.IsAltPath = false;
         out.MeshBuffers.push_back(mb);
-        debug_file << "Added foliage mesh buffer, position now: " << r.i << std::endl;
     }
-    debug_file << "FOLIAGE PATH SUCCESS" << std::endl;
-    debug_file.close();
     return true;
 }
 
     if(StringBlockCount>0){
-        debug_file << "ENTERING STRINGBLOCK PATH" << std::endl;
         uint32_t bufferID=0, bufferID_copy=0, someCount1=0;
         if(!r.u32be(bufferID)) return false;
         if(!r.u32be(bufferID_copy)) return false;
@@ -437,11 +395,8 @@ if(is_foliage){
             out.MeshBuffers.push_back(mb);
             scan_pos = r.i;
         }
-        debug_file.close();
         return true;
     }
-
-    debug_file << "ENTERING DEFAULT PATH" << std::endl;
 
     bool wasStringFound = false;
     if(r.i < r.n){
@@ -505,11 +460,22 @@ if(is_foliage){
             uint32_t vtx=0;
             if(!r.u32be(vtx)) return false;
 
-            size_t sub_count_offset = r.i;
-            uint32_t sub_count = 0;
-            if(!r.u32be(sub_count)) return false;
+            if(!r.skip(40)) return false;
 
-            debug_file << "sub_count offset: 0x" << std::hex << sub_count_offset << std::dec << ", sub_count: " << sub_count << std::endl;
+            size_t submesh_offset = r.i;
+            uint32_t submesh_count = 0;
+            if(!r.u32be(submesh_count)) return false;
+
+            uint32_t next_value = 0;
+            if(!r.u32be(next_value)) return false;
+
+            uint32_t final_submesh_count;
+            if(next_value != 0xFFFFFFFF || submesh_count >= 256){
+                final_submesh_count = 1;
+            } else {
+                r.i -= 4;
+                final_submesh_count = submesh_count;
+            }
 
             bool markerFound = false;
             for(size_t searchPos = r.i; searchPos + 4 <= r.n && searchPos < r.i + 1000; ++searchPos){
@@ -553,7 +519,7 @@ if(is_foliage){
             mb.VertexOffset=vert_off;
             mb.FaceCount=tlen;
             mb.FaceOffset=face_off;
-            mb.SubMeshCount=sub_count;
+            mb.SubMeshCount=final_submesh_count;
             mb.IsAltPath=true;
             out.MeshBuffers.push_back(mb);
 
@@ -638,7 +604,6 @@ if(is_foliage){
             out.MeshBuffers.push_back(mb);
         }
     }
-    debug_file.close();
     return true;
 }
 

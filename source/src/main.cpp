@@ -1,4 +1,3 @@
-// main.cpp
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include <windows.h>
 #include <d3d11.h>
@@ -138,6 +137,7 @@ int main() {
     ImGui::StyleColorsDark();
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+
     build_theme();
 
     S.last_dir = load_last_dir();

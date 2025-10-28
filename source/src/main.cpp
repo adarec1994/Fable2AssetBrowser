@@ -13,9 +13,64 @@
 #include "Progress.h"
 #include "HexView.h"
 #include "files.h"
+#include "play_audio.h"
 #include <string>
 #include <mutex>
 #include <algorithm>
+#include <fstream>
+#include <shlobj.h>
+
+static std::string get_config_path() {
+    char path[MAX_PATH];
+    if (SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, path) == S_OK) {
+        std::string config_dir = std::string(path) + "\\Fable2AssetBrowser";
+        CreateDirectoryA(config_dir.c_str(), NULL);
+        return config_dir + "\\config.ini";
+    }
+    return "config.ini";
+}
+
+static bool load_audio_muted() {
+    std::ifstream f(get_config_path());
+    if (!f.is_open()) return false;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.find("audio_muted=") == 0) {
+            return line.substr(12) == "1";
+        }
+    }
+    return false;
+}
+
+static void save_audio_muted(bool muted) {
+    std::string cfg_path = get_config_path();
+    std::string content;
+    bool found = false;
+
+    std::ifstream fin(cfg_path);
+    if (fin.is_open()) {
+        std::string line;
+        while (std::getline(fin, line)) {
+            if (line.find("audio_muted=") == 0) {
+                content += "audio_muted=" + std::string(muted ? "1" : "0") + "\n";
+                found = true;
+            } else {
+                content += line + "\n";
+            }
+        }
+        fin.close();
+    }
+
+    if (!found) {
+        content += "audio_muted=" + std::string(muted ? "1" : "0") + "\n";
+    }
+
+    std::ofstream fout(cfg_path);
+    if (fout.is_open()) {
+        fout << content;
+    }
+}
+
 
 static ID3D11Device *g_pd3dDevice = nullptr;
 static ID3D11DeviceContext *g_pd3dDeviceContext = nullptr;
@@ -142,6 +197,11 @@ int main() {
 
     S.last_dir = load_last_dir();
 
+    bool audio_muted = load_audio_muted();
+    BackgroundAudio::instance().set_muted(audio_muted);
+    BackgroundAudio::instance().start("include/audio/menu_interlude.wav");
+
+
     bool done = false;
     while (!done) {
         MSG msg;
@@ -157,6 +217,43 @@ int main() {
         ImGui::NewFrame();
 
         draw_main(hwnd, g_pd3dDevice);
+
+        if (S.root_dir.empty()) {
+            ImGuiViewport* viewport = ImGui::GetMainViewport();
+            ImVec2 work_pos = viewport->WorkPos;
+            ImVec2 work_size = viewport->WorkSize;
+
+            ImGui::SetNextWindowPos(ImVec2(work_pos.x + 10, work_pos.y + work_size.y - 50), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.7f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+
+            if (ImGui::Begin("##mute_button", nullptr,
+                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                ImGuiWindowFlags_NoNav)) {
+
+                bool muted = BackgroundAudio::instance().is_muted();
+                const char* icon = muted ? "🔇" : "🔊";
+
+                if (ImGui::Button(icon, ImVec2(32, 32))) {
+                    BackgroundAudio::instance().toggle_mute();
+                    save_audio_muted(BackgroundAudio::instance().is_muted());
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(muted ? "Unmute" : "Mute");
+                }
+            }
+            ImGui::End();
+            ImGui::PopStyleVar(2);
+        } else {
+            static bool audio_stopped = false;
+            if (!audio_stopped) {
+                BackgroundAudio::instance().stop();
+                audio_stopped = true;
+            }
+        }
+
         draw_folder_dialog();
         if (S.show_progress.load()) ImGui::OpenPopup("progress_win");
         if (S.show_error) {
@@ -269,6 +366,8 @@ int main() {
     }
 
     S.exiting = true;
+    BackgroundAudio::instance().stop();
+
 
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();

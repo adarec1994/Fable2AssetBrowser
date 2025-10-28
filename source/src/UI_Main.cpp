@@ -377,9 +377,26 @@ void draw_main(HWND hwnd, ID3D11Device* device) {
             draw_list->AddImage((ImTextureID)g_logo_texture, logo_min, logo_max);
         }
 
-        ImVec2 avail = ImGui::GetContentRegionAvail();
-        ImGui::InvisibleButton("splash_click_area", avail);
-        if (ImGui::IsItemClicked()) {
+        const char* text = "Click anywhere and browse to Fable 2 directory";
+
+        ImVec2 window_pos = ImGui::GetWindowPos();
+        ImVec2 window_size = ImGui::GetWindowSize();
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+        ImVec2 text_size = ImGui::CalcTextSize(text);
+        float text_x = window_pos.x + (window_size.x - text_size.x) * 0.5f;
+        float text_y = window_pos.y + (window_size.y - text_size.y) * 0.75f;
+
+        // Draw backdrop
+        float padding = 10.0f;
+        ImVec2 backdrop_min(text_x - padding, text_y - padding);
+        ImVec2 backdrop_max(text_x + text_size.x + padding, text_y + text_size.y + padding);
+        draw_list->AddRectFilled(backdrop_min, backdrop_max, IM_COL32(0, 0, 0, 180), 4.0f);
+
+        // Draw text
+        draw_list->AddText(ImVec2(text_x, text_y), IM_COL32(255, 255, 255, 255), text);
+
+        if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0)) {
             IGFD::FileDialogConfig cfg;
             std::string base = (!S.last_dir.empty() && std::filesystem::exists(S.last_dir) &&
                                 std::filesystem::is_directory(S.last_dir))

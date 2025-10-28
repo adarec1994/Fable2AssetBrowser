@@ -36,12 +36,12 @@ static inline std::string json_escape(const std::string& s){
 
 struct Matrix4 {
     float m[16];
-    
+
     Matrix4() {
         for(int i=0;i<16;++i) m[i]=0.0f;
         m[0]=m[5]=m[10]=m[15]=1.0f;
     }
-    
+
     static Matrix4 fromTRS(float qx, float qy, float qz, float qw,
                            float tx, float ty, float tz,
                            float sx, float sy, float sz) {
@@ -50,35 +50,35 @@ struct Matrix4 {
         float xx = qx * x2, yy = qy * y2, zz = qz * z2;
         float xy = qx * y2, xz = qx * z2, yz = qy * z2;
         float wx = qw * x2, wy = qw * y2, wz = qw * z2;
-        
+
         mat.m[0] = (1.0f - (yy + zz)) * sx;
         mat.m[1] = (xy + wz) * sx;
         mat.m[2] = (xz - wy) * sx;
         mat.m[3] = 0.0f;
-        
+
         mat.m[4] = (xy - wz) * sy;
         mat.m[5] = (1.0f - (xx + zz)) * sy;
         mat.m[6] = (yz + wx) * sy;
         mat.m[7] = 0.0f;
-        
+
         mat.m[8] = (xz + wy) * sz;
         mat.m[9] = (yz - wx) * sz;
         mat.m[10] = (1.0f - (xx + yy)) * sz;
         mat.m[11] = 0.0f;
-        
+
         mat.m[12] = tx;
         mat.m[13] = ty;
         mat.m[14] = tz;
         mat.m[15] = 1.0f;
-        
+
         return mat;
     }
-    
+
     Matrix4 operator*(const Matrix4& other) const {
         Matrix4 result;
         for(int c=0; c<4; ++c) {
             for(int r=0; r<4; ++r) {
-                result.m[c*4+r] = 
+                result.m[c*4+r] =
                     m[0*4+r] * other.m[c*4+0] +
                     m[1*4+r] * other.m[c*4+1] +
                     m[2*4+r] * other.m[c*4+2] +
@@ -87,22 +87,22 @@ struct Matrix4 {
         }
         return result;
     }
-    
+
     Matrix4 inverse() const {
         float r0[3] = {m[0], m[1], m[2]};
         float r1[3] = {m[4], m[5], m[6]};
         float r2[3] = {m[8], m[9], m[10]};
         float t[3] = {m[12], m[13], m[14]};
-        
+
         float a=r0[0], b=r0[1], c=r0[2];
         float d=r1[0], e=r1[1], f=r1[2];
         float g=r2[0], h=r2[1], i=r2[2];
-        
+
         float A = e*i - f*h;
         float B = -(d*i - f*g);
         float C = d*h - e*g;
         float det = a*A + b*B + c*C;
-        
+
         if(std::abs(det) < 1e-8f) {
             Matrix4 result;
             result.m[12] = -t[0];
@@ -110,30 +110,30 @@ struct Matrix4 {
             result.m[14] = -t[2];
             return result;
         }
-        
+
         float invdet = 1.0f / det;
         Matrix4 result;
-        
+
         result.m[0] = A * invdet;
         result.m[1] = (c*h - b*i) * invdet;
         result.m[2] = (b*f - c*e) * invdet;
         result.m[3] = 0.0f;
-        
+
         result.m[4] = B * invdet;
         result.m[5] = (a*i - c*g) * invdet;
         result.m[6] = (c*d - a*f) * invdet;
         result.m[7] = 0.0f;
-        
+
         result.m[8] = C * invdet;
         result.m[9] = (b*g - a*h) * invdet;
         result.m[10] = (a*e - b*d) * invdet;
         result.m[11] = 0.0f;
-        
+
         result.m[12] = -(result.m[0]*t[0] + result.m[4]*t[1] + result.m[8]*t[2]);
         result.m[13] = -(result.m[1]*t[0] + result.m[5]*t[1] + result.m[9]*t[2]);
         result.m[14] = -(result.m[2]*t[0] + result.m[6]*t[1] + result.m[10]*t[2]);
         result.m[15] = 1.0f;
-        
+
         return result;
     }
 };
@@ -766,7 +766,6 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
         accessors << "{\"bufferView\":" << idx_bv << ",\"componentType\":5125,\"count\":" << geom.indices.size() << ",\"type\":\"SCALAR\"}";
         int idx_acc = acc_count++;
 
-        int mat_idx = -1;
         std::string mesh_name = model_name + "_mesh_" + std::to_string(gi);
 
         if (gi < info.Meshes.size()) {
@@ -778,87 +777,70 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
         if (mesh_count > 0) meshes << ",";
         meshes << "{\"name\":\"" << json_escape(mesh_name) << "\",\"primitives\":[";
 
-        size_t num_materials = (gi < info.Meshes.size()) ? info.Meshes[gi].Materials.size() : 0;
-        if (num_materials == 0) num_materials = 1;
+        int tex_idx = -1;
+        bool has_alpha = false;
+        int this_mat_idx = -1;
+        std::string material_name = "material_" + std::to_string(gi);
 
-        for (size_t mat_i = 0; mat_i < num_materials; ++mat_i) {
-            if (mat_i > 0) meshes << ",";
+        if (!geom.diffuse_tex_name.empty()) {
+            material_name = std::filesystem::path(geom.diffuse_tex_name).stem().string();
 
-            int tex_idx = -1;
-            bool has_alpha = false;
-            int this_mat_idx = -1;
-            std::string material_name = "material_" + std::to_string(mat_i);
-
-            if (gi < info.Meshes.size() && mat_i < info.Meshes[gi].Materials.size()) {
-                const auto& mat = info.Meshes[gi].Materials[mat_i];
-
-                if (!mat.TextureName.empty()) {
-                    material_name = std::filesystem::path(mat.TextureName).stem().string();
-                } else if (!mat.NormalMapName.empty()) {
-                    material_name = std::filesystem::path(mat.NormalMapName).stem().string();
-                } else if (!mat.SpecularMapName.empty()) {
-                    material_name = std::filesystem::path(mat.SpecularMapName).stem().string();
-                }
-
-                if (!mat.TextureName.empty()) {
-                    std::vector<unsigned char> tex_buf;
-                    if (build_any_tex_buffer_for_name(mat.TextureName, tex_buf)) {
-                        std::vector<uint8_t> png_data;
-                        if (decode_texture_to_png(tex_buf, png_data)) {
-                            TexInfo tex_info;
-                            if (parse_tex_info(tex_buf, tex_info)) {
-                                has_alpha = (tex_info.PixelFormat == 39);
-                            }
-
-                            size_t img_offset = add_data(png_data.data(), png_data.size());
-
-                            if (bv_count > 0) bufferViews << ",";
-                            bufferViews << "{\"buffer\":0,\"byteOffset\":" << img_offset << ",\"byteLength\":" << png_data.size() << "}";
-                            int img_bv = bv_count++;
-
-                            if (img_count > 0) images << ",";
-                            images << "{\"bufferView\":" << img_bv << ",\"mimeType\":\"image/png\"}";
-                            int img_idx = img_count++;
-
-                            if (tex_count > 0) textures << ",";
-                            textures << "{\"source\":" << img_idx << "}";
-                            tex_idx = tex_count++;
-                        }
+            std::vector<unsigned char> tex_buf;
+            if (build_any_tex_buffer_for_name(geom.diffuse_tex_name, tex_buf)) {
+                std::vector<uint8_t> png_data;
+                if (decode_texture_to_png(tex_buf, png_data)) {
+                    TexInfo tex_info;
+                    if (parse_tex_info(tex_buf, tex_info)) {
+                        has_alpha = (tex_info.PixelFormat == 39);
                     }
-                }
 
-                if (mat_count > 0) materials << ",";
-                materials << "{\"name\":\"" << json_escape(material_name) << "\"";
-                materials << ",\"doubleSided\":true";
-                if (has_alpha) {
-                    materials << ",\"alphaMode\":\"BLEND\"";
+                    size_t img_offset = add_data(png_data.data(), png_data.size());
+
+                    if (bv_count > 0) bufferViews << ",";
+                    bufferViews << "{\"buffer\":0,\"byteOffset\":" << img_offset << ",\"byteLength\":" << png_data.size() << "}";
+                    int img_bv = bv_count++;
+
+                    if (img_count > 0) images << ",";
+                    images << "{\"bufferView\":" << img_bv << ",\"mimeType\":\"image/png\"}";
+                    int img_idx = img_count++;
+
+                    if (tex_count > 0) textures << ",";
+                    textures << "{\"source\":" << img_idx << "}";
+                    tex_idx = tex_count++;
                 }
-                materials << ",\"pbrMetallicRoughness\":{";
-                if (tex_idx >= 0) {
-                    materials << "\"baseColorTexture\":{\"index\":" << tex_idx << "},";
-                }
-                materials << "\"metallicFactor\":0.0,\"roughnessFactor\":0.9}}";
-                this_mat_idx = mat_count++;
             }
 
-            meshes << "{";
-            meshes << "\"attributes\":{";
-            meshes << "\"POSITION\":" << pos_acc << ",";
-            meshes << "\"NORMAL\":" << norm_acc << ",";
-            meshes << "\"TEXCOORD_0\":" << uv_acc;
-
-            if (joints_acc >= 0 && weights_acc >= 0) {
-                meshes << ",\"JOINTS_0\":" << joints_acc;
-                meshes << ",\"WEIGHTS_0\":" << weights_acc;
+            if (mat_count > 0) materials << ",";
+            materials << "{\"name\":\"" << json_escape(material_name) << "\"";
+            materials << ",\"doubleSided\":true";
+            if (has_alpha) {
+                materials << ",\"alphaMode\":\"BLEND\"";
             }
-
-            meshes << "},";
-            meshes << "\"indices\":" << idx_acc;
-            if (this_mat_idx >= 0) {
-                meshes << ",\"material\":" << this_mat_idx;
+            materials << ",\"pbrMetallicRoughness\":{";
+            if (tex_idx >= 0) {
+                materials << "\"baseColorTexture\":{\"index\":" << tex_idx << "},";
             }
-            meshes << "}";
+            materials << "\"metallicFactor\":0.0,\"roughnessFactor\":0.9}}";
+            this_mat_idx = mat_count++;
         }
+
+        meshes << "{";
+        meshes << "\"attributes\":{";
+        meshes << "\"POSITION\":" << pos_acc << ",";
+        meshes << "\"NORMAL\":" << norm_acc << ",";
+        meshes << "\"TEXCOORD_0\":" << uv_acc;
+
+        if (joints_acc >= 0 && weights_acc >= 0) {
+            meshes << ",\"JOINTS_0\":" << joints_acc;
+            meshes << ",\"WEIGHTS_0\":" << weights_acc;
+        }
+
+        meshes << "},";
+        meshes << "\"indices\":" << idx_acc;
+        if (this_mat_idx >= 0) {
+            meshes << ",\"material\":" << this_mat_idx;
+        }
+        meshes << "}";
 
         meshes << "]}";
         mesh_count++;

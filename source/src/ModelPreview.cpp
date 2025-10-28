@@ -609,41 +609,37 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             vtx[v].v  = hasT ? g.uvs[v*2+1] : 0.0f;
         }
 
-        std::vector<uint32_t> idx = g.indices;
+        MPPerMesh m;
 
-        size_t mat_count = 1;
-        if(i < info.Meshes.size()){
-            mat_count = info.Meshes[i].Materials.size();
-            if(mat_count == 0) mat_count = 1;
+        D3D11_BUFFER_DESC vb{}; vb.BindFlags=D3D11_BIND_VERTEX_BUFFER; vb.ByteWidth=(UINT)(vtx.size()*sizeof(MPVertex)); vb.Usage=D3D11_USAGE_IMMUTABLE;
+        D3D11_SUBRESOURCE_DATA vsd{}; vsd.pSysMem=vtx.data();
+        if(FAILED(dev->CreateBuffer(&vb,&vsd,&m.vb))) continue;
+
+        D3D11_BUFFER_DESC ib{}; ib.BindFlags=D3D11_BIND_INDEX_BUFFER; ib.ByteWidth=(UINT)(g.indices.size()*sizeof(uint32_t)); ib.Usage=D3D11_USAGE_IMMUTABLE;
+        D3D11_SUBRESOURCE_DATA isd{}; isd.pSysMem=g.indices.data();
+        if(FAILED(dev->CreateBuffer(&ib,&isd,&m.ib))) { m.vb->Release(); continue; }
+        m.index_count = (UINT)g.indices.size();
+
+        bool hasA = false;
+        if(!g.diffuse_tex_name.empty()){
+            std::vector<unsigned char> tex_buf;
+            if(build_any_tex_buffer_for_name(g.diffuse_tex_name, tex_buf)){
+                if(srv_from_tex_blob_auto(dev, tex_buf, &m.srv_diffuse, &hasA)){}
+            }
         }
 
-        for(size_t mat_idx = 0; mat_idx < mat_count; ++mat_idx){
-            MPPerMesh m;
+        if (!m.srv_diffuse && mp.default_srv) { m.srv_diffuse = mp.default_srv; m.srv_diffuse->AddRef(); }
+        if (!m.srv_normal  && mp.default_srv) { m.srv_normal  = mp.default_srv; m.srv_normal->AddRef(); }
+        if (!m.srv_specular&& mp.default_srv) { m.srv_specular= mp.default_srv; m.srv_specular->AddRef(); }
+        if (!m.srv_unk     && mp.default_srv) { m.srv_unk     = mp.default_srv; m.srv_unk->AddRef(); }
+        if (!m.srv_tint    && mp.default_srv) { m.srv_tint    = mp.default_srv; m.srv_tint->AddRef(); }
 
-            D3D11_BUFFER_DESC vb{}; vb.BindFlags=D3D11_BIND_VERTEX_BUFFER; vb.ByteWidth=(UINT)(vtx.size()*sizeof(MPVertex)); vb.Usage=D3D11_USAGE_IMMUTABLE;
-            D3D11_SUBRESOURCE_DATA vsd{}; vsd.pSysMem=vtx.data();
-            if(FAILED(dev->CreateBuffer(&vb,&vsd,&m.vb))) continue;
-
-            D3D11_BUFFER_DESC ib{}; ib.BindFlags=D3D11_BIND_INDEX_BUFFER; ib.ByteWidth=(UINT)(idx.size()*sizeof(uint32_t)); ib.Usage=D3D11_USAGE_IMMUTABLE;
-            D3D11_SUBRESOURCE_DATA isd{}; isd.pSysMem=idx.data();
-            if(FAILED(dev->CreateBuffer(&ib,&isd,&m.ib))) { m.vb->Release(); continue; }
-            m.index_count = (UINT)idx.size();
-
-            bool hasA = false;
-            build_mesh_textures(dev, info, i, mat_idx, &m.srv_diffuse, &m.srv_normal, &m.srv_specular, &m.srv_unk, &m.srv_tint, &hasA);
-
-            if (!m.srv_diffuse && mp.default_srv) { m.srv_diffuse = mp.default_srv; m.srv_diffuse->AddRef(); }
-            if (!m.srv_normal  && mp.default_srv) { m.srv_normal  = mp.default_srv; m.srv_normal->AddRef(); }
-            if (!m.srv_specular&& mp.default_srv) { m.srv_specular= mp.default_srv; m.srv_specular->AddRef(); }
-            if (!m.srv_unk     && mp.default_srv) { m.srv_unk     = mp.default_srv; m.srv_unk->AddRef(); }
-            if (!m.srv_tint    && mp.default_srv) { m.srv_tint    = mp.default_srv; m.srv_tint->AddRef(); }
-
-            m.has_alpha = hasA;
-            mp.meshes.push_back(m);
-        }
+        m.has_alpha = hasA;
+        mp.meshes.push_back(m);
     }
     return true;
 }
+
 
 void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, float dist){
     ID3D11DeviceContext* ctx=nullptr; dev->GetImmediateContext(&ctx); if(!ctx) return;

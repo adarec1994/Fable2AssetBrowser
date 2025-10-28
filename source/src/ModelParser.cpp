@@ -566,15 +566,29 @@ if(is_foliage){
             uint32_t vtx2=0; if(!r.u32be(vtx2)) return false;
             uint32_t sub2=0; if(!r.u32be(sub2)) return false;
 
+            std::vector<MDLSubMeshInfo> temp_submeshes;
             if(sub2>0 && sub2<65535u){
+                temp_submeshes.reserve(sub2);
+                uint32_t running_face_start = 0;
+
                 for(uint32_t s=0;s<sub2;s++){
-                    uint32_t S1; uint8_t S2; uint32_t S3a,S3b,S3c; float F4[6];
-                    if(!r.u32be(S1)) return false;
-                    if(!r.u8(S2)) return false;
-                    if(!r.u32be(S3a)) return false;
-                    if(!r.u32be(S3b)) return false;
-                    if(!r.u32be(S3c)) return false;
+                    uint32_t marker; if(!r.u32be(marker)) return false;
+                    uint32_t mat_idx; if(!r.u32be(mat_idx)) return false;
+                    uint8_t unk_byte; if(!r.u8(unk_byte)) return false;
+                    uint32_t face_count; if(!r.u32be(face_count)) return false;
+                    uint32_t unk1,unk2,unk3; float F4[6];
+                    if(!r.u32be(unk1)) return false;
+                    if(!r.u32be(unk2)) return false;
+                    if(!r.u32be(unk3)) return false;
                     for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
+
+                    MDLSubMeshInfo smi;
+                    smi.StartIndex = running_face_start;
+                    smi.IndexCount = face_count;
+                    smi.MaterialIndex = (uint8_t)mat_idx;
+                    temp_submeshes.push_back(smi);
+
+                    running_face_start += face_count;
                 }
             }
 
@@ -601,6 +615,7 @@ if(is_foliage){
             mb.FaceOffset=face_off2;
             mb.SubMeshCount=sub2;
             mb.IsAltPath=false;
+            mb.SubMeshes=std::move(temp_submeshes);
             out.MeshBuffers.push_back(mb);
         }
     }
@@ -702,7 +717,28 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
 
         compute_smooth_normals(mb.VertexCount, g.indices, g.positions, g.normals);
 
-        out.push_back(std::move(g));
+        if(mb.SubMeshes.empty()){
+            out.push_back(std::move(g));
+        } else {
+            for(const auto& sm : mb.SubMeshes){
+                uint32_t end_idx = sm.StartIndex + sm.IndexCount;
+                if(end_idx > g.indices.size()) continue;
+
+                MDLMeshGeom sub;
+                sub.positions = g.positions;
+                sub.normals = g.normals;
+                sub.uvs = g.uvs;
+                sub.bone_ids = g.bone_ids;
+                sub.bone_weights = g.bone_weights;
+                sub.indices.assign(g.indices.begin() + sm.StartIndex, g.indices.begin() + end_idx);
+
+                size_t mat_idx = sm.MaterialIndex;
+                if(mi<info.Meshes.size() && mat_idx < info.Meshes[mi].Materials.size())
+                    sub.diffuse_tex_name=info.Meshes[mi].Materials[mat_idx].TextureName;
+
+                out.push_back(std::move(sub));
+            }
+        }
     }
     return true;
 }

@@ -24,6 +24,12 @@ struct MDLMeshInfo {
     std::vector<MDLMaterialInfo> Materials;
 };
 
+struct MDLSubMeshInfo {
+    uint32_t StartIndex = 0;
+    uint32_t IndexCount = 0;
+    uint8_t  MaterialIndex = 0;
+};
+
 struct MDLMeshBufferInfo {
     uint32_t VertexCount = 0;
     size_t   VertexOffset = 0;
@@ -31,6 +37,7 @@ struct MDLMeshBufferInfo {
     size_t   FaceOffset = 0;
     uint32_t SubMeshCount = 0;
     bool     IsAltPath = false;
+    std::vector<MDLSubMeshInfo> SubMeshes;
 };
 
 struct MDLInfo {

@@ -385,16 +385,18 @@ void draw_main(HWND hwnd, ID3D11Device* device) {
 
         ImVec2 text_size = ImGui::CalcTextSize(text);
         float text_x = window_pos.x + (window_size.x - text_size.x) * 0.5f;
-        float text_y = window_pos.y + (window_size.y - text_size.y) * 0.75f;
 
-        // Draw backdrop
+        float logo_scale = window_size.x / (g_logo_width * 1.5f);
+        float scaled_height = g_logo_height * logo_scale;
+        float logo_bottom = window_pos.y + window_size.y * 0.33f + scaled_height * 0.5f;
+        float text_y = logo_bottom - 20.0f;
+
         float padding = 10.0f;
         ImVec2 backdrop_min(text_x - padding, text_y - padding);
         ImVec2 backdrop_max(text_x + text_size.x + padding, text_y + text_size.y + padding);
-        draw_list->AddRectFilled(backdrop_min, backdrop_max, IM_COL32(0, 0, 0, 180), 4.0f);
+        draw_list->AddRectFilled(backdrop_min, backdrop_max, IM_COL32(0, 0, 0, (int)(alpha * 180)), 4.0f);
 
-        // Draw text
-        draw_list->AddText(ImVec2(text_x, text_y), IM_COL32(255, 255, 255, 255), text);
+        draw_list->AddText(ImVec2(text_x, text_y), IM_COL32(255, 255, 255, (int)(alpha * 255)), text);
 
         if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0)) {
             IGFD::FileDialogConfig cfg;

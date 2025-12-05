@@ -26,12 +26,12 @@ static std::string apply_folder_prefix_to_filename(const std::string& full_path,
     std::transform(filename_lower.begin(), filename_lower.end(), filename_lower.begin(), ::tolower);
 
     if (filename_lower != "interior" && filename_lower != "exterior") {
-        return p.filename().string();
+        return filename + extension;
     }
 
     std::filesystem::path parent = p.parent_path();
     if (parent.empty()) {
-        return p.filename().string();
+        return filename + extension;
     }
 
     std::string folder_name = parent.filename().string();

@@ -1,3 +1,6 @@
+#ifndef BNKREADER_CPP_INCLUDED
+#define BNKREADER_CPP_INCLUDED
+
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -379,3 +382,5 @@ private:
         char buf[32]; std::snprintf(buf,sizeof(buf),"file_%08X.bin",off); return std::string(buf);
     }
 };
+
+#endif // BNKREADER_CPP_INCLUDED

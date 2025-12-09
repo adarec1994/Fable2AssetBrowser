@@ -2,13 +2,10 @@
 #include "State.h"
 #include "Utils.h"
 #include "Progress.h"
-#include "Files.h"
+#include "files.h"
 #include "TexParser.h"
 #include "ModelParser.h"
-#ifdef _WIN32
 #include "ModelPreview.h"
-#endif
-#include "BNKCore.cpp"
 #include "imgui.h"
 #include "imgui_hex.h"
 #include <thread>
@@ -32,9 +29,7 @@
 #include <GL/glew.h>
 #endif
 
-#ifdef _WIN32
-static ModelPreview g_mp;
-#endif
+extern ModelPreview g_mp;
 
 static void reset_preview_resources() {
 #ifdef _WIN32

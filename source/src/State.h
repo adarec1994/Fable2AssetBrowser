@@ -103,6 +103,7 @@ struct State {
     MDLInfo mdl_info;
 
     bool show_model_preview = false;
+    std::atomic<bool> pending_preview_build{false};  // For Linux: build preview on main thread
     std::vector<MDLMeshGeom> mdl_meshes;
     float cam_yaw = 0.0f;
     float cam_pitch = 0.2f;

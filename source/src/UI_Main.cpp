@@ -2,7 +2,7 @@
 #include "UI_Main.h"
 #include "State.h"
 #include "Utils.h"
-#include "Files.h"
+#include "files.h"
 #include "Progress.h"
 #include "UI_Panels.h"
 #include "imgui.h"
@@ -13,17 +13,21 @@
 #include <vector>
 
 #ifdef _WIN32
-#include "ModelPreview.h"
 #include <d3d11.h>
-#else
+#endif
+
+#include "ModelPreview.h"
+
+#ifndef _WIN32
 #include <GL/glew.h>
 #endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-#ifdef _WIN32
 ModelPreview g_mp;
+
+#ifdef _WIN32
 static ID3D11ShaderResourceView* g_splash_texture = nullptr;
 static ID3D11ShaderResourceView* g_logo_texture = nullptr;
 static ID3D11ShaderResourceView* g_button_texture = nullptr;

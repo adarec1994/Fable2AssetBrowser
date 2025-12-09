@@ -997,6 +997,7 @@ void MP_Render(ModelPreview& mp, float yaw, float pitch, float dist) {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
     glDisable(GL_CULL_FACE);
 
     glUseProgram(mp.shader_program);
@@ -1011,6 +1012,7 @@ void MP_Render(ModelPreview& mp, float yaw, float pitch, float dist) {
 
     float V[16], P[16], W[16], Tm[16], R[16], Tp[16], tmp[16];
 
+    // Use LH-style lookat to match D3D11
     mat4_lookat(V, ex, ey, ez, mp.center[0], mp.center[1], mp.center[2], 0, 1, 0);
 
     float fov = 60.0f * 3.14159265f / 180.0f;
@@ -1022,6 +1024,7 @@ void MP_Render(ModelPreview& mp, float yaw, float pitch, float dist) {
     mat4_rotateX(R, tiltX);
     mat4_translate(Tp, mp.center[0], mp.center[1], mp.center[2]);
 
+    // W = Tm * R * Tp (same order as D3D11)
     mat4_mult(tmp, R, Tm);
     mat4_mult(W, Tp, tmp);
 

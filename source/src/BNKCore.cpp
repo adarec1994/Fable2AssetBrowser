@@ -1,3 +1,6 @@
+#ifndef BNKCORE_CPP_INCLUDED
+#define BNKCORE_CPP_INCLUDED
+
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -62,3 +65,5 @@ static std::vector<std::string> find_bnks(const std::string& root, const std::ve
     }
     return hits;
 }
+
+#endif // BNKCORE_CPP_INCLUDED

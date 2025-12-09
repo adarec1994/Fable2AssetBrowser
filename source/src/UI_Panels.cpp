@@ -6,9 +6,7 @@
 #include "UI_Main.h"
 #include "TexParser.h"
 #include "ModelParser.h"
-#ifdef _WIN32
 #include "ModelPreview.h"
-#endif
 #include "mdl_converter.h"
 #include "BNKCore.cpp"
 #include "imgui.h"
@@ -1397,8 +1395,94 @@ if (!can_preview) {
     }
         }
 #else
-        // Linux: Preview not supported yet
-        show_error_box("Preview is only available on Windows.");
+        // Linux: Use OpenGL-based preview
+        // Note: OpenGL calls must be made from main thread, so we load data in thread
+        // and set a flag to build the preview on main thread
+        if (can_folder_preview && !S.selected_folder_path.empty()) {
+            std::vector<std::pair<std::string, std::string>> mdl_paths;
+            if (find_mdl_files_in_folder(g_tree_root, S.selected_folder_path, mdl_paths)) {
+                progress_open(0, "Loading preview...");
+
+                std::thread([mdl_paths]() {
+                    std::vector<MDLMeshGeom> all_meshes;
+                    MDLInfo combined_info;
+                    bool any_success = false;
+
+                    for (const auto& [mdl_path, bnk_source] : mdl_paths) {
+                        std::vector<unsigned char> buf;
+                        bool ok = false;
+
+                        try {
+                            ok = build_mdl_buffer_for_name(mdl_path, buf);
+                        } catch (...) {}
+
+                        if (ok && !buf.empty()) {
+                            MDLInfo mdl_info;
+                            if (parse_mdl_info(buf, mdl_info, mdl_path)) {
+                                std::vector<MDLMeshGeom> meshes;
+                                if (parse_mdl_geometry(buf, mdl_info, meshes)) {
+                                    all_meshes.insert(all_meshes.end(), meshes.begin(), meshes.end());
+                                    if (!any_success) {
+                                        combined_info = mdl_info;
+                                        any_success = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (any_success && !all_meshes.empty()) {
+                        S.hex_data.clear();
+                        S.mdl_info_ok = true;
+                        S.mdl_info = combined_info;
+                        S.mdl_meshes = all_meshes;
+                        S.cam_yaw = 0.0f;
+                        S.cam_pitch = 0.2f;
+                        S.cam_dist = 3.0f;
+                        S.pending_preview_build = true;  // Build on main thread
+                    }
+
+                    progress_done();
+                    if (!any_success) {
+                        show_error_box("Failed to load preview.");
+                    }
+                }).detach();
+            }
+        } else if (can_mdl) {
+            auto item = S.files[(size_t)S.selected_file_index];
+            auto name = item.name;
+            progress_open(0, "Loading preview...");
+
+            std::thread([name]() {
+                bool ok = false;
+                std::vector<unsigned char> buf;
+
+                try {
+                    ok = build_mdl_buffer_for_name(name, buf);
+                } catch (...) {}
+
+                if (ok && !buf.empty()) {
+                    MDLInfo mdl_info;
+                    if (parse_mdl_info(buf, mdl_info, name)) {
+                        std::vector<MDLMeshGeom> meshes;
+                        if (parse_mdl_geometry(buf, mdl_info, meshes)) {
+                            S.hex_data.clear();
+                            S.mdl_info_ok = true;
+                            S.mdl_info = mdl_info;
+                            S.mdl_meshes = meshes;
+                            S.cam_yaw = 0.0f;
+                            S.cam_pitch = 0.2f;
+                            S.cam_dist = 3.0f;
+                            S.pending_preview_build = true;  // Build on main thread
+                            ok = true;
+                        }
+                    }
+                }
+
+                progress_done();
+                if (!ok) show_error_box("Failed to load preview.");
+            }).detach();
+        }
 #endif
     }
     if (!can_preview) {
@@ -1599,71 +1683,20 @@ if (!can_preview) {
     }
     ImGui::EndChild();
 
-#ifdef _WIN32
-    if(S.show_preview_popup){
-        ImGui::OpenPopup("Mip Preview");
-        S.show_preview_popup = false;
-    }
-
-    if(ImGui::BeginPopupModal("Mip Preview", nullptr, ImGuiWindowFlags_None)){
-        if(S.preview_mip_index >= 0 && S.preview_mip_index < (int)S.tex_info.Mips.size()){
-            const auto& m = S.tex_info.Mips[S.preview_mip_index];
-            if(!S.preview_srv){
-                uint32_t base_w = S.tex_info.TextureWidth;
-                uint32_t base_h = S.tex_info.TextureHeight;
-                uint32_t w = m.HasWH ? (uint32_t)std::max(1,(int)m.MipWidth)  : std::max(1u, base_w >> S.preview_mip_index);
-                uint32_t h = m.HasWH ? (uint32_t)std::max(1,(int)m.MipHeight) : std::max(1u, base_h >> S.preview_mip_index);
-                if(m.MipDataOffset < S.hex_data.size() && m.MipDataOffset + m.MipDataSizeParsed <= S.hex_data.size()){
-                    const uint8_t* src = S.hex_data.data() + m.MipDataOffset;
-                    size_t src_sz = m.MipDataSizeParsed;
-
-                    DXGI_FORMAT fmt = DXGI_FORMAT_BC1_UNORM;
-                    if(S.tex_info.PixelFormat == 39) fmt = DXGI_FORMAT_BC3_UNORM;
-                    else if(S.tex_info.PixelFormat == 40) fmt = DXGI_FORMAT_BC5_UNORM;
-
-                    size_t blocks_x = (w + 3) / 4;
-                    std::vector<uint8_t> payload(src, src + src_sz);
-
-                    for(size_t i = 0; i + 8 <= payload.size(); i += 8) {
-                        uint16_t c0 = (payload[i+0] << 8) | payload[i+1];
-                        uint16_t c1 = (payload[i+2] << 8) | payload[i+3];
-                        uint32_t idx = (payload[i+4] << 24) | (payload[i+5] << 16) | (payload[i+6] << 8) | payload[i+7];
-
-                        payload[i+0] = c0 & 0xFF;
-                        payload[i+1] = (c0 >> 8) & 0xFF;
-                        payload[i+2] = c1 & 0xFF;
-                        payload[i+3] = (c1 >> 8) & 0xFF;
-                        payload[i+4] = idx & 0xFF;
-                        payload[i+5] = (idx >> 8) & 0xFF;
-                        payload[i+6] = (idx >> 16) & 0xFF;
-                        payload[i+7] = (idx >> 24) & 0xFF;
-                    }
-
-                    D3D11_TEXTURE2D_DESC td{};
-                    td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1; td.Format = fmt;
-                    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                    D3D11_SUBRESOURCE_DATA sd{}; sd.pSysMem = payload.data(); sd.SysMemPitch = (UINT)(blocks_x * 8);
-                    ID3D11Texture2D* tex = nullptr;
-                    if(device->CreateTexture2D(&td, &sd, &tex) == S_OK){
-                        D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
-                        svd.Format = td.Format; svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; svd.Texture2D.MipLevels = 1;
-                        device->CreateShaderResourceView(tex, &svd, &S.preview_srv); tex->Release();
-                    }
-                }
-            }
-            if(S.preview_srv) ImGui::Image((ImTextureID)S.preview_srv, ImVec2(512, 512));
-            else ImGui::TextUnformatted("Preview unsupported or failed.");
-        }else{
-            ImGui::TextUnformatted("No mip selected");
-        }
-        if(ImGui::Button("Close", ImVec2(-1,0))) {
-            if(S.preview_srv) { S.preview_srv->Release(); S.preview_srv = nullptr; }
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-
+    // Model Preview popup - cross-platform
     {
+#ifndef _WIN32
+        // Linux: Handle deferred OpenGL preview build on main thread
+        if (S.pending_preview_build) {
+            S.pending_preview_build = false;
+            extern ModelPreview g_mp;
+            MP_Release(g_mp);
+            MP_Init(g_mp, 960, 640);
+            MP_Build(S.mdl_meshes, S.mdl_info, g_mp);
+            S.show_model_preview = true;
+        }
+#endif
+
         if(S.show_model_preview){ ImGui::OpenPopup("Model Preview"); S.show_model_preview = false; }
 
         const ImVec2 canvas(960, 640);
@@ -1676,10 +1709,15 @@ if (!can_preview) {
         if(ImGui::BeginPopupModal("Model Preview", nullptr, ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings))
         {
             extern ModelPreview g_mp;
+#ifdef _WIN32
             MP_Render(device, g_mp, S.cam_yaw, S.cam_pitch, S.cam_dist);
-
             ImVec2 pos = ImGui::GetCursorScreenPos();
             if(g_mp.srv) ImGui::GetWindowDrawList()->AddImage((ImTextureID)g_mp.srv, pos, ImVec2(pos.x + canvas.x, pos.y + canvas.y));
+#else
+            MP_Render(g_mp, S.cam_yaw, S.cam_pitch, S.cam_dist);
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            if(g_mp.color_tex) ImGui::GetWindowDrawList()->AddImage((ImTextureID)(intptr_t)g_mp.color_tex, pos, ImVec2(pos.x + canvas.x, pos.y + canvas.y));
+#endif
             ImGui::InvisibleButton("model_canvas", canvas);
 
             float dt = ImGui::GetIO().DeltaTime;
@@ -1708,7 +1746,6 @@ if (!can_preview) {
             ImGui::EndPopup();
         }
     }
-#endif
 
     ImGui::EndChild();
 }

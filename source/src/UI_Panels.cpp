@@ -1,7 +1,7 @@
 #include "UI_Panels.h"
 #include "State.h"
 #include "Utils.h"
-#include "operations.h"
+#include "Operations.h"
 #include "HexView.h"
 #include "UI_Main.h"
 #include "TexParser.h"
@@ -18,7 +18,7 @@
 #include <thread>
 #include <atomic>
 #include "Progress.h"
-#include "Files.h"
+#include "files.h"
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -1393,7 +1393,6 @@ if (!can_preview) {
 
         skip_preview:;
     }
-        }
 #else
         // Linux: Use OpenGL-based preview
         // Note: OpenGL calls must be made from main thread, so we load data in thread

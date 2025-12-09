@@ -6,6 +6,7 @@
 #include "TexParser.h"
 #include "ModelParser.h"
 #include "ModelPreview.h"
+#include "BNKCore.cpp"
 #include "imgui.h"
 #include "imgui_hex.h"
 #include <thread>

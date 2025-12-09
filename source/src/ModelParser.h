@@ -25,8 +25,7 @@ struct MDLMeshInfo {
 };
 
 struct MDLSubMeshInfo {
-    uint32_t StartIndex = 0;
-    uint32_t IndexCount = 0;
+    uint32_t FaceCount = 0;
     uint8_t  MaterialIndex = 0;
 };
 
@@ -63,6 +62,7 @@ struct MDLMeshGeom {
     std::vector<uint16_t> bone_ids;
     std::vector<float> bone_weights;
     std::string diffuse_tex_name;
+    std::string name;
     uint32_t MeshIndex = 0;
     uint32_t SubMeshIndex = 0;
 };

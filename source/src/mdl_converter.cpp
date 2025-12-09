@@ -768,9 +768,14 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
 
         std::string mesh_name = model_name + "_mesh_" + std::to_string(gi);
 
-        if (gi < info.Meshes.size()) {
-            if (!info.Meshes[gi].MeshName.empty()) {
-                mesh_name = info.Meshes[gi].MeshName;
+        uint32_t meshIdx = geom.MeshIndex;
+        uint32_t subIdx = geom.SubMeshIndex;
+        if (meshIdx < info.Meshes.size()) {
+            if (!info.Meshes[meshIdx].MeshName.empty()) {
+                mesh_name = info.Meshes[meshIdx].MeshName;
+                if (subIdx > 0) {
+                    mesh_name += "_sub" + std::to_string(subIdx);
+                }
             }
         }
 

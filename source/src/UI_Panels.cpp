@@ -1,12 +1,14 @@
 #include "UI_Panels.h"
 #include "State.h"
 #include "Utils.h"
-#include "Operations.h"
+#include "operations.h"
 #include "HexView.h"
 #include "UI_Main.h"
 #include "TexParser.h"
 #include "ModelParser.h"
+#ifdef _WIN32
 #include "ModelPreview.h"
+#endif
 #include "mdl_converter.h"
 #include "BNKCore.cpp"
 #include "imgui.h"
@@ -18,7 +20,13 @@
 #include <thread>
 #include <atomic>
 #include "Progress.h"
-#include "files.h"
+#include "Files.h"
+
+#ifdef _WIN32
+#include <d3d11.h>
+#else
+#include <GL/glew.h>
+#endif
 
 
 
@@ -269,7 +277,11 @@ static void build_unified_file_tree(TreeNode& root) {
     }
 }
 
+#ifdef _WIN32
 static void draw_tree_node(TreeNode& node, ID3D11Device* device) {
+#else
+static void draw_tree_node(TreeNode& node) {
+#endif
     if (node.is_file) {
         ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
 
@@ -345,7 +357,11 @@ static void draw_tree_node(TreeNode& node, ID3D11Device* device) {
                 });
 
             for (auto& pair : sorted_children) {
+#ifdef _WIN32
                 draw_tree_node(*pair.second, device);
+#else
+                draw_tree_node(*pair.second);
+#endif
             }
 
             ImGui::TreePop();
@@ -353,7 +369,11 @@ static void draw_tree_node(TreeNode& node, ID3D11Device* device) {
     }
 }
 
+#ifdef _WIN32
 void draw_left_panel(ID3D11Device* device) {
+#else
+void draw_left_panel() {
+#endif
     ImGui::BeginChild("left_panel", ImVec2(360, 0), true);
 
     if (ImGui::BeginTabBar("LeftPanelTabs", ImGuiTabBarFlags_None)) {
@@ -556,7 +576,11 @@ void draw_left_panel(ID3D11Device* device) {
                 }
             } else if (tree_built) {
                 for (auto& pair : root.children) {
+#ifdef _WIN32
                     draw_tree_node(pair.second, device);
+#else
+                    draw_tree_node(pair.second);
+#endif
                 }
             }
 
@@ -711,7 +735,11 @@ void draw_folder_dialog() {
     }
 }
 
+#ifdef _WIN32
 void draw_right_panel(ID3D11Device* device) {
+#else
+void draw_right_panel() {
+#endif
     ImGui::BeginChild("right_panel", ImVec2(0, 0), false);
 
     ImGui::BeginChild("extract_box", ImVec2(0, 100), true, ImGuiWindowFlags_NoScrollbar);
@@ -991,6 +1019,7 @@ if (!can_preview) {
         ImGui::BeginDisabled();
     }
     if (ImGui::Button("Preview")) {
+#ifdef _WIN32
         if (can_folder_preview && !S.selected_folder_path.empty()) {
             std::vector<std::pair<std::string, std::string>> mdl_paths;
             if (find_mdl_files_in_folder(g_tree_root, S.selected_folder_path, mdl_paths)) {
@@ -1269,6 +1298,11 @@ if (!can_preview) {
         skip_preview:;
     }
         }
+#else
+        // Linux: Preview not supported yet
+        show_error_box("Preview is only available on Windows.");
+#endif
+    }
     if (!can_preview) {
         ImGui::EndDisabled();
     }
@@ -1467,6 +1501,7 @@ if (!can_preview) {
     }
     ImGui::EndChild();
 
+#ifdef _WIN32
     if(S.show_preview_popup){
         ImGui::OpenPopup("Mip Preview");
         S.show_preview_popup = false;
@@ -1575,6 +1610,7 @@ if (!can_preview) {
             ImGui::EndPopup();
         }
     }
+#endif
 
     ImGui::EndChild();
 }

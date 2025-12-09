@@ -2,17 +2,18 @@
 #include "State.h"
 #include "Utils.h"
 #include "Progress.h"
-#include "files.h"
+#include "Files.h"
 #include "TexParser.h"
 #include "ModelParser.h"
+#ifdef _WIN32
 #include "ModelPreview.h"
+#endif
 #include "BNKCore.cpp"
 #include "imgui.h"
 #include "imgui_hex.h"
 #include <thread>
 #include <filesystem>
 #include <algorithm>
-#include <d3d11.h>
 #include <cmath>
 #include <vector>
 #include <string>
@@ -25,12 +26,25 @@
 #include <iomanip>
 #include <sstream>
 
+#ifdef _WIN32
+#include <d3d11.h>
+#else
+#include <GL/glew.h>
+#endif
+
+#ifdef _WIN32
 static ModelPreview g_mp;
+#endif
 
 static void reset_preview_resources() {
+#ifdef _WIN32
     if (S.preview_srv) { S.preview_srv->Release(); S.preview_srv = nullptr; }
     if (S.model_diffuse_srv) { S.model_diffuse_srv->Release(); S.model_diffuse_srv = nullptr; }
     MP_Release(g_mp);
+#else
+    if (S.preview_tex) { glDeleteTextures(1, &S.preview_tex); S.preview_tex = 0; }
+    if (S.model_diffuse_tex) { glDeleteTextures(1, &S.model_diffuse_tex); S.model_diffuse_tex = 0; }
+#endif
     S.preview_mip_index = -1;
     S.show_preview_popup = false;
     S.tex_info_ok = false;
@@ -40,6 +54,7 @@ static void reset_preview_resources() {
     S.cam_yaw = 0.0f; S.cam_pitch = 0.2f; S.cam_dist = 3.0f;
 }
 
+#ifdef _WIN32
 static bool is_bc_format(uint32_t comp_flag, DXGI_FORMAT& out_fmt) {
     if (comp_flag == 7) { out_fmt = DXGI_FORMAT_BC1_UNORM; return true; }
     if (comp_flag == 8) { out_fmt = DXGI_FORMAT_BC2_UNORM; return true; }
@@ -48,6 +63,7 @@ static bool is_bc_format(uint32_t comp_flag, DXGI_FORMAT& out_fmt) {
     if (comp_flag == 11) { out_fmt = DXGI_FORMAT_BC5_UNORM; return true; }
     return false;
 }
+#endif
 
 static bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index, std::vector<unsigned char>& out) {
     try {
@@ -327,7 +343,11 @@ void open_hex_for_selected() {
     }).detach();
 }
 
+#ifdef _WIN32
 void draw_hex_window(ID3D11Device *device) {
+#else
+void draw_hex_window() {
+#endif
     if(!S.hex_open) return;
     if(S.hex_loading.load()) return;
     if(S.hex_data.empty()){ S.hex_open = false; return; }
@@ -437,12 +457,14 @@ void draw_hex_window(ID3D11Device *device) {
                                 ImGui::Text("Derived Size: %ux%u", w, h);
                             }
                             ImGui::Text("MipMapData@ 0x%zX, Size %zu", m.MipDataOffset, m.MipDataSizeParsed);
+#ifdef _WIN32
                             if(m.CompFlag == 7){
                                 if(ImGui::Button("Preview")){
                                     S.preview_mip_index = i;
                                     S.show_preview_popup = true;
                                 }
                             }
+#endif
                             ImGui::TreePop();
                         }
                     }
@@ -540,6 +562,7 @@ void draw_hex_window(ID3D11Device *device) {
     }
     ImGui::End();
 
+#ifdef _WIN32
     if(S.show_preview_popup){
         ImGui::OpenPopup("Mip Preview");
         S.show_preview_popup = false;
@@ -644,4 +667,5 @@ void draw_hex_window(ID3D11Device *device) {
             ImGui::EndPopup();
         }
     }
+#endif
 }

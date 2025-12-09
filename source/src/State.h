@@ -4,9 +4,13 @@
 #include <atomic>
 #include <mutex>
 #include <set>
-#include <d3d11.h>
+#include <cstdint>
 #include "imgui_hex.h"
 #include "ModelParser.h"
+
+#ifdef _WIN32
+#include <d3d11.h>
+#endif
 
 struct BNKItemUI {
     int index;
@@ -88,7 +92,11 @@ struct State {
     size_t pending_goto = (size_t) -1;
     bool show_preview_popup = false;
     int preview_mip_index = -1;
+#ifdef _WIN32
     ID3D11ShaderResourceView *preview_srv = nullptr;
+#else
+    unsigned int preview_tex = 0;
+#endif
     std::string hex_file_path;
 
     bool mdl_info_ok = false;
@@ -99,7 +107,11 @@ struct State {
     float cam_yaw = 0.0f;
     float cam_pitch = 0.2f;
     float cam_dist = 3.0f;
+#ifdef _WIN32
     ID3D11ShaderResourceView* model_diffuse_srv = nullptr;
+#else
+    unsigned int model_diffuse_tex = 0;
+#endif
 };
 
 extern State S;

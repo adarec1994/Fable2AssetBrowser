@@ -2,7 +2,7 @@
 #include "UI_Main.h"
 #include "State.h"
 #include "Utils.h"
-#include "files.h"
+#include "Files.h"
 #include "Progress.h"
 #include "UI_Panels.h"
 #include "BNKCore.cpp"
@@ -12,18 +12,30 @@
 #include <filesystem>
 #include <algorithm>
 #include <vector>
+
+#ifdef _WIN32
 #include "ModelPreview.h"
 #include <d3d11.h>
+#else
+#include <GL/glew.h>
+#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#ifdef _WIN32
 ModelPreview g_mp;
-
 static ID3D11ShaderResourceView* g_splash_texture = nullptr;
 static ID3D11ShaderResourceView* g_logo_texture = nullptr;
 static ID3D11ShaderResourceView* g_button_texture = nullptr;
 static ID3D11ShaderResourceView* g_sparkle_textures[8] = {nullptr};
+#else
+static unsigned int g_splash_texture = 0;
+static unsigned int g_logo_texture = 0;
+static unsigned int g_button_texture = 0;
+static unsigned int g_sparkle_textures[8] = {0};
+#endif
+
 static float g_splash_scroll_offset = 0.0f;
 static int g_splash_width = 0;
 static int g_splash_height = 0;
@@ -43,7 +55,7 @@ static const char* g_logo_map[] = {
 "           rYrrrvvvLLvvvrrrrrrrrrvsJuqBI                                                                                                       iBBBBZPPSIuUuJjuukSVUU vqusUVVXbqkjUISkuvi               ",
 "           LBBBBQgRbjuKMBBQBBQBBBBBdKJvBi                                                                                                        UQQZqIusrvsuVdgRPugBvSBBBBPQBuYBBBBBBBBBBQi            ",
 "            iDBkvui iSRBBBBQQQBBBBQMBB BU                                                                                                          vPRBBQgVbBBBJiiPQRu iPBvbIi XQMEqkJvvvUgBv           ",
-"              BivsiiBBPjrii   iivSZirBrBs       sSPPQBMu          Jvrrvvvriiiiiii          isrrvvvvrrrri           UvrvLsYvrrrrrrvvvsId                ivuKqQuQsivMI    iBiqUiuBI           i           ",
+"              BivsiiBBPjrii   iivSZirBrBs       sSPPQBMu          Jvrrvvvvriiiiiii          isrrvvvvrrrri           UvrvLsYvrrrrrrvvvsId                ivuKqQuQsivMI    iBiqUiuBI           i           ",
 "              Bivu iBu               QkBL     rBvr gQgQBBv        QBBZgkvudgBBBBBBBgi      iBBBgMMgBBBBBBQu        BBgsuvLJVdRQZBBBMRjsI                    dirrivRv     BLks vQr                       ",
 "              BvvkiiBL               PDBv    iB LBYiBi  ir         ugii vQBRgEEDBQqBBP       MUi  gRbSkuJuEu        dI   IQBQgDZEDgQZUrRi                   QiiiivRv     Brqk rQr                       ",
 "              BuSZriBv               ZBgi    B uBBBivS              Qvr MZi     rbiv QU      Iqi iQu                rqi idbi      irisKgi                   RrvrvvRL     Qisu vQr                       ",
@@ -97,6 +109,7 @@ struct Sparkle {
 static Sparkle g_sparkles[400];
 static bool g_sparkles_initialized = false;
 
+#ifdef _WIN32
 static bool LoadTextureFromFile(const char* filename, ID3D11Device* device, ID3D11ShaderResourceView** out_srv, int* out_width, int* out_height) {
     int width, height, channels;
     unsigned char* image_data = stbi_load(filename, &width, &height, &channels, 4);
@@ -133,6 +146,27 @@ static bool LoadTextureFromFile(const char* filename, ID3D11Device* device, ID3D
     stbi_image_free(image_data);
     return true;
 }
+#else
+static bool LoadTextureFromFile(const char* filename, unsigned int* out_tex, int* out_width, int* out_height) {
+    int width, height, channels;
+    unsigned char* image_data = stbi_load(filename, &width, &height, &channels, 4);
+    if (image_data == NULL) return false;
+
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    *out_tex = tex;
+    *out_width = width;
+    *out_height = height;
+    stbi_image_free(image_data);
+    return true;
+}
+#endif
 
 void refresh_file_table() { S.selected_file_index = -1; }
 
@@ -207,7 +241,11 @@ void open_folder_logic(const std::string &sel) {
     refresh_file_table();
 }
 
+#ifdef _WIN32
 void draw_main(HWND hwnd, ID3D11Device* device) {
+#else
+void draw_main(GLFWwindow* window) {
+#endif
     ImGuiViewport *vp = ImGui::GetMainViewport();
     const float inset = 8.0f;
     ImGui::SetNextWindowPos(vp->WorkPos + ImVec2(inset, inset));
@@ -216,19 +254,33 @@ void draw_main(HWND hwnd, ID3D11Device* device) {
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                  ImGuiWindowFlags_NoBringToFrontOnFocus);
     if (S.root_dir.empty()) {
+#ifdef _WIN32
         if (!g_splash_texture) {
             LoadTextureFromFile("../include/image/splash_pano.png", device, &g_splash_texture, &g_splash_width, &g_splash_height);
         }
         if (!g_logo_texture) {
             LoadTextureFromFile("../include/image/f2_logo.png", device, &g_logo_texture, &g_logo_width, &g_logo_height);
         }
-
         for (int i = 0; i < 8; ++i) {
             if (!g_sparkle_textures[i]) {
                 std::string path = "../include/image/sparkle_" + std::to_string(i + 1) + ".png";
                 LoadTextureFromFile(path.c_str(), device, &g_sparkle_textures[i], &g_sparkle_widths[i], &g_sparkle_heights[i]);
             }
         }
+#else
+        if (!g_splash_texture) {
+            LoadTextureFromFile("../include/image/splash_pano.png", &g_splash_texture, &g_splash_width, &g_splash_height);
+        }
+        if (!g_logo_texture) {
+            LoadTextureFromFile("../include/image/f2_logo.png", &g_logo_texture, &g_logo_width, &g_logo_height);
+        }
+        for (int i = 0; i < 8; ++i) {
+            if (!g_sparkle_textures[i]) {
+                std::string path = "../include/image/sparkle_" + std::to_string(i + 1) + ".png";
+                LoadTextureFromFile(path.c_str(), &g_sparkle_textures[i], &g_sparkle_widths[i], &g_sparkle_heights[i]);
+            }
+        }
+#endif
 
         g_splash_time_elapsed += ImGui::GetIO().DeltaTime;
 
@@ -262,6 +314,7 @@ void draw_main(HWND hwnd, ID3D11Device* device) {
 
             ImU32 col = IM_COL32(255, 255, 255, (int)(alpha * 255));
 
+#ifdef _WIN32
             ImVec2 p1_min(x1, window_pos.y);
             ImVec2 p1_max(x1 + display_width, window_pos.y + display_height);
             draw_list->AddImage((ImTextureID)g_splash_texture, p1_min, p1_max, ImVec2(0,0), ImVec2(1,1), col);
@@ -269,6 +322,15 @@ void draw_main(HWND hwnd, ID3D11Device* device) {
             ImVec2 p2_min(x2, window_pos.y);
             ImVec2 p2_max(x2 + display_width, window_pos.y + display_height);
             draw_list->AddImage((ImTextureID)g_splash_texture, p2_min, p2_max, ImVec2(0,0), ImVec2(1,1), col);
+#else
+            ImVec2 p1_min(x1, window_pos.y);
+            ImVec2 p1_max(x1 + display_width, window_pos.y + display_height);
+            draw_list->AddImage((ImTextureID)(intptr_t)g_splash_texture, p1_min, p1_max, ImVec2(0,0), ImVec2(1,1), col);
+
+            ImVec2 p2_min(x2, window_pos.y);
+            ImVec2 p2_max(x2 + display_width, window_pos.y + display_height);
+            draw_list->AddImage((ImTextureID)(intptr_t)g_splash_texture, p2_min, p2_max, ImVec2(0,0), ImVec2(1,1), col);
+#endif
         }
 
         if (g_logo_texture) {
@@ -362,19 +424,31 @@ void draw_main(HWND hwnd, ID3D11Device* device) {
 
                 ImVec2 sp_min(center_x - half_size, center_y - half_size);
                 ImVec2 sp_max(center_x + half_size, center_y + half_size);
+#ifdef _WIN32
                 draw_list->AddImage((ImTextureID)g_sparkle_textures[tex_idx], sp_min, sp_max, ImVec2(0,0), ImVec2(1,1), col);
+#else
+                draw_list->AddImage((ImTextureID)(intptr_t)g_sparkle_textures[tex_idx], sp_min, sp_max, ImVec2(0,0), ImVec2(1,1), col);
+#endif
 
                 float glow_size = sparkle_size * 1.3f;
                 float glow_half = glow_size * 0.5f;
                 ImU32 glow_col = IM_COL32(255, 255, 200, (int)(sparkle_alpha * 100));
                 ImVec2 glow_min(center_x - glow_half, center_y - glow_half);
                 ImVec2 glow_max(center_x + glow_half, center_y + glow_half);
+#ifdef _WIN32
                 draw_list->AddImage((ImTextureID)g_sparkle_textures[tex_idx], glow_min, glow_max, ImVec2(0,0), ImVec2(1,1), glow_col);
+#else
+                draw_list->AddImage((ImTextureID)(intptr_t)g_sparkle_textures[tex_idx], glow_min, glow_max, ImVec2(0,0), ImVec2(1,1), glow_col);
+#endif
             }
 
             ImVec2 logo_min(logo_x, logo_y);
             ImVec2 logo_max(logo_x + scaled_width, logo_y + scaled_height);
+#ifdef _WIN32
             draw_list->AddImage((ImTextureID)g_logo_texture, logo_min, logo_max);
+#else
+            draw_list->AddImage((ImTextureID)(intptr_t)g_logo_texture, logo_min, logo_max);
+#endif
         }
 
         const char* text = "Click anywhere and browse to Fable 2 directory";
@@ -391,12 +465,18 @@ void draw_main(HWND hwnd, ID3D11Device* device) {
         float logo_bottom = window_pos.y + window_size.y * 0.33f + scaled_height * 0.5f;
         float text_y = logo_bottom - 20.0f;
 
+        float text_alpha = 1.0f;
+        if (g_splash_time_elapsed < g_fade_in_delay + g_fade_in_duration) {
+            float fade_progress = (g_splash_time_elapsed - g_fade_in_delay) / g_fade_in_duration;
+            text_alpha = (fade_progress > 1.0f) ? 1.0f : (fade_progress < 0.0f ? 0.0f : fade_progress);
+        }
+
         float padding = 10.0f;
         ImVec2 backdrop_min(text_x - padding, text_y - padding);
         ImVec2 backdrop_max(text_x + text_size.x + padding, text_y + text_size.y + padding);
-        draw_list->AddRectFilled(backdrop_min, backdrop_max, IM_COL32(0, 0, 0, (int)(alpha * 180)), 4.0f);
+        draw_list->AddRectFilled(backdrop_min, backdrop_max, IM_COL32(0, 0, 0, (int)(text_alpha * 180)), 4.0f);
 
-        draw_list->AddText(ImVec2(text_x, text_y), IM_COL32(255, 255, 255, (int)(alpha * 255)), text);
+        draw_list->AddText(ImVec2(text_x, text_y), IM_COL32(255, 255, 255, (int)(text_alpha * 255)), text);
 
         if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0)) {
             IGFD::FileDialogConfig cfg;
@@ -412,10 +492,18 @@ void draw_main(HWND hwnd, ID3D11Device* device) {
         ImGui::BeginChild("browser_group", ImVec2(0, 0), false);
         ImGui::BeginGroup();
         ImGui::BeginChild("left_panel_wrap", ImVec2(360, 0), false);
+#ifdef _WIN32
         draw_left_panel(device);
+#else
+        draw_left_panel();
+#endif
         ImGui::EndChild();
         ImGui::SameLine();
+#ifdef _WIN32
         draw_right_panel(device);
+#else
+        draw_right_panel();
+#endif
         ImGui::EndGroup();
         ImGui::EndChild();
     }

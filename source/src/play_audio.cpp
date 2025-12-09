@@ -1,3 +1,4 @@
+#ifdef _WIN32
 #include "play_audio.h"
 #include <mmsystem.h>
 #include <fstream>
@@ -6,7 +7,7 @@
 
 void BackgroundAudio::start(const std::string& wav_path) {
     stop();
-    
+
     char exe_path[MAX_PATH];
     GetModuleFileNameA(NULL, exe_path, MAX_PATH);
     std::string exe_dir = exe_path;
@@ -70,3 +71,4 @@ void BackgroundAudio::audio_loop() {
         }
     }
 }
+#endif

@@ -1,26 +1,39 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
+
+#ifdef _WIN32
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
-#include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
-#include "ImGuiFileDialog.h"
+#include <shlobj.h>
+#include "play_audio.h"
 #include "../resource.h"
+#else
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
+#include <unistd.h>
+#include <sys/stat.h>
+#include <pwd.h>
+#endif
+
+#include "imgui.h"
+#include "ImGuiFileDialog.h"
 #include "State.h"
 #include "UI_Main.h"
 #include "UI_Panels.h"
 #include "Progress.h"
 #include "HexView.h"
-#include "files.h"
-#include "play_audio.h"
+#include "Files.h"
 #include <string>
 #include <mutex>
 #include <algorithm>
 #include <fstream>
-#include <shlobj.h>
 
 static std::string get_config_path() {
+#ifdef _WIN32
     char path[MAX_PATH];
     if (SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, path) == S_OK) {
         std::string config_dir = std::string(path) + "\\Fable2AssetBrowser";
@@ -28,6 +41,16 @@ static std::string get_config_path() {
         return config_dir + "\\config.ini";
     }
     return "config.ini";
+#else
+    const char* home = getenv("HOME");
+    if (!home) {
+        struct passwd* pw = getpwuid(getuid());
+        home = pw ? pw->pw_dir : ".";
+    }
+    std::string config_dir = std::string(home) + "/.config/Fable2AssetBrowser";
+    mkdir(config_dir.c_str(), 0755);
+    return config_dir + "/config.ini";
+#endif
 }
 
 static bool load_audio_muted() {
@@ -71,7 +94,7 @@ static void save_audio_muted(bool muted) {
     }
 }
 
-
+#ifdef _WIN32
 static ID3D11Device *g_pd3dDevice = nullptr;
 static ID3D11DeviceContext *g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain *g_pSwapChain = nullptr;
@@ -114,18 +137,9 @@ static bool CreateDeviceD3D(HWND hWnd) {
 
 static void CleanupDeviceD3D() {
     CleanupRenderTarget();
-    if (g_pSwapChain) {
-        g_pSwapChain->Release();
-        g_pSwapChain = nullptr;
-    }
-    if (g_pd3dDeviceContext) {
-        g_pd3dDeviceContext->Release();
-        g_pd3dDeviceContext = nullptr;
-    }
-    if (g_pd3dDevice) {
-        g_pd3dDevice->Release();
-        g_pd3dDevice = nullptr;
-    }
+    if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = nullptr; }
+    if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
+    if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
 }
 
 static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -145,6 +159,13 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return DefWindowProc(hWnd, msg, wParam, lParam);
     }
 }
+#else
+static GLFWwindow* g_window = nullptr;
+
+static void glfw_error_callback(int error, const char* description) {
+    fprintf(stderr, "GLFW Error %d: %s\n", error, description);
+}
+#endif
 
 static void build_theme() {
     auto &s = ImGui::GetStyle();
@@ -159,6 +180,7 @@ static void build_theme() {
 }
 
 int main() {
+#ifdef _WIN32
     HINSTANCE hInstance = GetModuleHandle(nullptr);
     WNDCLASSEXA wc{};
     wc.cbSize = sizeof(WNDCLASSEX);
@@ -192,18 +214,47 @@ int main() {
     ImGui::StyleColorsDark();
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+#else
+    glfwSetErrorCallback(glfw_error_callback);
+    if (!glfwInit()) return 1;
+
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+    g_window = glfwCreateWindow(1100, 680, "Fable 2 Asset Browser", nullptr, nullptr);
+    if (!g_window) {
+        glfwTerminate();
+        return 1;
+    }
+
+    glfwMakeContextCurrent(g_window);
+    glfwSwapInterval(1);
+
+    if (glewInit() != GLEW_OK) {
+        fprintf(stderr, "Failed to initialize GLEW\n");
+        return 1;
+    }
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+    ImGui_ImplGlfw_InitForOpenGL(g_window, true);
+    ImGui_ImplOpenGL3_Init("#version 330");
+#endif
 
     build_theme();
-
     S.last_dir = load_last_dir();
 
+#ifdef _WIN32
     bool audio_muted = load_audio_muted();
     BackgroundAudio::instance().set_muted(audio_muted);
     BackgroundAudio::instance().start("include/audio/menu_interlude.wav");
-
+#endif
 
     bool done = false;
     while (!done) {
+#ifdef _WIN32
         MSG msg;
         while (PeekMessage(&msg, NULL, 0U, 0U, PM_REMOVE)) {
             if (msg.message == WM_QUIT) done = true;
@@ -214,8 +265,17 @@ int main() {
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
+#else
+        glfwPollEvents();
+        if (glfwWindowShouldClose(g_window)) done = true;
+        if (done) break;
+
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+#endif
         ImGui::NewFrame();
 
+#ifdef _WIN32
         draw_main(hwnd, g_pd3dDevice);
 
         if (S.root_dir.empty()) {
@@ -234,7 +294,7 @@ int main() {
                 ImGuiWindowFlags_NoNav)) {
 
                 bool muted = BackgroundAudio::instance().is_muted();
-                const char* icon = muted ? "🔇" : "🔊";
+                const char* icon = muted ? "M" : "S";
 
                 if (ImGui::Button(icon, ImVec2(32, 32))) {
                     BackgroundAudio::instance().toggle_mute();
@@ -253,6 +313,9 @@ int main() {
                 audio_stopped = true;
             }
         }
+#else
+        draw_main(g_window);
+#endif
 
         draw_folder_dialog();
         if (S.show_progress.load()) ImGui::OpenPopup("progress_win");
@@ -355,25 +418,48 @@ int main() {
             ImGui::EndPopup();
         }
 
+#ifdef _WIN32
         draw_hex_window(g_pd3dDevice);
+#else
+        draw_hex_window();
+#endif
 
         ImGui::Render();
+#ifdef _WIN32
         const float clear_color[4] = {0.10f, 0.10f, 0.10f, 1.0f};
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         g_pSwapChain->Present(1, 0);
+#else
+        int display_w, display_h;
+        glfwGetFramebufferSize(g_window, &display_w, &display_h);
+        glViewport(0, 0, display_w, display_h);
+        glClearColor(0.10f, 0.10f, 0.10f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        glfwSwapBuffers(g_window);
+#endif
     }
 
     S.exiting = true;
+#ifdef _WIN32
     BackgroundAudio::instance().stop();
-
-
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
+#else
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+#endif
     ImGui::DestroyContext();
+
+#ifdef _WIN32
     CleanupDeviceD3D();
     DestroyWindow(hwnd);
     UnregisterClassA(wc.lpszClassName, wc.hInstance);
+#else
+    glfwDestroyWindow(g_window);
+    glfwTerminate();
+#endif
     return 0;
 }

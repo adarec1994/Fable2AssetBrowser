@@ -38,6 +38,7 @@ struct MDLMeshBufferInfo {
     uint32_t SubMeshCount = 0;
     bool     IsAltPath = false;
     std::vector<MDLSubMeshInfo> SubMeshes;
+    uint32_t MeshIndex = 0;
 };
 
 struct MDLInfo {
@@ -62,6 +63,8 @@ struct MDLMeshGeom {
     std::vector<uint16_t> bone_ids;
     std::vector<float> bone_weights;
     std::string diffuse_tex_name;
+    uint32_t MeshIndex = 0;
+    uint32_t SubMeshIndex = 0;
 };
 
 bool build_mdl_buffer_for_name(const std::string &mdl_name, std::vector<unsigned char> &out);

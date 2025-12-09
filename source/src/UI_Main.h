@@ -1,10 +1,15 @@
 #pragma once
 #include <string>
+
+#ifdef _WIN32
 #include <windows.h>
-
-struct ID3D11Device;
-
-void pick_bnk(const std::string &path);
-void refresh_file_table();
-void open_folder_logic(const std::string &sel);
+#include <d3d11.h>
 void draw_main(HWND hwnd, ID3D11Device* device);
+#else
+struct GLFWwindow;
+void draw_main(GLFWwindow* window);
+#endif
+
+void refresh_file_table();
+void pick_bnk(const std::string &path);
+void open_folder_logic(const std::string &sel);

@@ -28,7 +28,93 @@
 #include <GL/glew.h>
 #endif
 
+void refresh_file_table() { S.selected_file_index = -1; }
 
+void pick_bnk(const std::string &path) {
+    S.selected_bnk = path;
+    S.selected_nested_temp_path.clear();
+    S.files.clear();
+    S.file_filter.clear();
+    BNKReader reader(path);
+    const auto &fe = reader.list_files();
+    S.files.reserve(fe.size());
+    for (size_t i = 0; i < fe.size(); ++i) S.files.push_back({(int) i, fe[i].name, fe[i].uncompressed_size});
+
+    auto get_filename = [](const std::string& p) -> std::string {
+        size_t pos = p.find_last_of("/\\");
+        if (pos != std::string::npos) return p.substr(pos + 1);
+        return p;
+    };
+
+    std::sort(S.files.begin(), S.files.end(), [&get_filename](const BNKItemUI &a, const BNKItemUI &b) {
+        std::string x = get_filename(a.name);
+        std::string y = get_filename(b.name);
+        std::transform(x.begin(), x.end(), x.begin(), ::tolower);
+        std::transform(y.begin(), y.end(), y.begin(), ::tolower);
+        return x < y;
+    });
+
+    refresh_file_table();
+}
+
+void open_folder_logic(const std::string &sel) {
+    if (sel.empty()) {
+        show_error_box("No folder selected");
+        return;
+    }
+    if (!std::filesystem::exists(sel)) {
+        show_error_box(std::string("Folder does not exist: ") + sel);
+        return;
+    }
+    if (!std::filesystem::is_directory(sel)) {
+        show_error_box(std::string("Selected path is not a directory: ") + sel);
+        return;
+    }
+    S.root_dir = sel;
+    S.last_dir = sel;
+    save_last_dir(sel);
+    try {
+        S.bnk_paths = scan_bnks_recursive(sel);
+        if (S.bnk_paths.empty()) S.bnk_paths = find_bnks(sel);
+
+        S.adb_paths = scan_adbs_recursive(sel);
+    } catch (...) {
+        show_error_box("Error searching for BNK files");
+        return;
+    }
+    if (S.bnk_paths.empty()) {
+        show_error_box(
+            std::string("No .bnk files found in:\n") + sel + std::string(
+                "\n\nPlease select a folder containing Fable 2 BNK files."));
+        return;
+    }
+
+    auto get_filename = [](const std::string& p) -> std::string {
+        size_t pos = p.find_last_of("/\\");
+        if (pos != std::string::npos) return p.substr(pos + 1);
+        return p;
+    };
+
+    std::sort(S.bnk_paths.begin(), S.bnk_paths.end(), [&get_filename](const std::string &a, const std::string &b) {
+        std::string A = get_filename(a);
+        std::string B = get_filename(b);
+        std::transform(A.begin(), A.end(), A.begin(), ::tolower);
+        std::transform(B.begin(), B.end(), B.begin(), ::tolower);
+        return A < B;
+    });
+
+    std::sort(S.adb_paths.begin(), S.adb_paths.end(), [&get_filename](const std::string &a, const std::string &b) {
+        std::string A = get_filename(a);
+        std::string B = get_filename(b);
+        std::transform(A.begin(), A.end(), A.begin(), ::tolower);
+        std::transform(B.begin(), B.end(), B.begin(), ::tolower);
+        return A < B;
+    });
+
+    S.selected_bnk.clear();
+    S.files.clear();
+    refresh_file_table();
+}
 
 static bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index, std::vector<unsigned char>& out) {
     try {
@@ -600,6 +686,12 @@ void draw_file_table() {
     for (size_t i = 0; i < S.files.size(); ++i)
         if (name_matches_filter(S.files[i].name, S.file_filter)) vis.push_back((int) i);
 
+    auto get_filename = [](const std::string& path) -> std::string {
+        size_t pos = path.find_last_of("/\\");
+        if (pos != std::string::npos) return path.substr(pos + 1);
+        return path;
+    };
+
     ImGuiTable *tbl_ptr = nullptr;
     if (ImGui::BeginTable("files_table", 2,
                           ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter |
@@ -618,7 +710,7 @@ void draw_file_table() {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 bool selected = (i == S.selected_file_index);
-                std::string base = std::filesystem::path(S.files[i].name).filename().string();
+                std::string base = get_filename(S.files[i].name);
                 if (ImGui::Selectable(base.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns))
                     S.selected_file_index = i;
                 if (!S.hide_tooltips && ImGui::IsItemHovered()) {
@@ -646,6 +738,12 @@ void draw_global_results_table() {
         ImGui::TextUnformatted("Searching all BNKs...");
         return;
     }
+
+    auto get_filename = [](const std::string& path) -> std::string {
+        size_t pos = path.find_last_of("/\\");
+        if (pos != std::string::npos) return path.substr(pos + 1);
+        return path;
+    };
 
     std::vector<int> vis;
     vis.reserve(g_global_hits.size());
@@ -677,7 +775,7 @@ void draw_global_results_table() {
                 ImGui::TableSetColumnIndex(0);
 
                 bool selected = (i == g_selected_global);
-                std::string base = std::filesystem::path(hit.file_name).filename().string();
+                std::string base = get_filename(hit.file_name);
 
                 if (ImGui::Selectable(base.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
                     g_selected_global = i;
@@ -698,7 +796,7 @@ void draw_global_results_table() {
                 }
 
                 ImGui::TableSetColumnIndex(1);
-                std::string bnk_name = std::filesystem::path(hit.bnk_path).filename().string();
+                std::string bnk_name = get_filename(hit.bnk_path);
                 ImGui::TextUnformatted(bnk_name.c_str());
 
                 if (!S.hide_tooltips && ImGui::IsItemHovered()) {

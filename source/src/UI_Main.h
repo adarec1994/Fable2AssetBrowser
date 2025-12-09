@@ -9,7 +9,3 @@ void draw_main(HWND hwnd, ID3D11Device* device);
 struct GLFWwindow;
 void draw_main(GLFWwindow* window);
 #endif
-
-void refresh_file_table();
-void pick_bnk(const std::string &path);
-void open_folder_logic(const std::string &sel);

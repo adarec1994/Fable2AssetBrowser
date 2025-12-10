@@ -2,7 +2,7 @@
 #include "State.h"
 #include "Utils.h"
 #include "Progress.h"
-#include "files.h"
+#include "Files.h"
 #include "TexParser.h"
 #include "ModelParser.h"
 #include "ModelPreview.h"

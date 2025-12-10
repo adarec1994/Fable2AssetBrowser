@@ -1,7 +1,7 @@
 #include "UI_Panels.h"
 #include "State.h"
 #include "Utils.h"
-#include "Operations.h"
+#include "operations.h"
 #include "HexView.h"
 #include "UI_Main.h"
 #include "TexParser.h"
@@ -18,7 +18,7 @@
 #include <thread>
 #include <atomic>
 #include "Progress.h"
-#include "files.h"
+#include "Files.h"
 
 #ifdef _WIN32
 #include <d3d11.h>

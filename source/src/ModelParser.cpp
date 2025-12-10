@@ -306,13 +306,14 @@ if(is_foliage){
                 uint32_t subIdx; if(!r.u32be(subIdx)) return false;
                 uint8_t matIdx; if(!r.u8(matIdx)) return false;
                 uint32_t faceCount; if(!r.u32be(faceCount)) return false;
-                uint32_t unk1; if(!r.u32be(unk1)) return false;
+                uint32_t startIdx; if(!r.u32be(startIdx)) return false;
                 float F4[6];
                 for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
 
                 MDLSubMeshInfo smi;
                 smi.MaterialIndex = matIdx;
                 smi.FaceCount = faceCount;
+                smi.StartIndex = startIdx;
                 submeshes.push_back(smi);
             }
         }
@@ -377,13 +378,14 @@ if(is_foliage){
                     uint32_t subIdx; if(!r.u32be(subIdx)) return false;
                     uint8_t matIdx; if(!r.u8(matIdx)) return false;
                     uint32_t faceCount; if(!r.u32be(faceCount)) return false;
-                    uint32_t unk1; if(!r.u32be(unk1)) return false;
+                    uint32_t startIdx; if(!r.u32be(startIdx)) return false;
                     float F4[6];
                     for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
 
                     MDLSubMeshInfo smi;
                     smi.MaterialIndex = matIdx;
                     smi.FaceCount = faceCount;
+                    smi.StartIndex = startIdx;
                     submeshesn.push_back(smi);
                 }
             }
@@ -515,13 +517,14 @@ if(is_foliage){
                 uint32_t subIdx; if(!r.u32be(subIdx)) return false;
                 uint8_t matIdx; if(!r.u8(matIdx)) return false;
                 uint32_t faceCount; if(!r.u32be(faceCount)) return false;
-                uint32_t unk1; if(!r.u32be(unk1)) return false;
+                uint32_t startIdx; if(!r.u32be(startIdx)) return false;
                 float F4[6];
                 for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
 
                 MDLSubMeshInfo smi;
                 smi.MaterialIndex = matIdx;
                 smi.FaceCount = faceCount;
+                smi.StartIndex = startIdx;
                 submeshes.push_back(smi);
             }
 
@@ -598,13 +601,14 @@ if(is_foliage){
                     uint32_t subIdx; if(!r.u32be(subIdx)) return false;
                     uint8_t matIdx; if(!r.u8(matIdx)) return false;
                     uint32_t faceCount; if(!r.u32be(faceCount)) return false;
-                    uint32_t unk1; if(!r.u32be(unk1)) return false;
+                    uint32_t startIdx; if(!r.u32be(startIdx)) return false;
                     float F4[6];
                     for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
 
                     MDLSubMeshInfo smi;
                     smi.MaterialIndex = matIdx;
                     smi.FaceCount = faceCount;
+                    smi.StartIndex = startIdx;
                     submeshes.push_back(smi);
                 }
             }
@@ -755,7 +759,6 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
 
             out.push_back(std::move(g));
         } else {
-            uint32_t strip_offset = 0;
             for(size_t si=0; si<mb.SubMeshes.size(); ++si){
                 const auto& sub = mb.SubMeshes[si];
 
@@ -766,19 +769,21 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                 else if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty())
                     g.diffuse_tex_name=info.Meshes[mi].Materials[0].TextureName;
 
-                uint32_t face_count = sub.FaceCount;
+                uint32_t start_idx = sub.StartIndex;
+                uint32_t end_idx;
+                if(si + 1 < mb.SubMeshes.size())
+                    end_idx = mb.SubMeshes[si + 1].StartIndex;
+                else
+                    end_idx = (uint32_t)strip.size();
 
-                if(strip_offset >= strip.size() || face_count == 0){
+                if(start_idx >= strip.size() || start_idx >= end_idx){
                     out.push_back(std::move(g));
-                    strip_offset += face_count;
                     continue;
                 }
 
-                uint32_t end_idx = strip_offset + face_count;
                 if(end_idx > strip.size()) end_idx = (uint32_t)strip.size();
 
-                std::vector<uint16_t> sub_strip(strip.begin() + strip_offset, strip.begin() + end_idx);
-                strip_offset = end_idx;
+                std::vector<uint16_t> sub_strip(strip.begin() + start_idx, strip.begin() + end_idx);
 
                 std::vector<uint32_t> sub_indices;
                 build_triangles_from_strip(sub_strip, sub_indices);

@@ -12,18 +12,12 @@
 #include <cstring>
 #include <cmath>
 
-// --- Third Party Includes ---
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include "ImGuiFileDialog.h"
 
-// GLFW
 #include <GLFW/glfw3.h>
-
-// =========================================================
-// UTILITY FUNCTIONS
-// =========================================================
 
 inline uint32_t ReadU32BE(const uint8_t* data) {
     return (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3];
@@ -45,10 +39,6 @@ inline float ReadF32BE(const uint8_t* data) {
     return f;
 }
 
-// =========================================================
-// DATA STRUCTURES - TOC
-// =========================================================
-
 struct AnimEvent {
     float time = 0.0f;
     uint32_t string_index = 0;
@@ -60,13 +50,11 @@ struct AnimEntry {
     int index = 0;
     uint32_t toc_offset = 0;
     uint32_t data_offset = 0;
-    uint32_t field1 = 0;        // Matches DATA.unk2
+    uint32_t field1 = 0;
     float fps = 30.0f;
     uint32_t event_count_field = 0;
     uint64_t hash_value = 0;
     std::vector<AnimEvent> events;
-
-    // Cross-reference to DATA clip
     int linked_clip_index = -1;
 };
 
@@ -78,10 +66,6 @@ struct TocHeader {
     uint32_t field4 = 0;
     uint32_t string_count = 0;
 };
-
-// =========================================================
-// DATA STRUCTURES - ANIMATION DATA
-// =========================================================
 
 struct Quaternion {
     float w = 1.0f, x = 0.0f, y = 0.0f, z = 0.0f;
@@ -107,7 +91,7 @@ struct Keyframe {
     uint32_t byte_offset = 0;
     float time = 0.0f;
     Quaternion rotation;
-    std::vector<float> raw_values;  // All extracted values from block
+    std::vector<float> raw_values;
 };
 
 struct BoneTrack {
@@ -119,27 +103,17 @@ struct AnimClip {
     int index = 0;
     uint32_t file_offset = 0;
     uint32_t size = 0;
-
-    // Header fields
     uint32_t magic = 0;
     uint32_t bone_count = 0;
     uint32_t frame_count = 0;
-    uint32_t offset_table_size = 0;  // unk1
-    uint32_t unk2 = 0;               // Matches TOC.field1
+    uint32_t offset_table_size = 0;
+    uint32_t unk2 = 0;
     uint32_t track_count = 0;
-
-    // Extracted data
     std::vector<BoneTrack> tracks;
-
-    // Cross-reference to TOC
     int linked_toc_index = -1;
 
     float Duration() const { return frame_count / 30.0f; }
 };
-
-// =========================================================
-// FABLE 2 ANIMATION PARSER
-// =========================================================
 
 class Fable2AnimParser {
 public:
@@ -152,7 +126,7 @@ public:
     std::vector<AnimClip> clips;
     std::string load_error;
 
-    static constexpr uint32_t FPS_MARKER = 0x41F00000;  // 30.0 as BE float
+    static constexpr uint32_t FPS_MARKER = 0x41F00000;
     static constexpr uint32_t CLIP_MAGIC = 0xCEA5EBED;
 
     bool LoadToc(const std::string& tocPath) {
@@ -194,7 +168,6 @@ public:
         return "<invalid:" + std::to_string(index) + ">";
     }
 
-    // Extract keyframe data for a clip
     bool ExtractClipKeyframes(int clipIndex) {
         if (clipIndex < 0 || clipIndex >= (int)clips.size()) {
             return false;
@@ -202,7 +175,6 @@ public:
 
         AnimClip& clip = clips[clipIndex];
 
-        // Already extracted?
         if (!clip.tracks.empty()) {
             return true;
         }
@@ -325,12 +297,7 @@ private:
         }
     }
 
-    // =========================================================
-    // DATA FILE PARSING
-    // =========================================================
-
     void ParseClips() {
-        // Find all clip magic markers
         std::vector<size_t> clip_offsets;
 
         for (size_t i = 0; i + 4 <= data_file.size(); i++) {
@@ -339,7 +306,6 @@ private:
             }
         }
 
-        // Parse each clip header
         for (size_t i = 0; i < clip_offsets.size(); i++) {
             size_t offset = clip_offsets[i];
             size_t next_offset = (i + 1 < clip_offsets.size()) ? clip_offsets[i + 1] : data_file.size();
@@ -363,13 +329,11 @@ private:
     }
 
     void CrossReferenceEntries() {
-        // Build lookup from unk2 to clip index
         std::map<uint32_t, int> unk2_to_clip;
         for (size_t i = 0; i < clips.size(); i++) {
             unk2_to_clip[clips[i].unk2] = (int)i;
         }
 
-        // Link TOC entries to clips via field1 == unk2
         for (auto& entry : entries) {
             auto it = unk2_to_clip.find(entry.field1);
             if (it != unk2_to_clip.end()) {
@@ -379,17 +343,12 @@ private:
         }
     }
 
-    // =========================================================
-    // KEYFRAME EXTRACTION
-    // =========================================================
-
     Quaternion ExtractQuaternion(size_t offset) {
         Quaternion q;
         if (offset + 8 > data_file.size()) {
             return q;
         }
 
-        // Read 4 x int16 BE, normalize to [-1, 1]
         q.w = ReadS16BE(&data_file[offset + 0]) / 32767.0f;
         q.x = ReadS16BE(&data_file[offset + 2]) / 32767.0f;
         q.y = ReadS16BE(&data_file[offset + 4]) / 32767.0f;
@@ -418,14 +377,12 @@ private:
             BoneTrack track;
             track.bone_index = track_idx;
 
-            // Get track offset from header
             size_t track_offset_pos = clip_start + 28 + track_idx * 4;
             if (track_offset_pos + 4 > data_file.size()) break;
 
             uint32_t track_rel_offset = ReadU32BE(&data_file[track_offset_pos]);
             size_t track_abs = clip_start + track_rel_offset;
 
-            // Calculate track size
             uint32_t next_track_rel = 0;
             if (track_idx + 1 < clip.track_count) {
                 next_track_rel = ReadU32BE(&data_file[track_offset_pos + 4]);
@@ -434,7 +391,6 @@ private:
             }
             uint32_t track_size = next_track_rel - track_rel_offset;
 
-            // Read offset table (absolute file offsets)
             uint32_t num_offsets = track_size / 4;
             std::vector<uint32_t> kf_offsets;
 
@@ -446,11 +402,10 @@ private:
                 if (off > 0 && off < data_file.size()) {
                     kf_offsets.push_back(off);
                 } else {
-                    break;  // End of valid offsets
+                    break;
                 }
             }
 
-            // Extract keyframes
             float duration = clip.Duration();
             for (size_t kf_idx = 0; kf_idx < kf_offsets.size(); kf_idx++) {
                 Keyframe kf;
@@ -472,14 +427,12 @@ private:
     bool ExtractSingleTrackClip(AnimClip& clip) {
         size_t clip_start = clip.file_offset;
 
-        // Get track 0 offset
         size_t track_offset_pos = clip_start + 28;
         if (track_offset_pos + 4 > data_file.size()) return false;
 
         uint32_t track_rel = ReadU32BE(&data_file[track_offset_pos]);
         size_t track_abs = clip_start + track_rel;
 
-        // Read offset table
         std::vector<uint32_t> offset_table;
         for (uint32_t i = 0; i < clip.offset_table_size; i++) {
             size_t pos = track_abs + i * 4;
@@ -487,25 +440,21 @@ private:
             offset_table.push_back(ReadU32BE(&data_file[pos]));
         }
 
-        // Compressed data base (after offset table + 4 byte keyframe header)
         size_t compressed_base = track_abs + clip.offset_table_size * 4 + 4;
 
         clip.tracks.clear();
         float duration = clip.Duration();
 
-        // Parse bone structure from offset table
         for (uint32_t bone_idx = 0; bone_idx < clip.bone_count; bone_idx++) {
             BoneTrack track;
             track.bone_index = bone_idx;
 
-            // First bone_count entries are bone-level indices
             uint32_t start_entry_idx = offset_table[bone_idx] / 4;
             uint32_t end_entry_idx;
 
             if (bone_idx + 1 < clip.bone_count) {
                 end_entry_idx = offset_table[bone_idx + 1] / 4;
             } else {
-                // Find first entry beyond table size
                 uint32_t table_size_bytes = clip.offset_table_size * 4;
                 end_entry_idx = clip.offset_table_size;
                 for (uint32_t i = bone_idx + 1; i < clip.offset_table_size; i++) {
@@ -516,7 +465,6 @@ private:
                 }
             }
 
-            // Get keyframe offsets for this bone
             for (uint32_t entry_idx = start_entry_idx; entry_idx < end_entry_idx; entry_idx++) {
                 if (entry_idx >= offset_table.size()) break;
 
@@ -543,10 +491,6 @@ private:
     }
 
 public:
-    // =========================================================
-    // EXPORT FUNCTIONS
-    // =========================================================
-
     bool ExportClipToJson(int clipIndex, const std::string& outputPath) {
         if (clipIndex < 0 || clipIndex >= (int)clips.size()) {
             return false;
@@ -625,7 +569,6 @@ public:
             }
             out << total_kf << ",\n";
 
-            // Sample quaternion from first track
             out << "      \"sample_quat\": ";
             if (!clip.tracks.empty() && !clip.tracks[0].keyframes.empty()) {
                 const Quaternion& q = clip.tracks[0].keyframes[0].rotation;
@@ -646,10 +589,6 @@ public:
     }
 };
 
-// =========================================================
-// GUI APPLICATION CLASS
-// =========================================================
-
 class FableAnimApp {
 private:
     Fable2AnimParser parser;
@@ -657,16 +596,13 @@ private:
     std::string dataPath;
     std::string logBuffer;
 
-    // Search/Filter
     char filterBuffer[128] = "";
     char eventFilterBuffer[128] = "";
     char clipFilterBuffer[128] = "";
 
-    // Selection
     int selectedEntry = -1;
     int selectedClip = -1;
 
-    // Export
     char exportPath[256] = "exported_animation.json";
 
     void Log(const std::string& msg) {
@@ -684,11 +620,9 @@ public:
 
         if (ImGui::Begin("Fable 2 Animation Viewer", nullptr, window_flags)) {
 
-            // --- Header ---
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "FABLE 2 ANIMATION VIEWER (with Decompression)");
             ImGui::Separator();
 
-            // File selection row
             ImGui::Text("TOC:");
             ImGui::SameLine();
             ImGui::SetNextItemWidth(300);
@@ -733,7 +667,6 @@ public:
                             Log("DATA: " + std::to_string(parser.clips.size()) + " clips, "
                                 + std::to_string(parser.data_file.size()) + " bytes.");
 
-                            // Count cross-references
                             int linked = 0;
                             for (const auto& e : parser.entries) {
                                 if (e.linked_clip_index >= 0) linked++;
@@ -748,7 +681,6 @@ public:
 
             ImGui::Separator();
 
-            // --- Stats ---
             if (!parser.entries.empty() || !parser.clips.empty()) {
                 ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f),
                     "TOC: %d entries, %d strings | DATA: %d clips",
@@ -756,7 +688,6 @@ public:
                 ImGui::Separator();
             }
 
-            // --- View Mode Tabs ---
             ImGui::BeginTabBar("ViewTabs");
 
             if (ImGui::BeginTabItem("TOC Entries")) {
@@ -791,7 +722,6 @@ public:
 
             ImGui::EndTabBar();
 
-            // --- Footer Log ---
             ImGui::Separator();
             ImGui::Text("Log:");
             ImGui::BeginChild("LogRegion", ImVec2(0, 80), true);
@@ -802,7 +732,6 @@ public:
         }
         ImGui::End();
 
-        // Dialog handling
         HandleFileDialogs();
     }
 
@@ -975,7 +904,7 @@ private:
 
         ImGui::SameLine();
         ImGui::Text("  Tracks: ");
-        static int trackFilter = 0;  // 0 = all, 1-10 = specific
+        static int trackFilter = 0;
         ImGui::SameLine();
         ImGui::SetNextItemWidth(80);
         ImGui::InputInt("##trackFilter", &trackFilter);
@@ -1190,14 +1119,12 @@ private:
             return;
         }
 
-        // Extract keyframes on demand
         parser.ExtractClipKeyframes(selectedClip);
         const AnimClip& clip = parser.clips[selectedClip];
 
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "DATA Clip %d", clip.index);
         ImGui::Separator();
 
-        // Header info
         ImGui::Columns(2, "clipdetails", true);
         ImGui::SetColumnWidth(0, 150);
 
@@ -1233,13 +1160,11 @@ private:
         ImGui::Columns(1);
         ImGui::Separator();
 
-        // Keyframe data
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Extracted Tracks (%d):", (int)clip.tracks.size());
 
         if (clip.tracks.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "No keyframe data extracted.");
         } else {
-            // Summary
             int total_kf = 0;
             int valid_kf = 0;
             for (const auto& track : clip.tracks) {
@@ -1254,7 +1179,6 @@ private:
 
             ImGui::Separator();
 
-            // Per-track tables
             for (size_t t = 0; t < clip.tracks.size(); t++) {
                 const BoneTrack& track = clip.tracks[t];
 
@@ -1317,7 +1241,6 @@ private:
 
         ImGui::Separator();
 
-        // Single clip export
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Export Single Clip:");
         ImGui::Text("Selected Clip: %d", selectedClip);
         ImGui::SameLine();
@@ -1335,7 +1258,6 @@ private:
 
         ImGui::Separator();
 
-        // Batch export
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Batch Export:");
         static int batchCount = 100;
         ImGui::Text("Export first N clips:");
@@ -1360,7 +1282,6 @@ private:
 
         ImGui::Separator();
 
-        // Export all
         if (ImGui::Button("Export ALL Clips (may take a while)")) {
             std::string allPath = std::string(exportPath);
             if (allPath.find(".json") == std::string::npos) {
@@ -1378,10 +1299,6 @@ private:
             "Note: Exported JSON contains quaternion keyframes [w,x,y,z] for each bone/track.");
     }
 };
-
-// =========================================================
-// MAIN ENTRY POINT
-// =========================================================
 
 static void glfw_error_callback(int error, const char* description) {
     fprintf(stderr, "GLFW Error %d: %s\n", error, description);

@@ -4,10 +4,8 @@ project(animparser)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# --- 1. Dependencies ---
 include(FetchContent)
 
-# A. GLFW
 FetchContent_Declare(
         glfw
         GIT_REPOSITORY https://github.com/glfw/glfw.git
@@ -15,15 +13,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glfw)
 
-# B. ImGui (Core + Backends)
 FetchContent_Declare(
         imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui.git
-        GIT_TAG docking # Use docking branch for latest features
+        GIT_TAG docking
 )
 FetchContent_MakeAvailable(imgui)
 
-# C. ImGuiFileDialog
 FetchContent_Declare(
         ImGuiFileDialog
         GIT_REPOSITORY https://github.com/aiekick/ImGuiFileDialog.git
@@ -31,9 +27,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(ImGuiFileDialog)
 
-# --- 2. Define Sources ---
-
-# Define the ImGui sources we need to compile
 set(IMGUI_SOURCES
         ${imgui_SOURCE_DIR}/imgui.cpp
         ${imgui_SOURCE_DIR}/imgui_demo.cpp
@@ -44,21 +37,18 @@ set(IMGUI_SOURCES
         ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
 )
 
-# --- 3. Build the Executable ---
 add_executable(animparser
         main.cpp
         ${IMGUI_SOURCES}
         ${ImGuiFileDialog_SOURCE_DIR}/ImGuiFileDialog.cpp
 )
 
-# --- 4. Include Directories ---
 target_include_directories(animparser PRIVATE
-        ${imgui_SOURCE_DIR}             # For imgui.h
-        ${imgui_SOURCE_DIR}/backends    # For imgui_impl_glfw.h
-        ${ImGuiFileDialog_SOURCE_DIR}   # For ImGuiFileDialog.h
+        ${imgui_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}/backends
+        ${ImGuiFileDialog_SOURCE_DIR}
 )
 
-# --- 5. Link Libraries ---
 find_package(OpenGL REQUIRED)
 target_link_libraries(animparser PRIVATE
         glfw

@@ -53,10 +53,18 @@ struct TexInfo {
     std::vector<MipDef> Mips;
 };
 
+struct LuaFileUI {
+    int index;
+    std::string path;
+    std::string filename;
+    uint32_t size;
+};
+
 struct State {
     std::string root_dir;
     std::vector<std::string> bnk_paths;
     std::vector<std::string> adb_paths;
+    std::vector<LuaFileUI> lua_files;
     std::string bnk_filter;
     std::string selected_bnk;
     std::string selected_nested_bnk;
@@ -64,6 +72,7 @@ struct State {
     int selected_nested_index = -1;
     std::string selected_nested_temp_path;
     bool viewing_adb = false;
+    bool viewing_lua = false;
     std::vector<BNKItemUI> files;
     int selected_file_index = -1;
     bool hide_tooltips = false;
@@ -103,7 +112,7 @@ struct State {
     MDLInfo mdl_info;
 
     bool show_model_preview = false;
-    std::atomic<bool> pending_preview_build{false};  // For Linux: build preview on main thread
+    std::atomic<bool> pending_preview_build{false};
     std::vector<MDLMeshGeom> mdl_meshes;
     float cam_yaw = 0.0f;
     float cam_pitch = 0.2f;
@@ -113,6 +122,11 @@ struct State {
 #else
     unsigned int model_diffuse_tex = 0;
 #endif
+
+    std::string lua_preview_content;
+    std::string lua_preview_title;
+    int lua_preview_selected = -1;
+    std::atomic<bool> lua_preview_loading{false};
 };
 
 extern State S;

@@ -2,6 +2,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <initguid.h>
 #include <d3d11.h>
 #include <dxgi.h>
 #include "imgui_impl_win32.h"
@@ -179,8 +180,9 @@ static void build_theme() {
     s.WindowBorderSize = 0.0f;
 }
 
-int main() {
 #ifdef _WIN32
+int main() {
+
     HINSTANCE hInstance = GetModuleHandle(nullptr);
     WNDCLASSEXA wc{};
     wc.cbSize = sizeof(WNDCLASSEX);

@@ -19,9 +19,11 @@
 #include <atomic>
 #include "Progress.h"
 #include "Files.h"
+#include "Lua.h"
 
 #ifdef _WIN32
 #include <d3d11.h>
+#include <shellapi.h>
 #else
 #include <GL/glew.h>
 #endif
@@ -30,6 +32,10 @@ void refresh_file_table() { S.selected_file_index = -1; }
 
 void pick_bnk(const std::string &path) {
     S.selected_bnk = path;
+    S.viewing_lua = false;
+    S.lua_preview_content.clear();
+    S.lua_preview_title.clear();
+    S.lua_preview_selected = -1;
     S.selected_nested_temp_path.clear();
     S.files.clear();
     S.file_filter.clear();
@@ -76,6 +82,24 @@ void open_folder_logic(const std::string &sel) {
         if (S.bnk_paths.empty()) S.bnk_paths = find_bnks(sel);
 
         S.adb_paths = scan_adbs_recursive(sel);
+
+        auto lua_paths = scan_luas_recursive(sel);
+        S.lua_files.clear();
+        S.lua_files.reserve(lua_paths.size());
+        for (size_t i = 0; i < lua_paths.size(); ++i) {
+            std::filesystem::path p(lua_paths[i]);
+            std::error_code ec;
+            auto fsize = std::filesystem::file_size(p, ec);
+            uint32_t size = ec ? 0 : (uint32_t)fsize;
+            S.lua_files.push_back({(int)i, lua_paths[i], p.filename().string(), size});
+        }
+
+        std::sort(S.lua_files.begin(), S.lua_files.end(), [](const LuaFileUI& a, const LuaFileUI& b) {
+            std::string x = a.filename, y = b.filename;
+            std::transform(x.begin(), x.end(), x.begin(), ::tolower);
+            std::transform(y.begin(), y.end(), y.begin(), ::tolower);
+            return x < y;
+        });
     } catch (...) {
         show_error_box("Error searching for BNK files");
         return;
@@ -487,6 +511,7 @@ void draw_left_panel() {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.4f, 1.0f));
                 if (ImGui::Selectable("Audio Database", selected, ImGuiSelectableFlags_SpanAllColumns)) {
                     S.viewing_adb = true;
+                    S.viewing_lua = false;
                     S.selected_bnk.clear();
                     S.global_search.clear();
                     S.files.clear();
@@ -504,6 +529,34 @@ void draw_left_panel() {
                 if (!S.hide_tooltips && ImGui::IsItemHovered()) {
                     ImGui::BeginTooltip();
                     ImGui::Text("Audio Database Files (%d)", (int)S.adb_paths.size());
+                    ImGui::EndTooltip();
+                }
+                ImGui::PopID();
+            }
+
+            if (!S.lua_files.empty()) {
+                ImGui::PushID("lua_entry");
+                bool selected = S.viewing_lua;
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.4f, 1.0f));
+                if (ImGui::Selectable("Lua Scripts", selected, ImGuiSelectableFlags_SpanAllColumns)) {
+                    S.viewing_lua = true;
+                    S.viewing_adb = false;
+                    S.selected_bnk.clear();
+                    S.global_search.clear();
+                    S.files.clear();
+                    S.selected_file_index = -1;
+                    S.lua_preview_content.clear();
+                    S.lua_preview_title.clear();
+                    S.lua_preview_selected = -1;
+
+                    for (size_t i = 0; i < S.lua_files.size(); ++i) {
+                        S.files.push_back({(int)i, S.lua_files[i].filename, S.lua_files[i].size});
+                    }
+                }
+                ImGui::PopStyleColor();
+                if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                    ImGui::BeginTooltip();
+                    ImGui::Text("Lua Script Files (%d)", (int)S.lua_files.size());
                     ImGui::EndTooltip();
                 }
                 ImGui::PopID();
@@ -534,6 +587,7 @@ void draw_left_panel() {
                         }
                     }
                     S.viewing_adb = false;
+                    S.viewing_lua = false;
                     S.global_search.clear();
                     S.selected_nested_bnk.clear();
                     S.selected_nested_index = -1;
@@ -559,6 +613,7 @@ void draw_left_panel() {
                                 bool nested_selected = (S.selected_nested_bnk == p && S.selected_nested_index == (int)i);
                                 if (ImGui::Selectable(nested_label.c_str(), nested_selected, ImGuiSelectableFlags_SpanAllColumns)) {
                                     S.viewing_adb = false;
+                                    S.viewing_lua = false;
                                     S.selected_bnk = p;
                                     S.selected_nested_bnk = p;
                                     S.selected_nested_index = (int)i;
@@ -778,6 +833,7 @@ void draw_global_results_table() {
                 if (ImGui::Selectable(base.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
                     g_selected_global = i;
                     S.viewing_adb = false;
+                    S.viewing_lua = false;
                     pick_bnk(hit.bnk_path);
                     for (size_t j = 0; j < S.files.size(); ++j) {
                         if (S.files[j].index == hit.index) {
@@ -847,7 +903,7 @@ void draw_right_panel() {
 
     ImGui::BeginGroup();
 
-    if (!S.viewing_adb) {
+    if (!S.viewing_adb && !S.viewing_lua) {
         if (ImGui::Button("Dump All Files")) {
             ImGui::OpenPopup("progress_win");
             if (!S.global_search.empty()) {
@@ -1023,7 +1079,7 @@ void draw_right_panel() {
                 }
             }
         }
-    } else {
+    } else if (S.viewing_adb) {
         if (ImGui::Button("Extract All Uncompressed")) {
             ImGui::OpenPopup("progress_win");
             on_extract_all_adb();
@@ -1050,6 +1106,36 @@ void draw_right_panel() {
         }
         if (!has_selection) {
             ImGui::EndDisabled();
+        }
+    } else if (S.viewing_lua) {
+        bool has_selection = (S.selected_file_index >= 0 && S.selected_file_index < (int)S.files.size());
+
+        if (!has_selection) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button("Dump Lua")) {
+            if (has_selection && S.selected_file_index < (int)S.lua_files.size()) {
+                std::string path = S.lua_files[S.selected_file_index].path;
+                dump_single_lua_file(path, S.root_dir);
+            }
+        }
+        if (!S.hide_tooltips && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted("Decompile and dump selected Lua file");
+            ImGui::EndTooltip();
+        }
+        if (!has_selection) {
+            ImGui::EndDisabled();
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Dump All Lua")) {
+            dump_all_lua_files(S.root_dir);
+        }
+        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted("Decompile and dump all Lua files");
+            ImGui::EndTooltip();
         }
     }
 
@@ -1098,7 +1184,7 @@ void draw_right_panel() {
     bool can_tex = false, can_mdl = false;
     bool can_folder_preview = false;
 
-    if (has_selection && !S.viewing_adb) {
+    if (has_selection && !S.viewing_adb && !S.viewing_lua) {
         std::string n = S.files[(size_t)S.selected_file_index].name;
         std::string l = n;
         std::transform(l.begin(), l.end(), l.begin(), ::tolower);
@@ -1565,7 +1651,10 @@ if (!can_preview) {
     float field_width = (available_width - 8.0f) * 0.5f;
 
     ImGui::SetNextItemWidth(field_width);
-    ImGui::InputTextWithHint("##file_filter", S.viewing_adb ? "Filter ADB Files" : "Filter Current BNK", &S.file_filter);
+    const char* filter_hint = "Filter Current BNK";
+    if (S.viewing_adb) filter_hint = "Filter ADB Files";
+    else if (S.viewing_lua) filter_hint = "Filter Lua Scripts";
+    ImGui::InputTextWithHint("##file_filter", filter_hint, &S.file_filter);
 
     ImGui::SameLine();
     ImGui::SetNextItemWidth(field_width);
@@ -1674,13 +1763,71 @@ if (!can_preview) {
         ImGui::EndTooltip();
     }
 
-    ImGui::BeginChild("right_table_container", ImVec2(0, 0), false);
-    if (!S.global_search.empty()) {
-        draw_global_results_table();
-    } else {
+    if (S.viewing_lua) {
+        float available_height = ImGui::GetContentRegionAvail().y;
+        float table_height = available_height * 0.35f;
+        float preview_height = available_height - table_height - 8.0f;
+
+        ImGui::BeginChild("lua_table_container", ImVec2(0, table_height), false);
         draw_file_table();
-    }
-    ImGui::EndChild();
+        ImGui::EndChild();
+
+        if (S.selected_file_index >= 0 && S.selected_file_index < (int)S.lua_files.size()) {
+            if (S.lua_preview_selected != S.selected_file_index && !S.lua_preview_loading) {
+                S.lua_preview_selected = S.selected_file_index;
+                S.lua_preview_title = S.lua_files[S.selected_file_index].filename;
+                S.lua_preview_content.clear();
+                S.lua_preview_loading = true;
+
+                std::string path = S.lua_files[S.selected_file_index].path;
+                std::string title = S.lua_preview_title;
+
+                progress_open(0, "Decompiling " + title + "...");
+
+                std::thread([path, title]() {
+                    std::string content = read_lua_file_content(path);
+                    S.lua_preview_content = content;
+                    S.lua_preview_loading = false;
+                    progress_done();
+                }).detach();
+            }
+        }
+
+        ImGui::Dummy(ImVec2(0, 4));
+
+        if (S.lua_preview_loading) {
+            ImGui::BeginChild("lua_preview_loading", ImVec2(0, preview_height), true);
+            ImGui::TextDisabled("Decompiling...");
+            ImGui::EndChild();
+        } else if (!S.lua_preview_content.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.12f, 0.12f, 1.0f));
+            ImGui::BeginChild("lua_preview", ImVec2(0, preview_height), true, ImGuiWindowFlags_HorizontalScrollbar);
+
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.9f, 0.7f, 1.0f));
+            ImGui::TextUnformatted(S.lua_preview_title.c_str());
+            ImGui::PopStyleColor();
+            ImGui::Separator();
+
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.9f, 0.8f, 1.0f));
+            ImGui::TextUnformatted(S.lua_preview_content.c_str());
+            ImGui::PopStyleColor();
+
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::BeginChild("lua_preview_empty", ImVec2(0, preview_height), true);
+            ImGui::TextDisabled("Select a Lua file to preview");
+            ImGui::EndChild();
+        }
+    } else {
+        ImGui::BeginChild("right_table_container", ImVec2(0, 0), false);
+        if (!S.global_search.empty()) {
+            draw_global_results_table();
+        } else {
+            draw_file_table();
+        }
+        ImGui::EndChild();
+    };
 
     // Model Preview popup - cross-platform
     {

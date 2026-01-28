@@ -1,14 +1,14 @@
 #include "UI_Panels.h"
-#include "State.h"
-#include "Utils.h"
-#include "operations.h"
-#include "HexView.h"
+#include "../Utilities/State.h"
+#include "../Utilities/Utils.h"
+#include "../Utilities/operations.h"
+#include "../UI/HexView.h"
 #include "UI_Main.h"
-#include "TexParser.h"
-#include "ModelParser.h"
+#include "../TexParser.h"
+#include "../MDL/ModelParser.h"
 #include "ModelPreview.h"
-#include "mdl_converter.h"
-#include "BNKCore.cpp"
+#include "../MDL/mdl_converter.h"
+#include "../BNKCore.cpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "imgui_stdlib.h"
@@ -17,9 +17,10 @@
 #include <algorithm>
 #include <thread>
 #include <atomic>
-#include "Progress.h"
-#include "Files.h"
-#include "Lua.h"
+#include <cstring>
+#include "../Utilities/Progress.h"
+#include "../Utilities/Files.h"
+#include "../Lua.h"
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -223,6 +224,12 @@ static std::atomic<bool> g_cancel_search(false);
 static std::string g_last_global_search;
 static int g_selected_global = -1;
 
+static std::atomic<bool> g_pending_mdl_load{false};
+static int g_pending_mdl_index = -1;
+
+static std::atomic<bool> g_pending_tex_load{false};
+static int g_pending_tex_index = -1;
+
 struct TreeNode {
     std::string name;
     bool is_file;
@@ -390,6 +397,12 @@ static void draw_tree_node(TreeNode& node, ID3D11Device* device) {
 #else
 static void draw_tree_node(TreeNode& node) {
 #endif
+    auto is_mdl = [](const std::string& name) -> bool {
+        std::string l = name;
+        std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+        return l.size() >= 4 && l.rfind(".mdl") == l.size() - 4;
+    };
+
     if (node.is_file) {
         ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
 
@@ -424,6 +437,10 @@ static void draw_tree_node(TreeNode& node) {
             for (size_t i = 0; i < S.files.size(); ++i) {
                 if (S.files[i].index == node.bnk_index) {
                     S.selected_file_index = (int)i;
+                    if (is_mdl(node.name)) {
+                        g_pending_mdl_load = true;
+                        g_pending_mdl_index = (int)i;
+                    }
                     break;
                 }
             }
@@ -745,6 +762,18 @@ void draw_file_table() {
         return path;
     };
 
+    auto is_mdl = [](const std::string& name) -> bool {
+        std::string l = name;
+        std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+        return l.size() >= 4 && l.rfind(".mdl") == l.size() - 4;
+    };
+
+    auto is_tex = [](const std::string& name) -> bool {
+        std::string l = name;
+        std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+        return l.size() >= 4 && l.rfind(".tex") == l.size() - 4;
+    };
+
     ImGuiTable *tbl_ptr = nullptr;
     if (ImGui::BeginTable("files_table", 2,
                           ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter |
@@ -764,8 +793,17 @@ void draw_file_table() {
                 ImGui::TableSetColumnIndex(0);
                 bool selected = (i == S.selected_file_index);
                 std::string base = get_filename(S.files[i].name);
-                if (ImGui::Selectable(base.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns))
+                if (ImGui::Selectable(base.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick)) {
                     S.selected_file_index = i;
+                    if (is_mdl(S.files[i].name) && !S.viewing_adb && !S.viewing_lua) {
+                        g_pending_mdl_load = true;
+                        g_pending_mdl_index = i;
+                    }
+                    if (ImGui::IsMouseDoubleClicked(0) && is_tex(S.files[i].name)) {
+                        g_pending_tex_load = true;
+                        g_pending_tex_index = i;
+                    }
+                }
                 if (!S.hide_tooltips && ImGui::IsItemHovered()) {
                     ImGui::BeginTooltip();
                     ImGui::TextUnformatted(S.files[i].name.c_str());
@@ -796,6 +834,12 @@ void draw_global_results_table() {
         size_t pos = path.find_last_of("/\\");
         if (pos != std::string::npos) return path.substr(pos + 1);
         return path;
+    };
+
+    auto is_mdl = [](const std::string& name) -> bool {
+        std::string l = name;
+        std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+        return l.size() >= 4 && l.rfind(".mdl") == l.size() - 4;
     };
 
     std::vector<int> vis;
@@ -838,6 +882,10 @@ void draw_global_results_table() {
                     for (size_t j = 0; j < S.files.size(); ++j) {
                         if (S.files[j].index == hit.index) {
                             S.selected_file_index = (int)j;
+                            if (is_mdl(hit.file_name)) {
+                                g_pending_mdl_load = true;
+                                g_pending_mdl_index = (int)j;
+                            }
                             break;
                         }
                     }
@@ -1263,21 +1311,21 @@ if (!can_preview) {
         auto item = S.files[(size_t)S.selected_file_index];
         auto name = item.name;
 
-        // Check if this is interior.mdl or exterior.mdl
+
         {
             std::string filename = std::filesystem::path(name).filename().string();
             std::string filename_lower = filename;
             std::transform(filename_lower.begin(), filename_lower.end(), filename_lower.begin(), ::tolower);
             bool is_interior_or_exterior = (filename_lower == "interior.mdl" || filename_lower == "exterior.mdl");
 
-            // If it's interior/exterior, try to load both from the same folder
+
             if (is_interior_or_exterior && can_mdl) {
-                // Extract the parent folder path
+
                 std::filesystem::path full_path(name);
                 std::string folder_path = full_path.parent_path().string();
 
-                // Search for both interior.mdl and exterior.mdl in the same folder
-                std::vector<std::pair<std::string, int>> mdl_files; // name, index
+
+                std::vector<std::pair<std::string, int>> mdl_files;
 
                 for (size_t i = 0; i < S.files.size(); ++i) {
                     const auto& file = S.files[i];
@@ -1286,7 +1334,7 @@ if (!can_preview) {
                     std::string file_name_lower = file_path.filename().string();
                     std::transform(file_name_lower.begin(), file_name_lower.end(), file_name_lower.begin(), ::tolower);
 
-                    // Check if it's in the same folder and is interior/exterior.mdl
+
                     if (file_folder == folder_path &&
                         (file_name_lower == "interior.mdl" || file_name_lower == "exterior.mdl")) {
                         mdl_files.push_back({file.name, file.index});
@@ -1294,7 +1342,7 @@ if (!can_preview) {
                 }
 
                 if (mdl_files.size() > 0) {
-                    // Use the folder preview path (load both interior and exterior)
+
                     progress_open(0, "Loading preview...");
 
                     ID3D11Device* device_ptr = device;
@@ -1351,11 +1399,11 @@ if (!can_preview) {
 
                     goto skip_preview;
                 }
-                // If no sibling MDL files found, fall through to single-file preview
+
             }
         }
 
-        // Original single-file preview code
+
         {
         std::string bnk_to_use;
         std::string nested_temp_copy;
@@ -1480,9 +1528,9 @@ if (!can_preview) {
         skip_preview:;
     }
 #else
-        // Linux: Use OpenGL-based preview
-        // Note: OpenGL calls must be made from main thread, so we load data in thread
-        // and set a flag to build the preview on main thread
+
+
+
         if (can_folder_preview && !S.selected_folder_path.empty()) {
             std::vector<std::pair<std::string, std::string>> mdl_paths;
             if (find_mdl_files_in_folder(g_tree_root, S.selected_folder_path, mdl_paths)) {
@@ -1524,7 +1572,7 @@ if (!can_preview) {
                         S.cam_yaw = 0.0f;
                         S.cam_pitch = 0.2f;
                         S.cam_dist = 3.0f;
-                        S.pending_preview_build = true;  // Build on main thread
+                        S.pending_preview_build = true;
                     }
 
                     progress_done();
@@ -1558,7 +1606,7 @@ if (!can_preview) {
                             S.cam_yaw = 0.0f;
                             S.cam_pitch = 0.2f;
                             S.cam_dist = 3.0f;
-                            S.pending_preview_build = true;  // Build on main thread
+                            S.pending_preview_build = true;
                             ok = true;
                         }
                     }
@@ -1829,69 +1877,179 @@ if (!can_preview) {
         ImGui::EndChild();
     };
 
-    // Model Preview popup - cross-platform
-    {
-#ifndef _WIN32
-        // Linux: Handle deferred OpenGL preview build on main thread
-        if (S.pending_preview_build) {
-            S.pending_preview_build = false;
-            extern ModelPreview g_mp;
-            MP_Release(g_mp);
-            MP_Init(g_mp, 960, 640);
-            MP_Build(S.mdl_meshes, S.mdl_info, g_mp);
-            S.show_model_preview = true;
+    if (g_pending_mdl_load && g_pending_mdl_index >= 0 && g_pending_mdl_index < (int)S.files.size()) {
+        g_pending_mdl_load = false;
+        auto item = S.files[(size_t)g_pending_mdl_index];
+        auto name = item.name;
+
+        std::string bnk_to_use;
+        std::string nested_temp_copy;
+        bool is_nested = false;
+
+        if (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty()) {
+            is_nested = true;
+            auto tmpdir = std::filesystem::temp_directory_path() / "f2_preview";
+            std::error_code ec;
+            std::filesystem::create_directories(tmpdir, ec);
+            auto unique_temp = tmpdir / ("nested_" + std::to_string(std::hash<std::string>{}(S.selected_nested_temp_path + std::to_string(std::time(nullptr)))) + ".bnk");
+            try {
+                if (std::filesystem::exists(S.selected_nested_temp_path)) {
+                    std::filesystem::copy_file(S.selected_nested_temp_path, unique_temp,
+                                              std::filesystem::copy_options::overwrite_existing, ec);
+                    if (!ec) {
+                        nested_temp_copy = unique_temp.string();
+                        bnk_to_use = nested_temp_copy;
+                    }
+                }
+            } catch (...) {}
+        } else {
+            bnk_to_use = S.selected_bnk;
         }
-#endif
 
-        if(S.show_model_preview){ ImGui::OpenPopup("Model Preview"); S.show_model_preview = false; }
-
-        const ImVec2 canvas(960, 640);
-        const ImVec2 win_size(canvas.x + 32.0f, canvas.y + 110.0f);
-
-        ImGuiViewport* vp = ImGui::GetMainViewport();
-        ImGui::SetNextWindowSize(win_size, ImGuiCond_Always);
-        ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-
-        if(ImGui::BeginPopupModal("Model Preview", nullptr, ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings))
-        {
-            extern ModelPreview g_mp;
+        if (!bnk_to_use.empty()) {
 #ifdef _WIN32
-            MP_Render(device, g_mp, S.cam_yaw, S.cam_pitch, S.cam_dist);
-            ImVec2 pos = ImGui::GetCursorScreenPos();
-            if(g_mp.srv) ImGui::GetWindowDrawList()->AddImage((ImTextureID)g_mp.srv, pos, ImVec2(pos.x + canvas.x, pos.y + canvas.y));
+            ID3D11Device* device_ptr = device;
+            std::thread([device_ptr, item, name, bnk_to_use, nested_temp_copy, is_nested]() {
 #else
-            MP_Render(g_mp, S.cam_yaw, S.cam_pitch, S.cam_dist);
-            ImVec2 pos = ImGui::GetCursorScreenPos();
-            if(g_mp.color_tex) ImGui::GetWindowDrawList()->AddImage((ImTextureID)(intptr_t)g_mp.color_tex, pos, ImVec2(pos.x + canvas.x, pos.y + canvas.y));
+            std::thread([item, name, bnk_to_use, nested_temp_copy, is_nested]() {
 #endif
-            ImGui::InvisibleButton("model_canvas", canvas);
+                std::vector<unsigned char> buf;
+                bool ok = false;
 
-            float dt = ImGui::GetIO().DeltaTime;
-            S.cam_yaw += dt * 0.6f;
-            if(S.cam_yaw > 6.2831853f) S.cam_yaw -= 6.2831853f;
+                try {
+                    if (is_nested) {
+                        ok = reconstruct_nested_mdl(bnk_to_use, item.index, buf);
+                    } else {
+                        ok = build_mdl_buffer_for_name(name, buf);
+                    }
 
-            if(ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup)){
-                float wheel = ImGui::GetIO().MouseWheel;
-                if(fabsf(wheel) > 0.0001f) S.cam_dist *= (wheel > 0.f ? 0.9f : 1.1f);
-            }
+                    if (!ok) {
+                        auto tmpdir = std::filesystem::temp_directory_path() / "f2_preview";
+                        std::error_code ec;
+                        std::filesystem::create_directories(tmpdir, ec);
+                        auto tmp_file = tmpdir / ("preview_" + std::to_string(std::hash<std::string>{}(name + std::to_string(std::time(nullptr)))) + ".bin");
+                        try {
+                            extract_one(bnk_to_use, item.index, tmp_file.string());
+                            buf = read_all_bytes(tmp_file);
+                            ok = !buf.empty();
+                            std::filesystem::remove(tmp_file, ec);
+                        } catch (...) {
+                            std::filesystem::remove(tmp_file, ec);
+                        }
+                    }
+                } catch (...) {
+                    ok = false;
+                }
 
-            if(ImGui::Button("Zoom -", ImVec2(90,0))) S.cam_dist *= 1.1f;
-            ImGui::SameLine();
-            if(ImGui::Button("Zoom +", ImVec2(90,0))) S.cam_dist *= 0.9f;
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(220);
-            ImGui::SliderFloat("##zoom", &S.cam_dist, 0.3f, 50.0f, "Dist %.2f");
-            if(S.cam_dist < 0.3f)  S.cam_dist = 0.3f;
-            if(S.cam_dist > 50.0f) S.cam_dist = 50.0f;
+                if (!nested_temp_copy.empty()) {
+                    std::error_code ec;
+                    std::filesystem::remove(nested_temp_copy, ec);
+                }
 
-            ImGui::Dummy(ImVec2(0,6));
-            if(ImGui::Button("Close", ImVec2(-1,0))) {
-                MP_Release(g_mp);
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
+                if (ok && !buf.empty()) {
+                    S.mdl_info_ok = parse_mdl_info(buf, S.mdl_info, name);
+                    if (S.mdl_info_ok) {
+                        S.mdl_meshes.clear();
+                        parse_mdl_geometry(buf, S.mdl_info, S.mdl_meshes);
+#ifdef _WIN32
+                        extern ModelPreview g_mp;
+                        MP_Release(g_mp);
+                        MP_Init(device_ptr, g_mp, 800, 600);
+                        MP_Build(device_ptr, S.mdl_meshes, S.mdl_info, g_mp);
+#else
+                        S.pending_preview_build = true;
+#endif
+                    }
+                }
+            }).detach();
         }
+        g_pending_mdl_index = -1;
     }
+
+    if (g_pending_tex_load && g_pending_tex_index >= 0 && g_pending_tex_index < (int)S.files.size()) {
+        g_pending_tex_load = false;
+        auto item = S.files[(size_t)g_pending_tex_index];
+        auto name = item.name;
+        S.texture_window_name = name;
+
+        std::thread([name]() {
+            std::vector<unsigned char> tex_buf;
+            if (!build_any_tex_buffer_for_name(name, tex_buf)) {
+                S.texture_window_name = "ERROR: Could not load texture file";
+                S.pending_texture_load = true;
+                S.pending_texture_w = 0;
+                S.pending_texture_h = 0;
+                return;
+            }
+
+            TexInfo ti{};
+            if (!parse_tex_info(tex_buf, ti) || ti.Mips.empty()) {
+                S.texture_window_name = "ERROR: Could not parse texture info";
+                S.pending_texture_load = true;
+                S.pending_texture_w = 0;
+                S.pending_texture_h = 0;
+                return;
+            }
+
+            int uncompressed_idx = -1;
+            for (size_t i = 0; i < ti.Mips.size(); ++i) {
+                if (ti.Mips[i].CompFlag == 7) {
+                    uncompressed_idx = (int)i;
+                    break;
+                }
+            }
+
+            if (uncompressed_idx < 0) {
+                S.texture_window_name = "ERROR: No uncompressed mip available for " + std::filesystem::path(name).filename().string();
+                S.pending_texture_load = true;
+                S.pending_texture_w = 0;
+                S.pending_texture_h = 0;
+                return;
+            }
+
+            const auto& m = ti.Mips[uncompressed_idx];
+            int w = m.HasWH ? (int)m.MipWidth : std::max(1, (int)ti.TextureWidth >> uncompressed_idx);
+            int h = m.HasWH ? (int)m.MipHeight : std::max(1, (int)ti.TextureHeight >> uncompressed_idx);
+
+            if (m.MipDataOffset + m.MipDataSizeParsed > tex_buf.size()) {
+                S.texture_window_name = "ERROR: Mip data out of bounds";
+                S.pending_texture_load = true;
+                S.pending_texture_w = 0;
+                S.pending_texture_h = 0;
+                return;
+            }
+
+            size_t expected_size = (size_t)w * (size_t)h * 4;
+            if (m.MipDataSizeParsed < expected_size) {
+                S.texture_window_name = "ERROR: Mip data too small (expected " + std::to_string(expected_size) + ", got " + std::to_string(m.MipDataSizeParsed) + ")";
+                S.pending_texture_load = true;
+                S.pending_texture_w = 0;
+                S.pending_texture_h = 0;
+                return;
+            }
+
+            std::vector<uint8_t> rgba(expected_size);
+            memcpy(rgba.data(), tex_buf.data() + m.MipDataOffset, expected_size);
+
+            S.pending_texture_rgba = std::move(rgba);
+            S.pending_texture_w = w;
+            S.pending_texture_h = h;
+            S.pending_texture_load = true;
+        }).detach();
+
+        g_pending_tex_index = -1;
+    }
+
+#ifndef _WIN32
+    if (S.pending_preview_build) {
+        S.pending_preview_build = false;
+        extern ModelPreview g_mp;
+        extern FlyCam g_flycam;
+        MP_Release(g_mp);
+        MP_Init(g_mp, 800, 600);
+        MP_Build(S.mdl_meshes, S.mdl_info, g_mp);
+    }
+#endif
 
     ImGui::EndChild();
 }

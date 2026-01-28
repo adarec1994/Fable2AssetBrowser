@@ -6,28 +6,30 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(APP_SOURCES
         src/main.cpp
-        src/State.cpp
-        src/Utils.cpp
-        src/Files.cpp
+        src/Utilities/State.cpp
+        src/Utilities/Utils.cpp
+        src/Utilities/Files.cpp
         src/TexParser.cpp
-        src/ModelParser.cpp
-        src/Progress.cpp
-        src/operations.cpp
-        src/HexView.cpp
-        src/UI_Main.cpp
-        src/UI_Panels.cpp
-        src/mdl_converter.cpp
+        src/MDL/ModelParser.cpp
+        src/Utilities/Progress.cpp
+        src/Utilities/operations.cpp
+        src/UI/HexView.cpp
+        src/UI/UI_Main.cpp
+        src/UI/UI_Panels.cpp
+        src/MDL/mdl_converter.cpp
         src/BNKCore.cpp
-        src/audio.cpp
-        src/ModelPreview.cpp
-        src/ModelPreview.h
+        src/Audio/audio.cpp
+        src/UI/ModelPreview.cpp
+        src/UI/ModelPreview.h
+        src/Lua.cpp
+        src/Lua.h
 )
 
 if(WIN32)
     set(APP_RES ${CMAKE_CURRENT_SOURCE_DIR}/fable.rc resource.h)
     list(APPEND APP_SOURCES
-            src/play_audio.cpp
-            src/play_audio.h
+            src/Audio/play_audio.cpp
+            src/Audio/play_audio.h
     )
     add_executable(Fable_2_Asset_Browser WIN32
             ${APP_SOURCES}

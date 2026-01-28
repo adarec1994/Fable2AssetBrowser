@@ -7,11 +7,10 @@
 #include <cstring>
 #include <cmath>
 #include "ModelPreview.h"
-#include "Files.h"
-#include "Utils.h"
-#include "BNKCore.cpp"
-#include "TexParser.h"
-
+#include "../Utilities/Files.h"
+#include "../Utilities/Utils.h"
+#include "../BNKCore.cpp"
+#include "../TexParser.h"
 #ifdef _WIN32
 #include <initguid.h>
 #include <d3d11.h>
@@ -21,7 +20,7 @@ using namespace DirectX;
 #else
 #include <GL/glew.h>
 #endif
-
+FlyCam g_flycam;
 static inline std::string tolower_copy(std::string s){ std::transform(s.begin(), s.end(), s.begin(), ::tolower); return s; }
 static inline std::string basename_lower_noext(const std::string& s){
     auto b = std::filesystem::path(s).filename().string();
@@ -35,15 +34,12 @@ static inline std::string force_tex_ext(const std::string& s){
     if(p!=std::string::npos) base = base.substr(0,p);
     return base + ".tex";
 }
-
 static std::optional<std::string> find_any_textures_bnk(){
     if(auto p1 = find_bnk_by_filename("globals_textures.bnk"); p1) return p1;
     return find_bnk_by_filename("global_textures.bnk");
 }
-
 static inline uint8_t ex5(uint16_t v){ return (uint8_t)((v<<3)|(v>>2)); }
 static inline uint8_t ex6(uint16_t v){ return (uint8_t)((v<<2)|(v>>4)); }
-
 static void decode_bc1_block(const uint8_t* b, uint32_t* outRGBA) {
     uint16_t c0 = (uint16_t)(b[0] | (b[1]<<8));
     uint16_t c1 = (uint16_t)(b[2] | (b[3]<<8));
@@ -67,7 +63,6 @@ static void decode_bc1_block(const uint8_t* b, uint32_t* outRGBA) {
         }
     }
 }
-
 static void decode_bc3_block(const uint8_t* b, uint32_t* outRGBA){
     uint8_t a0=b[0], a1=b[1];
     uint64_t abits = 0;
@@ -84,7 +79,6 @@ static void decode_bc3_block(const uint8_t* b, uint32_t* outRGBA){
     }
     for(int i=0;i<16;++i) outRGBA[i]=color[i];
 }
-
 static void swap_bc1_endian(uint8_t* data, size_t size) {
     for(size_t i = 0; i + 8 <= size; i += 8) {
         uint16_t c0 = (data[i+0] << 8) | data[i+1];
@@ -100,7 +94,6 @@ static void swap_bc1_endian(uint8_t* data, size_t size) {
         data[i+7] = (idx >> 24) & 0xFF;
     }
 }
-
 static void swap_bc3_endian(uint8_t* data, size_t size) {
     for(size_t i = 0; i + 16 <= size; i += 16) {
         uint64_t alpha_bits = 0;
@@ -117,8 +110,7 @@ static void swap_bc3_endian(uint8_t* data, size_t size) {
         swap_bc1_endian(data + i + 8, 8);
     }
 }
-
-static bool decode_tex_to_rgba(const std::vector<unsigned char>& blob, std::vector<uint8_t>& rgba, int& out_w, int& out_h, bool* out_has_alpha){
+bool decode_tex_to_rgba(const std::vector<unsigned char>& blob, std::vector<uint8_t>& rgba, int& out_w, int& out_h, bool* out_has_alpha){
     if(out_has_alpha) *out_has_alpha = false;
     TexInfo ti{};
     if(!parse_tex_info(blob, ti) || ti.Mips.empty()) return false;
@@ -198,7 +190,6 @@ static bool decode_tex_to_rgba(const std::vector<unsigned char>& blob, std::vect
     if(out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
     return true;
 }
-
 static bool extract_tex_bytes_by_candidate(const std::vector<std::string>& candidates, std::vector<unsigned char>& out){
     auto pOpt = find_any_textures_bnk();
     if(!pOpt) return false;
@@ -247,9 +238,59 @@ static bool extract_tex_bytes_by_candidate(const std::vector<std::string>& candi
     }
     return best_idx >= 0 && !out.empty();
 }
-
+void FlyCam_Reset(FlyCam& cam, float cx, float cy, float cz, float radius) {
+    cam.pos[0] = cx;
+    cam.pos[1] = cy;
+    cam.pos[2] = cz + radius * 3.0f;
+    cam.yaw = 3.14159265f;
+    cam.pitch = 0.0f;
+    cam.move_speed = radius * 2.0f;
+    cam.is_looking = false;
+}
+void FlyCam_Update(FlyCam& cam, float dt, bool w, bool s, bool a, bool d, bool q, bool e, float mouse_dx, float mouse_dy) {
+    if (cam.is_looking) {
+        cam.yaw -= mouse_dx * cam.look_sensitivity;
+        cam.pitch += mouse_dy * cam.look_sensitivity;
+        const float max_pitch = 1.5f;
+        if (cam.pitch > max_pitch) cam.pitch = max_pitch;
+        if (cam.pitch < -max_pitch) cam.pitch = -max_pitch;
+    }
+    float cy = cosf(cam.yaw);
+    float sy = sinf(cam.yaw);
+    float cp = cosf(cam.pitch);
+    float sp = sinf(cam.pitch);
+    float forward[3] = { sy * cp, sp, cy * cp };
+    float right[3] = { cy, 0.0f, -sy };
+    float up[3] = { 0.0f, 1.0f, 0.0f };
+    float speed = cam.move_speed * dt;
+    if (w) {
+        cam.pos[0] += forward[0] * speed;
+        cam.pos[1] += forward[1] * speed;
+        cam.pos[2] += forward[2] * speed;
+    }
+    if (s) {
+        cam.pos[0] -= forward[0] * speed;
+        cam.pos[1] -= forward[1] * speed;
+        cam.pos[2] -= forward[2] * speed;
+    }
+    if (a) {
+        cam.pos[0] += right[0] * speed;
+        cam.pos[1] += right[1] * speed;
+        cam.pos[2] += right[2] * speed;
+    }
+    if (d) {
+        cam.pos[0] -= right[0] * speed;
+        cam.pos[1] -= right[1] * speed;
+        cam.pos[2] -= right[2] * speed;
+    }
+    if (e) {
+        cam.pos[1] += speed;
+    }
+    if (q) {
+        cam.pos[1] -= speed;
+    }
+}
 #ifdef _WIN32
-
 static void mp_release_mesh(MPPerMesh& m){
     if(m.vb){ m.vb->Release(); m.vb=nullptr; }
     if(m.ib){ m.ib->Release(); m.ib=nullptr; }
@@ -260,7 +301,6 @@ static void mp_release_mesh(MPPerMesh& m){
     if(m.srv_tint){ m.srv_tint->Release(); m.srv_tint=nullptr; }
     m.index_count = 0;
 }
-
 static void mp_release(ModelPreview& mp){
     for(auto& m: mp.meshes) mp_release_mesh(m);
     mp.meshes.clear();
@@ -280,8 +320,8 @@ static void mp_release(ModelPreview& mp){
     if(mp.default_srv){ mp.default_srv->Release(); mp.default_srv=nullptr; }
     if(mp.dssWrite){ mp.dssWrite->Release(); mp.dssWrite=nullptr; }
     if(mp.dssNoWrite){ mp.dssNoWrite->Release(); mp.dssNoWrite=nullptr; }
+    mp.has_model = false;
 }
-
 static bool compile_shader(const char* src, const char* entry, const char* profile, ID3DBlob** blob){
     UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
 #if defined(_DEBUG)
@@ -292,7 +332,6 @@ static bool compile_shader(const char* src, const char* entry, const char* profi
     if(err){ err->Release(); }
     return SUCCEEDED(hr);
 }
-
 static const char* g_vs = R"(
 cbuffer CB : register(b0){
     float4x4 mvp;
@@ -311,7 +350,6 @@ VSOUT VS(VSIN i){
     return o;
 }
 )";
-
 static const char* g_ps = R"(
 cbuffer CB : register(b0){
     float4x4 mvp;
@@ -348,7 +386,6 @@ float4 PS(VSOUT i) : SV_Target {
     return float4(color, alpha);
 }
 )";
-
 static bool create_white_srv(ID3D11Device* dev, ID3D11ShaderResourceView** out_srv){
     *out_srv = nullptr;
     UINT px = 0xFFFFFFFFu;
@@ -359,8 +396,7 @@ static bool create_white_srv(ID3D11Device* dev, ID3D11ShaderResourceView** out_s
     ID3D11ShaderResourceView* srv=nullptr; if(FAILED(dev->CreateShaderResourceView(tex,nullptr,&srv))){ tex->Release(); return false; }
     tex->Release(); *out_srv=srv; return true;
 }
-
-static ID3D11ShaderResourceView* create_srv_from_rgba(ID3D11Device* dev, int w, int h, const std::vector<uint8_t>& rgba){
+ID3D11ShaderResourceView* create_srv_from_rgba(ID3D11Device* dev, int w, int h, const std::vector<uint8_t>& rgba){
     D3D11_TEXTURE2D_DESC td{}; td.Width=w; td.Height=h; td.MipLevels=0; td.ArraySize=1; td.Format=DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count=1; td.Usage=D3D11_USAGE_DEFAULT; td.BindFlags=D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET; td.MiscFlags=D3D11_RESOURCE_MISC_GENERATE_MIPS;
     ID3D11Texture2D* t=nullptr; if(FAILED(dev->CreateTexture2D(&td,nullptr,&t))) return nullptr;
     ID3D11DeviceContext* ctx=nullptr; dev->GetImmediateContext(&ctx);
@@ -370,7 +406,6 @@ static ID3D11ShaderResourceView* create_srv_from_rgba(ID3D11Device* dev, int w, 
     ctx->Release();
     t->Release(); return v;
 }
-
 static bool srv_from_tex_blob_auto(ID3D11Device* dev, const std::vector<unsigned char>& blob, ID3D11ShaderResourceView** out_srv, bool* out_has_alpha){
     *out_srv = nullptr;
     std::vector<uint8_t> rgba;
@@ -379,9 +414,12 @@ static bool srv_from_tex_blob_auto(ID3D11Device* dev, const std::vector<unsigned
     *out_srv = create_srv_from_rgba(dev, w, h, rgba);
     return (*out_srv != nullptr);
 }
-
 static bool create_target(ID3D11Device* dev, ModelPreview& mp, int w, int h){
-    mp_release(mp);
+    if(mp.rtv){ mp.rtv->Release(); mp.rtv=nullptr; }
+    if(mp.srv){ mp.srv->Release(); mp.srv=nullptr; }
+    if(mp.color){ mp.color->Release(); mp.color=nullptr; }
+    if(mp.dsv){ mp.dsv->Release(); mp.dsv=nullptr; }
+    if(mp.depth){ mp.depth->Release(); mp.depth=nullptr; }
     mp.width = w; mp.height = h;
     D3D11_TEXTURE2D_DESC td{};
     td.Width = w; td.Height = h; td.MipLevels=1; td.ArraySize=1;
@@ -400,6 +438,9 @@ static bool create_target(ID3D11Device* dev, ModelPreview& mp, int w, int h){
     dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
     if(FAILED(dev->CreateTexture2D(&dd,nullptr,&mp.depth))) return false;
     if(FAILED(dev->CreateDepthStencilView(mp.depth,nullptr,&mp.dsv))) return false;
+    return true;
+}
+static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     ID3DBlob* vsb=nullptr; ID3DBlob* psb=nullptr;
     if(!compile_shader(g_vs,"VS","vs_5_0",&vsb)) return false;
     if(!compile_shader(g_ps,"PS","ps_5_0",&psb)){ if(vsb) vsb->Release(); return false; }
@@ -451,24 +492,27 @@ static bool create_target(ID3D11Device* dev, ModelPreview& mp, int w, int h){
     if(!create_white_srv(dev, &mp.default_srv)) return false;
     return true;
 }
-
 bool MP_Init(ID3D11Device* dev, ModelPreview& mp, int w, int h){
-    return create_target(dev, mp, w, h);
+    if(!create_target(dev, mp, w, h)) return false;
+    if(!create_pipeline(dev, mp)) return false;
+    return true;
 }
-
+void MP_Resize(ID3D11Device* dev, ModelPreview& mp, int w, int h){
+    if(w == mp.width && h == mp.height) return;
+    create_target(dev, mp, w, h);
+}
 void MP_Release(ModelPreview& mp){
     mp_release(mp);
 }
-
 bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp){
     for(auto& m : mp.meshes){
         if(m.vb){m.vb->Release();}
         if(m.ib){m.ib->Release();}
-        if(m.srv_diffuse){m.srv_diffuse->Release();}
-        if(m.srv_normal){m.srv_normal->Release();}
-        if(m.srv_specular){m.srv_specular->Release();}
-        if(m.srv_unk){m.srv_unk->Release();}
-        if(m.srv_tint){m.srv_tint->Release();}
+        if(m.srv_diffuse && m.srv_diffuse != mp.default_srv){m.srv_diffuse->Release();}
+        if(m.srv_normal && m.srv_normal != mp.default_srv){m.srv_normal->Release();}
+        if(m.srv_specular && m.srv_specular != mp.default_srv){m.srv_specular->Release();}
+        if(m.srv_unk && m.srv_unk != mp.default_srv){m.srv_unk->Release();}
+        if(m.srv_tint && m.srv_tint != mp.default_srv){m.srv_tint->Release();}
     }
     mp.meshes.clear();
     float minx=1e9f,miny=1e9f,minz=1e9f,maxx=-1e9f,maxy=-1e9f,maxz=-1e9f;
@@ -482,6 +526,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     if(!(minx<maxx)){ minx=-1;maxx=1;miny=-1;maxy=1;minz=-1;maxz=1; }
     mp.center[0]=(minx+maxx)*0.5f; mp.center[1]=(miny+maxy)*0.5f; mp.center[2]=(minz+maxz)*0.5f;
     mp.radius = std::max(std::max(maxx-minx,maxy-miny),maxz-minz)*0.5f; if(mp.radius<0.0001f) mp.radius=1.0f;
+    FlyCam_Reset(g_flycam, mp.center[0], mp.center[1], mp.center[2], mp.radius);
     for(size_t i=0;i<geoms.size();++i){
         const auto& g = geoms[i];
         size_t vcount = g.positions.size()/3;
@@ -522,14 +567,15 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         m.has_alpha = hasA;
         mp.meshes.push_back(m);
     }
+    mp.has_model = !mp.meshes.empty();
     return true;
 }
-
-void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, float dist){
+void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
+    if(!mp.has_model) return;
     ID3D11DeviceContext* ctx=nullptr; dev->GetImmediateContext(&ctx); if(!ctx) return;
     D3D11_VIEWPORT vp{}; vp.TopLeftX=0; vp.TopLeftY=0; vp.Width=(FLOAT)mp.width; vp.Height=(FLOAT)mp.height; vp.MinDepth=0; vp.MaxDepth=1;
     ctx->RSSetViewports(1,&vp);
-    float clear[4] = {0.18f,0.22f,0.28f,1.0f};
+    float clear[4] = {0.22f,0.22f,0.22f,1.0f};
     ctx->OMSetRenderTargets(1,&mp.rtv, mp.dsv);
     ctx->ClearRenderTargetView(mp.rtv, clear);
     ctx->ClearDepthStencilView(mp.dsv, D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL, 1.0f, 0);
@@ -538,17 +584,19 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, floa
     ctx->PSSetShader(mp.ps,nullptr,0);
     ctx->PSSetSamplers(0,1,&mp.sampler);
     ctx->RSSetState(mp.rs);
-    float r = std::max(0.5f, dist) * mp.radius * 2.2f;
-    float cy=cosf(yaw), sy=sinf(yaw);
-    float cp=cosf(pitch), sp=sinf(pitch);
-    XMVECTOR C   = XMVectorSet(mp.center[0], mp.center[1], mp.center[2], 1);
-    XMVECTOR eye = XMVectorSet(mp.center[0] + r*cp*sy, mp.center[1] + r*sp, mp.center[2] + r*cp*cy, 1);
-    XMVECTOR at  = C;
-    XMVECTOR up  = XMVectorSet(0,1,0,0);
+    float cy = cosf(cam.yaw);
+    float sy = sinf(cam.yaw);
+    float cp = cosf(cam.pitch);
+    float sp = sinf(cam.pitch);
+    float forward[3] = { sy * cp, sp, cy * cp };
+    XMVECTOR eye = XMVectorSet(cam.pos[0], cam.pos[1], cam.pos[2], 1);
+    XMVECTOR at = XMVectorSet(cam.pos[0] + forward[0], cam.pos[1] + forward[1], cam.pos[2] + forward[2], 1);
+    XMVECTOR up = XMVectorSet(0, 1, 0, 0);
     XMMATRIX V = XMMatrixLookAtLH(eye, at, up);
     float fov = XMConvertToRadians(60.0f);
     float aspect = (float)mp.width / (float)mp.height;
-    XMMATRIX P = XMMatrixPerspectiveFovLH(fov, aspect, 0.05f, r*8.0f);
+    float far_plane = mp.radius * 100.0f;
+    XMMATRIX P = XMMatrixPerspectiveFovLH(fov, aspect, 0.05f, far_plane);
     const float tiltX = -XM_PIDIV2;
     XMMATRIX Tm = XMMatrixTranslation(-mp.center[0], -mp.center[1], -mp.center[2]);
     XMMATRIX R  = XMMatrixRotationX(tiltX);
@@ -556,9 +604,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, floa
     XMMATRIX W  = Tm * R * Tp;
     XMMATRIX MVP = XMMatrixTranspose(W * V * P);
     XMMATRIX MV  = XMMatrixTranspose(W * V);
-    XMVECTOR lightDirV = XMVector3Normalize(XMVectorSubtract(eye, at));
-    lightDirV = XMVectorAdd(lightDirV, XMVectorSet(0.2f, 0.3f, 0.0f, 0.0f));
-    lightDirV = XMVector3Normalize(lightDirV);
+    XMVECTOR lightDirV = XMVector3Normalize(XMVectorSet(0.5f, 1.0f, 0.3f, 0.0f));
     XMFLOAT4 lightDirF; XMStoreFloat4(&lightDirF, lightDirV);
     struct CB { XMFLOAT4X4 mvp; XMFLOAT4 lightDir; XMFLOAT4X4 mv; XMFLOAT4 params; } cb;
     XMStoreFloat4x4(&cb.mvp, MVP);
@@ -603,9 +649,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, float yaw, float pitch, floa
     }
     ctx->Release();
 }
-
 #else
-
 static const char* gl_vs = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -621,7 +665,6 @@ void main() {
     vTexCoord = vec2(aTexCoord.x, 1.0 - aTexCoord.y);
 }
 )";
-
 static const char* gl_fs = R"(
 #version 330 core
 in vec3 vNormal;
@@ -654,7 +697,6 @@ void main() {
     FragColor = vec4(color, alpha);
 }
 )";
-
 static unsigned int compile_gl_shader(const char* src, GLenum type) {
     unsigned int shader = glCreateShader(type);
     glShaderSource(shader, 1, &src, nullptr);
@@ -664,7 +706,6 @@ static unsigned int compile_gl_shader(const char* src, GLenum type) {
     if (!success) { glDeleteShader(shader); return 0; }
     return shader;
 }
-
 static unsigned int create_gl_program(const char* vs_src, const char* fs_src) {
     unsigned int vs = compile_gl_shader(vs_src, GL_VERTEX_SHADER);
     if (!vs) return 0;
@@ -681,8 +722,7 @@ static unsigned int create_gl_program(const char* vs_src, const char* fs_src) {
     if (!success) { glDeleteProgram(prog); return 0; }
     return prog;
 }
-
-static unsigned int create_gl_texture_from_rgba(int w, int h, const uint8_t* data) {
+unsigned int create_gl_texture_from_rgba(int w, int h, const uint8_t* data) {
     unsigned int tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -698,12 +738,10 @@ static unsigned int create_gl_texture_from_rgba(int w, int h, const uint8_t* dat
     glBindTexture(GL_TEXTURE_2D, 0);
     return tex;
 }
-
 static unsigned int create_white_tex() {
     uint32_t px = 0xFFFFFFFF;
     return create_gl_texture_from_rgba(1, 1, (const uint8_t*)&px);
 }
-
 static void mp_release_mesh_gl(MPPerMesh& m) {
     if (m.vao) { glDeleteVertexArrays(1, &m.vao); m.vao = 0; }
     if (m.vbo) { glDeleteBuffers(1, &m.vbo); m.vbo = 0; }
@@ -715,19 +753,17 @@ static void mp_release_mesh_gl(MPPerMesh& m) {
     if (m.tex_tint) { glDeleteTextures(1, &m.tex_tint); m.tex_tint = 0; }
     m.index_count = 0;
 }
-
 static void mp_release_gl(ModelPreview& mp) {
     for (auto& m : mp.meshes) mp_release_mesh_gl(m);
     mp.meshes.clear();
-    if (mp.shader_program) { glDeleteProgram(mp.shader_program); mp.shader_program = 0; }
     if (mp.fbo) { glDeleteFramebuffers(1, &mp.fbo); mp.fbo = 0; }
     if (mp.color_tex) { glDeleteTextures(1, &mp.color_tex); mp.color_tex = 0; }
     if (mp.depth_rbo) { glDeleteRenderbuffers(1, &mp.depth_rbo); mp.depth_rbo = 0; }
+    if (mp.shader_program) { glDeleteProgram(mp.shader_program); mp.shader_program = 0; }
     if (mp.default_tex) { glDeleteTextures(1, &mp.default_tex); mp.default_tex = 0; }
+    mp.has_model = false;
 }
-
 bool MP_Init(ModelPreview& mp, int w, int h) {
-    mp_release_gl(mp);
     mp.width = w;
     mp.height = h;
     mp.shader_program = create_gl_program(gl_vs, gl_fs);
@@ -740,14 +776,14 @@ bool MP_Init(ModelPreview& mp, int w, int h) {
     mp.tex_unk_loc = glGetUniformLocation(mp.shader_program, "uTexUnk");
     mp.tex_tint_loc = glGetUniformLocation(mp.shader_program, "uTexTint");
     glGenFramebuffers(1, &mp.fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, mp.fbo);
     glGenTextures(1, &mp.color_tex);
+    glGenRenderbuffers(1, &mp.depth_rbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, mp.fbo);
     glBindTexture(GL_TEXTURE_2D, mp.color_tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, mp.color_tex, 0);
-    glGenRenderbuffers(1, &mp.depth_rbo);
     glBindRenderbuffer(GL_RENDERBUFFER, mp.depth_rbo);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, mp.depth_rbo);
@@ -759,11 +795,18 @@ bool MP_Init(ModelPreview& mp, int w, int h) {
     mp.default_tex = create_white_tex();
     return true;
 }
-
 void MP_Release(ModelPreview& mp) {
     mp_release_gl(mp);
 }
-
+void MP_Resize(ModelPreview& mp, int w, int h) {
+    if (w == mp.width && h == mp.height) return;
+    mp.width = w;
+    mp.height = h;
+    glBindTexture(GL_TEXTURE_2D, mp.color_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glBindRenderbuffer(GL_RENDERBUFFER, mp.depth_rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+}
 static unsigned int load_tex_from_name(const std::string& name, bool* out_has_alpha) {
     if (name.empty()) return 0;
     std::vector<unsigned char> tex_buf;
@@ -776,7 +819,6 @@ static unsigned int load_tex_from_name(const std::string& name, bool* out_has_al
     }
     return 0;
 }
-
 bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp) {
     for (auto& m : mp.meshes) mp_release_mesh_gl(m);
     mp.meshes.clear();
@@ -792,6 +834,7 @@ bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelP
     mp.center[0] = (minx + maxx) * 0.5f; mp.center[1] = (miny + maxy) * 0.5f; mp.center[2] = (minz + maxz) * 0.5f;
     mp.radius = std::max(std::max(maxx - minx, maxy - miny), maxz - minz) * 0.5f;
     if (mp.radius < 0.0001f) mp.radius = 1.0f;
+    FlyCam_Reset(g_flycam, mp.center[0], mp.center[1], mp.center[2], mp.radius);
     for (size_t i = 0; i < geoms.size(); ++i) {
         const auto& g = geoms[i];
         size_t vcount = g.positions.size() / 3;
@@ -836,9 +879,9 @@ bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelP
         m.has_alpha = hasA;
         mp.meshes.push_back(m);
     }
+    mp.has_model = !mp.meshes.empty();
     return true;
 }
-
 static void mat4_identity(float* m) { memset(m, 0, 16 * sizeof(float)); m[0] = m[5] = m[10] = m[15] = 1.0f; }
 static void mat4_perspective(float* m, float fov, float aspect, float znear, float zfar) {
     float f = 1.0f / tanf(fov * 0.5f);
@@ -863,21 +906,27 @@ static void mat4_mult(float* out, const float* a, const float* b) {
     for (int c = 0; c < 4; ++c) for (int r = 0; r < 4; ++r) tmp[c * 4 + r] = a[0 * 4 + r] * b[c * 4 + 0] + a[1 * 4 + r] * b[c * 4 + 1] + a[2 * 4 + r] * b[c * 4 + 2] + a[3 * 4 + r] * b[c * 4 + 3];
     memcpy(out, tmp, 16 * sizeof(float));
 }
-
-void MP_Render(ModelPreview& mp, float yaw, float pitch, float dist) {
+void MP_Render(ModelPreview& mp, const FlyCam& cam) {
+    if (!mp.has_model) return;
     glBindFramebuffer(GL_FRAMEBUFFER, mp.fbo);
     glViewport(0, 0, mp.width, mp.height);
-    glClearColor(0.18f, 0.22f, 0.28f, 1.0f);
+    glClearColor(0.22f, 0.22f, 0.22f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS); glDisable(GL_CULL_FACE);
     glUseProgram(mp.shader_program);
-    float r = std::max(0.5f, dist) * mp.radius * 2.2f;
-    float cy = cosf(yaw), sy = sinf(yaw), cp = cosf(pitch), sp = sinf(pitch);
-    float ex = mp.center[0] + r * cp * sy, ey = mp.center[1] + r * sp, ez = mp.center[2] + r * cp * cy;
+    float cy = cosf(cam.yaw);
+    float sy = sinf(cam.yaw);
+    float cp = cosf(cam.pitch);
+    float sp = sinf(cam.pitch);
+    float forward[3] = { sy * cp, sp, cy * cp };
+    float atx = cam.pos[0] + forward[0];
+    float aty = cam.pos[1] + forward[1];
+    float atz = cam.pos[2] + forward[2];
     float V[16], P[16], W[16], Tm[16], R[16], Tp[16], tmp[16];
-    mat4_lookat(V, ex, ey, ez, mp.center[0], mp.center[1], mp.center[2], 0, 1, 0);
+    mat4_lookat(V, cam.pos[0], cam.pos[1], cam.pos[2], atx, aty, atz, 0, 1, 0);
     float fov = 60.0f * 3.14159265f / 180.0f, aspect = (float)mp.width / (float)mp.height;
-    mat4_perspective(P, fov, aspect, 0.05f, r * 8.0f);
+    float far_plane = mp.radius * 100.0f;
+    mat4_perspective(P, fov, aspect, 0.05f, far_plane);
     const float tiltX = 3.14159265f / 2.0f;
     mat4_translate(Tm, -mp.center[0], -mp.center[1], -mp.center[2]);
     mat4_rotateX(R, tiltX);
@@ -912,7 +961,5 @@ void MP_Render(ModelPreview& mp, float yaw, float pitch, float dist) {
     glDepthMask(GL_TRUE);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
-
 unsigned int MP_GetTexture(ModelPreview& mp) { return mp.color_tex; }
-
 #endif

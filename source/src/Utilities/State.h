@@ -6,7 +6,7 @@
 #include <set>
 #include <cstdint>
 #include "imgui_hex.h"
-#include "ModelParser.h"
+#include "../MDL/ModelParser.h"
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -107,6 +107,20 @@ struct State {
     unsigned int preview_tex = 0;
 #endif
     std::string hex_file_path;
+
+    bool show_texture_window = false;
+    std::string texture_window_name;
+    int texture_window_width = 0;
+    int texture_window_height = 0;
+#ifdef _WIN32
+    ID3D11ShaderResourceView *texture_window_srv = nullptr;
+#else
+    unsigned int texture_window_gl = 0;
+#endif
+    std::atomic<bool> pending_texture_load{false};
+    std::vector<unsigned char> pending_texture_rgba;
+    int pending_texture_w = 0;
+    int pending_texture_h = 0;
 
     bool mdl_info_ok = false;
     MDLInfo mdl_info;

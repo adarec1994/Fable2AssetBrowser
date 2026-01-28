@@ -1,5 +1,4 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
-
 #ifdef _WIN32
 #include <windows.h>
 #include <initguid.h>
@@ -19,20 +18,18 @@
 #include <sys/stat.h>
 #include <pwd.h>
 #endif
-
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
-#include "State.h"
-#include "UI_Main.h"
-#include "UI_Panels.h"
-#include "Progress.h"
-#include "HexView.h"
-#include "Files.h"
+#include "Utilities/State.h"
+#include "UI/UI_Main.h"
+#include "UI/UI_Panels.h"
+#include "Utilities/Progress.h"
+#include "UI/HexView.h"
+#include "Utilities/Files.h"
 #include <string>
 #include <mutex>
 #include <algorithm>
 #include <fstream>
-
 static std::string get_config_path() {
 #ifdef _WIN32
     char path[MAX_PATH];
@@ -53,7 +50,6 @@ static std::string get_config_path() {
     return config_dir + "/config.ini";
 #endif
 }
-
 static bool load_audio_muted() {
     std::ifstream f(get_config_path());
     if (!f.is_open()) return false;
@@ -65,12 +61,10 @@ static bool load_audio_muted() {
     }
     return false;
 }
-
 static void save_audio_muted(bool muted) {
     std::string cfg_path = get_config_path();
     std::string content;
     bool found = false;
-
     std::ifstream fin(cfg_path);
     if (fin.is_open()) {
         std::string line;
@@ -84,39 +78,32 @@ static void save_audio_muted(bool muted) {
         }
         fin.close();
     }
-
     if (!found) {
         content += "audio_muted=" + std::string(muted ? "1" : "0") + "\n";
     }
-
     std::ofstream fout(cfg_path);
     if (fout.is_open()) {
         fout << content;
     }
 }
-
 #ifdef _WIN32
 static ID3D11Device *g_pd3dDevice = nullptr;
 static ID3D11DeviceContext *g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain *g_pSwapChain = nullptr;
 static ID3D11RenderTargetView *g_mainRenderTargetView = nullptr;
-
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
-
 static void CreateRenderTarget() {
     ID3D11Texture2D *pBackBuffer = nullptr;
     g_pSwapChain->GetBuffer(0, IID_ID3D11Texture2D, (void **) &pBackBuffer);
     g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
     if (pBackBuffer) pBackBuffer->Release();
 }
-
 static void CleanupRenderTarget() {
     if (g_mainRenderTargetView) {
         g_mainRenderTargetView->Release();
         g_mainRenderTargetView = nullptr;
     }
 }
-
 static bool CreateDeviceD3D(HWND hWnd) {
     DXGI_SWAP_CHAIN_DESC sd{};
     sd.BufferCount = 2;
@@ -135,14 +122,12 @@ static bool CreateDeviceD3D(HWND hWnd) {
     CreateRenderTarget();
     return true;
 }
-
 static void CleanupDeviceD3D() {
     CleanupRenderTarget();
     if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = nullptr; }
     if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
     if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
 }
-
 static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam)) return 1;
     switch (msg) {
@@ -162,12 +147,10 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 }
 #else
 static GLFWwindow* g_window = nullptr;
-
 static void glfw_error_callback(int error, const char* description) {
     fprintf(stderr, "GLFW Error %d: %s\n", error, description);
 }
 #endif
-
 static void build_theme() {
     auto &s = ImGui::GetStyle();
     s.WindowRounding = 12.0f;
@@ -179,10 +162,8 @@ static void build_theme() {
     s.ScrollbarRounding = 8.0f;
     s.WindowBorderSize = 0.0f;
 }
-
 #ifdef _WIN32
 int main() {
-
     HINSTANCE hInstance = GetModuleHandle(nullptr);
     WNDCLASSEXA wc{};
     wc.cbSize = sizeof(WNDCLASSEX);
@@ -210,50 +191,42 @@ int main() {
     }
     ShowWindow(hwnd, SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
-
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 #else
+int main() {
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) return 1;
-
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-
     g_window = glfwCreateWindow(1100, 680, "Fable 2 Asset Browser", nullptr, nullptr);
     if (!g_window) {
         glfwTerminate();
         return 1;
     }
-
     glfwMakeContextCurrent(g_window);
     glfwSwapInterval(1);
-
     if (glewInit() != GLEW_OK) {
         fprintf(stderr, "Failed to initialize GLEW\n");
         return 1;
     }
-
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(g_window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 #endif
-
     build_theme();
     S.last_dir = load_last_dir();
-
 #ifdef _WIN32
     bool audio_muted = load_audio_muted();
     BackgroundAudio::instance().set_muted(audio_muted);
     BackgroundAudio::instance().start("include/audio/menu_interlude.wav");
 #endif
-
     bool done = false;
     while (!done) {
 #ifdef _WIN32
@@ -264,40 +237,32 @@ int main() {
             DispatchMessage(&msg);
         }
         if (done) break;
-
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
 #else
         glfwPollEvents();
         if (glfwWindowShouldClose(g_window)) done = true;
         if (done) break;
-
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
 #endif
         ImGui::NewFrame();
-
 #ifdef _WIN32
         draw_main(hwnd, g_pd3dDevice);
-
         if (S.root_dir.empty()) {
             ImGuiViewport* viewport = ImGui::GetMainViewport();
             ImVec2 work_pos = viewport->WorkPos;
             ImVec2 work_size = viewport->WorkSize;
-
             ImGui::SetNextWindowPos(ImVec2(work_pos.x + 10, work_pos.y + work_size.y - 50), ImGuiCond_Always);
             ImGui::SetNextWindowBgAlpha(0.7f);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
-
             if (ImGui::Begin("##mute_button", nullptr,
                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
                 ImGuiWindowFlags_NoNav)) {
-
                 bool muted = BackgroundAudio::instance().is_muted();
                 const char* icon = muted ? "M" : "S";
-
                 if (ImGui::Button(icon, ImVec2(32, 32))) {
                     BackgroundAudio::instance().toggle_mute();
                     save_audio_muted(BackgroundAudio::instance().is_muted());
@@ -318,7 +283,6 @@ int main() {
 #else
         draw_main(g_window);
 #endif
-
         draw_folder_dialog();
         if (S.show_progress.load()) ImGui::OpenPopup("progress_win");
         if (S.show_error) {
@@ -329,7 +293,6 @@ int main() {
             ImGui::OpenPopup("completion_modal");
             S.show_completion = false;
         }
-
         ImGuiViewport *vp = ImGui::GetMainViewport();
         float w = std::clamp(vp->WorkSize.x * 0.6f, 520.0f, 900.0f);
         const ImGuiStyle &st = ImGui::GetStyle();
@@ -389,7 +352,6 @@ int main() {
             if (!S.show_progress.load()) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
-
         ImGuiViewport *vp2 = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(vp2->WorkPos + vp2->WorkSize * 0.5f, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         if (ImGui::BeginPopupModal("error_modal", nullptr,
@@ -404,7 +366,6 @@ int main() {
             if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
-
         ImGuiViewport *vp3 = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(vp3->WorkPos + vp3->WorkSize * 0.5f, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         if (ImGui::BeginPopupModal("completion_modal", nullptr,
@@ -419,13 +380,11 @@ int main() {
             if (ImGui::Button("OK", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
-
 #ifdef _WIN32
         draw_hex_window(g_pd3dDevice);
 #else
         draw_hex_window();
 #endif
-
         ImGui::Render();
 #ifdef _WIN32
         const float clear_color[4] = {0.10f, 0.10f, 0.10f, 1.0f};
@@ -443,7 +402,6 @@ int main() {
         glfwSwapBuffers(g_window);
 #endif
     }
-
     S.exiting = true;
 #ifdef _WIN32
     BackgroundAudio::instance().stop();
@@ -454,7 +412,6 @@ int main() {
     ImGui_ImplGlfw_Shutdown();
 #endif
     ImGui::DestroyContext();
-
 #ifdef _WIN32
     CleanupDeviceD3D();
     DestroyWindow(hwnd);

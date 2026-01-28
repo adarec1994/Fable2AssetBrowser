@@ -1,8 +1,8 @@
 // mdl_converter.cpp
 #include "mdl_converter.h"
 #include "ModelParser.h"
-#include "TexParser.h"
-#include "Files.h"
+#include "../TexParser.h"
+#include "../Utilities/Files.h"
 #include <vector>
 #include <string>
 #include <fstream>

@@ -2,8 +2,8 @@
 #include "Progress.h"
 #include "Utils.h"
 #include "Files.h"
-#include "BNKCore.cpp"
-#include "audio.cpp"
+#include "../BNKCore.cpp"
+#include "../Audio/audio.cpp"
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -13,8 +13,8 @@
 #include <unordered_map>
 #include <algorithm>
 #include <optional>
-#include "HexView.h"
-#include "mdl_converter.h"
+#include "../UI/HexView.h"
+#include "../MDL/mdl_converter.h"
 
 static std::string apply_folder_prefix_to_filename(const std::string& full_path, const std::string& extension) {
     std::string lower_path = full_path;

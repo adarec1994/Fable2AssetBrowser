@@ -1,17 +1,41 @@
-Fable 2 Asset Browser
+# Fable 2 Asset Browser
+Browse the Fable 2 BNK files. Included features:
+- Search and filter the internal files
+- Render and preview the models.
+- Export models to Blender.
+- More coming soon.
 
-Browse the Fable 2 .bnk's. Included features:
 
-    - Search and filter the internal files in each bnk.
-    - Render all models (with the exception of foliage).
-    - Export and import full models with rigs, weights, and textures to Blender.
-    - Hex editor viewer of files.
-    - And more.
+## How to use
+- Acquire a legitimate copy of Fable 2. 
+- Dump the contents of the .iso
+- Download Fable 2 Asset Browser.exe and run it.
 
-How to use
+## Preview
 
-    Acquire a legitimate copy of Fable 2 and rip it to your pc. Browse to the root directory of the ripped assets in the asset browser. Click through the .bnk's in the left panel, using the file tree if desired.
+Coming soon!
 
-Preview
 
-Coming soon
+## Building
+To build, clone the repository and open in Clion. Any dependencies will be pulled by Cmake.
+
+
+## How to Contribute
+
+There are several key areas where your contributions would be most impactful:
+
+1. **Bug Reporting**: Please report any identified bugs in the issue tracker. Before reporting, ensure the bug hasn't been reported previously. Provide screenshots, details, or screen recordings if necessary.
+
+2. **Code Reorganization**: The project could benefit from code reorganization to enhance readability and performance.
+
+3. **Feature Requests and Other Contributions**: If you have a new feature or suggestion, please share it via the issue tracker.
+
+### Submitting Changes
+
+Follow these steps to submit your changes:
+
+1. Fork the repository on GitHub.
+2. Create a new branch on your forked repository.
+3. Make your changes on this new branch.
+4. Push the changes to your fork.
+5. Submit a pull request to the 'main' branch.

@@ -1,7 +1,7 @@
 #include "ModelParser.h"
-#include "Files.h"
-#include "Utils.h"
-#include "BNKCore.cpp"
+#include "../Utilities/Files.h"
+#include "../Utilities/Utils.h"
+#include "../BNKCore.cpp"
 #include <algorithm>
 #include <unordered_map>
 #include <filesystem>

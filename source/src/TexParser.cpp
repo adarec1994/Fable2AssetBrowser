@@ -1,6 +1,6 @@
 #include "TexParser.h"
-#include "Files.h"
-#include "Utils.h"
+#include "Utilities/Files.h"
+#include "Utilities/Utils.h"
 #include "BNKCore.cpp"
 #include <filesystem>
 #include <fstream>

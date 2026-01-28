@@ -1,6 +1,6 @@
 #include "Lua.h"
-#include "Progress.h"
-#include "State.h"
+#include "Utilities/Progress.h"
+#include "Utilities/State.h"
 #include <filesystem>
 #include <algorithm>
 #include <fstream>

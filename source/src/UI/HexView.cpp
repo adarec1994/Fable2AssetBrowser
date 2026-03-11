@@ -631,31 +631,74 @@ void draw_hex_window() {
 
         if(ImGui::BeginPopupModal("Model Preview", nullptr, ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings))
         {
-            MP_Render(device, g_mp, S.cam_yaw, S.cam_pitch, S.cam_dist);
+            MP_Render(device, g_mp, g_flycam);
 
             ImVec2 pos = ImGui::GetCursorScreenPos();
             if(g_mp.srv) ImGui::GetWindowDrawList()->AddImage((ImTextureID)g_mp.srv, pos, ImVec2(pos.x + canvas.x, pos.y + canvas.y));
             ImGui::InvisibleButton("model_canvas", canvas);
 
             float dt = ImGui::GetIO().DeltaTime;
-            S.cam_yaw += dt * 0.6f;
-            if(S.cam_yaw > 6.2831853f) S.cam_yaw -= 6.2831853f;
+            bool canvas_hovered = ImGui::IsItemHovered();
+            auto& io = ImGui::GetIO();
 
-            if(ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup)){
-                float wheel = ImGui::GetIO().MouseWheel;
-                if(fabsf(wheel) > 0.0001f) S.cam_dist *= (wheel > 0.f ? 0.9f : 1.1f);
+            if(canvas_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)){
+                g_flycam.is_looking = true;
+                g_flycam.saved_mouse_x = io.MousePos.x;
+                g_flycam.saved_mouse_y = io.MousePos.y;
+#ifdef _WIN32
+                ShowCursor(FALSE);
+#endif
+            }
+            if(ImGui::IsMouseReleased(ImGuiMouseButton_Right)){
+                g_flycam.is_looking = false;
+#ifdef _WIN32
+                ShowCursor(TRUE);
+                SetCursorPos((int)g_flycam.saved_mouse_x, (int)g_flycam.saved_mouse_y);
+#endif
             }
 
-            if(ImGui::Button("Zoom -", ImVec2(90,0))) S.cam_dist *= 1.1f;
-            ImGui::SameLine();
-            if(ImGui::Button("Zoom +", ImVec2(90,0))) S.cam_dist *= 0.9f;
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(220);
-            ImGui::SliderFloat("##zoom", &S.cam_dist, 0.3f, 50.0f, "Dist %.2f");
-            if(S.cam_dist < 0.3f)  S.cam_dist = 0.3f;
-            if(S.cam_dist > 50.0f) S.cam_dist = 50.0f;
+            float mdx = 0.0f, mdy = 0.0f;
+            if(g_flycam.is_looking){
+#ifdef _WIN32
+                POINT cur;
+                GetCursorPos(&cur);
+                mdx = (float)(cur.x - (int)g_flycam.saved_mouse_x);
+                mdy = (float)(cur.y - (int)g_flycam.saved_mouse_y);
+                SetCursorPos((int)g_flycam.saved_mouse_x, (int)g_flycam.saved_mouse_y);
+#else
+                mdx = io.MouseDelta.x;
+                mdy = io.MouseDelta.y;
+#endif
+            }
 
-            ImGui::Dummy(ImVec2(0,6));
+            bool kw = ImGui::IsKeyDown(ImGuiKey_W);
+            bool ks = ImGui::IsKeyDown(ImGuiKey_S);
+            bool ka = ImGui::IsKeyDown(ImGuiKey_A);
+            bool kd = ImGui::IsKeyDown(ImGuiKey_D);
+            bool kq = ImGui::IsKeyDown(ImGuiKey_Q);
+            bool ke = ImGui::IsKeyDown(ImGuiKey_E);
+
+            FlyCam_Update(g_flycam, dt, kw, ks, ka, kd, kq, ke, mdx, mdy);
+
+            // Scroll to move forward/backward
+            if(canvas_hovered){
+                float wheel = io.MouseWheel;
+                if(fabsf(wheel) > 0.0001f){
+                    float cy_ = cosf(g_flycam.yaw), sy_ = sinf(g_flycam.yaw);
+                    float cp_ = cosf(g_flycam.pitch), sp_ = sinf(g_flycam.pitch);
+                    float step = g_mp.radius * 0.15f * wheel;
+                    g_flycam.pos[0] += sy_ * cp_ * step;
+                    g_flycam.pos[1] += sp_ * step;
+                    g_flycam.pos[2] += cy_ * cp_ * step;
+                }
+            }
+
+            ImGui::Text("Right-drag: look  WASD/QE: move  Scroll: zoom");
+
+            ImGui::Dummy(ImVec2(0,4));
+            if(ImGui::Button("Reset Camera", ImVec2(120,0)))
+                FlyCam_Reset(g_flycam, g_mp.center[0], g_mp.center[1], g_mp.center[2], g_mp.radius);
+            ImGui::SameLine();
             if(ImGui::Button("Close", ImVec2(-1,0))) {
                 MP_Release(g_mp);
                 ImGui::CloseCurrentPopup();

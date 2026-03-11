@@ -1,5 +1,8 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #ifdef _WIN32
+#pragma comment(linker, "/subsystem:windows /entry:mainCRTStartup")
+#endif
+#ifdef _WIN32
 #include <windows.h>
 #include <initguid.h>
 #include <d3d11.h>
@@ -7,7 +10,7 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 #include <shlobj.h>
-#include "play_audio.h"
+#include "Audio/play_audio.h"
 #include "../resource.h"
 #else
 #include <GL/glew.h>

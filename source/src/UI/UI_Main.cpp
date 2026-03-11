@@ -190,13 +190,15 @@ static void handle_flycam_input(float dt) {
 #endif
     }
     if (g_flycam.is_looking) {
+#ifdef _WIN32
+        POINT cur;
+        GetCursorPos(&cur);
+        mouse_dx = (float)(cur.x - (int)g_flycam.saved_mouse_x);
+        mouse_dy = (float)(cur.y - (int)g_flycam.saved_mouse_y);
+        SetCursorPos((int)g_flycam.saved_mouse_x, (int)g_flycam.saved_mouse_y);
+#else
         mouse_dx = io.MouseDelta.x;
         mouse_dy = io.MouseDelta.y;
-#ifdef _WIN32
-        POINT center;
-        center.x = (int)g_flycam.saved_mouse_x;
-        center.y = (int)g_flycam.saved_mouse_y;
-        SetCursorPos(center.x, center.y);
 #endif
     }
     FlyCam_Update(g_flycam, dt, w_pressed, s_pressed, a_pressed, d_pressed, q_pressed, e_pressed, mouse_dx, mouse_dy);

@@ -226,6 +226,7 @@ static int g_selected_global = -1;
 
 static std::atomic<bool> g_pending_mdl_load{false};
 static int g_pending_mdl_index = -1;
+static std::string g_pending_mdl_full_path;
 
 static std::atomic<bool> g_pending_tex_load{false};
 static int g_pending_tex_index = -1;
@@ -233,6 +234,7 @@ static int g_pending_tex_index = -1;
 struct TreeNode {
     std::string name;
     bool is_file;
+    bool is_nested_source = false;
     std::string full_path;
     std::string bnk_source;
     int bnk_index;
@@ -274,7 +276,7 @@ static bool find_mdl_files_in_folder(TreeNode& root, const std::string& folder_n
     return !out_mdl_paths.empty();
 }
 
-static void build_unified_file_tree(TreeNode& root) {
+static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk_paths) {
     root.children.clear();
 
     auto is_header_bnk = [](const std::string& bnk_path) -> bool {
@@ -322,6 +324,7 @@ static void build_unified_file_tree(TreeNode& root) {
                 child.bnk_source = bnk_source;
                 child.bnk_index = bnk_index;
                 child.file_size = file_size;
+                child.is_nested_source = is_nested;
             }
 
             current = &child;
@@ -330,7 +333,7 @@ static void build_unified_file_tree(TreeNode& root) {
 
     std::vector<std::pair<std::string, int>> nested_bnks;
 
-    for (const auto& bnk_path : S.bnk_paths) {
+    for (const auto& bnk_path : bnk_paths) {
         if (is_header_bnk(bnk_path)) {
             continue;
         }
@@ -353,37 +356,39 @@ static void build_unified_file_tree(TreeNode& root) {
         }
     }
 
+    auto tmpdir = std::filesystem::temp_directory_path() / "f2_nested_bnk_tree";
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(tmpdir, ec);
+    }
+
     for (const auto& [parent_bnk_path, nested_index] : nested_bnks) {
         try {
             BNKReader parent_reader(parent_bnk_path);
             const auto& parent_files = parent_reader.list_files();
 
-            if (nested_index < 0 || nested_index >= (int)parent_files.size()) {
-                continue;
-            }
+            if (nested_index < 0 || nested_index >= (int)parent_files.size()) continue;
 
             const auto& nested_file = parent_files[nested_index];
             std::string nested_path = nested_file.name;
 
-            auto tmpdir = std::filesystem::temp_directory_path() / "f2_nested_bnk_tree";
-            std::error_code ec;
-            std::filesystem::create_directories(tmpdir, ec);
-
             std::string temp_name = "nested_" + std::to_string(std::hash<std::string>{}(parent_bnk_path + nested_path)) + ".bnk";
             auto temp_bnk_path = tmpdir / temp_name;
 
-            extract_one(parent_bnk_path, nested_index, temp_bnk_path.string());
+            if (!std::filesystem::exists(temp_bnk_path)) {
+                extract_one(parent_bnk_path, nested_index, temp_bnk_path.string());
+            }
 
             BNKReader nested_reader(temp_bnk_path.string());
             const auto& nested_files = nested_reader.list_files();
 
             std::filesystem::path nested_parent = std::filesystem::path(nested_path).parent_path();
             std::string prefix = nested_parent.empty() ? "" : nested_parent.string() + "/";
+            std::replace(prefix.begin(), prefix.end(), '\\', '/');
 
             for (size_t i = 0; i < nested_files.size(); ++i) {
-                const auto& file = nested_files[i];
-                std::string full_nested_path = prefix + file.name;
-                add_to_tree(full_nested_path, temp_bnk_path.string(), (int)i, file.uncompressed_size, true);
+                std::string full_nested_path = prefix + nested_files[i].name;
+                add_to_tree(full_nested_path, temp_bnk_path.string(), (int)i, nested_files[i].uncompressed_size, true);
             }
 
         } catch (...) {
@@ -434,10 +439,17 @@ static void draw_tree_node(TreeNode& node) {
                 pick_bnk(node.bnk_source);
             }
 
+            // pick_bnk clears selected_nested_temp_path — restore it for nested files
+            if (node.is_nested_source) {
+                S.selected_nested_temp_path = node.bnk_source;
+                S.selected_nested_index = 0;
+            }
+
             for (size_t i = 0; i < S.files.size(); ++i) {
                 if (S.files[i].index == node.bnk_index) {
                     S.selected_file_index = (int)i;
                     if (is_mdl(node.name)) {
+                        g_pending_mdl_full_path = node.full_path;
                         g_pending_mdl_load = true;
                         g_pending_mdl_index = (int)i;
                     }
@@ -687,6 +699,14 @@ void draw_left_panel() {
             static bool tree_building = false;
             static std::atomic<bool> build_complete(false);
             static float build_start_time = 0.0f;
+            static std::string last_root_dir;
+
+            if (last_root_dir != S.root_dir) {
+                last_root_dir = S.root_dir;
+                tree_built = false;
+                tree_building = false;
+                root.children.clear();
+            }
 
             if (!tree_built && !tree_building && !S.bnk_paths.empty()) {
                 tree_building = true;
@@ -695,9 +715,10 @@ void draw_left_panel() {
 
                 TreeNode* root_ptr = &root;
                 std::atomic<bool>* complete_ptr = &build_complete;
+                std::vector<std::string> bnk_snapshot = S.bnk_paths;
 
-                std::thread([root_ptr, complete_ptr]() {
-                    build_unified_file_tree(*root_ptr);
+                std::thread([root_ptr, complete_ptr, bnk_snapshot = std::move(bnk_snapshot)]() mutable {
+                    build_unified_file_tree(*root_ptr, std::move(bnk_snapshot));
                     complete_ptr->store(true);
                 }).detach();
             }
@@ -1881,6 +1902,8 @@ if (!can_preview) {
         g_pending_mdl_load = false;
         auto item = S.files[(size_t)g_pending_mdl_index];
         auto name = item.name;
+        std::string parse_path = g_pending_mdl_full_path.empty() ? name : g_pending_mdl_full_path;
+        g_pending_mdl_full_path.clear();
 
         std::string bnk_to_use;
         std::string nested_temp_copy;
@@ -1909,9 +1932,9 @@ if (!can_preview) {
         if (!bnk_to_use.empty()) {
 #ifdef _WIN32
             ID3D11Device* device_ptr = device;
-            std::thread([device_ptr, item, name, bnk_to_use, nested_temp_copy, is_nested]() {
+            std::thread([device_ptr, item, name, parse_path, bnk_to_use, nested_temp_copy, is_nested]() {
 #else
-            std::thread([item, name, bnk_to_use, nested_temp_copy, is_nested]() {
+            std::thread([item, name, parse_path, bnk_to_use, nested_temp_copy, is_nested]() {
 #endif
                 std::vector<unsigned char> buf;
                 bool ok = false;
@@ -1947,7 +1970,7 @@ if (!can_preview) {
                 }
 
                 if (ok && !buf.empty()) {
-                    S.mdl_info_ok = parse_mdl_info(buf, S.mdl_info, name);
+                    S.mdl_info_ok = parse_mdl_info(buf, S.mdl_info, parse_path);
                     if (S.mdl_info_ok) {
                         S.mdl_meshes.clear();
                         parse_mdl_geometry(buf, S.mdl_info, S.mdl_meshes);

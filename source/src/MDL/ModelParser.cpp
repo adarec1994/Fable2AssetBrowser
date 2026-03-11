@@ -224,67 +224,36 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
 
 if(is_foliage){
     uint16_t unk2bytes = 0;
-    if(!r.u16be(unk2bytes)) {
-        return false;
-    }
+    if(!r.u16be(unk2bytes)) return false;
 
     for(uint32_t mi=0; mi<out.MeshCount; ++mi){
-        uint32_t meshBufferID = 0;
-        if(!r.u32be(meshBufferID)) {
-            return false;
-        }
+        // fields[0]=bufferID(0), fields[1]=face_count-2, fields[2]=face_count, fields[3]=vtx_count
+        uint32_t fields[4] = {0,0,0,0};
+        for(int k=0;k<4;k++) if(!r.u32be(fields[k])) return false;
 
-        uint32_t someCount1 = 0;
-        if(!r.u32be(someCount1)) {
-            return false;
-        }
-
-        uint32_t vtx = 0;
-        if(!r.u32be(vtx)) {
-            return false;
-        }
-
-        uint32_t tlen = 0;
-        if(!r.u32be(tlen)) {
-            return false;
-        }
-
-        if(!r.skip(41)) {
-            return false;
-        }
+        uint32_t vtx    = fields[3]; // vertex count
+        uint32_t face_ic = fields[2]; // face index count (u16 entries)
 
         size_t vert_off = 0, face_off = 0;
-        if(vtx > 0 && vtx < 65535u){
+        // stride 48: float32 pos(12) + normal(12) + uv(8) + tangent+W(16)
+        if(vtx > 0 && vtx < 100000u){
             vert_off = r.i;
-            size_t vsz = (size_t)vtx * 28;
-            if(!r.skip(vsz)) {
-                return false;
-            }
+            if(!r.skip((size_t)vtx * 48)) return false;
         }
-
-        if(tlen > 0 && tlen < 65535u){
+        if(face_ic > 0 && face_ic < 100000u){
             face_off = r.i;
-            size_t fsz = (size_t)tlen * 2;
-            if(!r.skip(fsz)) {
-                return false;
-            }
-        }
-
-        if(vtx > 0 && vtx < 65535u){
-            size_t usz = (size_t)vtx * 16;
-            if(!r.skip(usz)) {
-                return false;
-            }
+            if(!r.skip((size_t)face_ic * 2)) return false;
         }
 
         MDLMeshBufferInfo mb;
-        mb.VertexCount = vtx;
+        mb.VertexCount  = vtx;
         mb.VertexOffset = vert_off;
-        mb.FaceCount = tlen;
-        mb.FaceOffset = face_off;
+        mb.FaceCount    = face_ic;
+        mb.FaceOffset   = face_off;
         mb.SubMeshCount = 1;
-        mb.IsAltPath = false;
-        mb.MeshIndex = mi;
+        mb.IsAltPath    = false;
+        mb.IsFoliagePath = true;
+        mb.MeshIndex    = mi;
         out.MeshBuffers.push_back(mb);
     }
     return true;
@@ -650,6 +619,63 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
     R r{data.data(), data.size(), 0};
     for(size_t mi=0; mi<info.MeshBuffers.size(); ++mi){
         const auto& mb=info.MeshBuffers[mi];
+
+        if(mb.IsFoliagePath){
+            // stride 48: f32 pos(0..11), normal(12..23), uv(24..31), tangent(32..43), tangentW(44..47)
+            if(mb.VertexCount==0 || mb.FaceCount==0 ||
+               mb.VertexOffset+(size_t)mb.VertexCount*48>r.n ||
+               mb.FaceOffset+(size_t)mb.FaceCount*2>r.n){
+                MDLMeshGeom g;
+                if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty())
+                    g.diffuse_tex_name=info.Meshes[mi].Materials[0].TextureName;
+                out.push_back(std::move(g));
+                continue;
+            }
+            MDLMeshGeom g;
+            g.positions.resize((size_t)mb.VertexCount*3);
+            g.normals.resize((size_t)mb.VertexCount*3);
+            g.uvs.resize((size_t)mb.VertexCount*2);
+            const uint8_t* vp=r.p+mb.VertexOffset;
+            for(uint32_t v=0;v<mb.VertexCount;++v){
+                const uint8_t* p=vp+v*48;
+                float px,py,pz,nx,ny,nz,uu,vv;
+                std::memcpy(&px,p+0, 4); std::memcpy(&py,p+4, 4); std::memcpy(&pz,p+8, 4);
+                std::memcpy(&nx,p+12,4); std::memcpy(&ny,p+16,4); std::memcpy(&nz,p+20,4);
+                std::memcpy(&uu,p+24,4); std::memcpy(&vv,p+28,4);
+                // big-endian: byteswap each float
+                auto bswap=[](float f){ uint32_t u; std::memcpy(&u,&f,4);
+                    u=(u>>24)|((u>>8)&0xFF00)|((u<<8)&0xFF0000)|(u<<24);
+                    std::memcpy(&f,&u,4); return f; };
+                g.positions[v*3+0]=bswap(px); g.positions[v*3+1]=bswap(py); g.positions[v*3+2]=bswap(pz);
+                g.normals[v*3+0]=bswap(nx);   g.normals[v*3+1]=bswap(ny);   g.normals[v*3+2]=bswap(nz);
+                g.uvs[v*2+0]=bswap(uu);       g.uvs[v*2+1]=bswap(vv);
+            }
+            std::vector<uint16_t> strip(mb.FaceCount);
+            const uint8_t* fp=r.p+mb.FaceOffset;
+            bool hasFFFF=false;
+            for(uint32_t i=0;i<mb.FaceCount;i++){
+                uint16_t w=(uint16_t(fp[i*2+0])<<8)|fp[i*2+1];
+                strip[i]=w; if(w==0xFFFF) hasFFFF=true;
+            }
+            if(hasFFFF){ build_triangles_from_strip(strip,g.indices); }
+            else{
+                size_t tc=strip.size()/3; g.indices.resize(tc*3);
+                for(size_t t=0;t<tc;t++){
+                    g.indices[t*3+0]=strip[t*3+0];
+                    g.indices[t*3+1]=strip[t*3+1];
+                    g.indices[t*3+2]=strip[t*3+2];
+                }
+            }
+            if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty())
+                g.diffuse_tex_name=info.Meshes[mi].Materials[0].TextureName;
+            g.MeshIndex=(uint32_t)mi; g.SubMeshIndex=0;
+            if(mi<info.Meshes.size() && !info.Meshes[mi].MeshName.empty())
+                g.name=info.Meshes[mi].MeshName;
+            else
+                g.name="mesh_"+std::to_string(mi);
+            out.push_back(std::move(g));
+            continue;
+        }
 
         size_t vertex_stride = mb.IsAltPath ? 20 : 28;
 

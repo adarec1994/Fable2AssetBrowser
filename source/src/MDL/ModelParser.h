@@ -37,6 +37,7 @@ struct MDLMeshBufferInfo {
     size_t   FaceOffset = 0;
     uint32_t SubMeshCount = 0;
     bool     IsAltPath = false;
+    bool     IsFoliagePath = false;
     std::vector<MDLSubMeshInfo> SubMeshes;
     uint32_t MeshIndex = 0;
 };

@@ -1,15 +1,18 @@
 # Fable 2 Asset Browser
 Browse the Fable 2 BNK files. Included features:
 - Search and filter the internal files
-- Render and preview the models.
-- Export models to Blender.
+- Render and preview the models & textures. 
+- Export models to FBX or GLB.
+- Export textures.
+- Export audio files.
 - More coming soon.
 
 
 ## How to use
-- Acquire a legitimate copy of Fable 2. 
-- Dump the contents of the .iso
+- Acquire a legitimate copy of Fable 2.
+- Dump the iso on your computer.
 - Download Fable 2 Asset Browser.exe and run it.
+- Fable 2 Asset Browser supports loading an extracted iso, or the iso itself.
 
 ## Preview
 

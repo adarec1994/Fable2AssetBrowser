@@ -32,3 +32,24 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
                               int& out_width, int& out_height,
                               std::vector<uint8_t>& out_bc1,
                               std::string* err = nullptr);
+
+// Lionhead BC4/BC5 variant codec — port of sub_82B8D010 in Fable 2.
+//
+// Handles CompFlag = 2, 3, 4. Currently CompFlag = 3 is the only one
+// observed in the wild (PixelFormat=40 BC5 normal maps). See
+// `docs/CODEC.md` "variant_2_3_4" section for the full spec.
+//
+// `mode`:
+//   1 = output packed-3-bit indices (4×4 = 6 bytes per block)
+//   2 = output BC4 alpha block (a0, a1, 6 index bytes — what BC5 wants)
+//   3+ = output tiled stride pattern (used by some non-block formats)
+//
+// `body` / `body_size` is the compressed body for ONE channel. For BC5
+// the dispatcher calls this twice (X then Y) and concatenates results.
+//
+// **NOT YET IMPLEMENTED** — currently returns false with a "comp=3 codec
+// not yet ported" error. Implementation tracked in docs/STATE.md.
+bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,
+                             int mode, int width, int height,
+                             std::vector<uint8_t>& out_bytes,
+                             std::string* err = nullptr);

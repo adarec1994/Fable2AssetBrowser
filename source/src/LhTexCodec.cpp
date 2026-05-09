@@ -477,3 +477,19 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
 
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// lh_decode_variant_2_3_4 — STUB. See docs/CODEC.md "variant_2_3_4" for the
+// full reverse-engineered spec; the port is tracked in docs/STATE.md.
+// Returns false so callers fall through to comp=7 raw fallback gracefully.
+// ---------------------------------------------------------------------------
+bool lh_decode_variant_2_3_4(const uint8_t* /*body*/, size_t /*body_size*/,
+                             int /*mode*/, int /*width*/, int /*height*/,
+                             std::vector<uint8_t>& /*out_bytes*/,
+                             std::string* err) {
+    const char* msg = "lh_decode_variant_2_3_4: not yet ported "
+                      "(see docs/CODEC.md for spec)";
+    if (err) *err = msg;
+    log_tagged("LhTexCodec", msg);
+    return false;
+}

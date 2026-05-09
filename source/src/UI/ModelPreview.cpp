@@ -112,6 +112,42 @@ static void swap_bc3_endian(uint8_t* data, size_t size) {
         swap_bc1_endian(data + i + 8, 8);
     }
 }
+// Decode one BC4 sub-block (8 bytes) → 16 bytes of single-channel output.
+// Used as the building block for BC5 (= 2 BC4 blocks per BC5 block, one
+// for X, one for Y).
+static void decode_bc4_block(const uint8_t* b, uint8_t* out16) {
+    uint8_t a0 = b[0], a1 = b[1];
+    uint64_t abits = 0;
+    for (int i = 0; i < 6; ++i) abits |= (uint64_t)b[2+i] << (8*i);
+    uint8_t atab[8];
+    atab[0] = a0; atab[1] = a1;
+    if (a0 > a1) {
+        for (int i = 1; i <= 6; i++) atab[i+1] = (uint8_t)(((7-i)*a0 + i*a1)/7);
+    } else {
+        for (int i = 1; i <= 4; i++) atab[i+1] = (uint8_t)(((5-i)*a0 + i*a1)/5);
+        atab[6] = 0; atab[7] = 255;
+    }
+    for (int i = 0; i < 16; ++i) {
+        uint8_t ai = (uint8_t)((abits >> (3*i)) & 7);
+        out16[i] = atab[ai];
+    }
+}
+// BC5 endian-swap: each 16-byte BC5 block is 2 BC4 sub-blocks; swap each.
+static void swap_bc5_endian(uint8_t* data, size_t size) {
+    for (size_t i = 0; i + 16 <= size; i += 16) {
+        // Each BC4 block: 2 endpoint bytes + 6 index bytes (3-bit indices,
+        // 16 indices total = 48 bits = 6 bytes). BE→LE swap is the same
+        // as swap_bc3_endian's alpha portion for BOTH halves.
+        for (int half = 0; half < 2; ++half) {
+            uint8_t* blk = data + i + 8 * half;
+            uint64_t bits = 0;
+            for (int j = 0; j < 6; j++) bits |= ((uint64_t)blk[2+j]) << (j*8);
+            uint64_t sw = 0;
+            for (int j = 0; j < 6; j++) sw |= ((bits >> (j*8)) & 0xFF) << ((5-j)*8);
+            for (int j = 0; j < 6; j++) blk[2+j] = (sw >> (j*8)) & 0xFF;
+        }
+    }
+}
 // Helper: BC1 → RGBA blit (assumes input is little-endian BC1 blocks)
 static void blit_bc1_to_rgba(const uint8_t* src, int w, int h,
                              std::vector<uint8_t>& rgba) {
@@ -156,6 +192,50 @@ static void blit_bc3_to_rgba(const uint8_t* src, int w, int h,
                     int xx = (int)bxx * 4 + px;
                     if (xx >= w) break;
                     ((uint32_t*)rgba.data())[yy * w + xx] = block[py * 4 + px];
+                }
+            }
+        }
+    }
+}
+// Helper: BC5 (ATI2 / two-channel normal map) → RGBA blit.
+// Each 16-byte BC5 block = 2 BC4 sub-blocks (X, then Y).
+// Output RGBA: R=X, G=Y, B=Z (reconstructed via Z = sqrt(1 - X^2 - Y^2)),
+// A=255. Z reconstruction makes the visualization look like a real
+// normal map instead of just two grayscale channels.
+static void blit_bc5_to_rgba(const uint8_t* src, int w, int h,
+                             std::vector<uint8_t>& rgba) {
+    const size_t bx = (size_t)((w + 3) / 4);
+    const size_t by = (size_t)((h + 3) / 4);
+    rgba.assign((size_t)w * (size_t)h * 4, 0xFF);
+    size_t off = 0;
+    for (size_t byy = 0; byy < by; ++byy) {
+        for (size_t bxx = 0; bxx < bx; ++bxx) {
+            uint8_t xch[16], ych[16];
+            decode_bc4_block(src + off,     xch);   // first BC4 = X
+            decode_bc4_block(src + off + 8, ych);   // second BC4 = Y
+            off += 16;
+            for (int py = 0; py < 4; ++py) {
+                int yy = (int)byy * 4 + py;
+                if (yy >= h) break;
+                for (int px = 0; px < 4; ++px) {
+                    int xx = (int)bxx * 4 + px;
+                    if (xx >= w) break;
+                    int idx = py * 4 + px;
+                    int xi = xch[idx];
+                    int yi = ych[idx];
+                    // Reconstruct Z. nx, ny in [-1,1].
+                    float nx = (xi / 255.0f) * 2.0f - 1.0f;
+                    float ny = (yi / 255.0f) * 2.0f - 1.0f;
+                    float nz2 = 1.0f - nx*nx - ny*ny;
+                    float nz = nz2 > 0.0f ? sqrtf(nz2) : 0.0f;
+                    int zi = (int)((nz * 0.5f + 0.5f) * 255.0f + 0.5f);
+                    if (zi < 0) zi = 0;
+                    if (zi > 255) zi = 255;
+                    uint8_t* p = rgba.data() + (yy * w + xx) * 4;
+                    p[0] = (uint8_t)xi;
+                    p[1] = (uint8_t)yi;
+                    p[2] = (uint8_t)zi;
+                    p[3] = 0xFF;
                 }
             }
         }
@@ -250,8 +330,19 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             return true;
         }
         if (ti.PixelFormat == 40) {
-            log_tagged("decode_tex_to_rgba", "BC5 (PixelFormat 40) not supported yet (raw mip)");
-            return false;
+            // BC5 = 16 bytes/block (2 BC4 sub-blocks: X then Y).
+            if (m.MipDataSizeParsed < sz_bc3) {
+                std::ostringstream os;
+                os << "BC5 raw mip too small (" << m.MipDataSizeParsed << " < " << sz_bc3 << ")";
+                log_tagged("decode_tex_to_rgba", os.str());
+                return false;
+            }
+            std::vector<uint8_t> swapped(src, src + sz_bc3);
+            swap_bc5_endian(swapped.data(), swapped.size());
+            blit_bc5_to_rgba(swapped.data(), w, h, rgba);
+            out_w = w; out_h = h;
+            if (out_has_alpha) *out_has_alpha = false; // BC5 has no alpha
+            return true;
         }
         // Fallback: assume the raw bytes already are RGBA (rare format)
         size_t sz_raw = (size_t)w * (size_t)h * 4;
@@ -275,9 +366,14 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
     // The codec yields little-endian BC1 (no further endian swap needed).
     // ---------------------------------------------------------------
     {
-        // Currently only BC1 (PixelFormat 35) is supported by the codec we ported.
-        // For other formats, fall back to whichever uncompressed mip is largest.
-        if (ti.PixelFormat != 35) {
+        // BC1 (PixelFormat 35) and BC3 color-half (PixelFormat 39 with
+        // CompFlag 1) both use the Lionhead BC1 codec on their compressed
+        // body. For BC3, the parser sees the color sub-block as a comp=1
+        // record — we run the codec on it, get BC1, and present alpha=255
+        // (the alpha sub-block uses a different (currently unsupported)
+        // sub-codec; for now we just show the color half).
+        // Other formats fall back to whichever uncompressed mip is largest.
+        if (ti.PixelFormat != 35 && ti.PixelFormat != 39) {
             // Try to find the best comp=7 mip as a fallback
             int fallback_idx = -1;
             int fallback_area = 0;
@@ -314,6 +410,21 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 blit_bc3_to_rgba(swapped.data(), fw, fh, rgba);
                 out_w = fw; out_h = fh;
                 if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
+                return true;
+            }
+            if (ti.PixelFormat == 40) {
+                // BC5 normal map fallback: BC5 textures use comp=3 for their
+                // big mips (variant_2_3_4 codec — not ported yet) and comp=7
+                // for the smallest. So this path always uses the tiny mip.
+                if (fm.MipDataSizeParsed < fbx * fby * 16) {
+                    log_tagged("decode_tex_to_rgba", "BC5 fallback mip too small");
+                    return false;
+                }
+                std::vector<uint8_t> swapped(fsrc, fsrc + fbx * fby * 16);
+                swap_bc5_endian(swapped.data(), swapped.size());
+                blit_bc5_to_rgba(swapped.data(), fw, fh, rgba);
+                out_w = fw; out_h = fh;
+                if (out_has_alpha) *out_has_alpha = false;
                 return true;
             }
             {

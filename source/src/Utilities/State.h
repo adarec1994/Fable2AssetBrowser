@@ -108,8 +108,10 @@ struct State {
     // value across tab switches.
     std::vector<FlatAssetEntry> all_mdl_files;
     std::vector<FlatAssetEntry> all_tex_files;
+    std::vector<FlatAssetEntry> all_wav_files;
     std::string mdl_filter;
     std::string tex_filter;
+    std::string wav_filter;
 
     // ---- User-facing settings (persisted to config.ini) ----
     // show_paths controls whether the tree/file-table tooltips show the

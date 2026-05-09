@@ -475,10 +475,11 @@ static bool find_mdl_files_in_folder(TreeNode& root, const std::string& folder_n
 
 static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk_paths) {
     root.children.clear();
-    // Reset flat caches consumed by the Models / Textures tabs. They get
-    // appended to inside add_to_tree below as we walk every BNK.
+    // Reset flat caches consumed by the Models / Textures / Audio tabs.
+    // They get appended to inside add_to_tree below as we walk every BNK.
     S.all_mdl_files.clear();
     S.all_tex_files.clear();
+    S.all_wav_files.clear();
 
     auto is_header_bnk = [](const std::string& bnk_path) -> bool {
         std::string lower_path = bnk_path;
@@ -534,6 +535,15 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
             e.size = file_size;
             e.from_nested = is_nested;
             S.all_tex_files.push_back(std::move(e));
+        } else if (ends_with_ci(leaf, ".wav")) {
+            FlatAssetEntry e;
+            e.name = leaf;
+            e.full_path = path;
+            e.bnk_path = bnk_source;
+            e.file_index = bnk_index;
+            e.size = file_size;
+            e.from_nested = is_nested;
+            S.all_wav_files.push_back(std::move(e));
         }
 
         std::string normalized_path = path;
@@ -696,6 +706,28 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
             g_tree_done_units.fetch_add(1);
         }
     }
+
+    // Alphabetize each flat cache once at the end of the build —
+    // case-insensitive so MyAsset.tex and myasset.tex end up adjacent.
+    // Doing it here (rather than every frame inside the tab) keeps the
+    // per-frame cost of the Models / Textures / Audio tabs down to the
+    // filter walk.
+    auto cmp_ci = [](const FlatAssetEntry& a, const FlatAssetEntry& b) {
+        const std::string& sa = a.name;
+        const std::string& sb = b.name;
+        size_t n = std::min(sa.size(), sb.size());
+        for (size_t i = 0; i < n; ++i) {
+            char ca = sa[i], cb = sb[i];
+            if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+            if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+            if (ca != cb) return ca < cb;
+        }
+        return sa.size() < sb.size();
+    };
+    std::sort(S.all_mdl_files.begin(), S.all_mdl_files.end(), cmp_ci);
+    std::sort(S.all_tex_files.begin(), S.all_tex_files.end(), cmp_ci);
+    std::sort(S.all_wav_files.begin(), S.all_wav_files.end(), cmp_ci);
+
     set_tree_label("");
 }
 
@@ -837,7 +869,7 @@ static void draw_tree_node(TreeNode& node) {
 // state, locate the matching entry inside S.files, then arm the pending-load
 // flag the central render panel consumes.
 //
-// kind: 0 = .mdl, 1 = .tex
+// kind: 0 = .mdl, 1 = .tex, 2 = .wav (audio player)
 static void load_flat_asset_entry(const FlatAssetEntry& e, int kind) {
     if (S.selected_bnk != e.bnk_path) {
         S.viewing_adb = false;
@@ -859,9 +891,13 @@ static void load_flat_asset_entry(const FlatAssetEntry& e, int kind) {
                 g_pending_mdl_full_path = e.full_path;
                 g_pending_mdl_load = true;
                 g_pending_mdl_index = (int)i;
-            } else {
+            } else if (kind == 1) {
                 g_pending_tex_load = true;
                 g_pending_tex_index = (int)i;
+            } else if (kind == 2) {
+                // Audio: open the in-app audio player on the selected
+                // file. Same code path the file-table double-click uses.
+                open_audio_player_for_selected((int)i);
             }
             break;
         }
@@ -877,8 +913,111 @@ void draw_left_panel() {
     // outer MainLayout, not hardcoded here.
     ImGui::BeginChild("left_panel", ImVec2(0, 0), true);
 
-    if (ImGui::BeginTabBar("LeftPanelTabs", ImGuiTabBarFlags_None)) {
-        if (ImGui::BeginTabItem("BNK List")) {
+    // ImGui's TabBar can't render across two rows, so we roll our own
+    // tab strip out of regular Buttons styled with the Tab/TabActive
+    // palette. Selection is exclusive across both rows — clicking a row
+    // 2 button visually deselects row 1's active tab and vice versa.
+    // s_active_tab values: 0 BNK List, 1 File Tree, 2 Models, 3 Textures,
+    // 4 Audio. Default 1 puts the user on File Tree at startup.
+    static int s_active_tab = 1;
+
+    auto tab_button = [](const char* label, bool active, ImU32 text_col = 0) -> bool {
+        const ImGuiStyle& st = ImGui::GetStyle();
+        const ImVec4 bg     = st.Colors[active ? ImGuiCol_TabActive : ImGuiCol_Tab];
+        const ImVec4 hov    = st.Colors[ImGuiCol_TabHovered];
+        const ImVec4 act    = st.Colors[ImGuiCol_TabActive];
+        ImGui::PushStyleColor(ImGuiCol_Button,        bg);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hov);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  act);
+        if (text_col) ImGui::PushStyleColor(ImGuiCol_Text, text_col);
+        bool clicked = ImGui::Button(label);
+        if (text_col) ImGui::PopStyleColor();
+        ImGui::PopStyleColor(3);
+        return clicked;
+    };
+
+    // Row 1 — standard tabs.
+    if (tab_button("BNK List", s_active_tab == 0))   s_active_tab = 0;
+    ImGui::SameLine(0, 2);
+    if (tab_button("File Tree", s_active_tab == 1))  s_active_tab = 1;
+
+    // Row 2 — flat asset views, purple labels to set them apart.
+    const ImU32 kPurpleLabel = IM_COL32(200, 130, 255, 255);
+    if (tab_button("Models",   s_active_tab == 2, kPurpleLabel)) s_active_tab = 2;
+    ImGui::SameLine(0, 2);
+    if (tab_button("Textures", s_active_tab == 3, kPurpleLabel)) s_active_tab = 3;
+    ImGui::SameLine(0, 2);
+    if (tab_button("Audio",    s_active_tab == 4, kPurpleLabel)) s_active_tab = 4;
+
+    ImGui::Separator();
+
+    // Lambda used by the Models / Textures / Audio bodies further down.
+    // Defined up here so all three branches can share it without the
+    // pre-refactor double-tab-bar plumbing.
+    auto draw_flat_asset_tab = [](const char* /*label*/,
+                                  std::vector<FlatAssetEntry>& entries,
+                                  std::string& filter,
+                                  const char* child_id,
+                                  int kind) {
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint(("##" + std::string(child_id) + "_filter").c_str(),
+                                 "Filter", &filter);
+
+        std::vector<int> vis;
+        vis.reserve(entries.size());
+        std::string flow = filter;
+        std::transform(flow.begin(), flow.end(), flow.begin(), ::tolower);
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (flow.empty()) {
+                vis.push_back((int)i);
+            } else {
+                std::string nlow = entries[i].name;
+                std::transform(nlow.begin(), nlow.end(), nlow.begin(), ::tolower);
+                if (nlow.find(flow) != std::string::npos) vis.push_back((int)i);
+            }
+        }
+
+        if (S.dev_mode) {
+            ImGui::TextDisabled("%d / %zu", (int)vis.size(), entries.size());
+            ImGui::Separator();
+        }
+
+        ImGui::BeginChild(child_id, ImVec2(0, 0), false);
+        ImGuiListClipper clipper;
+        clipper.Begin((int)vis.size());
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                const FlatAssetEntry& e = entries[(size_t)vis[(size_t)row]];
+                ImGui::PushID(row);
+                bool selected = (S.selected_bnk == e.bnk_path &&
+                                 S.selected_file_index >= 0 &&
+                                 S.selected_file_index < (int)S.files.size() &&
+                                 S.files[(size_t)S.selected_file_index].index == e.file_index);
+                if (ImGui::Selectable(e.name.c_str(), selected,
+                                      ImGuiSelectableFlags_SpanAllColumns)) {
+                    load_flat_asset_entry(e, kind);
+                }
+                if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                    ImGui::BeginTooltip();
+                    if (S.dev_mode) {
+                        ImGui::TextUnformatted(e.full_path.c_str());
+                        ImGui::Text("Size: %u bytes", e.size);
+                        ImGui::Text("BNK: %s",
+                            std::filesystem::path(e.bnk_path).filename().string().c_str());
+                        if (e.from_nested) ImGui::TextDisabled("(nested)");
+                    } else {
+                        ImGui::TextUnformatted(e.name.c_str());
+                    }
+                    ImGui::EndTooltip();
+                }
+                ImGui::PopID();
+            }
+        }
+        clipper.End();
+        ImGui::EndChild();
+    };
+
+    if (s_active_tab == 0) {
             ImGui::SetNextItemWidth(-1);
             if (!S.bnk_paths.empty()) {
                 ImGui::InputTextWithHint("##bnk_filter", "Filter", &S.bnk_filter);
@@ -1093,18 +1232,9 @@ void draw_left_panel() {
             }
             clipper.End();
             ImGui::EndChild();
-            ImGui::EndTabItem();
         }
 
-        // File Tree is the priority view — flag it selected on the first
-        // frame so the user lands on it when the window opens. After
-        // that ImGui keeps whichever tab the user last clicked.
-        static bool s_file_tree_first_frame = true;
-        ImGuiTabItemFlags ft_flags = s_file_tree_first_frame
-                                     ? ImGuiTabItemFlags_SetSelected
-                                     : ImGuiTabItemFlags_None;
-        s_file_tree_first_frame = false;
-        if (ImGui::BeginTabItem("File Tree", nullptr, ft_flags)) {
+        if (s_active_tab == 1) {
             ImGui::BeginChild("file_tree", ImVec2(0, 0), false);
 
             // Tree build state was hoisted to file scope so we could
@@ -1164,92 +1294,22 @@ void draw_left_panel() {
             }
 
             ImGui::EndChild();
-            ImGui::EndTabItem();
         }
 
-        // Shared layout for the Models / Textures tabs: a sticky filter
-        // input drawn before BeginChild (so it doesn't scroll away), then
-        // the scrollable list itself inside the child. ImGuiListClipper
-        // keeps the list cheap even for thousands of entries.
-        auto draw_flat_asset_tab = [](const char* label,
-                                      std::vector<FlatAssetEntry>& entries,
-                                      std::string& filter,
-                                      const char* child_id,
-                                      int kind) {
-            // Sticky filter — sits above the BeginChild scroll region.
-            ImGui::SetNextItemWidth(-1);
-            ImGui::InputTextWithHint(("##" + std::string(child_id) + "_filter").c_str(),
-                                     "Filter", &filter);
-
-            // Pre-filter into an index vector so the clipper works on the
-            // visible subset only.
-            std::vector<int> vis;
-            vis.reserve(entries.size());
-            std::string flow = filter;
-            std::transform(flow.begin(), flow.end(), flow.begin(), ::tolower);
-            for (size_t i = 0; i < entries.size(); ++i) {
-                if (flow.empty()) {
-                    vis.push_back((int)i);
-                } else {
-                    std::string nlow = entries[i].name;
-                    std::transform(nlow.begin(), nlow.end(), nlow.begin(), ::tolower);
-                    if (nlow.find(flow) != std::string::npos) vis.push_back((int)i);
-                }
-            }
-
-            ImGui::TextDisabled("%d / %zu", (int)vis.size(), entries.size());
-            ImGui::Separator();
-
-            ImGui::BeginChild(child_id, ImVec2(0, 0), false);
-            ImGuiListClipper clipper;
-            clipper.Begin((int)vis.size());
-            while (clipper.Step()) {
-                for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-                    const FlatAssetEntry& e = entries[(size_t)vis[(size_t)row]];
-                    ImGui::PushID(row);
-                    bool selected = (S.selected_bnk == e.bnk_path &&
-                                     S.selected_file_index >= 0 &&
-                                     S.selected_file_index < (int)S.files.size() &&
-                                     S.files[(size_t)S.selected_file_index].index == e.file_index);
-                    if (ImGui::Selectable(e.name.c_str(), selected,
-                                          ImGuiSelectableFlags_SpanAllColumns)) {
-                        load_flat_asset_entry(e, kind);
-                    }
-                    if (!S.hide_tooltips && ImGui::IsItemHovered()) {
-                        ImGui::BeginTooltip();
-                        if (S.dev_mode) {
-                            ImGui::TextUnformatted(e.full_path.c_str());
-                            ImGui::Text("Size: %u bytes", e.size);
-                            ImGui::Text("BNK: %s",
-                                std::filesystem::path(e.bnk_path).filename().string().c_str());
-                            if (e.from_nested) ImGui::TextDisabled("(nested)");
-                        } else {
-                            ImGui::TextUnformatted(e.name.c_str());
-                        }
-                        ImGui::EndTooltip();
-                    }
-                    ImGui::PopID();
-                }
-            }
-            clipper.End();
-            ImGui::EndChild();
-        };
-
-        if (ImGui::BeginTabItem("Models")) {
+        if (s_active_tab == 2) {
             draw_flat_asset_tab("Models", S.all_mdl_files, S.mdl_filter,
                                 "models_list", /*kind=*/0);
-            ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Textures")) {
+        if (s_active_tab == 3) {
             draw_flat_asset_tab("Textures", S.all_tex_files, S.tex_filter,
                                 "textures_list", /*kind=*/1);
-            ImGui::EndTabItem();
+        }
+        if (s_active_tab == 4) {
+            draw_flat_asset_tab("Audio", S.all_wav_files, S.wav_filter,
+                                "audio_list", /*kind=*/2);
         }
 
-        ImGui::EndTabBar();
-    }
-
-    ImGui::EndChild();
+    ImGui::EndChild(); // left_panel
 }
 
 void draw_file_table() {

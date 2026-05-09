@@ -8,8 +8,91 @@
 #include <unordered_map>
 #include <algorithm>
 
+// Walk a bare-chain mip layout (no top-level header): just (12 u32 + body)
+// records concatenated. Produced by some extraction tools and the raw mip
+// payloads from BNK files when stripped of their wrapper.
+static bool parse_bare_chain(const std::vector<unsigned char>& d, TexInfo& out) {
+    size_t off = 0;
+    while (off + 48 <= d.size()) {
+        TexInfo::MipDef md{};
+        md.DefOffset = off;
+        size_t k = off;
+        auto rd = [&](uint32_t& v) {
+            if (!rd32be(d, k, v)) return false;
+            k += 4; return true;
+        };
+        if (!(rd(md.CompFlag) && rd(md.DataOffset) && rd(md.DataSize) &&
+              rd(md.Unknown_3) && rd(md.Unknown_4) && rd(md.Unknown_5) &&
+              rd(md.Unknown_6) && rd(md.Unknown_7) && rd(md.Unknown_8) &&
+              rd(md.Unknown_9) && rd(md.Unknown_10) && rd(md.Unknown_11))) break;
+        // Sanity: DataOffset must be 48, CompFlag must be in [0,24]
+        if (md.DataOffset != 48 || md.CompFlag > 24) break;
+        if (off + 48 + md.DataSize > d.size() + 32) break;
+
+        if (md.CompFlag == 7) {
+            md.HasWH = false;
+            md.MipDataOffset = off + 48;
+            md.MipDataSizeParsed = std::min<size_t>(md.DataSize, d.size() - (off + 48));
+        } else {
+            // Compressed body starts with u16 mw, u16 mh, then 440-byte tables, then payload
+            if (off + 48 + 4 > d.size()) break;
+            uint16_t w16 = 0, h16 = 0;
+            size_t whp = off + 48;
+            if (!rd16be(d, whp, w16) || !rd16be(d, whp, h16)) break;
+            md.HasWH = true;
+            md.MipWidth = w16;
+            md.MipHeight = h16;
+            const size_t header_bytes = 4 + 440;
+            if (md.DataSize < header_bytes) break;
+            md.MipDataOffset = off + 48 + header_bytes;
+            md.MipDataSizeParsed = md.DataSize - header_bytes;
+        }
+        // Detect a SECOND sub-block (BC5 X+Y, or BC3 color+alpha): u3
+        // looks like a CompFlag, u4 == 48 + DataSize (= immediately after
+        // the X / color body), u5 has a plausible byte size. If so, the
+        // next mip starts after BOTH bodies, not just one.
+        size_t advance = 48 + md.DataSize;  // default: just first body
+        bool dual = false;
+        if (md.Unknown_3 <= 24 &&
+            md.Unknown_4 == 48 + md.DataSize &&
+            md.Unknown_5 > 0 &&
+            (off + (size_t)md.Unknown_4 + md.Unknown_5) <= d.size() + 32) {
+            advance = (size_t)md.Unknown_4 + md.Unknown_5;
+            dual = true;
+        }
+
+        out.Mips.push_back(md);
+        // Use the first mip's declared (mw, mh) for the texture dimensions
+        if (out.TextureWidth == 0 && md.HasWH) {
+            out.TextureWidth = md.MipWidth;
+            out.TextureHeight = md.MipHeight;
+        }
+        // Track whether ANY mip used dual sub-block layout (used to set
+        // a sensible default PixelFormat for bare-chain BC5 files).
+        if (dual && out.PixelFormat == 0) out.PixelFormat = 40;  // BC5
+        off += advance;
+    }
+    // Bare chain has no PixelFormat field; default to BC1 (35) — most
+    // bare-chain textures we've seen are BC1 or BC1-style (comp=11).
+    if (out.PixelFormat == 0) out.PixelFormat = 35;
+    return !out.Mips.empty();
+}
+
 bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
     out = TexInfo{};
+    if (d.size() < 32) return false;
+    // Heuristic: if the first u32 is a small number (0..24, looks like a
+    // CompFlag) AND the second u32 is exactly 48 (DataOffset), this is a
+    // bare-chain file with no top-level header.
+    {
+        uint32_t a = 0, b = 0;
+        size_t p = 0;
+        rd32be(d, p, a); p = 4;
+        rd32be(d, p, b);
+        if (a <= 24 && b == 48) {
+            return parse_bare_chain(d, out);
+        }
+    }
     size_t off = 0;
     if (!rd32be(d, off, out.Sign)) return false;
     off += 4;

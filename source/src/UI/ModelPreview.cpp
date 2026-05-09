@@ -48,13 +48,15 @@ static void decode_bc1_block(const uint8_t* b, uint32_t* outRGBA) {
     uint8_t r0=ex5((c0>>11)&31), g0=ex6((c0>>5)&63),  b0=ex5(c0&31);
     uint8_t r1=ex5((c1>>11)&31), g1=ex6((c1>>5)&63),  b1=ex5(c1&31);
     uint32_t cols[4];
-    cols[0] = (0xFFu<<24) | (r0<<16) | (g0<<8) | b0;
-    cols[1] = (0xFFu<<24) | (r1<<16) | (g1<<8) | b1;
+    // Pack as RGBA in LE memory order: byte 0 = R, byte 1 = G, byte 2 = B, byte 3 = A.
+    // (DXGI_FORMAT_R8G8B8A8_UNORM expects this byte order.)
+    cols[0] = (0xFFu<<24) | ((uint32_t)b0<<16) | ((uint32_t)g0<<8) | (uint32_t)r0;
+    cols[1] = (0xFFu<<24) | ((uint32_t)b1<<16) | ((uint32_t)g1<<8) | (uint32_t)r1;
     if(c0 > c1){
-        cols[2] = (0xFFu<<24) | (((2*r0+r1)/3)<<16) | (((2*g0+g1)/3)<<8) | ((2*b0+b1)/3);
-        cols[3] = (0xFFu<<24) | (((r0+2*r1)/3)<<16) | (((g0+2*g1)/3)<<8) | ((b0+2*b1)/3);
+        cols[2] = (0xFFu<<24) | ((uint32_t)((2*b0+b1)/3)<<16) | ((uint32_t)((2*g0+g1)/3)<<8) | (uint32_t)((2*r0+r1)/3);
+        cols[3] = (0xFFu<<24) | ((uint32_t)((b0+2*b1)/3)<<16) | ((uint32_t)((g0+2*g1)/3)<<8) | (uint32_t)((r0+2*r1)/3);
     }else{
-        cols[2] = (0xFFu<<24) | (((r0+r1)>>1)<<16) | (((g0+g1)>>1)<<8) | ((b0+b1)>>1);
+        cols[2] = (0xFFu<<24) | ((uint32_t)((b0+b1)>>1)<<16) | ((uint32_t)((g0+g1)>>1)<<8) | (uint32_t)((r0+r1)>>1);
         cols[3] = 0x00000000u;
     }
     const uint32_t idx = b[4] | (b[5]<<8) | (b[6]<<16) | (b[7]<<24);
@@ -362,18 +364,92 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
     }
 
     // ---------------------------------------------------------------
+    // CompFlag = 3 (variant_2_3_4 codec) for BC5 normal maps (PF=40 / 4).
+    //
+    // BC5 layout (verified from dumped files): each mip is a 48-byte
+    // header containing TWO sub-headers:
+    //   bytes 0..11  = X channel: (CompFlag, DataOffset=48, DataSize)
+    //   bytes 12..23 = Y channel: (CompFlag, DataOffset=48+DS_X, DataSize)
+    // Then body[X bytes][Y bytes] follow.  We call variant_2_3_4 once
+    // for each channel, then interleave into BC5 blocks for the
+    // existing BC5→RGBA blit.
+    //
+    // Currently the codec's op_type 3 has correct bit consumption but
+    // a simplified output (full BC4 index packing is a follow-up), so
+    // expect a low-frequency approximation rather than pixel-accurate
+    // normal map decode. Still strictly better than failing.
+    // ---------------------------------------------------------------
+    if (m.CompFlag == 3 && (ti.PixelFormat == 40 || ti.PixelFormat == 4)) {
+        const size_t x_body_start = m.DefOffset + 48;
+        const size_t x_body_size  = m.DataSize;
+        const bool   has_y_sub    = (m.Unknown_3 == 3) && (m.Unknown_5 > 0) &&
+                                    (m.Unknown_4 == 48 + m.DataSize);
+        const size_t y_body_start = m.DefOffset + (size_t)m.Unknown_4;
+        const size_t y_body_size  = (size_t)m.Unknown_5;
+
+        const bool ranges_ok =
+            (x_body_start + x_body_size <= blob.size()) &&
+            (!has_y_sub || (y_body_start + y_body_size <= blob.size()));
+
+        if (ranges_ok) {
+            std::vector<uint8_t> bc4_x, bc4_y;
+            std::string err_x, err_y;
+            const bool ok_x = lh_decode_variant_2_3_4(
+                blob.data() + x_body_start, x_body_size, 2, w, h, bc4_x, &err_x);
+            const bool ok_y = has_y_sub
+                ? lh_decode_variant_2_3_4(
+                      blob.data() + y_body_start, y_body_size, 2, w, h, bc4_y, &err_y)
+                : false;
+
+            if (ok_x) {
+                const size_t n_blocks = (size_t)(w / 4) * (size_t)(h / 4);
+                std::vector<uint8_t> bc5_blocks(n_blocks * 16);
+                for (size_t i = 0; i < n_blocks; ++i) {
+                    // X channel
+                    memcpy(bc5_blocks.data() + i * 16, bc4_x.data() + i * 8, 8);
+                    if (ok_y) {
+                        // Y channel from second codec call
+                        memcpy(bc5_blocks.data() + i * 16 + 8, bc4_y.data() + i * 8, 8);
+                    } else {
+                        // Y unavailable / decode failed: flat 0x80 placeholder
+                        bc5_blocks[i * 16 + 8] = 0x80;
+                        bc5_blocks[i * 16 + 9] = 0x80;
+                        for (int k = 10; k < 16; ++k) bc5_blocks[i * 16 + k] = 0;
+                    }
+                }
+                blit_bc5_to_rgba(bc5_blocks.data(), w, h, rgba);
+                out_w = w; out_h = h;
+                if (out_has_alpha) *out_has_alpha = false;
+                return true;
+            } else {
+                std::ostringstream os;
+                os << "variant_2_3_4 BC5 X-channel (" << w << "x" << h
+                   << ") failed: " << err_x << " — falling back to comp=7";
+                log_tagged("decode_tex_to_rgba", os.str());
+                // fall through to comp=7 fallback
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
     // CompFlag != 7 → Lionhead-compressed mip body.
     // The codec yields little-endian BC1 (no further endian swap needed).
     // ---------------------------------------------------------------
     {
-        // BC1 (PixelFormat 35) and BC3 color-half (PixelFormat 39 with
-        // CompFlag 1) both use the Lionhead BC1 codec on their compressed
-        // body. For BC3, the parser sees the color sub-block as a comp=1
-        // record — we run the codec on it, get BC1, and present alpha=255
-        // (the alpha sub-block uses a different (currently unsupported)
-        // sub-codec; for now we just show the color half).
+        // BC1 (PixelFormat 35) and BC3 (PixelFormat 39, plus the older
+        // dispatcher-style codes 1/2/3 used by some files like
+        // alphastipple.tex) both use the Lionhead BC1 codec on their
+        // color-half body. For BC3, the parser sees the color sub-block as
+        // a comp=1 record — we run the codec on it, get BC1, and present
+        // alpha=255. The alpha sub-block uses a different (currently
+        // unsupported) sub-codec; for now we just show the color half.
         // Other formats fall back to whichever uncompressed mip is largest.
-        if (ti.PixelFormat != 35 && ti.PixelFormat != 39) {
+        const bool pf_is_bc1_family =
+            (ti.PixelFormat == 35) || (ti.PixelFormat == 0) || (ti.PixelFormat == 12);
+        const bool pf_is_bc3_family =
+            (ti.PixelFormat == 39) || (ti.PixelFormat == 1) ||
+            (ti.PixelFormat == 2)  || (ti.PixelFormat == 3);
+        if (!pf_is_bc1_family && !pf_is_bc3_family) {
             // Try to find the best comp=7 mip as a fallback
             int fallback_idx = -1;
             int fallback_area = 0;
@@ -400,7 +476,8 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 return false;
             }
             const uint8_t* fsrc = blob.data() + fm.MipDataOffset;
-            if (ti.PixelFormat == 39) {
+            if (ti.PixelFormat == 39 || ti.PixelFormat == 1 ||
+                ti.PixelFormat == 2  || ti.PixelFormat == 3) {
                 if (fm.MipDataSizeParsed < fbx * fby * 16) {
                     log_tagged("decode_tex_to_rgba", "BC3 fallback mip too small");
                     return false;
@@ -454,12 +531,16 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         std::vector<uint8_t> bc1;
         int dec_w = 0, dec_h = 0;
         std::string err;
+        // Route to the right codec based on CompFlag:
+        //   1  -> standard Lionhead BC1 codec (Z-order index layout)
+        //   11 -> same codec, column-major index layout (sub_82B8C900)
+        const bool comp11 = (m.CompFlag == 11);
         bool ok = lh_decode_compressed_mip(body_ptr, body_size,
-                                           dec_w, dec_h, bc1, &err);
+                                           dec_w, dec_h, bc1, &err, comp11);
         if (!ok) {
             std::ostringstream os;
             os << "lh_decode_compressed_mip failed for mip[" << best << "] "
-               << w << "x" << h << ": " << err;
+               << w << "x" << h << " (comp=" << m.CompFlag << "): " << err;
             log_tagged("decode_tex_to_rgba", os.str());
             return false;
         }
@@ -473,6 +554,50 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         }
         blit_bc1_to_rgba(bc1.data(), w, h, rgba);
         out_w = w; out_h = h;
+
+        // BC3 alpha sub-block. The Lionhead BC1 codec produces 8 bytes per
+        // block; when the encoder wrote BC3 alpha data, those 8 bytes are
+        // a BC4 alpha block (a0=byte[0], a1=byte[1], 48-bit index stream
+        // in bytes 2..7). Decode and merge into the diffuse RGBA's alpha.
+        if (pf_is_bc3_family && m.Unknown_3 == 1 && m.Unknown_5 > 0) {
+            const size_t a_body_start = m.DefOffset + (size_t)m.Unknown_4;
+            const size_t a_body_size  = (size_t)m.Unknown_5;
+            if (a_body_start + a_body_size <= blob.size()) {
+                std::vector<uint8_t> alpha_blocks;
+                int adec_w = 0, adec_h = 0;
+                std::string aerr;
+                bool aok = lh_decode_compressed_mip(
+                    blob.data() + a_body_start, a_body_size,
+                    adec_w, adec_h, alpha_blocks, &aerr, /*comp11_layout=*/false);
+                if (aok && adec_w == w && adec_h == h) {
+                    const size_t bx_n = (size_t)((w + 3) / 4);
+                    const size_t by_n = (size_t)((h + 3) / 4);
+                    for (size_t byy = 0; byy < by_n; ++byy) {
+                        for (size_t bxx = 0; bxx < bx_n; ++bxx) {
+                            uint8_t avals[16];
+                            decode_bc4_block(alpha_blocks.data() + (byy * bx_n + bxx) * 8,
+                                             avals);
+                            for (int py = 0; py < 4; ++py) {
+                                int yy = (int)byy * 4 + py;
+                                if (yy >= h) break;
+                                for (int px = 0; px < 4; ++px) {
+                                    int xx = (int)bxx * 4 + px;
+                                    if (xx >= w) break;
+                                    rgba[(yy * w + xx) * 4 + 3] = avals[py * 4 + px];
+                                }
+                            }
+                        }
+                    }
+                } else if (!aok) {
+                    std::ostringstream os;
+                    os << "BC3 alpha sub-block decode failed: " << aerr
+                       << " (size=" << a_body_size << ")";
+                    log_tagged("decode_tex_to_rgba", os.str());
+                    // keep alpha = 255 (already from BC1 decode)
+                }
+            }
+        }
+
         if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
         return true;
     }
@@ -633,7 +758,7 @@ VSOUT VS(VSIN i){
     o.p = mul(float4(i.p,1), mvp);
     float3 n = mul(i.n, (float3x3)mv);
     o.n = normalize(n);
-    o.t = float2(i.t.x, 1.0 - i.t.y);
+    o.t = i.t;
     return o;
 }
 )";
@@ -651,26 +776,17 @@ Texture2D tex3 : register(t3);
 Texture2D tex4 : register(t4);
 SamplerState smp : register(s0);
 struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
-float3 hemiAmbient(float3 n) {
-    float up = saturate(n.y*0.5 + 0.5);
-    float3 sky    = float3(0.75, 0.77, 0.80);
-    float3 ground = float3(0.50, 0.48, 0.46);
-    return lerp(ground, sky, up);
-}
 float4 PS(VSOUT i) : SV_Target {
-    float3 N_geo = normalize(i.n);
-    float3 N_m = tex1.Sample(smp, i.t).rgb * 2.0 - 1.0;
-    N_m = normalize(N_m);
-    float3 N = normalize(N_geo + N_m * 0.5);
-    float3 albedo   = tex0.Sample(smp, i.t).rgb;
-    float  alpha    = tex0.Sample(smp, i.t).a;
-    float3 specTex  = tex2.Sample(smp, i.t).rgb;
-    float3 tint     = tex4.Sample(smp, i.t).rgb;
-    albedo *= tint;
-    float3 gi = hemiAmbient(N);
-    float3 color = albedo * gi;
-    color = pow(color, 1.0/2.2);
-    return float4(color, alpha);
+    // Neutral lighting — just enough to show geometry, no color tinting.
+    // Pure white light (no sky/ground bias), no normal-map perturbation,
+    // no tint-mask multiply, no gamma re-encoding.
+    float3 N = normalize(i.n);
+    float3 L = normalize(float3(0.3, 0.7, 0.5));
+    float ndotl = saturate(dot(N, L));
+    float lighting = 0.65 + 0.35 * ndotl;   // 0.65 ambient + 0.35 directional, white
+    float3 albedo = tex0.Sample(smp, i.t).rgb;
+    float  alpha  = tex0.Sample(smp, i.t).a;
+    return float4(albedo * lighting, alpha);
 }
 )";
 static bool create_white_srv(ID3D11Device* dev, ID3D11ShaderResourceView** out_srv){
@@ -955,7 +1071,7 @@ out vec2 vTexCoord;
 void main() {
     gl_Position = uMVP * vec4(aPos, 1.0);
     vNormal = normalize(mat3(uMV) * aNormal);
-    vTexCoord = vec2(aTexCoord.x, 1.0 - aTexCoord.y);
+    vTexCoord = aTexCoord;
 }
 )";
 static const char* gl_fs = R"(
@@ -968,26 +1084,17 @@ uniform sampler2D uTexSpecular;
 uniform sampler2D uTexUnk;
 uniform sampler2D uTexTint;
 out vec4 FragColor;
-vec3 hemiAmbient(vec3 n) {
-    float up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 sky = vec3(0.75, 0.77, 0.80);
-    vec3 ground = vec3(0.50, 0.48, 0.46);
-    return mix(ground, sky, up);
-}
 void main() {
-    vec3 N_geo = normalize(vNormal);
-    vec3 N_m = texture(uTexNormal, vTexCoord).rgb * 2.0 - 1.0;
-    N_m = normalize(N_m);
-    vec3 N = normalize(N_geo + N_m * 0.5);
+    // Neutral lighting — pure white, just enough to show geometry, no
+    // color tinting, no normal-map perturbation, no tint-mask multiply.
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(vec3(0.3, 0.7, 0.5));
+    float ndotl = clamp(dot(N, L), 0.0, 1.0);
+    float lighting = 0.65 + 0.35 * ndotl;
     vec4 diffuseSample = texture(uTexDiffuse, vTexCoord);
     vec3 albedo = diffuseSample.rgb;
     float alpha = diffuseSample.a;
-    vec3 tint = texture(uTexTint, vTexCoord).rgb;
-    albedo *= tint;
-    vec3 gi = hemiAmbient(N);
-    vec3 color = albedo * gi;
-    color = pow(color, vec3(1.0/2.2));
-    FragColor = vec4(color, alpha);
+    FragColor = vec4(albedo * lighting, alpha);
 }
 )";
 static unsigned int compile_gl_shader(const char* src, GLenum type) {

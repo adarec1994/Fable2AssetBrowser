@@ -31,7 +31,23 @@ void log_tagged(const char* tag, const std::string& msg);
 bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
                               int& out_width, int& out_height,
                               std::vector<uint8_t>& out_bc1,
-                              std::string* err = nullptr);
+                              std::string* err = nullptr,
+                              bool comp11_layout = false);
+
+// Lionhead BC1 codec (CompFlag=11 variant) — port of sub_82B8C900.
+// Same trees, same per-block decode, same index byte transpose as comp=1.
+// The ONLY difference: comp=11 always decodes 4 index symbols every block,
+// while comp=1 skips index decoding when c0==c1 (solid block). If you don't
+// match that behavior, the bit-stream falls out of sync and the decoder
+// walks past the end of the body. Internally calls lh_decode_compressed_mip
+// with the comp11_layout flag set.
+inline bool lh_decode_compressed_mip_v11(const uint8_t* body, size_t body_size,
+                                         int& out_width, int& out_height,
+                                         std::vector<uint8_t>& out_bc1,
+                                         std::string* err = nullptr) {
+    return lh_decode_compressed_mip(body, body_size, out_width, out_height,
+                                    out_bc1, err, /*comp11_layout=*/true);
+}
 
 // Lionhead BC4/BC5 variant codec — port of sub_82B8D010 in Fable 2.
 //

@@ -321,7 +321,8 @@ static inline uint16_t apply_delta(uint16_t c565, const DeltaEntry& d) {
 bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
                               int& out_width, int& out_height,
                               std::vector<uint8_t>& out_bc1,
-                              std::string* err)
+                              std::string* err,
+                              bool comp11_layout)
 {
     auto fail = [&](const std::string& msg) -> bool {
         log_tagged("LhTexCodec", msg);
@@ -442,7 +443,14 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
             outb[2] = (uint8_t)(c1 & 0xFF);
             outb[3] = (uint8_t)(c1 >> 8);
 
-            if (c0 == c1) {
+            // KEY DIFFERENCE between comp=1 and comp=11:
+            //   comp=1  (sub_82B8C1C8): if c0==c1, indices are skipped (solid block).
+            //   comp=11 (sub_82B8C900): always reads 4 index symbols, regardless
+            //                           of whether c0==c1. The encoder packs 4
+            //                           index symbols every block.
+            // The output index transpose is identical between the two codecs.
+            const bool always_read_indices = comp11_layout;
+            if (c0 == c1 && !always_read_indices) {
                 outb[4] = outb[5] = outb[6] = outb[7] = 0;
             } else {
                 int B0 = huff_decode(br, tree_idx);
@@ -455,7 +463,8 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
                     return fail(os.str());
                 }
                 // 4 decoded symbols are 2x2 sub-blocks in Z-order:
-                //   B0 = top-left, B1 = top-right, B2 = bottom-left, B3 = bottom-right.
+                //   B0 = top-left, B1 = top-right, B2 = bottom-left, B3 = bottom-right
+                // (verified — same in both comp=1 and comp=11)
                 // Each byte holds 4 BC1 indices (2 bits each); low nibble = cols 0-1,
                 // high nibble = cols 2-3. high nibble of Bn = row 0/2, low nibble = row 1/3.
                 outb[4] = (uint8_t)(((B1 & 0xF0))        | (((B0 >> 4) & 0x0F)));
@@ -479,17 +488,232 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
 }
 
 // ---------------------------------------------------------------------------
-// lh_decode_variant_2_3_4 — STUB. See docs/CODEC.md "variant_2_3_4" for the
-// full reverse-engineered spec; the port is tracked in docs/STATE.md.
-// Returns false so callers fall through to comp=7 raw fallback gracefully.
+// lh_decode_variant_2_3_4 — port of sub_82B8D010 (CompFlag = 2/3/4).
+//
+// CURRENT STATE: framing (header parse + 4 huffman trees) and ops 0/1/2
+// are implemented. Op-type 3 (the common case for real textures) does
+// CORRECT bit consumption — walks tree A → endpoint a0_raw, tree B →
+// endpoint a1_raw, computes a0/a1, then walks tree C 8 times for index
+// values — but emits a SIMPLIFIED BC4 alpha block (a0, a1, all-zero
+// indices = solid-block per 4x4 tile). This produces a low-frequency
+// approximation of the texture rather than the full detail. The bit
+// stream stays aligned across blocks so the codec doesn't error out;
+// adding the full index packing is a follow-up step (the indices are
+// decoded into a stack buffer but not yet packed into the output).
 // ---------------------------------------------------------------------------
-bool lh_decode_variant_2_3_4(const uint8_t* /*body*/, size_t /*body_size*/,
-                             int /*mode*/, int /*width*/, int /*height*/,
-                             std::vector<uint8_t>& /*out_bytes*/,
+
+namespace {
+
+// 6-bit → 8-bit dequantize: round((v / 63.0) * 255) for v in 0..63
+// Populated at runtime to match byte_83491F10 in the binary (sub_82B8BEA0).
+static uint8_t g_dq6to8[64];
+
+// 4-bit → 8-bit dequantize (for op_type=2 in mode != 1 path)
+// Populated to match byte_83491F70.
+static uint8_t g_dq4to8[16];
+
+// 8-bit → 4-bit quantize (for op_type=2 in mode == 1 path)
+static uint8_t g_q8to4[256];
+
+static bool g_variant_tables_init = false;
+
+static void init_variant_tables() {
+    if (g_variant_tables_init) return;
+    for (int v = 0; v < 64; ++v) {
+        g_dq6to8[v] = (uint8_t)((v * 255 + 31) / 63);  // round-half-up
+    }
+    for (int v = 0; v < 16; ++v) {
+        g_dq4to8[v] = (uint8_t)((v * 255 + 7) / 15);
+    }
+    for (int v = 0; v < 256; ++v) {
+        g_q8to4[v] = (uint8_t)((v * 15 + 127) / 255);
+    }
+    g_variant_tables_init = true;
+}
+
+static inline int clamp6(int v) {
+    return v < 0 ? 0 : (v > 0x3F ? 0x3F : v);
+}
+
+} // anonymous
+
+bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,
+                             int mode, int width, int height,
+                             std::vector<uint8_t>& out_bytes,
                              std::string* err) {
-    const char* msg = "lh_decode_variant_2_3_4: not yet ported "
-                      "(see docs/CODEC.md for spec)";
-    if (err) *err = msg;
-    log_tagged("LhTexCodec", msg);
-    return false;
+    auto fail = [&](const std::string& msg) -> bool {
+        log_tagged("LhTexCodec", msg);
+        if (err) *err = msg;
+        return false;
+    };
+
+    init_variant_tables();
+
+    if (body_size < 32) return fail("variant_2_3_4: body too small");
+    if (width <= 0 || height <= 0 || (width % 4) != 0 || (height % 4) != 0)
+        return fail("variant_2_3_4: invalid dimensions");
+
+    BitReader br(body, body_size);
+    /*int mw =*/ (void)br.read(16);
+    /*int mh =*/ (void)br.read(16);
+    int mode_flag = (int)br.read(4);   // v94 in disasm — controls op_type=2 sub-mode
+    (void)br.read(8);                   // 8 reserved bits
+
+    // Read 4 frequency tables: tree A (64), tree B (32), tree C (64), op tree (32)
+    auto read_freqs = [&](uint32_t* freqs, int n) {
+        for (int i = 0; i < n; ++i) {
+            uint8_t b = (uint8_t)br.read(8);
+            freqs[i] = decode_freq_byte(b);
+        }
+    };
+    uint32_t freqA[64], freqB[32], freqC[64], freqOp[32];
+    read_freqs(freqA, 64);
+    read_freqs(freqB, 32);
+    read_freqs(freqC, 64);
+    read_freqs(freqOp, 32);
+
+    HuffArena arena;
+    HuffNode* tree_A  = build_tree(arena, freqA, 64);
+    HuffNode* tree_B  = build_tree(arena, freqB, 32);
+    HuffNode* tree_C  = build_tree(arena, freqC, 64);
+    HuffNode* tree_op = build_tree(arena, freqOp, 32);
+
+    if (!tree_A || !tree_B || !tree_C || !tree_op)
+        return fail("variant_2_3_4: tree build failed");
+
+    const int bx_count = width  / 4;
+    const int by_count = height / 4;
+    const size_t blocks = (size_t)bx_count * (size_t)by_count;
+
+    // Output buffer: 8 bytes per block (BC4 alpha block format)
+    out_bytes.assign(blocks * 8, 0);
+
+    int run_remaining = 0;     // v69 in disasm
+    int last_op_type = -1;      // v67 — re-used across blocks during a run
+    uint8_t last_v20 = 0;       // for op_type=2 runs
+
+    for (int by = 0; by < by_count; ++by) {
+        for (int bx = 0; bx < bx_count; ++bx) {
+            int op_type;
+            uint8_t v20 = 0;
+
+            if (run_remaining > 0) {
+                --run_remaining;
+                op_type = last_op_type;
+                v20 = last_v20;
+            } else {
+                int op_sym = huff_decode(br, tree_op);
+                if (op_sym < 0) return fail("variant_2_3_4: op tree decode failed");
+                int count = op_sym & 7;
+                op_type   = op_sym >> 3;
+                int extra = (count > 0) ? (int)br.read(count) : 0;
+                run_remaining = (1 << count) + extra - 1;  // (we consume one block right now)
+
+                if (op_type == 2) {
+                    int bits = (mode_flag == 1) ? (int)br.read(4) : (int)br.read(8);
+                    if (mode == 1) {
+                        // packed-bits mode: replicate nibble to byte
+                        v20 = (uint8_t)((bits & 0xF) | ((bits & 0xF) << 4));
+                    } else {
+                        // BC4-block mode (mode == 2): expand to byte via lookup
+                        if (mode_flag == 1) {
+                            v20 = g_dq4to8[bits & 0xF];
+                        } else {
+                            v20 = (uint8_t)(bits & 0xFF);
+                        }
+                    }
+                }
+                last_op_type = op_type;
+                last_v20 = v20;
+            }
+
+            uint8_t* outb = out_bytes.data() + (size_t)(by * bx_count + bx) * 8;
+
+            switch (op_type) {
+                case 0: {  // zero block
+                    for (int i = 0; i < 8; ++i) outb[i] = 0;
+                    break;
+                }
+                case 1: {  // 0xFF block
+                    for (int i = 0; i < 8; ++i) outb[i] = 0xFF;
+                    break;
+                }
+                case 2: {  // constant fill of v20
+                    if (mode == 2) {
+                        // BC4 alpha block with a0=a1=v20 (all pixels = v20)
+                        outb[0] = v20; outb[1] = v20;
+                        outb[2] = outb[3] = outb[4] = outb[5] = outb[6] = outb[7] = 0;
+                    } else {
+                        for (int i = 0; i < 8; ++i) outb[i] = v20;
+                    }
+                    break;
+                }
+                case 3: {  // full BC4 decode — endpoints from trees A & B, indices from tree C
+                    int sym_A = huff_decode(br, tree_A);
+                    int sym_B = huff_decode(br, tree_B);
+                    if (sym_A < 0 || sym_B < 0) return fail("variant_2_3_4: A/B tree decode failed");
+                    // Endpoint computation (matches asm):
+                    //   a0_pre = sym_A - sym_B  (signed, clamp [0, 0x3F])
+                    //   a1_pre = sym_A + sym_B  (clamp [0, 0x3F])
+                    int a0 = g_dq6to8[clamp6(sym_A - sym_B)];
+                    int a1 = g_dq6to8[clamp6(sym_A + sym_B)];
+
+                    // 8 walks of tree C for indices — must consume bits even
+                    // if we don't fully use them, so the bit stream stays aligned.
+                    uint8_t indices[16] = {0};
+                    for (int iter = 0; iter < 4; ++iter) {
+                        int sC1 = huff_decode(br, tree_C);
+                        int sC2 = huff_decode(br, tree_C);
+                        if (sC1 < 0 || sC2 < 0)
+                            return fail("variant_2_3_4: C tree decode failed");
+                        // Per asm: low_3 of sC1 → indices[iter+0], high of sC1 → indices[iter+4]
+                        //         low_3 of sC2 → indices[iter+8], high of sC2 → indices[iter+12]
+                        indices[iter +  0] = (uint8_t)(sC1 & 7);
+                        indices[iter +  4] = (uint8_t)((sC1 >> 3) & 7);
+                        indices[iter +  8] = (uint8_t)(sC2 & 7);
+                        indices[iter + 12] = (uint8_t)((sC2 >> 3) & 7);
+                    }
+
+                    if (mode == 2) {
+                        // BC4 alpha block: a0, a1, then 16 indices × 3 bits packed into 6 bytes
+                        outb[0] = (uint8_t)a0;
+                        outb[1] = (uint8_t)a1;
+                        // The Lionhead encoder stores indices column-major in
+                        // a 16-byte stack buffer:
+                        //   indices[col*4 + row] = pixel value at (row, col)
+                        // Then it packs them into the BC4 bit-stream in the
+                        // order indices[0], indices[4], indices[8], indices[12],
+                        // indices[1], indices[5], ... — which is exactly the
+                        // BC4 standard row-major layout (pixel(row, col) at
+                        // bit position (row*4 + col)*3).
+                        uint64_t packed = 0;
+                        int bit_pos = 0;
+                        for (int row = 0; row < 4; ++row) {
+                            for (int col = 0; col < 4; ++col) {
+                                int src = col * 4 + row;
+                                packed |= ((uint64_t)(indices[src] & 7)) << bit_pos;
+                                bit_pos += 3;
+                            }
+                        }
+                        outb[2] = (uint8_t)(packed       & 0xFF);
+                        outb[3] = (uint8_t)((packed >> 8)  & 0xFF);
+                        outb[4] = (uint8_t)((packed >> 16) & 0xFF);
+                        outb[5] = (uint8_t)((packed >> 24) & 0xFF);
+                        outb[6] = (uint8_t)((packed >> 32) & 0xFF);
+                        outb[7] = (uint8_t)((packed >> 40) & 0xFF);
+                    } else {
+                        // Other modes — emit BC4-shape data anyway; callers map as needed.
+                        outb[0] = (uint8_t)a0;
+                        outb[1] = (uint8_t)a1;
+                        for (int i = 2; i < 8; ++i) outb[i] = 0;
+                    }
+                    break;
+                }
+                default:
+                    return fail("variant_2_3_4: invalid op_type");
+            }
+        }
+    }
+
+    return true;
 }

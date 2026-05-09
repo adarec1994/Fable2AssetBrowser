@@ -22,7 +22,14 @@ set(APP_SOURCES
         src/Utilities/operations.cpp
         src/UI/HexView.cpp
         src/UI/UI_Main.cpp
-        src/UI/UI_Panels.cpp
+        src/UI/Panels/Selection.cpp
+        src/UI/Panels/TreeBuilder.cpp
+        src/UI/Panels/TreeRender.cpp
+        src/UI/Panels/LeftPanel.cpp
+        src/UI/Panels/FileTable.cpp
+        src/UI/Panels/FolderDialog.cpp
+        src/UI/Panels/RightPanel.cpp
+        src/UI/Panels/PendingLoads.cpp
         src/UI/AudioPlayerWindow.cpp
         src/UI/Layout/LoadingScreen.cpp
         src/UI/Layout/MainLayout.cpp

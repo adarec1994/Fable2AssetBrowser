@@ -8,6 +8,8 @@
 #include <cmath>
 #include <vector>
 #include <cstdint>
+#include <string>
+#include <filesystem>
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -27,6 +29,22 @@ extern FlyCam g_flycam;       // declared in ModelPreview.h with external linkag
 // can route picking + R-rotate based on whether the skeleton overlay is
 // currently visible.
 bool g_skel_overlay_show = false;
+
+// Materials-overlay state — driven by the Materials overlay below the
+// skeleton overlay. Spec: only ONE submesh can have either flag set at
+// a time, AND the two flags are mutually exclusive across all
+// submeshes. Stored as indices instead of booleans so the radio
+// behaviour is intrinsic. -1 = nothing selected.
+int g_highlight_mesh_idx = -1;
+int g_isolate_mesh_idx   = -1;
+
+// Texture popout — set when the user clicks a thumbnail in the
+// Materials overlay. The window stays up until the user closes it.
+#ifdef _WIN32
+ID3D11ShaderResourceView* g_tex_popout_srv = nullptr;
+#endif
+std::string g_tex_popout_name;
+bool        g_tex_popout_open = false;
 
 namespace UI {
 
@@ -425,6 +443,15 @@ void draw_model_in_panel(ID3D11Device* device) {
         }
     }
 
+    // Sync materials-overlay selection into per-mesh flags so MP_Render
+    // sees the latest user choice. The radio behaviour is enforced when
+    // the user toggles a checkbox below — here we just project the
+    // single global index onto every submesh.
+    for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
+        g_mp.meshes[i].highlight = ((int)i == ::g_highlight_mesh_idx);
+        g_mp.meshes[i].isolated  = ((int)i == ::g_isolate_mesh_idx);
+    }
+
     apply_orbit_to_flycam();
     MP_Render(device, g_mp, g_flycam);
 
@@ -460,6 +487,11 @@ void draw_model_in_panel(ID3D11Device* device) {
     ImGui::TextDisabled("L-Drag  rotate");
     ImGui::SetCursorScreenPos(ImVec2(origin.x + 14, origin.y + 46));
     ImGui::TextDisabled("Wheel  zoom  /  ESC  close");
+
+    // Track where the next overlay should be placed vertically — starts
+    // just below the Controls box, advances past the skeleton overlay if
+    // that one renders. Used by the Materials overlay below.
+    float next_overlay_y = origin.y + 76.0f;
 
     // Skeleton overlay — only when the loaded MDL carries bone data. Sits
     // directly below the Controls hint, same width. Faded to ~30% alpha
@@ -519,6 +551,12 @@ void draw_model_in_panel(ID3D11Device* device) {
                                         ? "RMB cancel  /  LMB confirm"
                                         : "R: rotate selected");
             }
+            // Capture the overlay's actual bottom so the Materials
+            // overlay below can sit flush against it. Done inside Begin
+            // so we read the current frame's auto-resized size.
+            ImVec2 wp = ImGui::GetWindowPos();
+            ImVec2 ws = ImGui::GetWindowSize();
+            next_overlay_y = wp.y + ws.y + 6.0f;
         }
         ImGui::End();
         ImGui::PopStyleVar();
@@ -538,6 +576,217 @@ void draw_model_in_panel(ID3D11Device* device) {
         ::g_skel_overlay_show = false;
         S.selected_bone       = -1;
         S.bone_rotate_mode    = false;
+    }
+
+    // ---- Materials overlay ----------------------------------------------
+    // Sits beneath the skeleton overlay (or right under Controls if the
+    // model has no skeleton). One section per submesh: name header,
+    // Highlight + Isolate checkboxes, and clickable texture thumbnails.
+    // Hover-fade alpha mirrors the skeleton overlay's behaviour.
+    //
+    // Highlight / Isolate are mutually exclusive across ALL submeshes —
+    // a single global index per flag (g_highlight_mesh_idx /
+    // g_isolate_mesh_idx) is the source of truth. Clicking a checkbox
+    // sets/clears that index AND clears the other flag's index, so
+    // ticking Highlight on submesh B automatically unticks Highlight on
+    // submesh A and any active Isolate elsewhere.
+    if (g_mp.has_model && !g_mp.meshes.empty()) {
+        static float s_mat_alpha = 0.30f;
+        const float kIdleAlpha   = 0.30f;
+        const float kHoverAlpha  = 1.00f;
+
+        // Width is fixed (the per-section row of thumbnails + checkboxes
+        // is sized for this width). Height is dynamic: ImGui auto-fits
+        // the window to its content, but a max-height constraint caps
+        // the growth at whatever vertical space is left in the panel —
+        // beyond that, the scrollbar takes over.
+        const float kMatW = 296.0f;
+        float max_h = std::max(160.0f,
+                               region.y - (next_overlay_y - origin.y) - 20.0f);
+
+        ImGui::SetNextWindowPos(ImVec2(origin.x + 6, next_overlay_y));
+        ImGui::SetNextWindowSizeConstraints(ImVec2(kMatW, 0.0f),
+                                            ImVec2(kMatW, max_h));
+        ImGui::SetNextWindowBgAlpha(s_mat_alpha * 0.78f);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, s_mat_alpha);
+
+        // AlwaysAutoResize asks ImGui to size the window to fit its
+        // content; the size constraint above clamps that to [kMatW,
+        // max_h] so a tall list doesn't overflow off-panel.
+        ImGuiWindowFlags fl = ImGuiWindowFlags_NoTitleBar
+                            | ImGuiWindowFlags_NoResize
+                            | ImGuiWindowFlags_NoMove
+                            | ImGuiWindowFlags_NoCollapse
+                            | ImGuiWindowFlags_NoSavedSettings
+                            | ImGuiWindowFlags_AlwaysAutoResize;
+        if (ImGui::Begin("##materials_overlay", nullptr, fl)) {
+            bool hovering = ImGui::IsWindowHovered(
+                ImGuiHoveredFlags_AllowWhenBlockedByPopup |
+                ImGuiHoveredFlags_ChildWindows);
+            float target = hovering ? kHoverAlpha : kIdleAlpha;
+            s_mat_alpha += (target - s_mat_alpha) * 0.18f;
+            if (std::fabs(s_mat_alpha - target) < 0.005f) s_mat_alpha = target;
+
+            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Materials");
+            ImGui::Separator();
+
+            const ImVec2 thumb_size(48, 48);
+
+            for (size_t mi = 0; mi < g_mp.meshes.size(); ++mi) {
+                auto& mesh = g_mp.meshes[mi];   // non-const so the
+                                                // per-slot visibility
+                                                // checkbox below can
+                                                // write through it.
+                ImGui::PushID((int)mi);
+
+                // Submesh name header. Truncated rendering relies on the
+                // window's clip rect — long names wrap into the next row.
+                ImGui::TextUnformatted(mesh.name.c_str());
+
+                bool h   = (::g_highlight_mesh_idx == (int)mi);
+                bool iso = (::g_isolate_mesh_idx   == (int)mi);
+
+                // Highlight: mutex with Isolate-on-anything AND with
+                // Highlight on every other submesh. We model that by
+                // single global indices.
+                if (ImGui::Checkbox("Highlight", &h)) {
+                    if (h) {
+                        ::g_highlight_mesh_idx = (int)mi;
+                        ::g_isolate_mesh_idx   = -1;
+                    } else if (::g_highlight_mesh_idx == (int)mi) {
+                        ::g_highlight_mesh_idx = -1;
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Checkbox("Isolate", &iso)) {
+                    if (iso) {
+                        ::g_isolate_mesh_idx   = (int)mi;
+                        ::g_highlight_mesh_idx = -1;
+                    } else if (::g_isolate_mesh_idx == (int)mi) {
+                        ::g_isolate_mesh_idx = -1;
+                    }
+                }
+
+                // Texture thumbnails — only render slots that have a
+                // real (non-default) SRV with a known name. Click = open
+                // popout, hover = tooltip with the texture name. Each
+                // thumbnail also gets a visibility checkbox stacked
+                // beneath it: when unchecked, MP_Render swaps the slot's
+                // SRV for the white default so the user can isolate
+                // which channel contributes what to the lit colour.
+                struct ThumbSpec {
+                    const char*               slot_id;
+                    ID3D11ShaderResourceView* srv;
+                    const std::string*        name;
+                    bool*                     visible;  // -> mesh.<slot>_visible
+                };
+                ThumbSpec thumbs[4] = {
+                    {"diffuse",  mesh.srv_diffuse,  &mesh.diffuse_tex_name,  &mesh.diffuse_visible},
+                    {"normal",   mesh.srv_normal,   &mesh.normal_tex_name,   &mesh.normal_visible},
+                    {"specular", mesh.srv_specular, &mesh.specular_tex_name, &mesh.specular_visible},
+                    {"tint",     mesh.srv_tint,     &mesh.tint_tex_name,     &mesh.tint_visible},
+                };
+                bool any_thumb = false;
+                for (int ti = 0; ti < 4; ++ti) {
+                    const ThumbSpec& t = thumbs[ti];
+                    if (!t.srv || t.srv == g_mp.default_srv) continue;
+                    if (t.name->empty()) continue;
+                    if (any_thumb) ImGui::SameLine();
+                    any_thumb = true;
+                    ImGui::PushID(t.slot_id);
+                    // Group keeps the thumbnail + checkbox stacked so
+                    // SameLine() between groups places the next slot's
+                    // pair next to this one.
+                    ImGui::BeginGroup();
+                    // Disabled slots get a dim tint so the icon clearly
+                    // reflects "this won't show in render".
+                    ImVec4 tint = (*t.visible) ? ImVec4(1, 1, 1, 1)
+                                               : ImVec4(0.45f, 0.45f, 0.45f, 1);
+                    if (ImGui::ImageButton("##t",
+                                           (ImTextureID)t.srv,
+                                           thumb_size,
+                                           ImVec2(0, 0), ImVec2(1, 1),
+                                           ImVec4(0, 0, 0, 0), tint)) {
+                        ::g_tex_popout_srv  = t.srv;
+                        ::g_tex_popout_name = *t.name;
+                        ::g_tex_popout_open = true;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s\n[%s]",
+                                          t.name->c_str(), t.slot_id);
+                    }
+                    // Visibility toggle directly under the thumbnail —
+                    // anonymous label so only the checkbox glyph shows.
+                    ImGui::Checkbox("##vis", t.visible);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Show %s in render", t.slot_id);
+                    }
+                    ImGui::EndGroup();
+                    ImGui::PopID();
+                }
+                if (!any_thumb) {
+                    ImGui::TextDisabled("(no textures)");
+                }
+
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
+    } else {
+        // No model — clear materials state so a new load starts fresh.
+        ::g_highlight_mesh_idx = -1;
+        ::g_isolate_mesh_idx   = -1;
+        ::g_tex_popout_open    = false;
+        ::g_tex_popout_srv     = nullptr;
+        ::g_tex_popout_name.clear();
+    }
+
+    // ---- Texture popout window ------------------------------------------
+    // Floating window showing whichever thumbnail the user last clicked.
+    // Window auto-sizes to the texture's native dimensions and is locked
+    // (NoResize) — the image displays at its true pixel size. Closes via
+    // the X button on the title bar.
+    if (::g_tex_popout_open && ::g_tex_popout_srv) {
+        int tw = 0, th = 0;
+        ID3D11Resource* res = nullptr;
+        ::g_tex_popout_srv->GetResource(&res);
+        if (res) {
+            // SRV resource for our textures is always a Texture2D — same
+            // creation path goes through CreateTexture2D + CSRV.
+            ID3D11Texture2D* t2d = (ID3D11Texture2D*)res;
+            D3D11_TEXTURE2D_DESC desc{};
+            t2d->GetDesc(&desc);
+            tw = (int)desc.Width;
+            th = (int)desc.Height;
+            res->Release();
+        }
+        if (tw > 0 && th > 0) {
+            std::string title = "Texture: "
+                + std::filesystem::path(::g_tex_popout_name).filename().string()
+                + "##tex_popout";
+            // AlwaysAutoResize + NoResize: window snaps to fit the image
+            // at native dimensions and the user cannot drag-resize.
+            // Drop the inner padding so the image sits flush with the
+            // window border (title bar still owns its own row).
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            ImGuiWindowFlags fl = ImGuiWindowFlags_NoCollapse
+                                | ImGuiWindowFlags_NoResize
+                                | ImGuiWindowFlags_AlwaysAutoResize;
+            if (ImGui::Begin(title.c_str(), &::g_tex_popout_open, fl)) {
+                ImGui::Image((ImTextureID)::g_tex_popout_srv,
+                             ImVec2((float)tw, (float)th));
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+        }
+        // X-button close path — drop the SRV reference so the next load
+        // doesn't accidentally reopen with a stale pointer.
+        if (!::g_tex_popout_open) {
+            ::g_tex_popout_srv = nullptr;
+            ::g_tex_popout_name.clear();
+        }
     }
 }
 #endif // _WIN32

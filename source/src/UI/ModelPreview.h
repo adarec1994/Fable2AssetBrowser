@@ -61,6 +61,18 @@ struct MPPerMesh {
     bool normal_visible   = true;
     bool specular_visible = true;
     bool tint_visible     = true;
+    // Submesh display name — copied from MDLMeshGeom.name at build time.
+    // Drives the per-section header in the Materials overlay.
+    std::string name;
+    // ---- Per-mesh selection flags driven by the Materials overlay ----
+    // `highlight`: paint this submesh green in the rendered image (a
+    // shader tint, not a vertex/material change). `isolated`: when ANY
+    // mesh has this set MP_Render skips drawing the others. Spec from
+    // the Materials overlay: only ONE mesh can have either flag at a
+    // time, and the two flags are mutually exclusive globally — so the
+    // checkboxes act as radios across every submesh + slot.
+    bool highlight = false;
+    bool isolated  = false;
 };
 struct ModelPreview {
 #ifdef _WIN32

@@ -892,6 +892,15 @@ float4 PS(VSOUT i) : SV_Target {
     float  spec  = pow(ndoth, 24.0) * spec_mask * 0.6;
 
     float3 color = albedo * diff_term + spec.xxx;
+
+    // Highlight tint — params.z carries a 0/1 flag from MP_Render. When
+    // on, blend the lit colour toward a saturated green so the user can
+    // visually pick out the selected submesh in the Materials overlay.
+    if (params.z > 0.5) {
+        float3 hi = float3(0.10, 0.95, 0.25);
+        color = lerp(color, hi, 0.65);
+    }
+
     return float4(color, alpha);
 }
 )";
@@ -1049,21 +1058,34 @@ static XMMATRIX bone_local_matrix(const float* tf, const float* delta /*xyzw or 
 }
 
 // Compute world-space rest pose matrices for every bone in `info`. Output
-// is row-major 4x4 (XMFLOAT4X4 stored as 16 floats). Skipping bones with
-// missing transforms collapses to identity.
+// is XMFLOAT4X4 (16 floats, row-major) — NOT XMMATRIX. The reason: on x86
+// std::vector<XMMATRIX> has been observed to produce stack-cookie /
+// alignment failures during SSE loads on some MSVC toolchains, since
+// XMMATRIX wants 16-byte alignment but the std::allocator path doesn't
+// always honour it. Storing as XMFLOAT4X4 (plain 16-float struct, no
+// alignment requirement) sidesteps the whole class of bug — we just
+// XMLoadFloat4x4 / XMStoreFloat4x4 around the SIMD operations.
+//
+// `n_cap` lets the caller bound the output to MP_MAX_BONES so a corrupt
+// MDL that reports a wild BoneCount can't trigger a multi-GB allocation.
 static void compute_rest_world(const MDLInfo& info,
-                               std::vector<XMMATRIX>& out_world){
-    const uint32_t n = info.BoneCount;
-    out_world.assign(n, XMMatrixIdentity());
+                               uint32_t n_cap,
+                               std::vector<XMFLOAT4X4>& out_world){
+    const uint32_t n = std::min<uint32_t>(info.BoneCount, n_cap);
+    out_world.assign(n, XMFLOAT4X4());
+    XMFLOAT4X4 ident_f; XMStoreFloat4x4(&ident_f, XMMatrixIdentity());
+    for (uint32_t i = 0; i < n; ++i) out_world[i] = ident_f;
+
     if (n == 0 || !info.HasBoneTransforms) return;
     if (info.Bones.size() != info.BoneTransforms.size()) return;
 
-    std::vector<XMMATRIX> local(n);
+    std::vector<XMFLOAT4X4> local(n);
     for (uint32_t i = 0; i < n; ++i){
         const auto& tf = info.BoneTransforms[i];
-        local[i] = (tf.size() >= 10)
+        XMMATRIX L = (tf.size() >= 10)
                      ? bone_local_matrix(tf.data(), nullptr)
                      : XMMatrixIdentity();
+        XMStoreFloat4x4(&local[i], L);
     }
     std::vector<uint8_t> done(n, 0);
     for (uint32_t i = 0; i < n; ++i){
@@ -1074,10 +1096,16 @@ static void compute_rest_world(const MDLInfo& info,
             chain.push_back(cur);
             cur = info.Bones[cur].ParentID;
         }
-        XMMATRIX accum = (cur >= 0 && cur < (int)n) ? out_world[cur] : XMMatrixIdentity();
+        XMMATRIX accum;
+        if (cur >= 0 && cur < (int)n) {
+            accum = XMLoadFloat4x4(&out_world[cur]);
+        } else {
+            accum = XMMatrixIdentity();
+        }
         for (auto it = chain.rbegin(); it != chain.rend(); ++it){
-            accum = local[*it] * accum;
-            out_world[*it] = accum;
+            XMMATRIX L = XMLoadFloat4x4(&local[*it]);
+            accum = L * accum;
+            XMStoreFloat4x4(&out_world[*it], accum);
             done[*it] = 1;
         }
     }
@@ -1169,6 +1197,17 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         m.normal_visible    = true;
         m.specular_visible  = true;
         m.tint_visible      = true;
+        // Submesh display name — falls back to mesh_<i>/sub_<j> if the
+        // parsed name is empty so the Materials overlay always has
+        // something to show in the section header.
+        if (!g.name.empty()) {
+            m.name = g.name;
+        } else {
+            m.name = "mesh_" + std::to_string(g.MeshIndex)
+                   + "_sub_" + std::to_string(g.SubMeshIndex);
+        }
+        m.highlight = false;
+        m.isolated  = false;
         // Prefer textures from the same nested BNK family the model came
         // from (the user's currently-selected BNK), so a model loaded from
         // a region archive uses that region's textures instead of globals.
@@ -1233,10 +1272,13 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         }
 
         // Compute rest world matrices, then their inverses for inv-bind.
-        std::vector<XMMATRIX> rest_world;
-        compute_rest_world(info, rest_world);
-        for (uint32_t i = 0; i < n; ++i){
-            XMMATRIX inv = XMMatrixInverse(nullptr, rest_world[i]);
+        // Stored as XMFLOAT4X4 to avoid the alignment trap described in
+        // compute_rest_world's header comment.
+        std::vector<XMFLOAT4X4> rest_world;
+        compute_rest_world(info, n, rest_world);
+        for (uint32_t i = 0; i < n && i < rest_world.size(); ++i){
+            XMMATRIX W   = XMLoadFloat4x4(&rest_world[i]);
+            XMMATRIX inv = XMMatrixInverse(nullptr, W);
             XMFLOAT4X4 m;
             XMStoreFloat4x4(&m, inv);
             std::memcpy(&mp.inv_bind[(size_t)i * 16], &m, sizeof(float) * 16);
@@ -1315,16 +1357,19 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     }
     if (mp.bone_count > 0) {
         const uint32_t n = mp.bone_count;
-        // Pose locals — apply delta quaternion if available.
-        std::vector<XMMATRIX> local(n);
+        // Pose locals — apply delta quaternion if available. Stored as
+        // XMFLOAT4X4 so the underlying allocator doesn't need 16-byte
+        // alignment (see compute_rest_world's note for context).
+        std::vector<XMFLOAT4X4> local(n);
         bool have_deltas = (S.bone_rot_deltas.size() >= (size_t)n * 4);
         for (uint32_t i = 0; i < n; ++i){
             const float* tf = &mp.local_rest[(size_t)i * 11];
             const float* dq = have_deltas ? &S.bone_rot_deltas[(size_t)i * 4] : nullptr;
-            local[i] = bone_local_matrix(tf, dq);
+            XMMATRIX L = bone_local_matrix(tf, dq);
+            XMStoreFloat4x4(&local[i], L);
         }
         // World matrices via the cached parent chain.
-        std::vector<XMMATRIX> world(n);
+        std::vector<XMFLOAT4X4> world(n);
         std::vector<uint8_t> done(n, 0);
         for (uint32_t i = 0; i < n; ++i){
             if (done[i]) continue;
@@ -1334,10 +1379,13 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 chain.push_back(cur);
                 cur = mp.bone_parents[cur];
             }
-            XMMATRIX accum = (cur >= 0 && cur < (int)n) ? world[cur] : XMMatrixIdentity();
+            XMMATRIX accum;
+            if (cur >= 0 && cur < (int)n) accum = XMLoadFloat4x4(&world[cur]);
+            else                          accum = XMMatrixIdentity();
             for (auto it = chain.rbegin(); it != chain.rend(); ++it){
-                accum = local[*it] * accum;
-                world[*it] = accum;
+                XMMATRIX L = XMLoadFloat4x4(&local[*it]);
+                accum = L * accum;
+                XMStoreFloat4x4(&world[*it], accum);
                 done[*it] = 1;
             }
         }
@@ -1348,21 +1396,45 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             XMFLOAT4X4 ib_f;
             std::memcpy(&ib_f, &mp.inv_bind[(size_t)i * 16], sizeof(float) * 16);
             XMMATRIX ib = XMLoadFloat4x4(&ib_f);
-            XMMATRIX skin = ib * world[i];
+            XMMATRIX W  = XMLoadFloat4x4(&world[i]);
+            XMMATRIX skin = ib * W;
             XMStoreFloat4x4(&bone_mats[i], skin);
         }
     }
-    D3D11_MAPPED_SUBRESOURCE bms{};
-    if (SUCCEEDED(ctx->Map(mp.bone_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &bms))){
-        std::memcpy(bms.pData, bone_mats.data(),
-                    sizeof(XMFLOAT4X4) * MP_MAX_BONES);
-        ctx->Unmap(mp.bone_cb, 0);
+    if (mp.bone_cb) {
+        D3D11_MAPPED_SUBRESOURCE bms{};
+        if (SUCCEEDED(ctx->Map(mp.bone_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &bms))){
+            std::memcpy(bms.pData, bone_mats.data(),
+                        sizeof(XMFLOAT4X4) * MP_MAX_BONES);
+            ctx->Unmap(mp.bone_cb, 0);
+        }
+        ctx->VSSetConstantBuffers(1, 1, &mp.bone_cb);
     }
-    ctx->VSSetConstantBuffers(1, 1, &mp.bone_cb);
+
+    // Materials-overlay state: when any submesh has `isolated=true` we
+    // draw only that one (acts like solo / hide-rest). Highlight is
+    // independent — it just toggles a green tint via params.z below.
+    bool any_isolated = false;
+    for (const auto& mm : mp.meshes) { if (mm.isolated) { any_isolated = true; break; } }
+
+    // Helper to push the per-mesh CB right before its draw — we copy the
+    // common camera/light values once into `cb` above, and only swap the
+    // per-mesh highlight bit here. Cheaper than rebuilding the whole CB.
+    auto upload_per_mesh_cb = [&](bool highlight){
+        cb.params = XMFLOAT4(0.4f, 48.0f, highlight ? 1.0f : 0.0f, 0.0f);
+        D3D11_MAPPED_SUBRESOURCE pms{};
+        if (SUCCEEDED(ctx->Map(mp.cbuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &pms))) {
+            std::memcpy(pms.pData, &cb, sizeof(cb));
+            ctx->Unmap(mp.cbuffer, 0);
+        }
+    };
+
     float blend_factor[4] = {0,0,0,0};
     ctx->OMSetDepthStencilState(mp.dssWrite, 0);
     for(const auto& m : mp.meshes){
         if(!m.vb || !m.ib || m.index_count==0 || m.has_alpha) continue;
+        if (any_isolated && !m.isolated) continue;
+        upload_per_mesh_cb(m.highlight);
         ctx->OMSetBlendState(mp.bs, blend_factor, 0xFFFFFFFF);
         UINT stride=sizeof(MPVertex), offset=0;
         ctx->IASetVertexBuffers(0,1,&m.vb,&stride,&offset);
@@ -1386,6 +1458,8 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     ctx->OMSetDepthStencilState(mp.dssNoWrite, 0);
     for(const auto& m : mp.meshes){
         if(!m.vb || !m.ib || m.index_count==0 || !m.has_alpha) continue;
+        if (any_isolated && !m.isolated) continue;
+        upload_per_mesh_cb(m.highlight);
         ctx->OMSetBlendState(mp.bsAlpha, blend_factor, 0xFFFFFFFF);
         UINT stride=sizeof(MPVertex), offset=0;
         ctx->IASetVertexBuffers(0,1,&m.vb,&stride,&offset);
@@ -1418,15 +1492,17 @@ void MP_ComputeWorldPose(const ModelPreview& mp,
     const uint32_t n = mp.bone_count;
     const bool have_deltas = (deltas.size() >= (size_t)n * 4);
 
-    // Locals (rest, optionally with delta applied).
-    std::vector<XMMATRIX> local(n);
+    // Locals (rest, optionally with delta applied). XMFLOAT4X4 storage —
+    // see compute_rest_world for the alignment-trap context.
+    std::vector<XMFLOAT4X4> local(n);
     for (uint32_t i = 0; i < n; ++i){
         const float* tf = &mp.local_rest[(size_t)i * 11];
         const float* dq = have_deltas ? &deltas[(size_t)i * 4] : nullptr;
-        local[i] = bone_local_matrix(tf, dq);
+        XMMATRIX L = bone_local_matrix(tf, dq);
+        XMStoreFloat4x4(&local[i], L);
     }
     // Worlds via parent chain.
-    std::vector<XMMATRIX> world(n);
+    std::vector<XMFLOAT4X4> world(n);
     std::vector<uint8_t> done(n, 0);
     for (uint32_t i = 0; i < n; ++i){
         if (done[i]) continue;
@@ -1436,19 +1512,21 @@ void MP_ComputeWorldPose(const ModelPreview& mp,
             chain.push_back(cur);
             cur = mp.bone_parents[cur];
         }
-        XMMATRIX accum = (cur >= 0 && cur < (int)n) ? world[cur] : XMMatrixIdentity();
+        XMMATRIX accum;
+        if (cur >= 0 && cur < (int)n) accum = XMLoadFloat4x4(&world[cur]);
+        else                          accum = XMMatrixIdentity();
         for (auto it = chain.rbegin(); it != chain.rend(); ++it){
-            accum = local[*it] * accum;
-            world[*it] = accum;
+            XMMATRIX L = XMLoadFloat4x4(&local[*it]);
+            accum = L * accum;
+            XMStoreFloat4x4(&world[*it], accum);
             done[*it] = 1;
         }
     }
     // Output as 16 floats per bone, row-major.
     out_world_pose.resize((size_t)n * 16);
     for (uint32_t i = 0; i < n; ++i){
-        XMFLOAT4X4 m;
-        XMStoreFloat4x4(&m, world[i]);
-        std::memcpy(&out_world_pose[(size_t)i * 16], &m, sizeof(float) * 16);
+        std::memcpy(&out_world_pose[(size_t)i * 16],
+                    &world[i], sizeof(float) * 16);
     }
 }
 
@@ -1699,6 +1777,17 @@ bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelP
         m.normal_visible    = true;
         m.specular_visible  = true;
         m.tint_visible      = true;
+        // Submesh display name — falls back to mesh_<i>/sub_<j> if the
+        // parsed name is empty so the Materials overlay always has
+        // something to show in the section header.
+        if (!g.name.empty()) {
+            m.name = g.name;
+        } else {
+            m.name = "mesh_" + std::to_string(g.MeshIndex)
+                   + "_sub_" + std::to_string(g.SubMeshIndex);
+        }
+        m.highlight = false;
+        m.isolated  = false;
         if (!g.diffuse_tex_name.empty())  { m.tex_diffuse  = load_tex_from_name(g.diffuse_tex_name,  &hasA); }
         if (!g.normal_tex_name.empty())   { m.tex_normal   = load_tex_from_name(g.normal_tex_name,   nullptr); }
         if (!g.specular_tex_name.empty()) { m.tex_specular = load_tex_from_name(g.specular_tex_name, nullptr); }

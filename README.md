@@ -18,11 +18,6 @@ Browse the Fable 2 BNK files. Included features:
 
 Coming soon!
 
-
-## Building
-To build, clone the repository and open in Clion. Any dependencies will be pulled by Cmake.
-
-
 ## How to Contribute
 
 There are several key areas where your contributions would be most impactful:

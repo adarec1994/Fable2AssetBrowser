@@ -25,8 +25,8 @@ set(APP_SOURCES
         src/UI/UI_Panels.cpp
         src/UI/AudioPlayerWindow.cpp
         src/UI/Layout/LoadingScreen.cpp
-        src/UI/Layout/Sidebar.cpp
         src/UI/Layout/MainLayout.cpp
+        src/UI/Layout/RenderPanel.cpp
         src/Splashscreen/Splashscreen.cpp
         src/Splashscreen/SplashSparkles.cpp
         src/Splashscreen/LogoMap.cpp

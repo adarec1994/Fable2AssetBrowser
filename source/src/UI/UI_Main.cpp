@@ -27,7 +27,9 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 ModelPreview g_mp;
-static bool g_mp_initialized = false;
+// Non-static so RenderPanel.cpp can reference it as extern. Tracks
+// whether MP_Init has run for the current model.
+bool g_mp_initialized = false;
 #ifdef _WIN32
 static ID3D11ShaderResourceView* g_splash_texture = nullptr;
 static ID3D11ShaderResourceView* g_logo_texture = nullptr;
@@ -158,6 +160,15 @@ static void handle_flycam_input(float dt) {
     }
     FlyCam_Update(g_flycam, dt, w_pressed, s_pressed, a_pressed, d_pressed, q_pressed, e_pressed, mouse_dx, mouse_dy);
 }
+
+// External entry point so the render panel (in src/UI/Layout/) can drive
+// the camera while the model is embedded in its child window. Same logic
+// as the in-file static — kept as a thin wrapper so we don't have to make
+// the camera state public.
+void render_panel_handle_flycam(float dt) {
+    handle_flycam_input(dt);
+}
+
 #ifdef _WIN32
 void draw_main(HWND hwnd, ID3D11Device* device) {
     g_hwnd = hwnd;
@@ -172,70 +183,41 @@ void draw_main(GLFWwindow* window) {
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                  ImGuiWindowFlags_NoBringToFrontOnFocus |
-                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                 ImGuiWindowFlags_MenuBar);
     float dt = ImGui::GetIO().DeltaTime;
+
+    // ---- Top menu bar ------------------------------------------------------
+    // Only shown after splash — otherwise it sits awkwardly above the
+    // "click anywhere" splash. File > Quit posts WM_QUIT so the main loop
+    // exits through the same path as clicking the X.
+    if (!S.root_dir.empty()) {
+        if (ImGui::BeginMenuBar()) {
+            if (ImGui::BeginMenu("File")) {
+                if (ImGui::MenuItem("Quit", "Alt+F4")) {
+#ifdef _WIN32
+                    PostQuitMessage(0);
+#else
+                    if (g_glfw_window) glfwSetWindowShouldClose(g_glfw_window, GLFW_TRUE);
+#endif
+                }
+                ImGui::EndMenu();
+            }
+            ImGui::EndMenuBar();
+        }
+    }
 
     // ---- Top-level dispatch ------------------------------------------------
     // 1. No data picked → splash screen.
-    // 2. Data picked + model preview active → 3D model viewer (full-window).
-    // 3. Data picked + tree still building → loading screen (full-window).
-    // 4. Data picked + tree ready → 3-column main layout.
+    // 2. Data picked + tree still building → loading screen (full-window).
+    // 3. Data picked + tree ready → main 2-column layout. The render
+    //    panel inside the layout owns model preview / texture display.
     if (S.root_dir.empty()) {
 #ifdef _WIN32
         Splash::draw(device);
 #else
         Splash::draw(window);
 #endif
-    } else if (g_mp.has_model) {
-        ImVec2 window_pos  = ImGui::GetWindowPos();
-        ImVec2 window_size = ImGui::GetWindowSize();
-        if (!g_mp_initialized) {
-#ifdef _WIN32
-            MP_Init(device, g_mp, (int)window_size.x, (int)window_size.y);
-#else
-            MP_Init(g_mp, (int)window_size.x, (int)window_size.y);
-#endif
-            g_mp_initialized = true;
-        }
-#ifdef _WIN32
-        MP_Resize(device, g_mp, (int)window_size.x, (int)window_size.y);
-        MP_Render(device, g_mp, g_flycam);
-#else
-        MP_Resize(g_mp, (int)window_size.x, (int)window_size.y);
-        MP_Render(g_mp, g_flycam);
-#endif
-        ImDrawList* draw_list = ImGui::GetWindowDrawList();
-#ifdef _WIN32
-        if (g_mp.srv) {
-            draw_list->AddImage((ImTextureID)g_mp.srv, window_pos,
-                                ImVec2(window_pos.x + window_size.x, window_pos.y + window_size.y));
-        }
-#else
-        if (g_mp.color_tex) {
-            draw_list->AddImage((ImTextureID)(intptr_t)g_mp.color_tex, window_pos,
-                                ImVec2(window_pos.x + window_size.x, window_pos.y + window_size.y));
-        }
-#endif
-        if (!ImGui::IsAnyItemActive() && !ImGui::IsAnyItemHovered()) {
-            handle_flycam_input(dt);
-        }
-        ImGui::SetCursorPos(ImVec2(10, 10));
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.1f, 0.1f, 0.1f, 0.8f));
-        ImGui::BeginChild("controls_hint", ImVec2(220, 140), true);
-        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Camera Controls");
-        ImGui::Separator();
-        ImGui::Text("W/S - Forward/Back");
-        ImGui::Text("A/D - Strafe Left/Right");
-        ImGui::Text("Q/E - Down/Up");
-        ImGui::Text("Right-Click - Look");
-        ImGui::Text("ESC - Close Model");
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-            MP_Release(g_mp);
-            g_mp.has_model = false;
-            g_mp_initialized = false;
-        }
     } else if (UI::loading_in_progress() || S.bnk_paths.empty()) {
         // Either the tree is still being built, or we don't have any
         // BNKs scanned yet (e.g. the open thread hasn't finished). Show
@@ -288,57 +270,10 @@ void draw_main(GLFWwindow* window) {
     }
 #endif
 
-    if (S.show_texture_window) {
-        ImGuiViewport* viewport = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(ImVec2(viewport->GetCenter().x - 200, viewport->GetCenter().y - 150), ImGuiCond_FirstUseEver);
-
-        bool is_error = (S.texture_window_width == 0 || S.texture_window_height == 0);
-        if (is_error) {
-            ImGui::SetNextWindowSize(ImVec2(500, 100), ImGuiCond_FirstUseEver);
-        } else {
-            ImGui::SetNextWindowSize(ImVec2((float)S.texture_window_width + 20, (float)S.texture_window_height + 60), ImGuiCond_FirstUseEver);
-        }
-
-        std::string title = is_error ? "Texture Preview" : ("Texture: " + std::filesystem::path(S.texture_window_name).filename().string());
-        if (ImGui::Begin(title.c_str(), &S.show_texture_window, ImGuiWindowFlags_NoCollapse)) {
-            if (is_error) {
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", S.texture_window_name.c_str());
-            } else {
-                ImGui::Text("%dx%d", S.texture_window_width, S.texture_window_height);
-                ImGui::Separator();
-
-                ImVec2 avail = ImGui::GetContentRegionAvail();
-                float scale = std::min(avail.x / (float)S.texture_window_width, avail.y / (float)S.texture_window_height);
-                float disp_w = S.texture_window_width * scale;
-                float disp_h = S.texture_window_height * scale;
-
-#ifdef _WIN32
-                if (S.texture_window_srv) {
-                    ImGui::Image((ImTextureID)S.texture_window_srv, ImVec2(disp_w, disp_h));
-                }
-#else
-                if (S.texture_window_gl) {
-                    ImGui::Image((ImTextureID)(intptr_t)S.texture_window_gl, ImVec2(disp_w, disp_h));
-                }
-#endif
-            }
-        }
-        ImGui::End();
-
-        if (!S.show_texture_window) {
-#ifdef _WIN32
-            if (S.texture_window_srv) {
-                S.texture_window_srv->Release();
-                S.texture_window_srv = nullptr;
-            }
-#else
-            if (S.texture_window_gl) {
-                glDeleteTextures(1, &S.texture_window_gl);
-                S.texture_window_gl = 0;
-            }
-#endif
-        }
-    }
+    // The floating "Texture Preview" ImGui window is gone — textures
+    // now render into the central RenderPanel via S.texture_window_srv.
+    // The pending_texture_load handler above creates that SRV; the
+    // panel paints it.
 
     // In-app audio player (only renders when a source is loaded).
     UI::draw_audio_player_window();

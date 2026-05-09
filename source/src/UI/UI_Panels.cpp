@@ -710,19 +710,19 @@ static void draw_tree_node(TreeNode& node) {
             for (size_t i = 0; i < S.files.size(); ++i) {
                 if (S.files[i].index == node.bnk_index) {
                     S.selected_file_index = (int)i;
+                    // Single-click loads .mdl and .tex straight into the
+                    // central render panel — no double-click needed.
                     if (is_mdl(node.name)) {
                         g_pending_mdl_full_path = node.full_path;
                         g_pending_mdl_load = true;
                         g_pending_mdl_index = (int)i;
                     }
-                    // Double-click on a .tex node opens the texture preview,
-                    // matching the flat-file-table behavior. Without this,
-                    // nested-tree .tex nodes had no way to launch the preview.
-                    if (is_tex(node.name) && ImGui::IsMouseDoubleClicked(0)) {
+                    if (is_tex(node.name)) {
                         g_pending_tex_load = true;
                         g_pending_tex_index = (int)i;
                     }
-                    // Double-click a .wav in the tree -> in-app audio player.
+                    // .wav stays double-click → audio player (a separate
+                    // floating window, not the central panel).
                     if (is_audio_file(node.name) && ImGui::IsMouseDoubleClicked(0)) {
                         open_audio_player_for_selected((int)i);
                     }
@@ -2380,6 +2380,10 @@ if (!can_preview) {
             ? S.selected_nested_temp_path
             : S.selected_bnk;
 
+        // Show the loading popup while the texture decode runs in the
+        // background. Matches the MDL preview path.
+        progress_open(0, "Loading texture...");
+
         std::thread([name, preferred_for_tex]() {
             std::vector<unsigned char> tex_buf;
             if (!build_any_tex_buffer_for_name(name, tex_buf, preferred_for_tex)) {
@@ -2389,6 +2393,7 @@ if (!can_preview) {
                 S.pending_texture_load = true;
                 S.pending_texture_w = 0;
                 S.pending_texture_h = 0;
+                progress_done();
                 return;
             }
 
@@ -2405,6 +2410,7 @@ if (!can_preview) {
                 S.pending_texture_load = true;
                 S.pending_texture_w = 0;
                 S.pending_texture_h = 0;
+                progress_done();
                 return;
             }
 
@@ -2412,6 +2418,7 @@ if (!can_preview) {
             S.pending_texture_w = w;
             S.pending_texture_h = h;
             S.pending_texture_load = true;
+            progress_done();
         }).detach();
 
         g_pending_tex_index = -1;

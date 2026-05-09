@@ -1,2 +1,21 @@
 #include "resource.h"
-IDI_ICON1 ICON "fable.ico"
+
+IDI_ICON1       ICON      "fable.ico"
+
+// Splash screen — bundled into the exe so we don't depend on
+// include/image/* being shipped alongside.
+IDR_SPLASH_PNG  RCDATA    "include/image/splash_pano.png"
+IDR_LOGO_PNG    RCDATA    "include/image/f2_logo.png"
+
+IDR_SPARKLE_1   RCDATA    "include/image/sparkle_1.png"
+IDR_SPARKLE_2   RCDATA    "include/image/sparkle_2.png"
+IDR_SPARKLE_3   RCDATA    "include/image/sparkle_3.png"
+IDR_SPARKLE_4   RCDATA    "include/image/sparkle_4.png"
+IDR_SPARKLE_5   RCDATA    "include/image/sparkle_5.png"
+IDR_SPARKLE_6   RCDATA    "include/image/sparkle_6.png"
+IDR_SPARKLE_7   RCDATA    "include/image/sparkle_7.png"
+IDR_SPARKLE_8   RCDATA    "include/image/sparkle_8.png"
+
+// Font Awesome 6 Solid (CMake stages this .ttf via FetchContent — see
+// CMakeLists.txt). Embedded so the exe doesn't need a sidecar font file.
+IDR_FA_FONT     RCDATA    "include/image/fa-solid-900.ttf"

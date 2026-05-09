@@ -65,6 +65,9 @@ struct MDLMeshGeom {
     std::vector<uint16_t> bone_ids;
     std::vector<float> bone_weights;
     std::string diffuse_tex_name;
+    std::string normal_tex_name;
+    std::string specular_tex_name;
+    std::string tint_tex_name;
     std::string name;
     uint32_t MeshIndex = 0;
     uint32_t SubMeshIndex = 0;

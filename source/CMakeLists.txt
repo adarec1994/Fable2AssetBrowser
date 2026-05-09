@@ -17,6 +17,11 @@ set(APP_SOURCES
         src/UI/HexView.cpp
         src/UI/UI_Main.cpp
         src/UI/UI_Panels.cpp
+        src/Splashscreen/Splashscreen.cpp
+        src/Splashscreen/SplashSparkles.cpp
+        src/Splashscreen/LogoMap.cpp
+        src/Splashscreen/IconFont.cpp
+        src/ISO/IsoExtract.cpp
         src/MDL/mdl_converter.cpp
         src/BNKCore.cpp
         src/Audio/audio.cpp
@@ -102,6 +107,28 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
+# Font Awesome 6 — IconFontCppHeaders for the icon code points + the
+# Solid font itself. Pulled separately because the headers repo doesn't
+# carry the font binaries.
+FetchContent_Declare(
+        iconfontcpp
+        GIT_REPOSITORY https://github.com/juliettef/IconFontCppHeaders.git
+        GIT_TAG main
+        GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(iconfontcpp)
+
+# fontawesome-free, "free for desktop", contains the .ttf files we need
+# under otfs/ (Font Awesome 6 Free-Solid-900.otf). We fetch master and
+# pick out the otf at runtime/build-time.
+FetchContent_Declare(
+        fontawesome
+        GIT_REPOSITORY https://github.com/FortAwesome/Font-Awesome.git
+        GIT_TAG 6.x
+        GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(fontawesome)
+
 if(WIN32)
     FetchContent_Declare(
             directxmath
@@ -134,7 +161,17 @@ if(WIN32)
             ${imgui_hex_editor_SOURCE_DIR}
             ${directxmath_SOURCE_DIR}/Inc
             ${stb_SOURCE_DIR}
+            ${iconfontcpp_SOURCE_DIR}
     )
+
+    # Stage the FontAwesome 6 Solid ttf at a stable path that fable.rc
+    # references (it goes in next to the splash images so it can be
+    # bundled into the exe as RCDATA).
+    set(FA_TTF_SOURCE "${fontawesome_SOURCE_DIR}/webfonts/fa-solid-900.ttf")
+    set(FA_TTF_STAGED "${CMAKE_CURRENT_SOURCE_DIR}/include/image/fa-solid-900.ttf")
+    if(EXISTS "${FA_TTF_SOURCE}")
+        configure_file("${FA_TTF_SOURCE}" "${FA_TTF_STAGED}" COPYONLY)
+    endif()
 
     target_link_libraries(Fable_2_Asset_Browser PRIVATE d3d11 dxgi d3dcompiler dwmapi winmm)
 else()

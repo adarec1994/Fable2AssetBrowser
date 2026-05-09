@@ -1276,6 +1276,21 @@ void draw_right_panel() {
         can_preview = can_folder_preview;
     }
 
+    // Always-available toggle for the Materials & Textures window. Useful
+    // when the auto-open didn't fire or you closed the window and want it
+    // back without reloading the model.
+    {
+        bool m_open = S.model_materials_open;
+        if (ImGui::Checkbox("Materials Window", &m_open)) {
+            S.model_materials_open = m_open;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Open Now")) {
+            S.model_materials_open = true;
+            S.model_preview_open   = true;
+        }
+    }
+
 if (!can_preview) {
         ImGui::BeginDisabled();
     }

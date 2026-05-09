@@ -5,6 +5,7 @@
 #include "../Utilities/Files.h"
 #include "../Utilities/Progress.h"
 #include "UI_Panels.h"
+#include "../Splashscreen/Splashscreen.h"
 #include "imgui.h"
 #include "imgui_stdlib.h"
 #include "ImGuiFileDialog.h"
@@ -213,185 +214,18 @@ void draw_main(GLFWwindow* window) {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
-    ImGui::Begin("##main", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImGui::Begin("##main", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoBringToFrontOnFocus |
+                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     float dt = ImGui::GetIO().DeltaTime;
     if (S.root_dir.empty()) {
 #ifdef _WIN32
-        if (!g_splash_texture) {
-            LoadTextureFromFile("include/images/splash.png", device, &g_splash_texture, &g_splash_width, &g_splash_height);
-        }
-        if (!g_logo_texture) {
-            LoadTextureFromFile("include/images/logo.png", device, &g_logo_texture, &g_logo_width, &g_logo_height);
-        }
-        if (!g_button_texture) {
-            LoadTextureFromFile("include/images/button.png", device, &g_button_texture, &g_button_width, &g_button_height);
-        }
-        for (int i = 0; i < 8; ++i) {
-            if (!g_sparkle_textures[i]) {
-                char path[64];
-                snprintf(path, sizeof(path), "include/images/sparkle_%d.png", i + 1);
-                LoadTextureFromFile(path, device, &g_sparkle_textures[i], &g_sparkle_widths[i], &g_sparkle_heights[i]);
-            }
-        }
+        Splash::draw(device);
 #else
-        if (!g_splash_texture) {
-            LoadTextureFromFile("include/images/splash.png", &g_splash_texture, &g_splash_width, &g_splash_height);
-        }
-        if (!g_logo_texture) {
-            LoadTextureFromFile("include/images/logo.png", &g_logo_texture, &g_logo_width, &g_logo_height);
-        }
-        if (!g_button_texture) {
-            LoadTextureFromFile("include/images/button.png", &g_button_texture, &g_button_width, &g_button_height);
-        }
-        for (int i = 0; i < 8; ++i) {
-            if (!g_sparkle_textures[i]) {
-                char path[64];
-                snprintf(path, sizeof(path), "include/images/sparkle_%d.png", i + 1);
-                LoadTextureFromFile(path, &g_sparkle_textures[i], &g_sparkle_widths[i], &g_sparkle_heights[i]);
-            }
-        }
+        Splash::draw(window);
 #endif
-        g_splash_time_elapsed += dt;
-        ImVec2 window_pos = ImGui::GetWindowPos();
-        ImVec2 window_size = ImGui::GetWindowSize();
-        ImDrawList* draw_list = ImGui::GetWindowDrawList();
-        if (g_splash_texture && g_splash_width > 0) {
-            float scale = window_size.y / (float)g_splash_height;
-            float scaled_width = g_splash_width * scale;
-            float scroll_speed = 20.0f;
-            g_splash_scroll_offset += dt * scroll_speed;
-            if (g_splash_scroll_offset > scaled_width) g_splash_scroll_offset -= scaled_width;
-            float start_x = window_pos.x - g_splash_scroll_offset;
-            for (float x = start_x; x < window_pos.x + window_size.x; x += scaled_width) {
-                ImVec2 uv0(0, 0);
-                ImVec2 uv1(1, 1);
-                ImVec2 p_min(x, window_pos.y);
-                ImVec2 p_max(x + scaled_width, window_pos.y + window_size.y);
-#ifdef _WIN32
-                draw_list->AddImage((ImTextureID)g_splash_texture, p_min, p_max, uv0, uv1);
-#else
-                draw_list->AddImage((ImTextureID)(intptr_t)g_splash_texture, p_min, p_max, uv0, uv1);
-#endif
-            }
-        }
-        if (g_logo_texture && g_logo_width > 0) {
-            build_letter_positions();
-            float logo_scale = window_size.x / (g_logo_width * 1.5f);
-            float scaled_width = g_logo_width * logo_scale;
-            float scaled_height = g_logo_height * logo_scale;
-            float logo_x = window_pos.x + (window_size.x - scaled_width) * 0.5f;
-            float logo_y = window_pos.y + window_size.y * 0.33f - scaled_height * 0.5f;
-            if (!g_sparkles_initialized && !g_letter_positions.empty()) {
-                for (int i = 0; i < 400; ++i) {
-                    int pos_index = rand() % g_letter_positions.size();
-                    float norm_x = g_letter_positions[pos_index].first;
-                    float norm_y = g_letter_positions[pos_index].second - 0.08f;
-                    float jitter_x = (((float)rand() / RAND_MAX) - 0.5f) * 0.08f;
-                    float jitter_y = (((float)rand() / RAND_MAX) - 0.5f) * 0.06f;
-                    g_sparkles[i].x = logo_x + (norm_x + jitter_x) * scaled_width;
-                    g_sparkles[i].start_y = logo_y + (norm_y + jitter_y) * scaled_height;
-                    g_sparkles[i].y = g_sparkles[i].start_y;
-                    g_sparkles[i].texture_index = rand() % 8;
-                    g_sparkles[i].life_time = ((float)rand() / RAND_MAX) * (0.4f + ((float)rand() / RAND_MAX) * 0.4f);
-                    g_sparkles[i].max_life = 0.4f + ((float)rand() / RAND_MAX) * 0.4f;
-                    g_sparkles[i].active = true;
-                    g_sparkles[i].falls = (rand() % 100) < 70;
-                }
-                g_sparkles_initialized = true;
-            }
-            for (int i = 0; i < 400; ++i) {
-                if (!g_sparkles[i].active) continue;
-                g_sparkles[i].life_time += dt;
-                if (g_sparkles[i].life_time >= g_sparkles[i].max_life) {
-                    g_sparkles[i].life_time = 0.0f;
-                    if (!g_letter_positions.empty()) {
-                        int pos_index = rand() % g_letter_positions.size();
-                        float norm_x = g_letter_positions[pos_index].first;
-                        float norm_y = g_letter_positions[pos_index].second - 0.08f;
-                        float jitter_x = (((float)rand() / RAND_MAX) - 0.5f) * 0.08f;
-                        float jitter_y = (((float)rand() / RAND_MAX) - 0.5f) * 0.06f;
-                        g_sparkles[i].x = logo_x + (norm_x + jitter_x) * scaled_width;
-                        g_sparkles[i].start_y = logo_y + (norm_y + jitter_y) * scaled_height;
-                        g_sparkles[i].y = g_sparkles[i].start_y;
-                        g_sparkles[i].texture_index = rand() % 8;
-                        g_sparkles[i].max_life = 0.4f + ((float)rand() / RAND_MAX) * 0.4f;
-                        g_sparkles[i].falls = (rand() % 100) < 70;
-                    }
-                }
-                float phase = g_sparkles[i].life_time / g_sparkles[i].max_life;
-                if (g_sparkles[i].falls) {
-                    float fall_distance = 30.0f;
-                    g_sparkles[i].y = g_sparkles[i].start_y + (phase * fall_distance);
-                } else {
-                    g_sparkles[i].y = g_sparkles[i].start_y;
-                }
-                int tex_idx = g_sparkles[i].texture_index;
-                if (!g_sparkle_textures[tex_idx]) continue;
-                float sparkle_alpha = 0.0f;
-                if (phase < 0.5f) {
-                    sparkle_alpha = phase * 2.0f;
-                } else {
-                    sparkle_alpha = (1.0f - phase) * 2.0f;
-                }
-                sparkle_alpha *= 0.7f;
-                float sparkle_size = 32.0f;
-                ImU32 col = IM_COL32(255, 255, 255, (int)(sparkle_alpha * 255));
-                float center_x = g_sparkles[i].x;
-                float center_y = g_sparkles[i].y;
-                float half_size = sparkle_size * 0.5f;
-                ImVec2 sp_min(center_x - half_size, center_y - half_size);
-                ImVec2 sp_max(center_x + half_size, center_y + half_size);
-#ifdef _WIN32
-                draw_list->AddImage((ImTextureID)g_sparkle_textures[tex_idx], sp_min, sp_max, ImVec2(0,0), ImVec2(1,1), col);
-#else
-                draw_list->AddImage((ImTextureID)(intptr_t)g_sparkle_textures[tex_idx], sp_min, sp_max, ImVec2(0,0), ImVec2(1,1), col);
-#endif
-                float glow_size = sparkle_size * 1.3f;
-                float glow_half = glow_size * 0.5f;
-                ImU32 glow_col = IM_COL32(255, 255, 200, (int)(sparkle_alpha * 100));
-                ImVec2 glow_min(center_x - glow_half, center_y - glow_half);
-                ImVec2 glow_max(center_x + glow_half, center_y + glow_half);
-#ifdef _WIN32
-                draw_list->AddImage((ImTextureID)g_sparkle_textures[tex_idx], glow_min, glow_max, ImVec2(0,0), ImVec2(1,1), glow_col);
-#else
-                draw_list->AddImage((ImTextureID)(intptr_t)g_sparkle_textures[tex_idx], glow_min, glow_max, ImVec2(0,0), ImVec2(1,1), glow_col);
-#endif
-            }
-            ImVec2 logo_min(logo_x, logo_y);
-            ImVec2 logo_max(logo_x + scaled_width, logo_y + scaled_height);
-#ifdef _WIN32
-            draw_list->AddImage((ImTextureID)g_logo_texture, logo_min, logo_max);
-#else
-            draw_list->AddImage((ImTextureID)(intptr_t)g_logo_texture, logo_min, logo_max);
-#endif
-        }
-        const char* text = "Click anywhere and browse to Fable 2 directory";
-        ImVec2 text_size = ImGui::CalcTextSize(text);
-        float text_x = window_pos.x + (window_size.x - text_size.x) * 0.5f;
-        float logo_scale = window_size.x / (g_logo_width * 1.5f);
-        float scaled_height = g_logo_height * logo_scale;
-        float logo_bottom = window_pos.y + window_size.y * 0.33f + scaled_height * 0.5f;
-        float text_y = logo_bottom - 20.0f;
-        float text_alpha = 1.0f;
-        if (g_splash_time_elapsed < g_fade_in_delay + g_fade_in_duration) {
-            float fade_progress = (g_splash_time_elapsed - g_fade_in_delay) / g_fade_in_duration;
-            text_alpha = (fade_progress > 1.0f) ? 1.0f : (fade_progress < 0.0f ? 0.0f : fade_progress);
-        }
-        float padding = 10.0f;
-        ImVec2 backdrop_min(text_x - padding, text_y - padding);
-        ImVec2 backdrop_max(text_x + text_size.x + padding, text_y + text_size.y + padding);
-        draw_list->AddRectFilled(backdrop_min, backdrop_max, IM_COL32(0, 0, 0, (int)(text_alpha * 180)), 4.0f);
-        draw_list->AddText(ImVec2(text_x, text_y), IM_COL32(255, 255, 255, (int)(text_alpha * 255)), text);
-        if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0)) {
-            IGFD::FileDialogConfig cfg;
-            std::string base = (!S.last_dir.empty() && std::filesystem::exists(S.last_dir) &&
-                                std::filesystem::is_directory(S.last_dir))
-                                   ? S.last_dir
-                                   : ".";
-            cfg.path = base.c_str();
-            ImGuiFileDialog::Instance()->OpenDialog("PickDir", "Select Fable 2 Directory", nullptr, cfg);
-        }
-        draw_folder_dialog();
     } else {
         ImVec2 window_pos = ImGui::GetWindowPos();
         ImVec2 window_size = ImGui::GetWindowSize();

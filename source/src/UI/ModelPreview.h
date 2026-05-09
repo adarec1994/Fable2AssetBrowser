@@ -47,7 +47,13 @@ struct MPPerMesh {
     // Texture toggle state — when false, the corresponding sampler is fed
     // the default white SRV instead of the real texture.
     std::string diffuse_tex_name;
-    bool diffuse_visible = true;
+    std::string normal_tex_name;
+    std::string specular_tex_name;
+    std::string tint_tex_name;
+    bool diffuse_visible  = true;
+    bool normal_visible   = true;
+    bool specular_visible = true;
+    bool tint_visible     = true;
 };
 struct ModelPreview {
 #ifdef _WIN32

@@ -345,9 +345,9 @@ void draw_hex_window(ID3D11Device *device) {
 #else
 void draw_hex_window() {
 #endif
-    if(!S.hex_open) return;
-    if(S.hex_loading.load()) return;
-    if(S.hex_data.empty()){ S.hex_open = false; return; }
+    if (S.hex_open && S.hex_data.empty()) S.hex_open = false;
+    const bool show_hex = S.hex_open && !S.hex_loading.load() && !S.hex_data.empty();
+    if (show_hex) {
 
     ImGui::SetNextWindowSize(ImVec2(1000, 620), ImGuiCond_FirstUseEver);
     if(ImGui::Begin(S.hex_title.c_str(), &S.hex_open))
@@ -501,12 +501,17 @@ void draw_hex_window() {
                             ImGui::TableSetupColumn("Name");
                             ImGui::TableSetupColumn("Parent");
                             ImGui::TableHeadersRow();
-                            for(size_t i=0;i<S.mdl_info.Bones.size();++i){
-                                ImGui::TableNextRow();
-                                ImGui::TableSetColumnIndex(0); ImGui::Text("%d", (int)i);
-                                ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(S.mdl_info.Bones[i].Name.c_str());
-                                ImGui::TableSetColumnIndex(2); ImGui::Text("%d", S.mdl_info.Bones[i].ParentID);
+                            ImGuiListClipper clipper;
+                            clipper.Begin((int)S.mdl_info.Bones.size());
+                            while (clipper.Step()) {
+                                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                                    ImGui::TableNextRow();
+                                    ImGui::TableSetColumnIndex(0); ImGui::Text("%d", i);
+                                    ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(S.mdl_info.Bones[i].Name.c_str());
+                                    ImGui::TableSetColumnIndex(2); ImGui::Text("%d", S.mdl_info.Bones[i].ParentID);
+                                }
                             }
+                            clipper.End();
                             ImGui::EndTable();
                         }
                     }
@@ -562,6 +567,7 @@ void draw_hex_window() {
         ImGui::EndChild();
     }
     ImGui::End();
+    } // end if (show_hex) — model preview windows below render unconditionally
 
 #ifdef _WIN32
     if(S.show_preview_popup){
@@ -702,18 +708,25 @@ void draw_hex_window() {
     }
 
     {
-        if(S.show_model_preview){ ImGui::OpenPopup("Model Preview"); S.show_model_preview = false; }
+        // Trigger: opens both the preview window and the materials window.
+        if (S.show_model_preview) {
+            S.show_model_preview = false;
+            S.model_preview_open = true;
+            S.model_materials_open = true;
+            ImGuiViewport* vp_t = ImGui::GetMainViewport();
+            ImGui::SetNextWindowPos(ImVec2(vp_t->GetCenter().x, vp_t->GetCenter().y),
+                                    ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
+        }
 
         const ImVec2 canvas(960, 640);
-        const float tex_panel_w = 320.0f;
-        const ImVec2 win_size(canvas.x + tex_panel_w + 48.0f, canvas.y + 110.0f);
+        const ImVec2 preview_size(canvas.x + 32.0f, canvas.y + 110.0f);
 
-        ImGuiViewport* vp = ImGui::GetMainViewport();
-        ImGui::SetNextWindowSize(win_size, ImGuiCond_Always);
-        ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-
-        if(ImGui::BeginPopupModal("Model Preview", nullptr, ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings))
-        {
+        // ----- Model Preview window (3D canvas) -----
+        if (S.model_preview_open) {
+            ImGui::SetNextWindowSize(preview_size, ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Model Preview", &S.model_preview_open,
+                             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings))
+            {
             MP_Render(device, g_mp, g_flycam);
 
             // Left column: 3D canvas
@@ -784,79 +797,146 @@ void draw_hex_window() {
             if(ImGui::Button("Reset Camera", ImVec2(120,0)))
                 FlyCam_Reset(g_flycam, g_mp.center[0], g_mp.center[1], g_mp.center[2], g_mp.radius);
             ImGui::SameLine();
+            if(ImGui::Button("Materials...", ImVec2(120,0)))
+                S.model_materials_open = true;
+            ImGui::SameLine();
             if(ImGui::Button("Close", ImVec2(-1,0))) {
-                MP_Release(g_mp);
-                ImGui::CloseCurrentPopup();
+                S.model_preview_open = false;
             }
             ImGui::EndChild();   // end canvas column
+            }
+            ImGui::End();
 
-            // Right column: Textures panel — sits inside the modal so it's
-            // not blocked by ImGui's modal-popup overlay.
-            ImGui::SameLine();
-            ImGui::BeginChild("##tex_col", ImVec2(tex_panel_w, canvas.y), ImGuiChildFlags_Border, ImGuiWindowFlags_None);
-            ImGui::TextUnformatted("Textures");
-            ImGui::Separator();
+            // If user closed the preview window, release model resources and
+            // also close the materials companion.
+            if (!S.model_preview_open) {
+                MP_Release(g_mp);
+                S.model_materials_open = false;
+            }
+        }
+
+        // ----- Materials/Textures window (separate floating window) -----
+        if (S.model_materials_open) {
+            ImGui::SetNextWindowSize(ImVec2(380.0f, 600.0f), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Materials & Textures", &S.model_materials_open,
+                             ImGuiWindowFlags_NoCollapse))
+            {
 
             if (g_mp.has_model && !g_mp.meshes.empty()) {
-                // Build a deduplicated list of texture names. Group meshes by name
-                // so toggling a name affects every mesh using it.
+                // Per-slot dedup: each slot (diffuse/normal/specular/tint) gets
+                // its own entry list grouped by texture name. Toggle a name and
+                // every mesh using it flips visibility for that slot.
                 struct TexEntry {
                     std::string name;
                     std::vector<size_t> mesh_idx;
                     bool any_visible = false;
                 };
-                std::vector<TexEntry> entries;
-                for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
-                    const std::string& nm = g_mp.meshes[i].diffuse_tex_name;
-                    if (nm.empty()) continue;
-                    auto it = std::find_if(entries.begin(), entries.end(),
-                        [&](const TexEntry& e) { return e.name == nm; });
-                    if (it == entries.end()) {
-                        TexEntry e;
-                        e.name = nm;
-                        e.mesh_idx.push_back(i);
-                        e.any_visible = g_mp.meshes[i].diffuse_visible;
-                        entries.push_back(e);
-                    } else {
-                        it->mesh_idx.push_back(i);
-                        it->any_visible = it->any_visible || g_mp.meshes[i].diffuse_visible;
+                enum Slot { SLOT_DIFFUSE=0, SLOT_NORMAL=1, SLOT_SPEC=2, SLOT_TINT=3, SLOT_COUNT=4 };
+                const char* slot_label[SLOT_COUNT] = { "Diffuse", "Normal", "Specular", "Tint" };
+                std::vector<TexEntry> entries[SLOT_COUNT];
+
+                auto get_name = [&](const MPPerMesh& m, int s) -> const std::string& {
+                    switch (s) {
+                        case SLOT_DIFFUSE: return m.diffuse_tex_name;
+                        case SLOT_NORMAL:  return m.normal_tex_name;
+                        case SLOT_SPEC:    return m.specular_tex_name;
+                        default:           return m.tint_tex_name;
+                    }
+                };
+                auto get_visible = [&](const MPPerMesh& m, int s) -> bool {
+                    switch (s) {
+                        case SLOT_DIFFUSE: return m.diffuse_visible;
+                        case SLOT_NORMAL:  return m.normal_visible;
+                        case SLOT_SPEC:    return m.specular_visible;
+                        default:           return m.tint_visible;
+                    }
+                };
+                auto set_visible = [&](MPPerMesh& m, int s, bool v) {
+                    switch (s) {
+                        case SLOT_DIFFUSE: m.diffuse_visible  = v; break;
+                        case SLOT_NORMAL:  m.normal_visible   = v; break;
+                        case SLOT_SPEC:    m.specular_visible = v; break;
+                        default:           m.tint_visible     = v; break;
+                    }
+                };
+
+                for (int s = 0; s < SLOT_COUNT; ++s) {
+                    for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
+                        const std::string& nm = get_name(g_mp.meshes[i], s);
+                        if (nm.empty()) continue;
+                        auto it = std::find_if(entries[s].begin(), entries[s].end(),
+                            [&](const TexEntry& e) { return e.name == nm; });
+                        if (it == entries[s].end()) {
+                            TexEntry e; e.name = nm; e.mesh_idx.push_back(i);
+                            e.any_visible = get_visible(g_mp.meshes[i], s);
+                            entries[s].push_back(e);
+                        } else {
+                            it->mesh_idx.push_back(i);
+                            it->any_visible = it->any_visible || get_visible(g_mp.meshes[i], s);
+                        }
                     }
                 }
 
-                if (entries.empty()) {
-                    ImGui::TextDisabled("(no diffuse textures referenced)");
+                bool any_textures = false;
+                for (int s = 0; s < SLOT_COUNT; ++s) any_textures |= !entries[s].empty();
+
+                if (!any_textures) {
+                    ImGui::TextDisabled("(no textures referenced)");
                 } else {
                     if (ImGui::Button("Show All", ImVec2(140, 0))) {
-                        for (auto& mm : g_mp.meshes) mm.diffuse_visible = true;
+                        for (auto& mm : g_mp.meshes) {
+                            mm.diffuse_visible = mm.normal_visible =
+                            mm.specular_visible = mm.tint_visible = true;
+                        }
                     }
                     ImGui::SameLine();
                     if (ImGui::Button("Hide All", ImVec2(140, 0))) {
-                        for (auto& mm : g_mp.meshes) mm.diffuse_visible = false;
+                        for (auto& mm : g_mp.meshes) {
+                            mm.diffuse_visible = mm.normal_visible =
+                            mm.specular_visible = mm.tint_visible = false;
+                        }
                     }
                     ImGui::Separator();
-                    ImGui::TextDisabled("Diffuse textures (uncheck to hide):");
 
-                    for (size_t ei = 0; ei < entries.size(); ++ei) {
-                        auto& e = entries[ei];
-                        bool v = e.any_visible;
-                        std::string label = e.name + "##tex_entry_" + std::to_string(ei);
-                        if (ImGui::Checkbox(label.c_str(), &v)) {
-                            for (size_t mi : e.mesh_idx) {
-                                g_mp.meshes[mi].diffuse_visible = v;
+                    for (int s = 0; s < SLOT_COUNT; ++s) {
+                        if (entries[s].empty()) continue;
+                        ImGui::PushID(s);
+                        if (ImGui::CollapsingHeader(slot_label[s],
+                                                    ImGuiTreeNodeFlags_DefaultOpen)) {
+                            ImGui::Indent(8.0f);
+                            for (size_t ei = 0; ei < entries[s].size(); ++ei) {
+                                auto& e = entries[s][ei];
+                                bool v = e.any_visible;
+                                std::string fname = std::filesystem::path(e.name)
+                                    .filename().string();
+                                std::string label = fname + "##slot_" + std::to_string(s)
+                                    + "_" + std::to_string(ei);
+                                if (ImGui::Checkbox(label.c_str(), &v)) {
+                                    for (size_t mi : e.mesh_idx) {
+                                        set_visible(g_mp.meshes[mi], s, v);
+                                    }
+                                }
+                                if (e.mesh_idx.size() > 1) {
+                                    ImGui::SameLine();
+                                    ImGui::TextDisabled("(%zu)", e.mesh_idx.size());
+                                }
+                                if (ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip("%s", e.name.c_str());
+                                }
                             }
+                            ImGui::Unindent(8.0f);
                         }
-                        if (e.mesh_idx.size() > 1) {
-                            ImGui::SameLine();
-                            ImGui::TextDisabled("(%zu meshes)", e.mesh_idx.size());
-                        }
+                        ImGui::PopID();
                     }
+
+                    ImGui::Separator();
+                    ImGui::TextDisabled("%zu meshes loaded", g_mp.meshes.size());
                 }
             } else {
                 ImGui::TextDisabled("(no model loaded)");
             }
-            ImGui::EndChild();   // end textures column
-
-            ImGui::EndPopup();
+            }
+            ImGui::End();
         }
     }
 #endif

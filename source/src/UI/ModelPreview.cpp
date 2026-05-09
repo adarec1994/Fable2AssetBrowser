@@ -558,42 +558,97 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         // BC3 alpha sub-block. The Lionhead BC1 codec produces 8 bytes per
         // block; when the encoder wrote BC3 alpha data, those 8 bytes are
         // a BC4 alpha block (a0=byte[0], a1=byte[1], 48-bit index stream
-        // in bytes 2..7). Decode and merge into the diffuse RGBA's alpha.
-        if (pf_is_bc3_family && m.Unknown_3 == 1 && m.Unknown_5 > 0) {
+        // in bytes 2..7). For comp=3 alpha (variant_2_3_4 codec) we use
+        // the variant codec in mode=2 which already produces BC4 blocks.
+        if (pf_is_bc3_family && m.Unknown_5 > 0) {
             const size_t a_body_start = m.DefOffset + (size_t)m.Unknown_4;
             const size_t a_body_size  = (size_t)m.Unknown_5;
+            const uint32_t a_cf = m.Unknown_3;
+            {
+                std::ostringstream os;
+                os << "BC3 mip[" << best << "] color comp=" << m.CompFlag
+                   << " alpha comp=" << a_cf
+                   << " alpha_off=" << a_body_start
+                   << " alpha_size=" << a_body_size;
+                log_tagged("decode_tex_to_rgba", os.str());
+            }
+
             if (a_body_start + a_body_size <= blob.size()) {
                 std::vector<uint8_t> alpha_blocks;
                 int adec_w = 0, adec_h = 0;
                 std::string aerr;
-                bool aok = lh_decode_compressed_mip(
-                    blob.data() + a_body_start, a_body_size,
-                    adec_w, adec_h, alpha_blocks, &aerr, /*comp11_layout=*/false);
+                bool aok = false;
+
+                if (a_cf == 1 || a_cf == 11) {
+                    // BC1-codec variants: comp=1 (Z-order) or comp=11 (column-major)
+                    aok = lh_decode_compressed_mip(
+                        blob.data() + a_body_start, a_body_size,
+                        adec_w, adec_h, alpha_blocks, &aerr,
+                        /*comp11_layout=*/(a_cf == 11));
+                } else if (a_cf == 3 || a_cf == 2 || a_cf == 4) {
+                    // variant_2_3_4 codec — produces BC4 alpha blocks directly
+                    aok = lh_decode_variant_2_3_4(
+                        blob.data() + a_body_start, a_body_size,
+                        /*mode=*/2, w, h, alpha_blocks, &aerr);
+                    adec_w = w; adec_h = h;  // variant doesn't return dims
+                } else if (a_cf == 7) {
+                    // Raw BC4 alpha blocks — body size = (w/4) * (h/4) * 8 bytes
+                    const size_t expected = (size_t)((w + 3) / 4)
+                                          * (size_t)((h + 3) / 4) * 8;
+                    if (a_body_size >= expected) {
+                        alpha_blocks.assign(blob.data() + a_body_start,
+                                            blob.data() + a_body_start + expected);
+                        // Endian-swap each 8-byte BC4 block: bytes [2..7] are
+                        // an LE 48-bit packed index field on PC; on Xbox the
+                        // bytes were stored BE inside the block's index half.
+                        for (size_t i = 0; i + 8 <= alpha_blocks.size(); i += 8) {
+                            uint8_t* blk = alpha_blocks.data() + i;
+                            uint64_t bits = 0;
+                            for (int j = 0; j < 6; j++)
+                                bits |= ((uint64_t)blk[2+j]) << (j * 8);
+                            uint64_t sw = 0;
+                            for (int j = 0; j < 6; j++)
+                                sw |= ((bits >> (j * 8)) & 0xFF) << ((5 - j) * 8);
+                            for (int j = 0; j < 6; j++)
+                                blk[2 + j] = (uint8_t)((sw >> (j * 8)) & 0xFF);
+                        }
+                        adec_w = w; adec_h = h;
+                        aok = true;
+                    } else {
+                        aerr = "alpha sub-block too small for raw BC4";
+                    }
+                } else {
+                    std::ostringstream os;
+                    os << "unhandled BC3 alpha CompFlag=" << a_cf;
+                    aerr = os.str();
+                }
+
                 if (aok && adec_w == w && adec_h == h) {
                     const size_t bx_n = (size_t)((w + 3) / 4);
                     const size_t by_n = (size_t)((h + 3) / 4);
-                    for (size_t byy = 0; byy < by_n; ++byy) {
-                        for (size_t bxx = 0; bxx < bx_n; ++bxx) {
-                            uint8_t avals[16];
-                            decode_bc4_block(alpha_blocks.data() + (byy * bx_n + bxx) * 8,
-                                             avals);
-                            for (int py = 0; py < 4; ++py) {
-                                int yy = (int)byy * 4 + py;
-                                if (yy >= h) break;
-                                for (int px = 0; px < 4; ++px) {
-                                    int xx = (int)bxx * 4 + px;
-                                    if (xx >= w) break;
-                                    rgba[(yy * w + xx) * 4 + 3] = avals[py * 4 + px];
+                    if (alpha_blocks.size() >= bx_n * by_n * 8) {
+                        for (size_t byy = 0; byy < by_n; ++byy) {
+                            for (size_t bxx = 0; bxx < bx_n; ++bxx) {
+                                uint8_t avals[16];
+                                decode_bc4_block(alpha_blocks.data() + (byy * bx_n + bxx) * 8,
+                                                 avals);
+                                for (int py = 0; py < 4; ++py) {
+                                    int yy = (int)byy * 4 + py;
+                                    if (yy >= h) break;
+                                    for (int px = 0; px < 4; ++px) {
+                                        int xx = (int)bxx * 4 + px;
+                                        if (xx >= w) break;
+                                        rgba[(yy * w + xx) * 4 + 3] = avals[py * 4 + px];
+                                    }
                                 }
                             }
                         }
                     }
                 } else if (!aok) {
                     std::ostringstream os;
-                    os << "BC3 alpha sub-block decode failed: " << aerr
-                       << " (size=" << a_body_size << ")";
+                    os << "BC3 alpha decode failed (cf=" << a_cf << "): " << aerr;
                     log_tagged("decode_tex_to_rgba", os.str());
-                    // keep alpha = 255 (already from BC1 decode)
+                    // keep alpha = 255 from BC1 decode
                 }
             }
         }
@@ -777,16 +832,41 @@ Texture2D tex4 : register(t4);
 SamplerState smp : register(s0);
 struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
 float4 PS(VSOUT i) : SV_Target {
-    // Neutral lighting — just enough to show geometry, no color tinting.
-    // Pure white light (no sky/ground bias), no normal-map perturbation,
-    // no tint-mask multiply, no gamma re-encoding.
-    float3 N = normalize(i.n);
+    // Diffuse
+    float4 diffSamp = tex0.Sample(smp, i.t);
+    float3 albedo   = diffSamp.rgb;
+    float  alpha    = diffSamp.a;
+
+    // Normal map. Default texture is white (1,1,1); skip perturbation in
+    // that case so lighting stays correct on meshes without normal maps.
+    float3 nSamp = tex1.Sample(smp, i.t).rgb;
+    bool   nIsDefault = (nSamp.r > 0.98 && nSamp.g > 0.98 && nSamp.b > 0.98);
+    float3 N_geo = normalize(i.n);
+    float3 N     = N_geo;
+    if (!nIsDefault) {
+        float3 N_m = nSamp * 2.0 - 1.0;
+        N = normalize(N_geo + N_m * 0.5);
+    }
+
+    // Light direction in view space (fixed — moves with camera, headlamp-like).
     float3 L = normalize(float3(0.3, 0.7, 0.5));
-    float ndotl = saturate(dot(N, L));
-    float lighting = 0.65 + 0.35 * ndotl;   // 0.65 ambient + 0.35 directional, white
-    float3 albedo = tex0.Sample(smp, i.t).rgb;
-    float  alpha  = tex0.Sample(smp, i.t).a;
-    return float4(albedo * lighting, alpha);
+    float3 V = float3(0.0, 0.0, 1.0);
+    float3 H = normalize(L + V);
+
+    // Diffuse term — double-sided via abs (back faces lit too).
+    float ndotl = abs(dot(N, L));
+    float diff_term = 0.55 + 0.45 * ndotl;
+
+    // Specular. Default texture white; treat as zero spec so meshes
+    // without a spec map don't go shiny.
+    float3 sSamp = tex2.Sample(smp, i.t).rgb;
+    bool   sIsDefault = (sSamp.r > 0.98 && sSamp.g > 0.98 && sSamp.b > 0.98);
+    float  spec_mask  = sIsDefault ? 0.0 : sSamp.r;
+    float  ndoth = saturate(abs(dot(N, H)));
+    float  spec  = pow(ndoth, 24.0) * spec_mask * 0.6;
+
+    float3 color = albedo * diff_term + spec.xxx;
+    return float4(color, alpha);
 }
 )";
 static bool create_white_srv(ID3D11Device* dev, ID3D11ShaderResourceView** out_srv){
@@ -956,14 +1036,29 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         if(FAILED(dev->CreateBuffer(&ib,&isd,&m.ib))) { m.vb->Release(); continue; }
         m.index_count = (UINT)g.indices.size();
         bool hasA = false;
-        m.diffuse_tex_name = g.diffuse_tex_name;
-        m.diffuse_visible = true;
-        if(!g.diffuse_tex_name.empty()){
+        m.diffuse_tex_name  = g.diffuse_tex_name;
+        m.normal_tex_name   = g.normal_tex_name;
+        m.specular_tex_name = g.specular_tex_name;
+        m.tint_tex_name     = g.tint_tex_name;
+        m.diffuse_visible   = true;
+        m.normal_visible    = true;
+        m.specular_visible  = true;
+        m.tint_visible      = true;
+        auto load_named_srv = [&](const std::string& tex_name,
+                                  ID3D11ShaderResourceView** out_srv,
+                                  bool* out_has_alpha) {
+            if (tex_name.empty()) return;
             std::vector<unsigned char> tex_buf;
-            if(build_any_tex_buffer_for_name(g.diffuse_tex_name, tex_buf)){
-                if(srv_from_tex_blob_auto(dev, tex_buf, &m.srv_diffuse, &hasA)){}
+            if (build_any_tex_buffer_for_name(tex_name, tex_buf)) {
+                bool dummyA = false;
+                bool* alpha_ptr = out_has_alpha ? out_has_alpha : &dummyA;
+                srv_from_tex_blob_auto(dev, tex_buf, out_srv, alpha_ptr);
             }
-        }
+        };
+        load_named_srv(g.diffuse_tex_name,  &m.srv_diffuse,  &hasA);
+        load_named_srv(g.normal_tex_name,   &m.srv_normal,   nullptr);
+        load_named_srv(g.specular_tex_name, &m.srv_specular, nullptr);
+        load_named_srv(g.tint_tex_name,     &m.srv_tint,     nullptr);
         if (!m.srv_diffuse && mp.default_srv) { m.srv_diffuse = mp.default_srv; m.srv_diffuse->AddRef(); }
         if (!m.srv_normal  && mp.default_srv) { m.srv_normal  = mp.default_srv; m.srv_normal->AddRef(); }
         if (!m.srv_specular&& mp.default_srv) { m.srv_specular= mp.default_srv; m.srv_specular->AddRef(); }
@@ -1032,9 +1127,16 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         ctx->IASetVertexBuffers(0,1,&m.vb,&stride,&offset);
         ctx->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ID3D11ShaderResourceView* diffuse_to_use =
-            (m.diffuse_visible && m.srv_diffuse) ? m.srv_diffuse : mp.default_srv;
-        ID3D11ShaderResourceView* srvs[5] = { diffuse_to_use, m.srv_normal ? m.srv_normal : mp.default_srv, m.srv_specular ? m.srv_specular : mp.default_srv, m.srv_unk ? m.srv_unk : mp.default_srv, m.srv_tint ? m.srv_tint : mp.default_srv };
+        ID3D11ShaderResourceView* diffuse_to_use  =
+            (m.diffuse_visible  && m.srv_diffuse)  ? m.srv_diffuse  : mp.default_srv;
+        ID3D11ShaderResourceView* normal_to_use   =
+            (m.normal_visible   && m.srv_normal)   ? m.srv_normal   : mp.default_srv;
+        ID3D11ShaderResourceView* specular_to_use =
+            (m.specular_visible && m.srv_specular) ? m.srv_specular : mp.default_srv;
+        ID3D11ShaderResourceView* tint_to_use     =
+            (m.tint_visible     && m.srv_tint)     ? m.srv_tint     : mp.default_srv;
+        ID3D11ShaderResourceView* srvs[5] = { diffuse_to_use, normal_to_use, specular_to_use,
+                                              m.srv_unk ? m.srv_unk : mp.default_srv, tint_to_use };
         ctx->PSSetShaderResources(0, 5, srvs);
         ctx->DrawIndexed(m.index_count,0,0);
         ID3D11ShaderResourceView* nullsrvs[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
@@ -1048,9 +1150,16 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         ctx->IASetVertexBuffers(0,1,&m.vb,&stride,&offset);
         ctx->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ID3D11ShaderResourceView* diffuse_to_use =
-            (m.diffuse_visible && m.srv_diffuse) ? m.srv_diffuse : mp.default_srv;
-        ID3D11ShaderResourceView* srvs[5] = { diffuse_to_use, m.srv_normal ? m.srv_normal : mp.default_srv, m.srv_specular ? m.srv_specular : mp.default_srv, m.srv_unk ? m.srv_unk : mp.default_srv, m.srv_tint ? m.srv_tint : mp.default_srv };
+        ID3D11ShaderResourceView* diffuse_to_use  =
+            (m.diffuse_visible  && m.srv_diffuse)  ? m.srv_diffuse  : mp.default_srv;
+        ID3D11ShaderResourceView* normal_to_use   =
+            (m.normal_visible   && m.srv_normal)   ? m.srv_normal   : mp.default_srv;
+        ID3D11ShaderResourceView* specular_to_use =
+            (m.specular_visible && m.srv_specular) ? m.srv_specular : mp.default_srv;
+        ID3D11ShaderResourceView* tint_to_use     =
+            (m.tint_visible     && m.srv_tint)     ? m.srv_tint     : mp.default_srv;
+        ID3D11ShaderResourceView* srvs[5] = { diffuse_to_use, normal_to_use, specular_to_use,
+                                              m.srv_unk ? m.srv_unk : mp.default_srv, tint_to_use };
         ctx->PSSetShaderResources(0, 5, srvs);
         ctx->DrawIndexed(m.index_count,0,0);
         ID3D11ShaderResourceView* nullsrvs[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
@@ -1085,16 +1194,38 @@ uniform sampler2D uTexUnk;
 uniform sampler2D uTexTint;
 out vec4 FragColor;
 void main() {
-    // Neutral lighting — pure white, just enough to show geometry, no
-    // color tinting, no normal-map perturbation, no tint-mask multiply.
-    vec3 N = normalize(vNormal);
+    // Diffuse
+    vec4 diffSamp = texture(uTexDiffuse, vTexCoord);
+    vec3 albedo = diffSamp.rgb;
+    float alpha = diffSamp.a;
+
+    // Normal map (skip if default-white)
+    vec3 nSamp = texture(uTexNormal, vTexCoord).rgb;
+    bool nIsDefault = (nSamp.r > 0.98 && nSamp.g > 0.98 && nSamp.b > 0.98);
+    vec3 N_geo = normalize(vNormal);
+    vec3 N = N_geo;
+    if (!nIsDefault) {
+        vec3 N_m = nSamp * 2.0 - 1.0;
+        N = normalize(N_geo + N_m * 0.5);
+    }
+
     vec3 L = normalize(vec3(0.3, 0.7, 0.5));
-    float ndotl = clamp(dot(N, L), 0.0, 1.0);
-    float lighting = 0.65 + 0.35 * ndotl;
-    vec4 diffuseSample = texture(uTexDiffuse, vTexCoord);
-    vec3 albedo = diffuseSample.rgb;
-    float alpha = diffuseSample.a;
-    FragColor = vec4(albedo * lighting, alpha);
+    vec3 V = vec3(0.0, 0.0, 1.0);
+    vec3 H = normalize(L + V);
+
+    // Double-sided diffuse
+    float ndotl = abs(dot(N, L));
+    float diff_term = 0.55 + 0.45 * ndotl;
+
+    // Specular (skip if default-white)
+    vec3 sSamp = texture(uTexSpecular, vTexCoord).rgb;
+    bool sIsDefault = (sSamp.r > 0.98 && sSamp.g > 0.98 && sSamp.b > 0.98);
+    float spec_mask = sIsDefault ? 0.0 : sSamp.r;
+    float ndoth = clamp(abs(dot(N, H)), 0.0, 1.0);
+    float spec = pow(ndoth, 24.0) * spec_mask * 0.6;
+
+    vec3 color = albedo * diff_term + vec3(spec);
+    FragColor = vec4(color, alpha);
 }
 )";
 static unsigned int compile_gl_shader(const char* src, GLenum type) {
@@ -1270,9 +1401,18 @@ bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelP
         glBindVertexArray(0);
         m.index_count = (unsigned int)g.indices.size();
         bool hasA = false;
-        m.diffuse_tex_name = g.diffuse_tex_name;
-        m.diffuse_visible = true;
-        if (!g.diffuse_tex_name.empty()) { m.tex_diffuse = load_tex_from_name(g.diffuse_tex_name, &hasA); }
+        m.diffuse_tex_name  = g.diffuse_tex_name;
+        m.normal_tex_name   = g.normal_tex_name;
+        m.specular_tex_name = g.specular_tex_name;
+        m.tint_tex_name     = g.tint_tex_name;
+        m.diffuse_visible   = true;
+        m.normal_visible    = true;
+        m.specular_visible  = true;
+        m.tint_visible      = true;
+        if (!g.diffuse_tex_name.empty())  { m.tex_diffuse  = load_tex_from_name(g.diffuse_tex_name,  &hasA); }
+        if (!g.normal_tex_name.empty())   { m.tex_normal   = load_tex_from_name(g.normal_tex_name,   nullptr); }
+        if (!g.specular_tex_name.empty()) { m.tex_specular = load_tex_from_name(g.specular_tex_name, nullptr); }
+        if (!g.tint_tex_name.empty())     { m.tex_tint     = load_tex_from_name(g.tint_tex_name,     nullptr); }
         if (!m.tex_diffuse) m.tex_diffuse = mp.default_tex;
         if (!m.tex_normal) m.tex_normal = mp.default_tex;
         if (!m.tex_specular) m.tex_specular = mp.default_tex;
@@ -1342,24 +1482,30 @@ void MP_Render(ModelPreview& mp, const FlyCam& cam) {
     for (const auto& m : mp.meshes) {
         if (!m.vao || m.index_count == 0 || m.has_alpha) continue;
         glDisable(GL_BLEND);
-        unsigned int diffuse_to_use = (m.diffuse_visible && m.tex_diffuse) ? m.tex_diffuse : mp.default_tex;
+        unsigned int diffuse_to_use  = (m.diffuse_visible  && m.tex_diffuse)  ? m.tex_diffuse  : mp.default_tex;
+        unsigned int normal_to_use   = (m.normal_visible   && m.tex_normal)   ? m.tex_normal   : mp.default_tex;
+        unsigned int specular_to_use = (m.specular_visible && m.tex_specular) ? m.tex_specular : mp.default_tex;
+        unsigned int tint_to_use     = (m.tint_visible     && m.tex_tint)     ? m.tex_tint     : mp.default_tex;
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, diffuse_to_use); glUniform1i(mp.tex_diffuse_loc, 0);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m.tex_normal ? m.tex_normal : mp.default_tex); glUniform1i(mp.tex_normal_loc, 1);
-        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m.tex_specular ? m.tex_specular : mp.default_tex); glUniform1i(mp.tex_specular_loc, 2);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, normal_to_use); glUniform1i(mp.tex_normal_loc, 1);
+        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, specular_to_use); glUniform1i(mp.tex_specular_loc, 2);
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m.tex_unk ? m.tex_unk : mp.default_tex); glUniform1i(mp.tex_unk_loc, 3);
-        glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, m.tex_tint ? m.tex_tint : mp.default_tex); glUniform1i(mp.tex_tint_loc, 4);
+        glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, tint_to_use); glUniform1i(mp.tex_tint_loc, 4);
         glBindVertexArray(m.vao); glDrawElements(GL_TRIANGLES, m.index_count, GL_UNSIGNED_INT, 0); glBindVertexArray(0);
     }
     glDepthMask(GL_FALSE);
     for (const auto& m : mp.meshes) {
         if (!m.vao || m.index_count == 0 || !m.has_alpha) continue;
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        unsigned int diffuse_to_use = (m.diffuse_visible && m.tex_diffuse) ? m.tex_diffuse : mp.default_tex;
+        unsigned int diffuse_to_use  = (m.diffuse_visible  && m.tex_diffuse)  ? m.tex_diffuse  : mp.default_tex;
+        unsigned int normal_to_use   = (m.normal_visible   && m.tex_normal)   ? m.tex_normal   : mp.default_tex;
+        unsigned int specular_to_use = (m.specular_visible && m.tex_specular) ? m.tex_specular : mp.default_tex;
+        unsigned int tint_to_use     = (m.tint_visible     && m.tex_tint)     ? m.tex_tint     : mp.default_tex;
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, diffuse_to_use); glUniform1i(mp.tex_diffuse_loc, 0);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m.tex_normal ? m.tex_normal : mp.default_tex); glUniform1i(mp.tex_normal_loc, 1);
-        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m.tex_specular ? m.tex_specular : mp.default_tex); glUniform1i(mp.tex_specular_loc, 2);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, normal_to_use); glUniform1i(mp.tex_normal_loc, 1);
+        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, specular_to_use); glUniform1i(mp.tex_specular_loc, 2);
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m.tex_unk ? m.tex_unk : mp.default_tex); glUniform1i(mp.tex_unk_loc, 3);
-        glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, m.tex_tint ? m.tex_tint : mp.default_tex); glUniform1i(mp.tex_tint_loc, 4);
+        glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, tint_to_use); glUniform1i(mp.tex_tint_loc, 4);
         glBindVertexArray(m.vao); glDrawElements(GL_TRIANGLES, m.index_count, GL_UNSIGNED_INT, 0); glBindVertexArray(0);
     }
     glDepthMask(GL_TRUE);

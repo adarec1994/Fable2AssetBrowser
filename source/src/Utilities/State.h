@@ -126,7 +126,9 @@ struct State {
     bool mdl_info_ok = false;
     MDLInfo mdl_info;
 
-    bool show_model_preview = false;
+    bool show_model_preview = false;        // trigger: set true to open the model preview window
+    bool model_preview_open = false;          // window visibility (kept in sync with the &open close button)
+    bool model_materials_open = false;        // separate Materials window, opens automatically with model
     std::atomic<bool> pending_preview_build{false};
     std::vector<MDLMeshGeom> mdl_meshes;
     float cam_yaw = 0.0f;

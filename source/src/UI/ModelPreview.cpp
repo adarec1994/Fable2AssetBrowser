@@ -779,6 +779,7 @@ static void mp_release(ModelPreview& mp){
     if(mp.bone_cb){ mp.bone_cb->Release(); mp.bone_cb=nullptr; }
     if(mp.sampler){ mp.sampler->Release(); mp.sampler=nullptr; }
     if(mp.rs){ mp.rs->Release(); mp.rs=nullptr; }
+    if(mp.rs_wire){ mp.rs_wire->Release(); mp.rs_wire=nullptr; }
     if(mp.bs){ mp.bs->Release(); mp.bs=nullptr; }
     if(mp.bsAlpha){ mp.bsAlpha->Release(); mp.bsAlpha=nullptr; }
     if(mp.rtv){ mp.rtv->Release(); mp.rtv=nullptr; }
@@ -996,6 +997,11 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     rd.DepthClipEnable = TRUE;
     rd.MultisampleEnable = FALSE;
     if(FAILED(dev->CreateRasterizerState(&rd,&mp.rs))) return false;
+    // Wireframe variant — same cull/clip settings, just FILL_WIREFRAME.
+    // MP_Render picks between mp.rs and mp.rs_wire based on mp.wireframe.
+    D3D11_RASTERIZER_DESC rd_w = rd;
+    rd_w.FillMode = D3D11_FILL_WIREFRAME;
+    if(FAILED(dev->CreateRasterizerState(&rd_w, &mp.rs_wire))) return false;
     D3D11_BLEND_DESC bd{};
     bd.RenderTarget[0].BlendEnable=FALSE;
     bd.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
@@ -1208,6 +1214,10 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         }
         m.highlight = false;
         m.isolated  = false;
+        // Original geom index — preserved so the UV overlay can find
+        // the matching MDLMeshGeom in S.mdl_meshes (which keeps every
+        // entry, including the empty ones we skip here).
+        m.source_mesh_idx = (uint32_t)i;
         // Prefer textures from the same nested BNK family the model came
         // from (the user's currently-selected BNK), so a model loaded from
         // a region archive uses that region's textures instead of globals.
@@ -1307,7 +1317,9 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     ctx->VSSetShader(mp.vs,nullptr,0);
     ctx->PSSetShader(mp.ps,nullptr,0);
     ctx->PSSetSamplers(0,1,&mp.sampler);
-    ctx->RSSetState(mp.rs);
+    // Wireframe toggle from the Wireframe overlay — falls back to solid
+    // if rs_wire wasn't created for any reason.
+    ctx->RSSetState((mp.wireframe && mp.rs_wire) ? mp.rs_wire : mp.rs);
     float cy = cosf(cam.yaw);
     float sy = sinf(cam.yaw);
     float cp = cosf(cam.pitch);

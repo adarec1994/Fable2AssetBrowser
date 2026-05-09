@@ -44,7 +44,14 @@ int g_isolate_mesh_idx   = -1;
 ID3D11ShaderResourceView* g_tex_popout_srv = nullptr;
 #endif
 std::string g_tex_popout_name;
-bool        g_tex_popout_open = false;
+bool        g_tex_popout_open    = false;
+// Index into g_mp.meshes that the popout was opened from — used by the
+// "Show UVs" overlay to find the matching MDLMeshGeom (UVs/indices) in
+// S.mdl_meshes via that mesh's source_mesh_idx.
+int         g_tex_popout_mesh_idx = -1;
+// Persists across popout opens so the user doesn't have to re-tick it
+// every time they click a different thumbnail.
+bool        g_tex_popout_show_uvs = false;
 
 namespace UI {
 
@@ -578,6 +585,49 @@ void draw_model_in_panel(ID3D11Device* device) {
         S.bone_rotate_mode    = false;
     }
 
+    // ---- Wireframe overlay ----------------------------------------------
+    // Single-checkbox overlay sitting between the Skeleton (if present)
+    // and the Materials overlay below. Hover-fade matches the others.
+    // Drives g_mp.wireframe, which MP_Render uses to swap the rasterizer
+    // state between FILL_SOLID and FILL_WIREFRAME.
+    if (g_mp.has_model) {
+        static float s_wire_alpha = 0.30f;
+        const float kIdleAlpha   = 0.30f;
+        const float kHoverAlpha  = 1.00f;
+
+        const ImVec2 wire_pos (origin.x + 6, next_overlay_y);
+        const ImVec2 wire_size(190, 0);
+        ImGui::SetNextWindowPos(wire_pos);
+        ImGui::SetNextWindowSize(wire_size, ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(s_wire_alpha * 0.78f);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, s_wire_alpha);
+
+        ImGuiWindowFlags fl = ImGuiWindowFlags_NoTitleBar
+                            | ImGuiWindowFlags_NoResize
+                            | ImGuiWindowFlags_NoMove
+                            | ImGuiWindowFlags_NoCollapse
+                            | ImGuiWindowFlags_NoSavedSettings
+                            | ImGuiWindowFlags_AlwaysAutoResize;
+        if (ImGui::Begin("##wireframe_overlay", nullptr, fl)) {
+            bool hovering = ImGui::IsWindowHovered(
+                ImGuiHoveredFlags_AllowWhenBlockedByPopup |
+                ImGuiHoveredFlags_ChildWindows);
+            float target = hovering ? kHoverAlpha : kIdleAlpha;
+            s_wire_alpha += (target - s_wire_alpha) * 0.18f;
+            if (std::fabs(s_wire_alpha - target) < 0.005f) s_wire_alpha = target;
+
+            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Wireframe");
+            ImGui::Checkbox("Show", &g_mp.wireframe);
+
+            // Capture bottom for the Materials overlay placement.
+            ImVec2 wp = ImGui::GetWindowPos();
+            ImVec2 ws = ImGui::GetWindowSize();
+            next_overlay_y = wp.y + ws.y + 6.0f;
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
+    }
+
     // ---- Materials overlay ----------------------------------------------
     // Sits beneath the skeleton overlay (or right under Controls if the
     // model has no skeleton). One section per submesh: name header,
@@ -707,9 +757,12 @@ void draw_model_in_panel(ID3D11Device* device) {
                                            thumb_size,
                                            ImVec2(0, 0), ImVec2(1, 1),
                                            ImVec4(0, 0, 0, 0), tint)) {
-                        ::g_tex_popout_srv  = t.srv;
-                        ::g_tex_popout_name = *t.name;
-                        ::g_tex_popout_open = true;
+                        ::g_tex_popout_srv      = t.srv;
+                        ::g_tex_popout_name     = *t.name;
+                        ::g_tex_popout_open     = true;
+                        // Remember which submesh this popout came from
+                        // so the UV overlay can locate the right geom.
+                        ::g_tex_popout_mesh_idx = (int)mi;
                     }
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("%s\n[%s]",
@@ -736,11 +789,12 @@ void draw_model_in_panel(ID3D11Device* device) {
         ImGui::PopStyleVar();
     } else {
         // No model — clear materials state so a new load starts fresh.
-        ::g_highlight_mesh_idx = -1;
-        ::g_isolate_mesh_idx   = -1;
-        ::g_tex_popout_open    = false;
-        ::g_tex_popout_srv     = nullptr;
+        ::g_highlight_mesh_idx  = -1;
+        ::g_isolate_mesh_idx    = -1;
+        ::g_tex_popout_open     = false;
+        ::g_tex_popout_srv      = nullptr;
         ::g_tex_popout_name.clear();
+        ::g_tex_popout_mesh_idx = -1;
     }
 
     // ---- Texture popout window ------------------------------------------
@@ -766,20 +820,66 @@ void draw_model_in_panel(ID3D11Device* device) {
             std::string title = "Texture: "
                 + std::filesystem::path(::g_tex_popout_name).filename().string()
                 + "##tex_popout";
-            // AlwaysAutoResize + NoResize: window snaps to fit the image
-            // at native dimensions and the user cannot drag-resize.
-            // Drop the inner padding so the image sits flush with the
-            // window border (title bar still owns its own row).
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            // AlwaysAutoResize + NoResize: window snaps to fit content
+            // (the image at native size + the UV checkbox above it),
+            // and the user cannot drag-resize.
             ImGuiWindowFlags fl = ImGuiWindowFlags_NoCollapse
                                 | ImGuiWindowFlags_NoResize
                                 | ImGuiWindowFlags_AlwaysAutoResize;
             if (ImGui::Begin(title.c_str(), &::g_tex_popout_open, fl)) {
+                // UV overlay toggle. The geom that owns this texture
+                // was recorded in g_tex_popout_mesh_idx when the user
+                // clicked the thumbnail. We only draw the overlay if
+                // that index is still valid AND the source MDLMeshGeom
+                // has UV/index data we can walk.
+                ImGui::Checkbox("Show UVs", &::g_tex_popout_show_uvs);
+
                 ImGui::Image((ImTextureID)::g_tex_popout_srv,
                              ImVec2((float)tw, (float)th));
+
+                if (::g_tex_popout_show_uvs &&
+                    ::g_tex_popout_mesh_idx >= 0 &&
+                    (size_t)::g_tex_popout_mesh_idx < g_mp.meshes.size())
+                {
+                    uint32_t src = g_mp.meshes[(size_t)::g_tex_popout_mesh_idx].source_mesh_idx;
+                    if (src < S.mdl_meshes.size()) {
+                        const auto& geom = S.mdl_meshes[src];
+                        if (!geom.uvs.empty() && !geom.indices.empty()) {
+                            ImVec2 img_min = ImGui::GetItemRectMin();
+                            ImVec2 img_max = ImGui::GetItemRectMax();
+                            float w_px = img_max.x - img_min.x;
+                            float h_px = img_max.y - img_min.y;
+                            ImDrawList* dl = ImGui::GetWindowDrawList();
+                            // Soft white at moderate alpha — readable on
+                            // most textures, doesn't drown the image.
+                            const ImU32 col = IM_COL32(255, 255, 255, 200);
+                            const float thickness = 1.0f;
+
+                            // Each triangle = 3 indices. Convert UV
+                            // (assumed [0,1] with V going down to match
+                            // ImGui's Y-down convention) to screen px.
+                            for (size_t i = 0; i + 2 < geom.indices.size(); i += 3) {
+                                uint32_t a = geom.indices[i];
+                                uint32_t b = geom.indices[i + 1];
+                                uint32_t c = geom.indices[i + 2];
+                                if ((size_t)a * 2 + 1 >= geom.uvs.size()) continue;
+                                if ((size_t)b * 2 + 1 >= geom.uvs.size()) continue;
+                                if ((size_t)c * 2 + 1 >= geom.uvs.size()) continue;
+                                ImVec2 pa(img_min.x + geom.uvs[a * 2 + 0] * w_px,
+                                          img_min.y + geom.uvs[a * 2 + 1] * h_px);
+                                ImVec2 pb(img_min.x + geom.uvs[b * 2 + 0] * w_px,
+                                          img_min.y + geom.uvs[b * 2 + 1] * h_px);
+                                ImVec2 pc(img_min.x + geom.uvs[c * 2 + 0] * w_px,
+                                          img_min.y + geom.uvs[c * 2 + 1] * h_px);
+                                dl->AddLine(pa, pb, col, thickness);
+                                dl->AddLine(pb, pc, col, thickness);
+                                dl->AddLine(pc, pa, col, thickness);
+                            }
+                        }
+                    }
+                }
             }
             ImGui::End();
-            ImGui::PopStyleVar();
         }
         // X-button close path — drop the SRV reference so the next load
         // doesn't accidentally reopen with a stale pointer.

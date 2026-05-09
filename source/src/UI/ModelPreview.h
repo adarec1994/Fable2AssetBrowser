@@ -73,6 +73,12 @@ struct MPPerMesh {
     // checkboxes act as radios across every submesh + slot.
     bool highlight = false;
     bool isolated  = false;
+    // Index into the geoms vector that was passed to MP_Build (i.e.
+    // S.mdl_meshes[source_mesh_idx]). Empty geoms are skipped during
+    // build, so MPPerMesh's vector index isn't itself a usable lookup.
+    // Used by the texture popout's UV overlay to find the matching
+    // MDLMeshGeom whose UVs/indices to draw.
+    uint32_t source_mesh_idx = 0;
 };
 struct ModelPreview {
 #ifdef _WIN32
@@ -86,7 +92,8 @@ struct ModelPreview {
     ID3D11InputLayout* layout = nullptr;
     ID3D11Buffer* cbuffer = nullptr;
     ID3D11SamplerState* sampler = nullptr;
-    ID3D11RasterizerState* rs = nullptr;
+    ID3D11RasterizerState* rs = nullptr;        // FILL_SOLID
+    ID3D11RasterizerState* rs_wire = nullptr;   // FILL_WIREFRAME — driven by `wireframe` flag below
     ID3D11BlendState* bs = nullptr;
     ID3D11BlendState* bsAlpha = nullptr;
     ID3D11DepthStencilState* dssWrite = nullptr;
@@ -114,6 +121,10 @@ struct ModelPreview {
     float radius = 1.0f;
     std::vector<MPPerMesh> meshes;
     bool has_model = false;
+    // Wireframe display toggle — driven by the Wireframe overlay in
+    // RenderPanel. When true, MP_Render swaps the FILL_SOLID rasterizer
+    // state for the FILL_WIREFRAME one (rs_wire above).
+    bool wireframe = false;
 
     // ---- Skinning (populated by MP_Build, consumed by MP_Render) ----
     // bone_count is the number of bones we actually upload to the GPU;

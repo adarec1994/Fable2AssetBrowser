@@ -475,6 +475,10 @@ static bool find_mdl_files_in_folder(TreeNode& root, const std::string& folder_n
 
 static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk_paths) {
     root.children.clear();
+    // Reset flat caches consumed by the Models / Textures tabs. They get
+    // appended to inside add_to_tree below as we walk every BNK.
+    S.all_mdl_files.clear();
+    S.all_tex_files.clear();
 
     auto is_header_bnk = [](const std::string& bnk_path) -> bool {
         std::string lower_path = bnk_path;
@@ -489,8 +493,49 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
         return lower.size() >= 4 && lower.substr(lower.size() - 4) == ".bnk";
     };
 
-    auto add_to_tree = [&root](const std::string& path, const std::string& bnk_source,
+    // Match by filename suffix — case insensitive. Cheaper than building
+    // a temporary lowered string just to compare 4 chars.
+    auto ends_with_ci = [](const std::string& s, const char* suffix) -> bool {
+        size_t n = std::strlen(suffix);
+        if (s.size() < n) return false;
+        for (size_t i = 0; i < n; ++i) {
+            char a = s[s.size() - n + i];
+            char b = suffix[i];
+            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+            if (a != b) return false;
+        }
+        return true;
+    };
+
+    auto add_to_tree = [&root, &ends_with_ci](const std::string& path, const std::string& bnk_source,
                                int bnk_index, uint32_t file_size, bool is_nested = false) {
+        // Bookkeeping for the Models / Textures tabs. Use the leaf
+        // filename for display so the user isn't seeing internal asset
+        // paths cluttering the list.
+        std::string leaf;
+        size_t slash = path.find_last_of("/\\");
+        leaf = (slash == std::string::npos) ? path : path.substr(slash + 1);
+        if (ends_with_ci(leaf, ".mdl")) {
+            FlatAssetEntry e;
+            e.name = leaf;
+            e.full_path = path;
+            e.bnk_path = bnk_source;
+            e.file_index = bnk_index;
+            e.size = file_size;
+            e.from_nested = is_nested;
+            S.all_mdl_files.push_back(std::move(e));
+        } else if (ends_with_ci(leaf, ".tex")) {
+            FlatAssetEntry e;
+            e.name = leaf;
+            e.full_path = path;
+            e.bnk_path = bnk_source;
+            e.file_index = bnk_index;
+            e.size = file_size;
+            e.from_nested = is_nested;
+            S.all_tex_files.push_back(std::move(e));
+        }
+
         std::string normalized_path = path;
         std::replace(normalized_path.begin(), normalized_path.end(), '\\', '/');
 
@@ -782,6 +827,43 @@ static void draw_tree_node(TreeNode& node) {
             }
 
             ImGui::TreePop();
+        }
+    }
+}
+
+// Click-to-load handler shared by the Models / Textures tabs. Mirrors the
+// equivalent block inside draw_tree_node so a click in either tab gets the
+// same end result: switch the active BNK if needed, restore nested-source
+// state, locate the matching entry inside S.files, then arm the pending-load
+// flag the central render panel consumes.
+//
+// kind: 0 = .mdl, 1 = .tex
+static void load_flat_asset_entry(const FlatAssetEntry& e, int kind) {
+    if (S.selected_bnk != e.bnk_path) {
+        S.viewing_adb = false;
+        S.global_search.clear();
+        S.selected_nested_bnk.clear();
+        S.selected_nested_index = -1;
+        pick_bnk(e.bnk_path);
+    }
+    // pick_bnk wipes selected_nested_temp_path — re-establish it for nested
+    // sources so subsequent extract paths know which nested BNK to pull from.
+    if (e.from_nested) {
+        S.selected_nested_temp_path = e.bnk_path;
+        S.selected_nested_index = 0;
+    }
+    for (size_t i = 0; i < S.files.size(); ++i) {
+        if (S.files[i].index == e.file_index) {
+            S.selected_file_index = (int)i;
+            if (kind == 0) {
+                g_pending_mdl_full_path = e.full_path;
+                g_pending_mdl_load = true;
+                g_pending_mdl_index = (int)i;
+            } else {
+                g_pending_tex_load = true;
+                g_pending_tex_index = (int)i;
+            }
+            break;
         }
     }
 }
@@ -1082,6 +1164,85 @@ void draw_left_panel() {
             }
 
             ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+
+        // Shared layout for the Models / Textures tabs: a sticky filter
+        // input drawn before BeginChild (so it doesn't scroll away), then
+        // the scrollable list itself inside the child. ImGuiListClipper
+        // keeps the list cheap even for thousands of entries.
+        auto draw_flat_asset_tab = [](const char* label,
+                                      std::vector<FlatAssetEntry>& entries,
+                                      std::string& filter,
+                                      const char* child_id,
+                                      int kind) {
+            // Sticky filter — sits above the BeginChild scroll region.
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint(("##" + std::string(child_id) + "_filter").c_str(),
+                                     "Filter", &filter);
+
+            // Pre-filter into an index vector so the clipper works on the
+            // visible subset only.
+            std::vector<int> vis;
+            vis.reserve(entries.size());
+            std::string flow = filter;
+            std::transform(flow.begin(), flow.end(), flow.begin(), ::tolower);
+            for (size_t i = 0; i < entries.size(); ++i) {
+                if (flow.empty()) {
+                    vis.push_back((int)i);
+                } else {
+                    std::string nlow = entries[i].name;
+                    std::transform(nlow.begin(), nlow.end(), nlow.begin(), ::tolower);
+                    if (nlow.find(flow) != std::string::npos) vis.push_back((int)i);
+                }
+            }
+
+            ImGui::TextDisabled("%d / %zu", (int)vis.size(), entries.size());
+            ImGui::Separator();
+
+            ImGui::BeginChild(child_id, ImVec2(0, 0), false);
+            ImGuiListClipper clipper;
+            clipper.Begin((int)vis.size());
+            while (clipper.Step()) {
+                for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                    const FlatAssetEntry& e = entries[(size_t)vis[(size_t)row]];
+                    ImGui::PushID(row);
+                    bool selected = (S.selected_bnk == e.bnk_path &&
+                                     S.selected_file_index >= 0 &&
+                                     S.selected_file_index < (int)S.files.size() &&
+                                     S.files[(size_t)S.selected_file_index].index == e.file_index);
+                    if (ImGui::Selectable(e.name.c_str(), selected,
+                                          ImGuiSelectableFlags_SpanAllColumns)) {
+                        load_flat_asset_entry(e, kind);
+                    }
+                    if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                        ImGui::BeginTooltip();
+                        if (S.dev_mode) {
+                            ImGui::TextUnformatted(e.full_path.c_str());
+                            ImGui::Text("Size: %u bytes", e.size);
+                            ImGui::Text("BNK: %s",
+                                std::filesystem::path(e.bnk_path).filename().string().c_str());
+                            if (e.from_nested) ImGui::TextDisabled("(nested)");
+                        } else {
+                            ImGui::TextUnformatted(e.name.c_str());
+                        }
+                        ImGui::EndTooltip();
+                    }
+                    ImGui::PopID();
+                }
+            }
+            clipper.End();
+            ImGui::EndChild();
+        };
+
+        if (ImGui::BeginTabItem("Models")) {
+            draw_flat_asset_tab("Models", S.all_mdl_files, S.mdl_filter,
+                                "models_list", /*kind=*/0);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Textures")) {
+            draw_flat_asset_tab("Textures", S.all_tex_files, S.tex_filter,
+                                "textures_list", /*kind=*/1);
             ImGui::EndTabItem();
         }
 

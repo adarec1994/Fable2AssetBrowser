@@ -61,6 +61,19 @@ struct LuaFileUI {
     uint32_t size;
 };
 
+// Flat-list entry used by the Models / Textures tabs in the left panel.
+// Built once during build_unified_file_tree() — covers files in every
+// top-level BNK plus nested BNKs that were extracted to disk. Click-load
+// uses the same g_pending_*_load pipe the tree click does.
+struct FlatAssetEntry {
+    std::string name;       // logical filename, e.g. "props_barrel_01.tex"
+    std::string full_path;  // full asset path inside the BNK (e.g. "props/foo/bar.mdl")
+    std::string bnk_path;   // BNK (top-level or nested temp path) it lives in
+    int file_index;         // index inside that BNK's directory listing
+    uint32_t size;          // file size in bytes (0 if unknown)
+    bool from_nested;       // true if bnk_path is a nested-BNK temp path
+};
+
 struct State {
     std::string root_dir;
     std::vector<std::string> bnk_paths;
@@ -87,6 +100,16 @@ struct State {
     std::vector<BNKItemUI> files;
     int selected_file_index = -1;
     bool hide_tooltips = false;
+
+    // Flat caches for the Models / Textures tabs in the left panel.
+    // Populated by build_unified_file_tree() — one pass over every BNK
+    // (top-level + nested) collecting .mdl / .tex entries respectively.
+    // Filter strings live next to them so the UI keeps the input
+    // value across tab switches.
+    std::vector<FlatAssetEntry> all_mdl_files;
+    std::vector<FlatAssetEntry> all_tex_files;
+    std::string mdl_filter;
+    std::string tex_filter;
 
     // ---- User-facing settings (persisted to config.ini) ----
     // show_paths controls whether the tree/file-table tooltips show the

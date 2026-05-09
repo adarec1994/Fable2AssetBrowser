@@ -375,7 +375,14 @@ int main() {
                 current = S.progress_current;
                 label = S.progress_label;
             }
-            ImGui::Text("%d/%d", current, std::max(1, total));
+            bool indeterminate = (total <= 0);
+            if (indeterminate) {
+                // No counter line — draw a blank line so the popup height
+                // stays stable whether we're determinate or not.
+                ImGui::NewLine();
+            } else {
+                ImGui::Text("%d/%d", current, total);
+            }
             float wrap_w = ImGui::GetContentRegionAvail().x;
             std::string two = label;
             if (ImGui::CalcTextSize(two.c_str()).x > wrap_w) {
@@ -404,8 +411,41 @@ int main() {
             ImGui::TextUnformatted(two.c_str());
             ImGui::EndChild();
             ImGui::PopTextWrapPos();
-            float frac = total > 0 ? (float) current / (float) total : 1.0f;
-            ImGui::ProgressBar(frac, ImVec2(-1, 0));
+            // Custom-drawn progress bar — replaces ImGui::ProgressBar so we
+            // can (a) use the blue accent (120,200,255) consistent with the
+            // post-splash loading screen instead of the default yellow
+            // PlotHistogram colour, and (b) animate an indeterminate
+            // sliding stripe when total<=0 (model loads etc.) instead of
+            // pinning the bar at 100% the whole time.
+            {
+                ImDrawList *dl = ImGui::GetWindowDrawList();
+                float bar_h = ImGui::GetFrameHeight();
+                float bar_w = ImGui::GetContentRegionAvail().x;
+                ImVec2 bar_min = ImGui::GetCursorScreenPos();
+                ImVec2 bar_max = ImVec2(bar_min.x + bar_w, bar_min.y + bar_h);
+                float r = bar_h * 0.5f;
+                dl->AddRectFilled(bar_min, bar_max, IM_COL32(40, 44, 52, 255), r);
+                if (indeterminate) {
+                    float stripe_w = bar_w * 0.28f;
+                    float t = (float) ImGui::GetTime();
+                    float phase = fmodf(t * 0.55f, 1.0f);
+                    float eased = (phase < 0.5f) ? (phase * 2.0f) : ((1.0f - phase) * 2.0f);
+                    float sx0 = bar_min.x + (bar_w - stripe_w) * eased;
+                    float sx1 = sx0 + stripe_w;
+                    dl->AddRectFilled(ImVec2(sx0, bar_min.y), ImVec2(sx1, bar_max.y),
+                                      IM_COL32(120, 200, 255, 255), r);
+                } else {
+                    float frac = (float) current / (float) total;
+                    if (frac < 0.0f) frac = 0.0f;
+                    if (frac > 1.0f) frac = 1.0f;
+                    if (frac > 0.0001f) {
+                        float fx1 = bar_min.x + bar_w * frac;
+                        dl->AddRectFilled(bar_min, ImVec2(fx1, bar_max.y),
+                                          IM_COL32(120, 200, 255, 255), r);
+                    }
+                }
+                ImGui::Dummy(ImVec2(bar_w, bar_h));
+            }
             ImGui::Dummy(ImVec2(0, 6));
             if (ImGui::Button("Cancel", ImVec2(-1, 0))) {
                 S.cancel_requested = true;

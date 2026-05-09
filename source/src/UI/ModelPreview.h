@@ -44,6 +44,10 @@ struct MPPerMesh {
     bool has_alpha = false;
     float center[3] = {0,0,0};
     float radius = 0.0f;
+    // Texture toggle state — when false, the corresponding sampler is fed
+    // the default white SRV instead of the real texture.
+    std::string diffuse_tex_name;
+    bool diffuse_visible = true;
 };
 struct ModelPreview {
 #ifdef _WIN32

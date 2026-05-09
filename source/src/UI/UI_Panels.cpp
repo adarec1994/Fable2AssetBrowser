@@ -5,6 +5,7 @@
 #include "../UI/HexView.h"
 #include "UI_Main.h"
 #include "../TexParser.h"
+#include "../LhTexCodec.h"
 #include "../MDL/ModelParser.h"
 #include "ModelPreview.h"
 #include "../MDL/mdl_converter.h"
@@ -1517,23 +1518,27 @@ if (!can_preview) {
                 if (can_tex) {
                     S.tex_info_ok = parse_tex_info(S.hex_data, S.tex_info);
                     if (S.tex_info_ok && !S.tex_info.Mips.empty()) {
+                        // Pick the LARGEST mip overall — compressed mips are
+                        // now decodable via the Lionhead codec port.
                         int best_mip = -1;
                         size_t best_area = 0;
                         for (int i = 0; i < (int)S.tex_info.Mips.size(); ++i) {
-                            if (S.tex_info.Mips[i].CompFlag == 7) {
-                                int w = S.tex_info.Mips[i].HasWH ? (int)S.tex_info.Mips[i].MipWidth : std::max(1, (int)S.tex_info.TextureWidth >> i);
-                                int h = S.tex_info.Mips[i].HasWH ? (int)S.tex_info.Mips[i].MipHeight : std::max(1, (int)S.tex_info.TextureHeight >> i);
-                                size_t area = (size_t)w * (size_t)h;
-                                if (area > best_area) {
-                                    best_area = area;
-                                    best_mip = i;
-                                }
+                            int w = S.tex_info.Mips[i].HasWH ? (int)S.tex_info.Mips[i].MipWidth : std::max(1, (int)S.tex_info.TextureWidth >> i);
+                            int h = S.tex_info.Mips[i].HasWH ? (int)S.tex_info.Mips[i].MipHeight : std::max(1, (int)S.tex_info.TextureHeight >> i);
+                            size_t area = (size_t)w * (size_t)h;
+                            if (area > best_area) {
+                                best_area = area;
+                                best_mip = i;
                             }
                         }
                         if (best_mip >= 0) {
                             S.preview_mip_index = best_mip;
                             S.show_preview_popup = true;
+                        } else {
+                            log_tagged("preview", "no mip found for " + name);
                         }
+                    } else if (!S.tex_info_ok) {
+                        log_tagged("preview", "parse_tex_info failed for " + name);
                     }
                 } else if (can_mdl) {
                     S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info, name);
@@ -2036,61 +2041,30 @@ if (!can_preview) {
         std::thread([name]() {
             std::vector<unsigned char> tex_buf;
             if (!build_any_tex_buffer_for_name(name, tex_buf)) {
-                S.texture_window_name = "ERROR: Could not load texture file";
+                log_tagged("texture window",
+                           "build_any_tex_buffer_for_name failed for " + name);
+                S.texture_window_name = "ERROR: Could not load texture file (see tex_errors.log)";
                 S.pending_texture_load = true;
                 S.pending_texture_w = 0;
                 S.pending_texture_h = 0;
                 return;
             }
 
-            TexInfo ti{};
-            if (!parse_tex_info(tex_buf, ti) || ti.Mips.empty()) {
-                S.texture_window_name = "ERROR: Could not parse texture info";
+            // decode_tex_to_rgba picks the largest mip available — comp=7 raw
+            // for BC1/BC3, or Lionhead-compressed (comp != 7) BC1 via the
+            // codec we ported from default.xex.
+            std::vector<uint8_t> rgba;
+            int w = 0, h = 0;
+            bool has_alpha = false;
+            if (!decode_tex_to_rgba(tex_buf, rgba, w, h, &has_alpha)) {
+                log_tagged("texture window",
+                           "decode_tex_to_rgba failed for " + name);
+                S.texture_window_name = "ERROR: Could not decode texture (see tex_errors.log)";
                 S.pending_texture_load = true;
                 S.pending_texture_w = 0;
                 S.pending_texture_h = 0;
                 return;
             }
-
-            int uncompressed_idx = -1;
-            for (size_t i = 0; i < ti.Mips.size(); ++i) {
-                if (ti.Mips[i].CompFlag == 7) {
-                    uncompressed_idx = (int)i;
-                    break;
-                }
-            }
-
-            if (uncompressed_idx < 0) {
-                S.texture_window_name = "ERROR: No uncompressed mip available for " + std::filesystem::path(name).filename().string();
-                S.pending_texture_load = true;
-                S.pending_texture_w = 0;
-                S.pending_texture_h = 0;
-                return;
-            }
-
-            const auto& m = ti.Mips[uncompressed_idx];
-            int w = m.HasWH ? (int)m.MipWidth : std::max(1, (int)ti.TextureWidth >> uncompressed_idx);
-            int h = m.HasWH ? (int)m.MipHeight : std::max(1, (int)ti.TextureHeight >> uncompressed_idx);
-
-            if (m.MipDataOffset + m.MipDataSizeParsed > tex_buf.size()) {
-                S.texture_window_name = "ERROR: Mip data out of bounds";
-                S.pending_texture_load = true;
-                S.pending_texture_w = 0;
-                S.pending_texture_h = 0;
-                return;
-            }
-
-            size_t expected_size = (size_t)w * (size_t)h * 4;
-            if (m.MipDataSizeParsed < expected_size) {
-                S.texture_window_name = "ERROR: Mip data too small (expected " + std::to_string(expected_size) + ", got " + std::to_string(m.MipDataSizeParsed) + ")";
-                S.pending_texture_load = true;
-                S.pending_texture_w = 0;
-                S.pending_texture_h = 0;
-                return;
-            }
-
-            std::vector<uint8_t> rgba(expected_size);
-            memcpy(rgba.data(), tex_buf.data() + m.MipDataOffset, expected_size);
 
             S.pending_texture_rgba = std::move(rgba);
             S.pending_texture_w = w;

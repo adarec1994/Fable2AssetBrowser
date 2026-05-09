@@ -10,6 +10,7 @@ set(APP_SOURCES
         src/Utilities/Utils.cpp
         src/Utilities/Files.cpp
         src/TexParser.cpp
+        src/LhTexCodec.cpp
         src/MDL/ModelParser.cpp
         src/Utilities/Progress.cpp
         src/Utilities/operations.cpp

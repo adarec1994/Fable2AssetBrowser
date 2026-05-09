@@ -4,6 +4,7 @@
 #include "../Utilities/Progress.h"
 #include "../Utilities/Files.h"
 #include "../TexParser.h"
+#include "../LhTexCodec.h"
 #include "../MDL/ModelParser.h"
 #include "ModelPreview.h"
 #include "../BNKCore.cpp"
@@ -454,7 +455,11 @@ void draw_hex_window() {
                             }
                             ImGui::Text("MipMapData@ 0x%zX, Size %zu", m.MipDataOffset, m.MipDataSizeParsed);
 #ifdef _WIN32
-                            if(m.CompFlag == 7){
+                            // Allow preview for raw (comp=7) mips of any BC format,
+                            // and for compressed BC1 mips via the Lionhead codec port.
+                            bool can_preview = (m.CompFlag == 7) ||
+                                               (S.tex_info.PixelFormat == 35 /* BC1 */);
+                            if(can_preview){
                                 if(ImGui::Button("Preview")){
                                     S.preview_mip_index = i;
                                     S.show_preview_popup = true;
@@ -580,33 +585,110 @@ void draw_hex_window() {
                     if(S.tex_info.PixelFormat == 39) fmt = DXGI_FORMAT_BC3_UNORM;
                     else if(S.tex_info.PixelFormat == 40) fmt = DXGI_FORMAT_BC5_UNORM;
 
-                    size_t blocks_x = (w + 3) / 4;
-                    std::vector<uint8_t> payload(src, src + src_sz);
+                    std::vector<uint8_t> payload;
 
-                    for(size_t i = 0; i + 8 <= payload.size(); i += 8) {
-                        uint16_t c0 = (payload[i+0] << 8) | payload[i+1];
-                        uint16_t c1 = (payload[i+2] << 8) | payload[i+3];
-                        uint32_t idx = (payload[i+4] << 24) | (payload[i+5] << 16) | (payload[i+6] << 8) | payload[i+7];
+                    if (m.CompFlag == 7) {
+                        // Raw mip — bytes are big-endian on disk; swap to LE for D3D.
+                        payload.assign(src, src + src_sz);
+                        if (S.tex_info.PixelFormat == 39) {
+                            // BC3: alpha block (8 bytes) needs its own swap, then color block as BC1
+                            for (size_t i = 0; i + 16 <= payload.size(); i += 16) {
+                                uint64_t alpha_bits = 0;
+                                for (int j = 0; j < 6; j++) alpha_bits |= ((uint64_t)payload[i+2+j]) << (j*8);
+                                uint64_t alpha_swapped = 0;
+                                for (int j = 0; j < 6; j++) alpha_swapped |= ((alpha_bits >> (j*8)) & 0xFF) << ((5-j)*8);
+                                for (int j = 0; j < 6; j++) payload[i+2+j] = (alpha_swapped >> (j*8)) & 0xFF;
+                                // color block (8 bytes) — same as BC1 swap
+                                size_t k = i + 8;
+                                uint16_t c0 = (payload[k+0] << 8) | payload[k+1];
+                                uint16_t c1 = (payload[k+2] << 8) | payload[k+3];
+                                uint32_t idx = ((uint32_t)payload[k+4] << 24) | ((uint32_t)payload[k+5] << 16) | ((uint32_t)payload[k+6] << 8) | payload[k+7];
+                                payload[k+0] = c0 & 0xFF; payload[k+1] = (c0 >> 8) & 0xFF;
+                                payload[k+2] = c1 & 0xFF; payload[k+3] = (c1 >> 8) & 0xFF;
+                                payload[k+4] = idx & 0xFF; payload[k+5] = (idx >> 8) & 0xFF;
+                                payload[k+6] = (idx >> 16) & 0xFF; payload[k+7] = (idx >> 24) & 0xFF;
+                            }
+                        } else {
+                            // BC1
+                            for (size_t i = 0; i + 8 <= payload.size(); i += 8) {
+                                uint16_t c0 = (payload[i+0] << 8) | payload[i+1];
+                                uint16_t c1 = (payload[i+2] << 8) | payload[i+3];
+                                uint32_t idx = ((uint32_t)payload[i+4] << 24) | ((uint32_t)payload[i+5] << 16) | ((uint32_t)payload[i+6] << 8) | payload[i+7];
+                                payload[i+0] = c0 & 0xFF; payload[i+1] = (c0 >> 8) & 0xFF;
+                                payload[i+2] = c1 & 0xFF; payload[i+3] = (c1 >> 8) & 0xFF;
+                                payload[i+4] = idx & 0xFF; payload[i+5] = (idx >> 8) & 0xFF;
+                                payload[i+6] = (idx >> 16) & 0xFF; payload[i+7] = (idx >> 24) & 0xFF;
+                            }
+                        }
+                    } else {
+                        // Compressed Lionhead BC1
+                        if (S.tex_info.PixelFormat != 35) {
+                            std::ostringstream os;
+                            os << "CompFlag=" << m.CompFlag
+                               << " with PixelFormat=" << S.tex_info.PixelFormat
+                               << " — only BC1 (35) compressed mips are supported by the codec port";
+                            log_tagged("mip preview", os.str());
+                            ImGui::TextUnformatted("Compressed non-BC1 preview not supported yet.");
+                            if(ImGui::Button("Close", ImVec2(-1,0))) ImGui::CloseCurrentPopup();
+                            ImGui::EndPopup();
+                            return;
+                        }
+                        // The codec wants the WHOLE body (u16 mw, u16 mh,
+                        // UnkData[440], payload). MipDataOffset already
+                        // skipped the 444-byte header; reconstruct from
+                        // DefOffset + sizeof(mip-header)=48.
+                        const size_t body_start = m.DefOffset + 48;
+                        const size_t body_size  = m.DataSize;
+                        if (body_start + body_size > S.hex_data.size()) {
+                            std::ostringstream os;
+                            os << "compressed mip body OOB (start=" << body_start
+                               << " size=" << body_size
+                               << " hex_data=" << S.hex_data.size() << ")";
+                            log_tagged("mip preview", os.str());
+                            ImGui::TextUnformatted("Compressed mip body OOB (see tex_errors.log).");
+                            if(ImGui::Button("Close", ImVec2(-1,0))) ImGui::CloseCurrentPopup();
+                            ImGui::EndPopup();
+                            return;
+                        }
+                        const uint8_t* body_ptr = S.hex_data.data() + body_start;
 
-                        payload[i+0] = c0 & 0xFF;
-                        payload[i+1] = (c0 >> 8) & 0xFF;
-                        payload[i+2] = c1 & 0xFF;
-                        payload[i+3] = (c1 >> 8) & 0xFF;
-                        payload[i+4] = idx & 0xFF;
-                        payload[i+5] = (idx >> 8) & 0xFF;
-                        payload[i+6] = (idx >> 16) & 0xFF;
-                        payload[i+7] = (idx >> 24) & 0xFF;
+                        int dec_w = 0, dec_h = 0;
+                        std::string err;
+                        if (!lh_decode_compressed_mip(body_ptr, body_size, dec_w, dec_h, payload, &err)) {
+                            log_tagged("mip preview", "lh_decode_compressed_mip failed: " + err);
+                            ImGui::TextUnformatted("Compressed mip decode failed (see tex_errors.log).");
+                            if(ImGui::Button("Close", ImVec2(-1,0))) ImGui::CloseCurrentPopup();
+                            ImGui::EndPopup();
+                            return;
+                        }
+                        // Codec output is little-endian BC1; D3D consumes that directly.
+                        w = (uint32_t)dec_w;
+                        h = (uint32_t)dec_h;
+                        fmt = DXGI_FORMAT_BC1_UNORM;
                     }
+
+                    size_t blocks_x = (w + 3) / 4;
+                    UINT pitch = (UINT)(blocks_x * (fmt == DXGI_FORMAT_BC3_UNORM ? 16 : 8));
 
                     D3D11_TEXTURE2D_DESC td{};
                     td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1; td.Format = fmt;
                     td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                    D3D11_SUBRESOURCE_DATA sd{}; sd.pSysMem = payload.data(); sd.SysMemPitch = (UINT)(blocks_x * 8);
+                    D3D11_SUBRESOURCE_DATA sd{}; sd.pSysMem = payload.data(); sd.SysMemPitch = pitch;
                     ID3D11Texture2D* tex = nullptr;
-                    if(device->CreateTexture2D(&td, &sd, &tex) == S_OK){
+                    HRESULT hr = device->CreateTexture2D(&td, &sd, &tex);
+                    if(SUCCEEDED(hr)){
                         D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
                         svd.Format = td.Format; svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; svd.Texture2D.MipLevels = 1;
                         device->CreateShaderResourceView(tex, &svd, &S.preview_srv); tex->Release();
+                    } else {
+                        std::ostringstream os;
+                        os << "CreateTexture2D failed (HRESULT=0x"
+                           << std::hex << (uint32_t)hr << std::dec
+                           << ", w=" << w << ", h=" << h
+                           << ", fmt=" << (int)fmt
+                           << ", payload=" << payload.size()
+                           << ", pitch=" << pitch << ")";
+                        log_tagged("mip preview", os.str());
                     }
                 }
             }
@@ -623,7 +705,8 @@ void draw_hex_window() {
         if(S.show_model_preview){ ImGui::OpenPopup("Model Preview"); S.show_model_preview = false; }
 
         const ImVec2 canvas(960, 640);
-        const ImVec2 win_size(canvas.x + 32.0f, canvas.y + 110.0f);
+        const float tex_panel_w = 320.0f;
+        const ImVec2 win_size(canvas.x + tex_panel_w + 48.0f, canvas.y + 110.0f);
 
         ImGuiViewport* vp = ImGui::GetMainViewport();
         ImGui::SetNextWindowSize(win_size, ImGuiCond_Always);
@@ -633,6 +716,8 @@ void draw_hex_window() {
         {
             MP_Render(device, g_mp, g_flycam);
 
+            // Left column: 3D canvas
+            ImGui::BeginChild("##canvas_col", canvas, ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
             ImVec2 pos = ImGui::GetCursorScreenPos();
             if(g_mp.srv) ImGui::GetWindowDrawList()->AddImage((ImTextureID)g_mp.srv, pos, ImVec2(pos.x + canvas.x, pos.y + canvas.y));
             ImGui::InvisibleButton("model_canvas", canvas);
@@ -703,6 +788,74 @@ void draw_hex_window() {
                 MP_Release(g_mp);
                 ImGui::CloseCurrentPopup();
             }
+            ImGui::EndChild();   // end canvas column
+
+            // Right column: Textures panel — sits inside the modal so it's
+            // not blocked by ImGui's modal-popup overlay.
+            ImGui::SameLine();
+            ImGui::BeginChild("##tex_col", ImVec2(tex_panel_w, canvas.y), ImGuiChildFlags_Border, ImGuiWindowFlags_None);
+            ImGui::TextUnformatted("Textures");
+            ImGui::Separator();
+
+            if (g_mp.has_model && !g_mp.meshes.empty()) {
+                // Build a deduplicated list of texture names. Group meshes by name
+                // so toggling a name affects every mesh using it.
+                struct TexEntry {
+                    std::string name;
+                    std::vector<size_t> mesh_idx;
+                    bool any_visible = false;
+                };
+                std::vector<TexEntry> entries;
+                for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
+                    const std::string& nm = g_mp.meshes[i].diffuse_tex_name;
+                    if (nm.empty()) continue;
+                    auto it = std::find_if(entries.begin(), entries.end(),
+                        [&](const TexEntry& e) { return e.name == nm; });
+                    if (it == entries.end()) {
+                        TexEntry e;
+                        e.name = nm;
+                        e.mesh_idx.push_back(i);
+                        e.any_visible = g_mp.meshes[i].diffuse_visible;
+                        entries.push_back(e);
+                    } else {
+                        it->mesh_idx.push_back(i);
+                        it->any_visible = it->any_visible || g_mp.meshes[i].diffuse_visible;
+                    }
+                }
+
+                if (entries.empty()) {
+                    ImGui::TextDisabled("(no diffuse textures referenced)");
+                } else {
+                    if (ImGui::Button("Show All", ImVec2(140, 0))) {
+                        for (auto& mm : g_mp.meshes) mm.diffuse_visible = true;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Hide All", ImVec2(140, 0))) {
+                        for (auto& mm : g_mp.meshes) mm.diffuse_visible = false;
+                    }
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Diffuse textures (uncheck to hide):");
+
+                    for (size_t ei = 0; ei < entries.size(); ++ei) {
+                        auto& e = entries[ei];
+                        bool v = e.any_visible;
+                        std::string label = e.name + "##tex_entry_" + std::to_string(ei);
+                        if (ImGui::Checkbox(label.c_str(), &v)) {
+                            for (size_t mi : e.mesh_idx) {
+                                g_mp.meshes[mi].diffuse_visible = v;
+                            }
+                        }
+                        if (e.mesh_idx.size() > 1) {
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("(%zu meshes)", e.mesh_idx.size());
+                        }
+                    }
+                }
+            } else {
+                ImGui::TextDisabled("(no model loaded)");
+            }
+            ImGui::EndChild();   // end textures column
+
             ImGui::EndPopup();
         }
     }

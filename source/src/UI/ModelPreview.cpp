@@ -6,11 +6,13 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <sstream>
 #include "ModelPreview.h"
 #include "../Utilities/Files.h"
 #include "../Utilities/Utils.h"
 #include "../BNKCore.cpp"
 #include "../TexParser.h"
+#include "../LhTexCodec.h"
 #ifdef _WIN32
 #include <initguid.h>
 #include <d3d11.h>
@@ -110,85 +112,259 @@ static void swap_bc3_endian(uint8_t* data, size_t size) {
         swap_bc1_endian(data + i + 8, 8);
     }
 }
-bool decode_tex_to_rgba(const std::vector<unsigned char>& blob, std::vector<uint8_t>& rgba, int& out_w, int& out_h, bool* out_has_alpha){
-    if(out_has_alpha) *out_has_alpha = false;
-    TexInfo ti{};
-    if(!parse_tex_info(blob, ti) || ti.Mips.empty()) return false;
-    size_t best = 0;
-    for(size_t i=1;i<ti.Mips.size();++i){
-        if(ti.Mips[i].CompFlag != 7) continue;
-        int w = ti.Mips[i].HasWH ? (int)ti.Mips[i].MipWidth  : std::max(1, (int)ti.TextureWidth  >> (int)i);
-        int h = ti.Mips[i].HasWH ? (int)ti.Mips[i].MipHeight : std::max(1, (int)ti.TextureHeight >> (int)i);
-        int bw = ti.Mips[best].HasWH ? (int)ti.Mips[best].MipWidth  : std::max(1, (int)ti.TextureWidth  >> (int)best);
-        int bh = ti.Mips[best].HasWH ? (int)ti.Mips[best].MipHeight : std::max(1, (int)ti.TextureHeight >> (int)best);
-        if(ti.Mips[best].CompFlag != 7 || w*h > bw*bh) best = i;
+// Helper: BC1 → RGBA blit (assumes input is little-endian BC1 blocks)
+static void blit_bc1_to_rgba(const uint8_t* src, int w, int h,
+                             std::vector<uint8_t>& rgba) {
+    const size_t bx = (size_t)((w + 3) / 4);
+    const size_t by = (size_t)((h + 3) / 4);
+    rgba.assign((size_t)w * (size_t)h * 4, 0xFF);
+    size_t off = 0;
+    for (size_t byy = 0; byy < by; ++byy) {
+        for (size_t bxx = 0; bxx < bx; ++bxx) {
+            uint32_t block[16];
+            decode_bc1_block(src + off, block);
+            off += 8;
+            for (int py = 0; py < 4; ++py) {
+                int yy = (int)byy * 4 + py;
+                if (yy >= h) break;
+                for (int px = 0; px < 4; ++px) {
+                    int xx = (int)bxx * 4 + px;
+                    if (xx >= w) break;
+                    ((uint32_t*)rgba.data())[yy * w + xx] = block[py * 4 + px];
+                }
+            }
+        }
     }
-    const auto& m = ti.Mips[best];
-    int w = m.HasWH ? (int)m.MipWidth  : std::max(1, (int)ti.TextureWidth  >> (int)best);
-    int h = m.HasWH ? (int)m.MipHeight : std::max(1, (int)ti.TextureHeight >> (int)best);
-    if(m.MipDataOffset + m.MipDataSizeParsed > blob.size()) return false;
-    size_t bx = (size_t)((w+3)/4), by = (size_t)((h+3)/4);
-    size_t sz_bc1 = bx*by*8;
-    size_t sz_bc3 = bx*by*16;
-    size_t sz_raw = (size_t)w*(size_t)h*4;
-    rgba.resize((size_t)w*(size_t)h*4, 0xFF);
-    const uint8_t* src = blob.data() + m.MipDataOffset;
-    auto any_alpha_lt_255 = [&](const std::vector<uint8_t>& buf)->bool{
+}
+
+// Helper: BC3 → RGBA blit (assumes input is little-endian BC3 blocks)
+static void blit_bc3_to_rgba(const uint8_t* src, int w, int h,
+                             std::vector<uint8_t>& rgba) {
+    const size_t bx = (size_t)((w + 3) / 4);
+    const size_t by = (size_t)((h + 3) / 4);
+    rgba.assign((size_t)w * (size_t)h * 4, 0xFF);
+    size_t off = 0;
+    for (size_t byy = 0; byy < by; ++byy) {
+        for (size_t bxx = 0; bxx < bx; ++bxx) {
+            uint32_t block[16];
+            decode_bc3_block(src + off, block);
+            off += 16;
+            for (int py = 0; py < 4; ++py) {
+                int yy = (int)byy * 4 + py;
+                if (yy >= h) break;
+                for (int px = 0; px < 4; ++px) {
+                    int xx = (int)bxx * 4 + px;
+                    if (xx >= w) break;
+                    ((uint32_t*)rgba.data())[yy * w + xx] = block[py * 4 + px];
+                }
+            }
+        }
+    }
+}
+
+bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
+                        std::vector<uint8_t>& rgba,
+                        int& out_w, int& out_h, bool* out_has_alpha) {
+    if (out_has_alpha) *out_has_alpha = false;
+    TexInfo ti{};
+    if (!parse_tex_info(blob, ti) || ti.Mips.empty()) {
+        log_tagged("decode_tex_to_rgba", "parse_tex_info failed or no mips");
+        return false;
+    }
+
+    // Helper: width/height for a given mip
+    auto mip_wh = [&](size_t i, int& mw, int& mh) {
+        const auto& m = ti.Mips[i];
+        mw = m.HasWH ? (int)m.MipWidth  : std::max(1, (int)ti.TextureWidth  >> (int)i);
+        mh = m.HasWH ? (int)m.MipHeight : std::max(1, (int)ti.TextureHeight >> (int)i);
+    };
+
+    auto any_alpha_lt_255 = [&](const std::vector<uint8_t>& buf) -> bool {
         const uint8_t* p = buf.data();
         size_t n = buf.size();
-        for(size_t i=3;i<n;i+=4){ if(p[i] < 255){ return true; } }
+        for (size_t i = 3; i < n; i += 4)
+            if (p[i] < 255) return true;
         return false;
     };
-    if(ti.PixelFormat == 35){
-        if(m.MipDataSizeParsed < sz_bc1) return false;
-        std::vector<uint8_t> swapped(src, src + sz_bc1);
-        swap_bc1_endian(swapped.data(), swapped.size());
-        size_t off=0;
-        for(size_t byy=0; byy<by; ++byy){
-            for(size_t bxx=0; bxx<bx; ++bxx){
-                uint32_t block[16];
-                decode_bc1_block(swapped.data()+off, block); off += 8;
-                for(int py=0; py<4; ++py){
-                    int yy = (int)byy*4 + py; if(yy>=h) break;
-                    for(int px=0; px<4; ++px){
-                        int xx=(int)bxx*4 + px; if(xx>=w) break;
-                        ((uint32_t*)rgba.data())[yy*w+xx] = block[py*4+px];
-                    }
-                }
-            }
+
+    // Pick the LARGEST mip available — compressed mips count too now that
+    // we have a Lionhead-codec implementation.
+    size_t best = 0;
+    {
+        int bw = 0, bh = 0; mip_wh(0, bw, bh);
+        size_t best_area = (size_t)bw * (size_t)bh;
+        for (size_t i = 1; i < ti.Mips.size(); ++i) {
+            int w = 0, h = 0; mip_wh(i, w, h);
+            size_t area = (size_t)w * (size_t)h;
+            if (area > best_area) { best_area = area; best = i; }
         }
+    }
+
+    const auto& m = ti.Mips[best];
+    int w = 0, h = 0; mip_wh(best, w, h);
+
+    if (m.MipDataOffset + m.MipDataSizeParsed > blob.size()) {
+        std::ostringstream os;
+        os << "mip[" << best << "] data out of bounds (offset=" << m.MipDataOffset
+           << " size=" << m.MipDataSizeParsed << " blob=" << blob.size() << ")";
+        log_tagged("decode_tex_to_rgba", os.str());
+        return false;
+    }
+
+    const size_t bx = (size_t)((w + 3) / 4);
+    const size_t by = (size_t)((h + 3) / 4);
+    const size_t sz_bc1 = bx * by * 8;
+    const size_t sz_bc3 = bx * by * 16;
+    const uint8_t* src = blob.data() + m.MipDataOffset;
+
+    // ---------------------------------------------------------------
+    // CompFlag == 7 → raw mip data (already-DXT, big-endian on Xbox 360).
+    // ---------------------------------------------------------------
+    if (m.CompFlag == 7) {
+        if (ti.PixelFormat == 35) {
+            if (m.MipDataSizeParsed < sz_bc1) {
+                std::ostringstream os;
+                os << "BC1 raw mip too small (" << m.MipDataSizeParsed << " < " << sz_bc1 << ")";
+                log_tagged("decode_tex_to_rgba", os.str());
+                return false;
+            }
+            std::vector<uint8_t> swapped(src, src + sz_bc1);
+            swap_bc1_endian(swapped.data(), swapped.size());
+            blit_bc1_to_rgba(swapped.data(), w, h, rgba);
+            out_w = w; out_h = h;
+            if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
+            return true;
+        }
+        if (ti.PixelFormat == 39) {
+            if (m.MipDataSizeParsed < sz_bc3) {
+                std::ostringstream os;
+                os << "BC3 raw mip too small (" << m.MipDataSizeParsed << " < " << sz_bc3 << ")";
+                log_tagged("decode_tex_to_rgba", os.str());
+                return false;
+            }
+            std::vector<uint8_t> swapped(src, src + sz_bc3);
+            swap_bc3_endian(swapped.data(), swapped.size());
+            blit_bc3_to_rgba(swapped.data(), w, h, rgba);
+            out_w = w; out_h = h;
+            if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
+            return true;
+        }
+        if (ti.PixelFormat == 40) {
+            log_tagged("decode_tex_to_rgba", "BC5 (PixelFormat 40) not supported yet (raw mip)");
+            return false;
+        }
+        // Fallback: assume the raw bytes already are RGBA (rare format)
+        size_t sz_raw = (size_t)w * (size_t)h * 4;
+        if (m.MipDataSizeParsed < sz_raw) {
+            std::ostringstream os;
+            os << "unknown raw format and data too small for RGBA ("
+               << m.MipDataSizeParsed << " < " << sz_raw
+               << ", PixelFormat=" << ti.PixelFormat << ")";
+            log_tagged("decode_tex_to_rgba", os.str());
+            return false;
+        }
+        rgba.assign(sz_raw, 0xFF);
+        memcpy(rgba.data(), src, sz_raw);
         out_w = w; out_h = h;
-        if(out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
+        if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
         return true;
     }
-    if(ti.PixelFormat == 39){
-        if(m.MipDataSizeParsed < sz_bc3) return false;
-        std::vector<uint8_t> swapped(src, src + sz_bc3);
-        swap_bc3_endian(swapped.data(), swapped.size());
-        size_t off=0;
-        for(size_t byy=0; byy<by; ++byy){
-            for(size_t bxx=0; bxx<bx; ++bxx){
-                uint32_t block[16];
-                decode_bc3_block(swapped.data()+off, block); off += 16;
-                for(int py=0; py<4; ++py){
-                    int yy = (int)byy*4 + py; if(yy>=h) break;
-                    for(int px=0; px<4; ++px){
-                        int xx=(int)bxx*4 + px; if(xx>=w) break;
-                        ((uint32_t*)rgba.data())[yy*w+xx] = block[py*4+px];
-                    }
-                }
+
+    // ---------------------------------------------------------------
+    // CompFlag != 7 → Lionhead-compressed mip body.
+    // The codec yields little-endian BC1 (no further endian swap needed).
+    // ---------------------------------------------------------------
+    {
+        // Currently only BC1 (PixelFormat 35) is supported by the codec we ported.
+        // For other formats, fall back to whichever uncompressed mip is largest.
+        if (ti.PixelFormat != 35) {
+            // Try to find the best comp=7 mip as a fallback
+            int fallback_idx = -1;
+            int fallback_area = 0;
+            for (size_t i = 0; i < ti.Mips.size(); ++i) {
+                if (ti.Mips[i].CompFlag != 7) continue;
+                int fw = 0, fh = 0; mip_wh(i, fw, fh);
+                int area = fw * fh;
+                if (area > fallback_area) { fallback_area = area; fallback_idx = (int)i; }
             }
+            if (fallback_idx < 0) {
+                std::ostringstream os;
+                os << "PixelFormat " << ti.PixelFormat
+                   << " is compressed and no comp=7 fallback exists; "
+                      "Lionhead codec port currently handles BC1 (35) only";
+                log_tagged("decode_tex_to_rgba", os.str());
+                return false;
+            }
+            const auto& fm = ti.Mips[fallback_idx];
+            int fw = 0, fh = 0; mip_wh(fallback_idx, fw, fh);
+            const size_t fbx = (size_t)((fw + 3) / 4);
+            const size_t fby = (size_t)((fh + 3) / 4);
+            if (fm.MipDataOffset + fm.MipDataSizeParsed > blob.size()) {
+                log_tagged("decode_tex_to_rgba", "fallback mip OOB");
+                return false;
+            }
+            const uint8_t* fsrc = blob.data() + fm.MipDataOffset;
+            if (ti.PixelFormat == 39) {
+                if (fm.MipDataSizeParsed < fbx * fby * 16) {
+                    log_tagged("decode_tex_to_rgba", "BC3 fallback mip too small");
+                    return false;
+                }
+                std::vector<uint8_t> swapped(fsrc, fsrc + fbx * fby * 16);
+                swap_bc3_endian(swapped.data(), swapped.size());
+                blit_bc3_to_rgba(swapped.data(), fw, fh, rgba);
+                out_w = fw; out_h = fh;
+                if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
+                return true;
+            }
+            {
+                std::ostringstream os;
+                os << "unhandled PixelFormat " << ti.PixelFormat << " for fallback path";
+                log_tagged("decode_tex_to_rgba", os.str());
+            }
+            return false;
         }
+
+        // PixelFormat 35 (BC1) — run the Lionhead codec.
+        // The codec wants the WHOLE body (u16 mw, u16 mh, UnkData[440],
+        // payload), but parse_tex_info's MipDataOffset already skips the
+        // 4-byte w/h + 440-byte UnkData, pointing at just the payload.
+        // Reconstruct the full body via DefOffset + sizeof(mip-header)=48.
+        const size_t body_start = m.DefOffset + 48;
+        const size_t body_size  = m.DataSize;
+        if (body_start + body_size > blob.size()) {
+            std::ostringstream os;
+            os << "compressed mip body OOB (start=" << body_start
+               << " size=" << body_size << " blob=" << blob.size() << ")";
+            log_tagged("decode_tex_to_rgba", os.str());
+            return false;
+        }
+        const uint8_t* body_ptr = blob.data() + body_start;
+
+        std::vector<uint8_t> bc1;
+        int dec_w = 0, dec_h = 0;
+        std::string err;
+        bool ok = lh_decode_compressed_mip(body_ptr, body_size,
+                                           dec_w, dec_h, bc1, &err);
+        if (!ok) {
+            std::ostringstream os;
+            os << "lh_decode_compressed_mip failed for mip[" << best << "] "
+               << w << "x" << h << ": " << err;
+            log_tagged("decode_tex_to_rgba", os.str());
+            return false;
+        }
+        // Sanity-check decoded dims match what we expected from the mip header
+        if (dec_w != w || dec_h != h) {
+            std::ostringstream os;
+            os << "WARNING: codec reported " << dec_w << "x" << dec_h
+               << " but TexInfo says " << w << "x" << h << "; trusting codec";
+            log_tagged("decode_tex_to_rgba", os.str());
+            w = dec_w; h = dec_h;
+        }
+        blit_bc1_to_rgba(bc1.data(), w, h, rgba);
         out_w = w; out_h = h;
-        if(out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
+        if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
         return true;
     }
-    if(ti.PixelFormat == 40) { return false; }
-    if(m.MipDataSizeParsed < sz_raw) return false;
-    memcpy(rgba.data(), src, sz_raw);
-    out_w = w; out_h = h;
-    if(out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
-    return true;
 }
 static bool extract_tex_bytes_by_candidate(const std::vector<std::string>& candidates, std::vector<unsigned char>& out){
     auto pOpt = find_any_textures_bnk();
@@ -230,9 +406,9 @@ static bool extract_tex_bytes_by_candidate(const std::vector<std::string>& candi
         if(blob.empty()) continue;
         TexInfo ti{};
         if(!parse_tex_info(blob, ti)) continue;
-        bool has_uncompressed = false;
-        for(const auto& mip : ti.Mips){ if(mip.CompFlag == 7){ has_uncompressed = true; break; } }
-        if(!has_uncompressed) continue;
+        // Accept textures with at least one decodable mip (comp=7 raw,
+        // or comp!=7 BC1 that the Lionhead codec can decode).
+        if (ti.Mips.empty()) continue;
         size_t area = (size_t)ti.TextureWidth * (size_t)ti.TextureHeight;
         if(area > best_area){ best_area = area; best_idx = (int)i; out.swap(blob); }
     }
@@ -553,6 +729,8 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         if(FAILED(dev->CreateBuffer(&ib,&isd,&m.ib))) { m.vb->Release(); continue; }
         m.index_count = (UINT)g.indices.size();
         bool hasA = false;
+        m.diffuse_tex_name = g.diffuse_tex_name;
+        m.diffuse_visible = true;
         if(!g.diffuse_tex_name.empty()){
             std::vector<unsigned char> tex_buf;
             if(build_any_tex_buffer_for_name(g.diffuse_tex_name, tex_buf)){
@@ -627,7 +805,9 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         ctx->IASetVertexBuffers(0,1,&m.vb,&stride,&offset);
         ctx->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ID3D11ShaderResourceView* srvs[5] = { m.srv_diffuse ? m.srv_diffuse : mp.default_srv, m.srv_normal ? m.srv_normal : mp.default_srv, m.srv_specular ? m.srv_specular : mp.default_srv, m.srv_unk ? m.srv_unk : mp.default_srv, m.srv_tint ? m.srv_tint : mp.default_srv };
+        ID3D11ShaderResourceView* diffuse_to_use =
+            (m.diffuse_visible && m.srv_diffuse) ? m.srv_diffuse : mp.default_srv;
+        ID3D11ShaderResourceView* srvs[5] = { diffuse_to_use, m.srv_normal ? m.srv_normal : mp.default_srv, m.srv_specular ? m.srv_specular : mp.default_srv, m.srv_unk ? m.srv_unk : mp.default_srv, m.srv_tint ? m.srv_tint : mp.default_srv };
         ctx->PSSetShaderResources(0, 5, srvs);
         ctx->DrawIndexed(m.index_count,0,0);
         ID3D11ShaderResourceView* nullsrvs[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
@@ -641,7 +821,9 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         ctx->IASetVertexBuffers(0,1,&m.vb,&stride,&offset);
         ctx->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ID3D11ShaderResourceView* srvs[5] = { m.srv_diffuse ? m.srv_diffuse : mp.default_srv, m.srv_normal ? m.srv_normal : mp.default_srv, m.srv_specular ? m.srv_specular : mp.default_srv, m.srv_unk ? m.srv_unk : mp.default_srv, m.srv_tint ? m.srv_tint : mp.default_srv };
+        ID3D11ShaderResourceView* diffuse_to_use =
+            (m.diffuse_visible && m.srv_diffuse) ? m.srv_diffuse : mp.default_srv;
+        ID3D11ShaderResourceView* srvs[5] = { diffuse_to_use, m.srv_normal ? m.srv_normal : mp.default_srv, m.srv_specular ? m.srv_specular : mp.default_srv, m.srv_unk ? m.srv_unk : mp.default_srv, m.srv_tint ? m.srv_tint : mp.default_srv };
         ctx->PSSetShaderResources(0, 5, srvs);
         ctx->DrawIndexed(m.index_count,0,0);
         ID3D11ShaderResourceView* nullsrvs[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
@@ -870,6 +1052,8 @@ bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelP
         glBindVertexArray(0);
         m.index_count = (unsigned int)g.indices.size();
         bool hasA = false;
+        m.diffuse_tex_name = g.diffuse_tex_name;
+        m.diffuse_visible = true;
         if (!g.diffuse_tex_name.empty()) { m.tex_diffuse = load_tex_from_name(g.diffuse_tex_name, &hasA); }
         if (!m.tex_diffuse) m.tex_diffuse = mp.default_tex;
         if (!m.tex_normal) m.tex_normal = mp.default_tex;
@@ -940,7 +1124,8 @@ void MP_Render(ModelPreview& mp, const FlyCam& cam) {
     for (const auto& m : mp.meshes) {
         if (!m.vao || m.index_count == 0 || m.has_alpha) continue;
         glDisable(GL_BLEND);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m.tex_diffuse ? m.tex_diffuse : mp.default_tex); glUniform1i(mp.tex_diffuse_loc, 0);
+        unsigned int diffuse_to_use = (m.diffuse_visible && m.tex_diffuse) ? m.tex_diffuse : mp.default_tex;
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, diffuse_to_use); glUniform1i(mp.tex_diffuse_loc, 0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m.tex_normal ? m.tex_normal : mp.default_tex); glUniform1i(mp.tex_normal_loc, 1);
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m.tex_specular ? m.tex_specular : mp.default_tex); glUniform1i(mp.tex_specular_loc, 2);
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m.tex_unk ? m.tex_unk : mp.default_tex); glUniform1i(mp.tex_unk_loc, 3);
@@ -951,7 +1136,8 @@ void MP_Render(ModelPreview& mp, const FlyCam& cam) {
     for (const auto& m : mp.meshes) {
         if (!m.vao || m.index_count == 0 || !m.has_alpha) continue;
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m.tex_diffuse ? m.tex_diffuse : mp.default_tex); glUniform1i(mp.tex_diffuse_loc, 0);
+        unsigned int diffuse_to_use = (m.diffuse_visible && m.tex_diffuse) ? m.tex_diffuse : mp.default_tex;
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, diffuse_to_use); glUniform1i(mp.tex_diffuse_loc, 0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m.tex_normal ? m.tex_normal : mp.default_tex); glUniform1i(mp.tex_normal_loc, 1);
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m.tex_specular ? m.tex_specular : mp.default_tex); glUniform1i(mp.tex_specular_loc, 2);
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m.tex_unk ? m.tex_unk : mp.default_tex); glUniform1i(mp.tex_unk_loc, 3);

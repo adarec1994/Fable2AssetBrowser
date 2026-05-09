@@ -279,7 +279,7 @@ private:
             if (pos+n > _file_table_blob.size()) throw std::runtime_error("EOF");
             std::string s(reinterpret_cast<const char*>(&_file_table_blob[pos]), n);
             pos+=n;
-            if (!s.empty() && s.back()==char(0)) s.pop_back();
+            while (!s.empty() && s.back()==char(0)) s.pop_back();
             return s;
         };
         auto make_offset = [&](uint32_t rel){ return base_offset + rel; };

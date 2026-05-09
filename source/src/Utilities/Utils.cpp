@@ -60,9 +60,42 @@ bool name_matches_filter(const std::string &name, const std::string &filter) {
     return n.find(f) != std::string::npos;
 }
 
+bool name_matches_ext(const std::string &name, const std::string &ext) {
+    if (ext.empty()) return true;
+    std::string n = name;
+    std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+    size_t last_sep = n.find_last_of("/\\");
+    if (last_sep != std::string::npos) n = n.substr(last_sep + 1);
+    size_t last_dot = n.find_last_of('.');
+    if (last_dot == std::string::npos) return false;
+    return n.substr(last_dot) == ext;
+}
+
+std::vector<std::string> unique_file_extensions() {
+    std::vector<std::string> out;
+    std::vector<std::string> seen;
+    seen.reserve(S.files.size());
+    for (auto &f : S.files) {
+        std::string n = f.name;
+        std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+        size_t last_sep = n.find_last_of("/\\");
+        if (last_sep != std::string::npos) n = n.substr(last_sep + 1);
+        size_t last_dot = n.find_last_of('.');
+        if (last_dot == std::string::npos || last_dot == n.size() - 1) continue;
+        std::string ext = n.substr(last_dot);
+        if (std::find(seen.begin(), seen.end(), ext) == seen.end()) {
+            seen.push_back(ext);
+        }
+    }
+    std::sort(seen.begin(), seen.end());
+    out = std::move(seen);
+    return out;
+}
+
 int count_visible_files() {
     int c = 0;
-    for (auto &f: S.files) if (name_matches_filter(f.name, S.file_filter)) ++c;
+    for (auto &f: S.files)
+        if (name_matches_filter(f.name, S.file_filter) && name_matches_ext(f.name, S.ext_filter)) ++c;
     return c;
 }
 

@@ -10,6 +10,8 @@ bool is_texture_bnk_selected();
 bool is_model_bnk_selected();
 std::vector<std::string> filtered_bnk_paths();
 bool name_matches_filter(const std::string &name, const std::string &filter);
+bool name_matches_ext(const std::string &name, const std::string &ext);
+std::vector<std::string> unique_file_extensions();
 int count_visible_files();
 bool any_wav_in_bnk();
 bool any_tex_in_bnk();

@@ -40,6 +40,7 @@ void pick_bnk(const std::string &path) {
     S.selected_nested_temp_path.clear();
     S.files.clear();
     S.file_filter.clear();
+    S.ext_filter.clear();
     BNKReader reader(path);
     const auto &fe = reader.list_files();
     S.files.reserve(fe.size());
@@ -382,9 +383,15 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
             BNKReader nested_reader(temp_bnk_path.string());
             const auto& nested_files = nested_reader.list_files();
 
-            std::filesystem::path nested_parent = std::filesystem::path(nested_path).parent_path();
-            std::string prefix = nested_parent.empty() ? "" : nested_parent.string() + "/";
-            std::replace(prefix.begin(), prefix.end(), '\\', '/');
+            // Compute the parent-directory prefix using only '/' as a separator.
+            // std::filesystem::path treats '\' as a separator on Windows but not on
+            // POSIX, which made nested .bnks whose stored paths contain backslashes
+            // get prefixed differently across platforms (and hide their contents
+            // under unexpected subtrees on Windows).
+            size_t last_slash = nested_path.find_last_of('/');
+            std::string prefix = (last_slash == std::string::npos)
+                ? std::string()
+                : nested_path.substr(0, last_slash + 1);
 
             for (size_t i = 0; i < nested_files.size(); ++i) {
                 std::string full_nested_path = prefix + nested_files[i].name;
@@ -775,7 +782,8 @@ void draw_file_table() {
     std::vector<int> vis;
     vis.reserve(S.files.size());
     for (size_t i = 0; i < S.files.size(); ++i)
-        if (name_matches_filter(S.files[i].name, S.file_filter)) vis.push_back((int) i);
+        if (name_matches_filter(S.files[i].name, S.file_filter) &&
+            name_matches_ext(S.files[i].name, S.ext_filter)) vis.push_back((int) i);
 
     auto get_filename = [](const std::string& path) -> std::string {
         size_t pos = path.find_last_of("/\\");
@@ -866,7 +874,8 @@ void draw_global_results_table() {
     std::vector<int> vis;
     vis.reserve(g_global_hits.size());
     for (size_t i = 0; i < g_global_hits.size(); ++i) {
-        if (name_matches_filter(g_global_hits[i].file_name, S.file_filter)) {
+        if (name_matches_filter(g_global_hits[i].file_name, S.file_filter) &&
+            name_matches_ext(g_global_hits[i].file_name, S.ext_filter)) {
             vis.push_back((int)i);
         }
     }
@@ -1716,6 +1725,30 @@ if (!can_preview) {
     ImGui::EndGroup();
     ImGui::EndChild();
 
+    {
+        std::vector<std::string> exts = unique_file_extensions();
+        ImGui::SetNextItemWidth(160.0f);
+        const char* current_label = S.ext_filter.empty() ? "(all extensions)" : S.ext_filter.c_str();
+        if (ImGui::BeginCombo("##ext_filter", current_label)) {
+            if (ImGui::Selectable("(all extensions)", S.ext_filter.empty())) {
+                S.ext_filter.clear();
+            }
+            for (const auto& e : exts) {
+                bool is_selected = (e == S.ext_filter);
+                if (ImGui::Selectable(e.c_str(), is_selected)) {
+                    S.ext_filter = e;
+                }
+                if (is_selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted("Show only files with this extension");
+            ImGui::EndTooltip();
+        }
+    }
+
     float available_width = ImGui::GetContentRegionAvail().x;
     float field_width = (available_width - 8.0f) * 0.5f;
 
@@ -1795,8 +1828,13 @@ if (!can_preview) {
                                         BNKReader nested_reader(temp_bnk_path.string());
                                         const auto& nested_files = nested_reader.list_files();
 
-                                        std::filesystem::path nested_parent = std::filesystem::path(fname).parent_path();
-                                        std::string prefix = nested_parent.empty() ? "" : nested_parent.string() + "/";
+                                        // Use '/' as the only separator to keep behavior consistent
+                                        // with POSIX; std::filesystem::path on Windows would also
+                                        // recognize '\', causing the prefix to change shape per platform.
+                                        size_t fname_last_slash = fname.find_last_of('/');
+                                        std::string prefix = (fname_last_slash == std::string::npos)
+                                            ? std::string()
+                                            : fname.substr(0, fname_last_slash + 1);
 
                                         for (size_t j = 0; j < nested_files.size(); ++j) {
                                             const auto& nested_file = nested_files[j];

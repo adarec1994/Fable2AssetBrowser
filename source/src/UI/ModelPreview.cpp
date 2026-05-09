@@ -10,6 +10,7 @@
 #include "ModelPreview.h"
 #include "../Utilities/Files.h"
 #include "../Utilities/Utils.h"
+#include "../Utilities/State.h"
 #include "../BNKCore.cpp"
 #include "../TexParser.h"
 #include "../LhTexCodec.h"
@@ -775,6 +776,7 @@ static void mp_release(ModelPreview& mp){
     if(mp.ps){ mp.ps->Release(); mp.ps=nullptr; }
     if(mp.layout){ mp.layout->Release(); mp.layout=nullptr; }
     if(mp.cbuffer){ mp.cbuffer->Release(); mp.cbuffer=nullptr; }
+    if(mp.bone_cb){ mp.bone_cb->Release(); mp.bone_cb=nullptr; }
     if(mp.sampler){ mp.sampler->Release(); mp.sampler=nullptr; }
     if(mp.rs){ mp.rs->Release(); mp.rs=nullptr; }
     if(mp.bs){ mp.bs->Release(); mp.bs=nullptr; }
@@ -806,12 +808,36 @@ cbuffer CB : register(b0){
     float4x4 mv;
     float4   params;
 }
-struct VSIN{ float3 p:POSITION; float3 n:NORMAL; float2 t:TEXCOORD0; };
+// Bones cbuffer — one matrix per bone, row-major. The CPU side caps the
+// upload at MP_MAX_BONES so the array size matches MP_MAX_BONES exactly.
+cbuffer Bones : register(b1){
+    row_major float4x4 bones[256];
+}
+struct VSIN{
+    float3 p   : POSITION;
+    float3 n   : NORMAL;
+    float2 t   : TEXCOORD0;
+    uint4  bid : BONEIDS;
+    float4 bw  : BONEWEIGHTS;
+};
 struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
 VSOUT VS(VSIN i){
     VSOUT o;
-    o.p = mul(float4(i.p,1), mvp);
-    float3 n = mul(i.n, (float3x3)mv);
+
+    // Skinning — combine up to 4 bone matrices weighted by bw. For
+    // unskinned meshes the CPU sets bw = (1,0,0,0) and bid.x = 0, with
+    // bones[0] = identity, so this collapses to a no-op multiply.
+    float4x4 skin =
+        bones[i.bid.x] * i.bw.x +
+        bones[i.bid.y] * i.bw.y +
+        bones[i.bid.z] * i.bw.z +
+        bones[i.bid.w] * i.bw.w;
+
+    float4 p_skin = mul(float4(i.p, 1.0), skin);
+    float3 n_skin = mul(i.n, (float3x3)skin);
+
+    o.p = mul(p_skin, mvp);
+    float3 n = mul(n_skin, (float3x3)mv);
     o.n = normalize(n);
     o.t = i.t;
     return o;
@@ -929,17 +955,30 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     if(!compile_shader(g_ps,"PS","ps_5_0",&psb)){ if(vsb) vsb->Release(); return false; }
     if(FAILED(dev->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &mp.vs))){ vsb->Release(); psb->Release(); return false; }
     if(FAILED(dev->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &mp.ps))){ vsb->Release(); psb->Release(); return false; }
+    // 5-element input layout: pos / normal / uv / 4-bone-IDs / 4-weights.
+    // Bone IDs come in as R8G8B8A8_UINT (matches MPVertex's b0..b3 bytes
+    // exactly); weights as a regular float4. See MPVertex layout in
+    // ModelPreview.h for byte offsets.
     D3D11_INPUT_ELEMENT_DESC il[] = {
-        {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,  D3D11_INPUT_PER_VERTEX_DATA,0},
-        {"NORMAL",  0,DXGI_FORMAT_R32G32B32_FLOAT,0,12, D3D11_INPUT_PER_VERTEX_DATA,0},
-        {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,   0,24, D3D11_INPUT_PER_VERTEX_DATA,0},
+        {"POSITION",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"NORMAL",     0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD",   0, DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"BONEIDS",    0, DXGI_FORMAT_R8G8B8A8_UINT,      0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"BONEWEIGHTS",0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 36, D3D11_INPUT_PER_VERTEX_DATA, 0},
     };
-    if(FAILED(dev->CreateInputLayout(il,3,vsb->GetBufferPointer(),vsb->GetBufferSize(),&mp.layout))){ vsb->Release(); psb->Release(); return false; }
+    if(FAILED(dev->CreateInputLayout(il,5,vsb->GetBufferPointer(),vsb->GetBufferSize(),&mp.layout))){ vsb->Release(); psb->Release(); return false; }
     vsb->Release(); psb->Release();
     struct CB { XMFLOAT4X4 mvp; XMFLOAT4 lightDir; XMFLOAT4X4 mv; XMFLOAT4 params; };
     D3D11_BUFFER_DESC cbd{};
     cbd.BindFlags=D3D11_BIND_CONSTANT_BUFFER; cbd.ByteWidth=sizeof(CB); cbd.Usage=D3D11_USAGE_DYNAMIC; cbd.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
     if(FAILED(dev->CreateBuffer(&cbd,nullptr,&mp.cbuffer))) return false;
+    // Bones cbuffer (b1): MP_MAX_BONES row-major float4x4 = 256*64 = 16 KB.
+    D3D11_BUFFER_DESC bcb{};
+    bcb.BindFlags     = D3D11_BIND_CONSTANT_BUFFER;
+    bcb.ByteWidth     = (UINT)(MP_MAX_BONES * sizeof(XMFLOAT4X4));
+    bcb.Usage         = D3D11_USAGE_DYNAMIC;
+    bcb.CPUAccessFlags= D3D11_CPU_ACCESS_WRITE;
+    if(FAILED(dev->CreateBuffer(&bcb, nullptr, &mp.bone_cb))) return false;
     D3D11_SAMPLER_DESC ssd{}; ssd.Filter=D3D11_FILTER_ANISOTROPIC; ssd.MaxAnisotropy=16; ssd.AddressU=ssd.AddressV=ssd.AddressW=D3D11_TEXTURE_ADDRESS_WRAP; ssd.MaxLOD=D3D11_FLOAT32_MAX;
     if(FAILED(dev->CreateSamplerState(&ssd,&mp.sampler))) return false;
     D3D11_RASTERIZER_DESC rd{};
@@ -987,6 +1026,63 @@ void MP_Resize(ID3D11Device* dev, ModelPreview& mp, int w, int h){
 void MP_Release(ModelPreview& mp){
     mp_release(mp);
 }
+// Build a row-major 4x4 from an 11-float bone TRS (rotQuat[0..3],
+// trans[4..6], scale[7..9]). Optional `delta` quaternion (xyzw) is
+// applied as an extra rotation in the bone's LOCAL frame BEFORE the
+// rest rotation — same convention used by the skinning math elsewhere
+// (children inherit the rotated frame). Pass nullptr for the rest pose.
+static XMMATRIX bone_local_matrix(const float* tf, const float* delta /*xyzw or null*/){
+    XMVECTOR q = XMVectorSet(tf[0], tf[1], tf[2], tf[3]);
+    XMVECTOR t = XMVectorSet(tf[4], tf[5], tf[6], 0.0f);
+    XMVECTOR s = XMVectorSet(tf[7], tf[8], tf[9], 1.0f);
+    XMMATRIX S_ = XMMatrixScalingFromVector(s);
+    XMMATRIX R_ = XMMatrixRotationQuaternion(q);
+    if (delta) {
+        XMVECTOR qd = XMVectorSet(delta[0], delta[1], delta[2], delta[3]);
+        // Apply delta in LOCAL space — i.e., multiply rotation BEFORE the
+        // rest rotation in row-vector terms (S * (R_delta * R_rest)).
+        XMMATRIX D_ = XMMatrixRotationQuaternion(qd);
+        R_ = D_ * R_;
+    }
+    XMMATRIX T_ = XMMatrixTranslationFromVector(t);
+    return S_ * R_ * T_;
+}
+
+// Compute world-space rest pose matrices for every bone in `info`. Output
+// is row-major 4x4 (XMFLOAT4X4 stored as 16 floats). Skipping bones with
+// missing transforms collapses to identity.
+static void compute_rest_world(const MDLInfo& info,
+                               std::vector<XMMATRIX>& out_world){
+    const uint32_t n = info.BoneCount;
+    out_world.assign(n, XMMatrixIdentity());
+    if (n == 0 || !info.HasBoneTransforms) return;
+    if (info.Bones.size() != info.BoneTransforms.size()) return;
+
+    std::vector<XMMATRIX> local(n);
+    for (uint32_t i = 0; i < n; ++i){
+        const auto& tf = info.BoneTransforms[i];
+        local[i] = (tf.size() >= 10)
+                     ? bone_local_matrix(tf.data(), nullptr)
+                     : XMMatrixIdentity();
+    }
+    std::vector<uint8_t> done(n, 0);
+    for (uint32_t i = 0; i < n; ++i){
+        if (done[i]) continue;
+        std::vector<int> chain;
+        int cur = (int)i;
+        while (cur >= 0 && cur < (int)n && !done[cur]){
+            chain.push_back(cur);
+            cur = info.Bones[cur].ParentID;
+        }
+        XMMATRIX accum = (cur >= 0 && cur < (int)n) ? out_world[cur] : XMMatrixIdentity();
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it){
+            accum = local[*it] * accum;
+            out_world[*it] = accum;
+            done[*it] = 1;
+        }
+    }
+}
+
 bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp){
     for(auto& m : mp.meshes){
         if(m.vb){m.vb->Release();}
@@ -1017,6 +1113,11 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         std::vector<MPVertex> vtx(vcount);
         bool hasN = (g.normals.size()==vcount*3);
         bool hasT = (g.uvs.size()==vcount*2);
+        // Bone-data presence tracked per-mesh: a mesh might have weights
+        // even if other meshes in the same model don't. When absent we
+        // fall back to bone[0] with full weight (= rest pose, no skin).
+        bool hasBI = (g.bone_ids.size()     == vcount * 4);
+        bool hasBW = (g.bone_weights.size() == vcount * 4);
         for(size_t v=0; v<vcount; ++v){
             vtx[v].px = g.positions[v*3+0];
             vtx[v].py = g.positions[v*3+1];
@@ -1026,6 +1127,30 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             vtx[v].nz = hasN ? g.normals[v*3+2] : 0.0f;
             vtx[v].u  = hasT ? g.uvs[v*2+0] : 0.0f;
             vtx[v].v  = hasT ? g.uvs[v*2+1] : 0.0f;
+            // Cap each ID to the cbuffer size so out-of-range never
+            // reads garbage past the bone matrix array.
+            auto cap = [](uint16_t id) -> uint8_t {
+                uint32_t x = (uint32_t)id;
+                if (x >= MP_MAX_BONES) x = 0;
+                return (uint8_t)x;
+            };
+            if (hasBI) {
+                vtx[v].b0 = cap(g.bone_ids[v*4+0]);
+                vtx[v].b1 = cap(g.bone_ids[v*4+1]);
+                vtx[v].b2 = cap(g.bone_ids[v*4+2]);
+                vtx[v].b3 = cap(g.bone_ids[v*4+3]);
+            } else {
+                vtx[v].b0 = vtx[v].b1 = vtx[v].b2 = vtx[v].b3 = 0;
+            }
+            if (hasBW) {
+                vtx[v].w0 = g.bone_weights[v*4+0];
+                vtx[v].w1 = g.bone_weights[v*4+1];
+                vtx[v].w2 = g.bone_weights[v*4+2];
+                vtx[v].w3 = g.bone_weights[v*4+3];
+            } else {
+                vtx[v].w0 = 1.0f;
+                vtx[v].w1 = vtx[v].w2 = vtx[v].w3 = 0.0f;
+            }
         }
         MPPerMesh m;
         D3D11_BUFFER_DESC vb{}; vb.BindFlags=D3D11_BIND_VERTEX_BUFFER; vb.ByteWidth=(UINT)(vtx.size()*sizeof(MPVertex)); vb.Usage=D3D11_USAGE_IMMUTABLE;
@@ -1075,6 +1200,56 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         mp.meshes.push_back(m);
     }
     mp.has_model = !mp.meshes.empty();
+
+    // ---- Cache the rest skeleton ----
+    // Used per-frame in MP_Render to compute the pose, and by
+    // MP_ComputeWorldPose for the on-screen skeleton overlay. Cap at
+    // MP_MAX_BONES so the cbuffer indexing stays in range.
+    mp.bone_count = 0;
+    mp.bone_parents.clear();
+    mp.local_rest.clear();
+    mp.inv_bind.clear();
+
+    if (info.HasBoneTransforms && info.BoneCount > 0 &&
+        info.Bones.size() == info.BoneTransforms.size()) {
+
+        const uint32_t n = std::min<uint32_t>(info.BoneCount, MP_MAX_BONES);
+        mp.bone_count = n;
+        mp.bone_parents.resize(n);
+        mp.local_rest.resize((size_t)n * 11);
+        mp.inv_bind.resize((size_t)n * 16);
+
+        for (uint32_t i = 0; i < n; ++i){
+            int pid = info.Bones[i].ParentID;
+            // Clamp parent index — out-of-range parents are treated as
+            // root, otherwise the chain walk could read junk.
+            if (pid >= (int)n) pid = -1;
+            mp.bone_parents[i] = pid;
+
+            const auto& tf = info.BoneTransforms[i];
+            for (int k = 0; k < 11; ++k){
+                mp.local_rest[(size_t)i * 11 + k] = (k < (int)tf.size()) ? tf[k] : 0.0f;
+            }
+        }
+
+        // Compute rest world matrices, then their inverses for inv-bind.
+        std::vector<XMMATRIX> rest_world;
+        compute_rest_world(info, rest_world);
+        for (uint32_t i = 0; i < n; ++i){
+            XMMATRIX inv = XMMatrixInverse(nullptr, rest_world[i]);
+            XMFLOAT4X4 m;
+            XMStoreFloat4x4(&m, inv);
+            std::memcpy(&mp.inv_bind[(size_t)i * 16], &m, sizeof(float) * 16);
+        }
+    }
+
+    // Reset per-model bone editing state. Identity quat is (0,0,0,1).
+    S.bone_rot_deltas.assign((size_t)mp.bone_count * 4, 0.0f);
+    for (uint32_t i = 0; i < mp.bone_count; ++i){
+        S.bone_rot_deltas[(size_t)i * 4 + 3] = 1.0f;  // w
+    }
+    S.selected_bone     = -1;
+    S.bone_rotate_mode  = false;
     return true;
 }
 void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
@@ -1125,6 +1300,65 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     }
     ctx->VSSetConstantBuffers(0,1,&mp.cbuffer);
     ctx->PSSetConstantBuffers(0,1,&mp.cbuffer);
+
+    // ---- Bone matrices (b1) ----
+    // Build skin matrices: SK[i] = inv_bind[i] * world_pose[i]. world_pose
+    // is the rest pose with each bone's user-applied delta quaternion
+    // multiplied into its local rotation, then chain-walked to the root.
+    // The cbuffer is sized for MP_MAX_BONES; bones[bone_count..MAX-1] get
+    // identity so any out-of-range vertex IDs (shouldn't happen — IDs are
+    // capped at MP_MAX_BONES in MP_Build — but harmless if they do) skin
+    // to bone[0] safely.
+    std::vector<XMFLOAT4X4> bone_mats(MP_MAX_BONES);
+    for (uint32_t i = 0; i < MP_MAX_BONES; ++i){
+        XMStoreFloat4x4(&bone_mats[i], XMMatrixIdentity());
+    }
+    if (mp.bone_count > 0) {
+        const uint32_t n = mp.bone_count;
+        // Pose locals — apply delta quaternion if available.
+        std::vector<XMMATRIX> local(n);
+        bool have_deltas = (S.bone_rot_deltas.size() >= (size_t)n * 4);
+        for (uint32_t i = 0; i < n; ++i){
+            const float* tf = &mp.local_rest[(size_t)i * 11];
+            const float* dq = have_deltas ? &S.bone_rot_deltas[(size_t)i * 4] : nullptr;
+            local[i] = bone_local_matrix(tf, dq);
+        }
+        // World matrices via the cached parent chain.
+        std::vector<XMMATRIX> world(n);
+        std::vector<uint8_t> done(n, 0);
+        for (uint32_t i = 0; i < n; ++i){
+            if (done[i]) continue;
+            std::vector<int> chain;
+            int cur = (int)i;
+            while (cur >= 0 && cur < (int)n && !done[cur]){
+                chain.push_back(cur);
+                cur = mp.bone_parents[cur];
+            }
+            XMMATRIX accum = (cur >= 0 && cur < (int)n) ? world[cur] : XMMatrixIdentity();
+            for (auto it = chain.rbegin(); it != chain.rend(); ++it){
+                accum = local[*it] * accum;
+                world[*it] = accum;
+                done[*it] = 1;
+            }
+        }
+        // Build skin matrices = inv_bind * world. The shader declares the
+        // array as row_major float4x4, and HLSL row_major matches our
+        // XMFLOAT4X4 storage — no transpose needed here.
+        for (uint32_t i = 0; i < n; ++i){
+            XMFLOAT4X4 ib_f;
+            std::memcpy(&ib_f, &mp.inv_bind[(size_t)i * 16], sizeof(float) * 16);
+            XMMATRIX ib = XMLoadFloat4x4(&ib_f);
+            XMMATRIX skin = ib * world[i];
+            XMStoreFloat4x4(&bone_mats[i], skin);
+        }
+    }
+    D3D11_MAPPED_SUBRESOURCE bms{};
+    if (SUCCEEDED(ctx->Map(mp.bone_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &bms))){
+        std::memcpy(bms.pData, bone_mats.data(),
+                    sizeof(XMFLOAT4X4) * MP_MAX_BONES);
+        ctx->Unmap(mp.bone_cb, 0);
+    }
+    ctx->VSSetConstantBuffers(1, 1, &mp.bone_cb);
     float blend_factor[4] = {0,0,0,0};
     ctx->OMSetDepthStencilState(mp.dssWrite, 0);
     for(const auto& m : mp.meshes){
@@ -1174,6 +1408,50 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     }
     ctx->Release();
 }
+
+void MP_ComputeWorldPose(const ModelPreview& mp,
+                         const std::vector<float>& deltas,
+                         std::vector<float>& out_world_pose){
+    out_world_pose.clear();
+    if (mp.bone_count == 0) return;
+
+    const uint32_t n = mp.bone_count;
+    const bool have_deltas = (deltas.size() >= (size_t)n * 4);
+
+    // Locals (rest, optionally with delta applied).
+    std::vector<XMMATRIX> local(n);
+    for (uint32_t i = 0; i < n; ++i){
+        const float* tf = &mp.local_rest[(size_t)i * 11];
+        const float* dq = have_deltas ? &deltas[(size_t)i * 4] : nullptr;
+        local[i] = bone_local_matrix(tf, dq);
+    }
+    // Worlds via parent chain.
+    std::vector<XMMATRIX> world(n);
+    std::vector<uint8_t> done(n, 0);
+    for (uint32_t i = 0; i < n; ++i){
+        if (done[i]) continue;
+        std::vector<int> chain;
+        int cur = (int)i;
+        while (cur >= 0 && cur < (int)n && !done[cur]){
+            chain.push_back(cur);
+            cur = mp.bone_parents[cur];
+        }
+        XMMATRIX accum = (cur >= 0 && cur < (int)n) ? world[cur] : XMMatrixIdentity();
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it){
+            accum = local[*it] * accum;
+            world[*it] = accum;
+            done[*it] = 1;
+        }
+    }
+    // Output as 16 floats per bone, row-major.
+    out_world_pose.resize((size_t)n * 16);
+    for (uint32_t i = 0; i < n; ++i){
+        XMFLOAT4X4 m;
+        XMStoreFloat4x4(&m, world[i]);
+        std::memcpy(&out_world_pose[(size_t)i * 16], &m, sizeof(float) * 16);
+    }
+}
+
 #else
 static const char* gl_vs = R"(
 #version 330 core

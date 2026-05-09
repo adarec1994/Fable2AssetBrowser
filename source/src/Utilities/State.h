@@ -187,6 +187,19 @@ struct State {
     bool model_materials_open = false;        // separate Materials window, opens automatically with model
     std::atomic<bool> pending_preview_build{false};
     std::vector<MDLMeshGeom> mdl_meshes;
+
+    // ---- Bone editing (skeleton overlay + R-rotate keybind) ----
+    // Per-bone rotation deltas applied on top of the rest pose.
+    // Stored as quaternions xyzw (so length is BoneCount*4). Empty when
+    // no model is loaded; resized + zeroed (identity quat = (0,0,0,1))
+    // by MP_Build whenever a new model is built.
+    //
+    // Both ModelPreview's skinning shader and RenderPanel's skeleton
+    // overlay consume these — so editing one bone updates skeleton + mesh
+    // simultaneously.
+    std::vector<float> bone_rot_deltas;
+    int  selected_bone     = -1;   // -1 when nothing is picked
+    bool bone_rotate_mode  = false; // true while the user is in R-rotate
     float cam_yaw = 0.0f;
     float cam_pitch = 0.2f;
     float cam_dist = 3.0f;

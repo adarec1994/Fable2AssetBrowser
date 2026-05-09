@@ -10,6 +10,14 @@ namespace IconFont {
 // is available.
 bool ensure_loaded();
 
+// Force-reload the font atlas at a new base size (in pixels). Clears
+// the existing fonts, re-adds Roboto + FontAwesome at the requested
+// size, and asks ImGui to rebuild the atlas. The caller is responsible
+// for invalidating the renderer-backend's font texture afterwards
+// (ImGui_ImplDX11_InvalidateDeviceObjects on Windows). Must be called
+// BEFORE any NewFrame in the current frame.
+bool reload_at_size(float size_px);
+
 } // namespace IconFont
 
 // Glyph code points for icons we use. Pulled from IconFontCppHeaders'

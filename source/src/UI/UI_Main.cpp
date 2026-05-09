@@ -179,19 +179,27 @@ void draw_main(GLFWwindow* window) {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
-    ImGui::Begin("##main", nullptr,
-                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                 ImGuiWindowFlags_NoBringToFrontOnFocus |
-                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
-                 ImGuiWindowFlags_MenuBar);
+    // Only carry the MenuBar flag when we're past the splash. The flag
+    // unconditionally reserves a strip at the top of the window even
+    // when no menu is drawn — that strip would steal pixels from the
+    // splash artwork.
+    ImGuiWindowFlags main_flags =
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+    if (!S.root_dir.empty()) main_flags |= ImGuiWindowFlags_MenuBar;
+    ImGui::Begin("##main", nullptr, main_flags);
     float dt = ImGui::GetIO().DeltaTime;
 
     // ---- Top menu bar ------------------------------------------------------
     // Only shown after splash — otherwise it sits awkwardly above the
     // "click anywhere" splash. File > Quit posts WM_QUIT so the main loop
-    // exits through the same path as clicking the X.
+    // exits through the same path as clicking the X. Settings is a
+    // dropdown carrying the show-paths / dev-mode toggles + font slider
+    // inline; no separate popup window.
     if (!S.root_dir.empty()) {
+        extern void settings_save();
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("File")) {
                 if (ImGui::MenuItem("Quit", "Alt+F4")) {
@@ -200,6 +208,41 @@ void draw_main(GLFWwindow* window) {
 #else
                     if (g_glfw_window) glfwSetWindowShouldClose(g_glfw_window, GLFW_TRUE);
 #endif
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Settings")) {
+                if (ImGui::Checkbox("Show file paths in tree tooltips", &S.show_paths)) {
+                    S.hide_tooltips = !S.show_paths;
+                    settings_save();
+                }
+                if (ImGui::Checkbox("Developer mode", &S.dev_mode)) {
+                    settings_save();
+                }
+                ImGui::TextDisabled(
+                    S.dev_mode
+                        ? "Tooltips/overlays show file size, BNK source, and full paths."
+                        : "Only the filename and basic info are shown.");
+
+                ImGui::Separator();
+                ImGui::TextUnformatted("Font size");
+                bool changed = false;
+                ImGui::SetNextItemWidth(180);
+                if (ImGui::SliderFloat("##font_size_slider", &S.pending_font_size,
+                                       10.0f, 28.0f, "%.0f px")) {
+                    changed = true;
+                }
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(80);
+                if (ImGui::InputFloat("##font_size_input", &S.pending_font_size,
+                                      1.0f, 1.0f, "%.0f")) {
+                    if (S.pending_font_size < 8.0f)  S.pending_font_size = 8.0f;
+                    if (S.pending_font_size > 48.0f) S.pending_font_size = 48.0f;
+                    changed = true;
+                }
+                if (changed) {
+                    S.font_size_dirty = true;
+                    settings_save();
                 }
                 ImGui::EndMenu();
             }
@@ -274,6 +317,18 @@ void draw_main(GLFWwindow* window) {
     // now render into the central RenderPanel via S.texture_window_srv.
     // The pending_texture_load handler above creates that SRV; the
     // panel paints it.
+
+    // Drive the MDL/TEX preview-load state machines. They used to live
+    // inside draw_right_panel; that function is no longer called by the
+    // new layout, so we run the handlers from here instead.
+#ifdef _WIN32
+    process_pending_loads(device);
+#else
+    process_pending_loads();
+#endif
+
+    // (Settings used to live in a floating window here; it's now a
+    // dropdown directly off the menu bar.)
 
     // In-app audio player (only renders when a source is loaded).
     UI::draw_audio_player_window();

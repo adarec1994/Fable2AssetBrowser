@@ -4,9 +4,15 @@
 #include <d3d11.h>
 void draw_left_panel(ID3D11Device* device);
 void draw_right_panel(ID3D11Device* device);
+// Run the pending MDL/TEX/preview load handlers. Called once per frame
+// from draw_main. Used to live inside draw_right_panel; extracted so the
+// new TT-Lab-style layout (which doesn't draw the right panel any more)
+// still drives load processing.
+void process_pending_loads(ID3D11Device* device);
 #else
 void draw_left_panel();
 void draw_right_panel();
+void process_pending_loads();
 #endif
 void draw_folder_dialog();
 void draw_file_table();

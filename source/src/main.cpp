@@ -31,8 +31,10 @@
 #include "UI/HexView.h"
 #include "Splashscreen/Splashscreen.h"
 #include "Utilities/Files.h"
+#include "Splashscreen/IconFont.h"
 #include <string>
 #include <mutex>
+#include <map>
 #include <algorithm>
 #include <fstream>
 static std::string get_config_path() {
@@ -55,43 +57,76 @@ static std::string get_config_path() {
     return config_dir + "/config.ini";
 #endif
 }
-static bool load_audio_muted() {
+// Tiny key=value config store. The file lives in
+// %APPDATA%\Fable2AssetBrowser\config.ini (Windows) or
+// ~/.config/Fable2AssetBrowser/config.ini (other). Order is irrelevant;
+// missing keys fall back to the defaults baked into State.h.
+namespace {
+std::map<std::string, std::string> read_config_kv() {
+    std::map<std::string, std::string> kv;
     std::ifstream f(get_config_path());
-    if (!f.is_open()) return false;
+    if (!f.is_open()) return kv;
     std::string line;
     while (std::getline(f, line)) {
-        if (line.find("audio_muted=") == 0) {
-            return line.substr(12) == "1";
-        }
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        kv[line.substr(0, eq)] = line.substr(eq + 1);
     }
-    return false;
+    return kv;
 }
+void write_config_kv(const std::map<std::string, std::string>& kv) {
+    std::ofstream f(get_config_path(), std::ios::trunc);
+    if (!f.is_open()) return;
+    for (auto& [k, v] : kv) f << k << "=" << v << "\n";
+}
+} // namespace
+
+static bool load_audio_muted() {
+    auto kv = read_config_kv();
+    auto it = kv.find("audio_muted");
+    return it != kv.end() && it->second == "1";
+}
+
 // Non-static so Splashscreen can persist the mute state when its FA-icon
 // button is clicked.
 void save_audio_muted(bool muted) {
-    std::string cfg_path = get_config_path();
-    std::string content;
-    bool found = false;
-    std::ifstream fin(cfg_path);
-    if (fin.is_open()) {
-        std::string line;
-        while (std::getline(fin, line)) {
-            if (line.find("audio_muted=") == 0) {
-                content += "audio_muted=" + std::string(muted ? "1" : "0") + "\n";
-                found = true;
-            } else {
-                content += line + "\n";
-            }
-        }
-        fin.close();
+    auto kv = read_config_kv();
+    kv["audio_muted"] = muted ? "1" : "0";
+    write_config_kv(kv);
+}
+
+// Read the user-visible settings from disk into S. Called once at startup
+// after the State singleton is alive.
+void settings_load() {
+    auto kv = read_config_kv();
+    if (auto it = kv.find("show_paths"); it != kv.end()) {
+        S.show_paths = (it->second != "0");
+        S.hide_tooltips = !S.show_paths;
     }
-    if (!found) {
-        content += "audio_muted=" + std::string(muted ? "1" : "0") + "\n";
+    if (auto it = kv.find("dev_mode"); it != kv.end()) {
+        S.dev_mode = (it->second == "1");
     }
-    std::ofstream fout(cfg_path);
-    if (fout.is_open()) {
-        fout << content;
+    if (auto it = kv.find("font_size"); it != kv.end()) {
+        try {
+            float v = std::stof(it->second);
+            if (v < 8.0f)  v = 8.0f;
+            if (v > 48.0f) v = 48.0f;
+            S.font_size = v;
+            S.pending_font_size = v;
+        } catch (...) {}
     }
+}
+
+// Persist the current S.* settings. Called from the Settings dropdown
+// whenever a value changes. Cheap (small file, infrequent edits).
+void settings_save() {
+    auto kv = read_config_kv();
+    kv["show_paths"] = S.show_paths ? "1" : "0";
+    kv["dev_mode"]   = S.dev_mode ? "1" : "0";
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.0f", S.font_size_dirty ? S.pending_font_size : S.font_size);
+    kv["font_size"] = buf;
+    write_config_kv(kv);
 }
 #ifdef _WIN32
 static ID3D11Device *g_pd3dDevice = nullptr;
@@ -236,6 +271,19 @@ int main() {
 #endif
     build_theme();
     S.last_dir = load_last_dir();
+
+    // Pull persisted user-visible settings (show_paths, dev_mode,
+    // font_size) from config.ini into S. Has to happen before the
+    // first NewFrame so the font-size value is honored on initial
+    // atlas build.
+    settings_load();
+    if (S.font_size != 17.0f) {
+        // User had a non-default font size persisted — rebuild the atlas
+        // at that size before the first frame so we never flash at the
+        // default.
+        IconFont::reload_at_size(S.font_size);
+        S.pending_font_size = S.font_size;
+    }
 #ifdef _WIN32
     bool audio_muted = load_audio_muted();
     BackgroundAudio::instance().set_muted(audio_muted);
@@ -252,12 +300,32 @@ int main() {
             DispatchMessage(&msg);
         }
         if (done) break;
+
+        // Apply pending font-size change BEFORE NewFrame. The atlas
+        // bitmap rebuilds on the CPU here, then the DX11 backend's
+        // GPU font texture is invalidated so it gets re-uploaded on
+        // the next call to ImGui_ImplDX11_NewFrame.
+        if (S.font_size_dirty) {
+            S.font_size_dirty = false;
+            S.font_size = S.pending_font_size;
+            IconFont::reload_at_size(S.font_size);
+#ifdef _WIN32
+            ImGui_ImplDX11_InvalidateDeviceObjects();
+#endif
+        }
+
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
 #else
         glfwPollEvents();
         if (glfwWindowShouldClose(g_window)) done = true;
         if (done) break;
+        if (S.font_size_dirty) {
+            S.font_size_dirty = false;
+            S.font_size = S.pending_font_size;
+            IconFont::reload_at_size(S.font_size);
+            ImGui_ImplOpenGL3_DestroyDeviceObjects();
+        }
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
 #endif

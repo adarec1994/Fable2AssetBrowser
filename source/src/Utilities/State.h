@@ -87,6 +87,26 @@ struct State {
     std::vector<BNKItemUI> files;
     int selected_file_index = -1;
     bool hide_tooltips = false;
+
+    // ---- User-facing settings (persisted to config.ini) ----
+    // show_paths controls whether the tree/file-table tooltips show the
+    // full asset path on hover. Mirrors the inverse of hide_tooltips —
+    // we keep both because hide_tooltips is the legacy flag that older
+    // code paths still check.
+    bool show_paths = true;
+    // Developer mode — when off (the default) the tree tooltips and
+    // any in-panel info overlays show only the filename. When on, they
+    // also include file size, BNK source, decoder/format details etc.
+    // Toggled from the Settings dropdown.
+    bool dev_mode = false;
+    // Base font size in pixels. The actual ImGui atlas only rebuilds
+    // when font_size_dirty flips true (handled before NewFrame in
+    // main.cpp). pending_font_size lets the slider preview without
+    // hammering the atlas every frame mid-drag.
+    float font_size           = 17.0f;
+    float pending_font_size   = 17.0f;
+    bool  font_size_dirty     = false;
+    bool  show_settings       = false;
     std::atomic<bool> cancel_requested{false};
     std::atomic<bool> exiting{false};
     std::mutex progress_mutex;

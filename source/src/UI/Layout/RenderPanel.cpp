@@ -5,6 +5,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cmath>
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -14,27 +15,14 @@
 #include <GLFW/glfw3.h>
 #endif
 
-// Globals owned by UI_Main.cpp — the model preview state and the fly-cam
-// used to navigate it. Declared extern so the render panel can drive
-// rendering without requiring a refactor that moves them.
 extern ModelPreview g_mp;
-namespace { /* defined in UI_Main.cpp; re-declare here */ }
 extern bool g_mp_initialized;
-
-struct FlyCam;            // forward decl matches UI_Main's static
-extern FlyCam g_flycam;
-
-// Forward declaration of the input handler. The implementation in
-// UI_Main.cpp is `static`, so we duplicate a thin wrapper here that
-// applies camera updates only when the render panel is hovered.
-void render_panel_handle_flycam(float dt);
+extern FlyCam g_flycam;       // declared in ModelPreview.h with external linkage
 
 namespace UI {
 
 namespace {
 
-// Draw a centered placeholder when nothing's loaded. Matches the panel's
-// dark palette so it doesn't fight the rest of the UI for attention.
 void draw_placeholder() {
     ImVec2 region = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -56,14 +44,11 @@ void draw_texture_in_panel() {
     ImVec2 origin = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // Background fill so any unfilled corners (from aspect-ratio fit) match
-    // the rest of the dark panel.
     dl->AddRectFilled(origin,
                       ImVec2(origin.x + region.x, origin.y + region.y),
                       IM_COL32(20, 22, 28, 255));
 
     if (!S.texture_window_srv || S.texture_window_width <= 0 || S.texture_window_height <= 0) {
-        // Decode failed — show the error name from the texture window state.
         const char* msg = S.texture_window_name.empty()
             ? "Texture decode failed"
             : S.texture_window_name.c_str();
@@ -75,11 +60,10 @@ void draw_texture_in_panel() {
         return;
     }
 
-    // Aspect-fit the texture into the panel.
     float tw = (float)S.texture_window_width;
     float th = (float)S.texture_window_height;
     float scale = std::min(region.x / tw, region.y / th);
-    if (scale > 4.0f) scale = 4.0f;          // don't upscale beyond 4x
+    if (scale > 4.0f) scale = 4.0f;
     float dw = tw * scale;
     float dh = th * scale;
     float x0 = origin.x + (region.x - dw) * 0.5f;
@@ -88,7 +72,6 @@ void draw_texture_in_panel() {
                  ImVec2(x0, y0),
                  ImVec2(x0 + dw, y0 + dh));
 
-    // Tiny info overlay in the top-left corner.
     char info[128];
     std::snprintf(info, sizeof(info), "%dx%d", S.texture_window_width, S.texture_window_height);
     dl->AddText(ImVec2(origin.x + 8, origin.y + 6),
@@ -97,7 +80,30 @@ void draw_texture_in_panel() {
     ImGui::Dummy(region);
 }
 
-void draw_model_in_panel(ID3D11Device* device, float dt) {
+// Convert the orbit-camera state (S.cam_yaw, S.cam_pitch, S.cam_dist)
+// into a FlyCam positioned around the model's center, looking toward
+// it. The model preview's MP_Render still consumes a FlyCam — we just
+// drive that FlyCam from orbit math instead of WASD/right-click input.
+void apply_orbit_to_flycam() {
+    float r = std::max(g_mp.radius, 0.5f) * std::max(S.cam_dist, 0.1f);
+    float yaw   = S.cam_yaw;
+    float pitch = S.cam_pitch;
+    float cy = cosf(pitch);
+    float sy = sinf(pitch);
+    float cx = cosf(yaw);
+    float sx = sinf(yaw);
+
+    g_flycam.pos[0] = g_mp.center[0] + r * cy * sx;
+    g_flycam.pos[1] = g_mp.center[1] + r * sy;
+    g_flycam.pos[2] = g_mp.center[2] + r * cy * cx;
+    // Camera looks back at the model center — the FlyCam yaw/pitch must
+    // produce a forward vector that is the negative of the offset above.
+    g_flycam.yaw   = yaw + 3.14159265f;
+    g_flycam.pitch = -pitch;
+    g_flycam.is_looking = false;          // suppress legacy mouse-look state
+}
+
+void draw_model_in_panel(ID3D11Device* device) {
     ImVec2 region = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
     int w = std::max(1, (int)region.x);
@@ -108,22 +114,45 @@ void draw_model_in_panel(ID3D11Device* device, float dt) {
         g_mp_initialized = true;
     }
     MP_Resize(device, g_mp, w, h);
-    MP_Render(device, g_mp, g_flycam);
 
     // Reserve the area as an item so we can hover-test for camera input.
     ImGui::InvisibleButton("##model_render", region);
     bool hovered = ImGui::IsItemHovered();
+    bool active  = ImGui::IsItemActive();
+
+    // Left-click drag to orbit. Active==true while the user is dragging
+    // even if they wander outside the panel — that's intentional, so a
+    // continuous rotation isn't broken by hand wobble crossing the edge.
+    if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+        ImVec2 d = ImGui::GetIO().MouseDelta;
+        const float kOrbitSensitivity = 0.008f;
+        S.cam_yaw   += d.x * kOrbitSensitivity;
+        S.cam_pitch += d.y * kOrbitSensitivity;
+        // Clamp pitch so we don't flip past straight-up / straight-down.
+        const float kPitchLimit = 1.5f;        // ~85°
+        if (S.cam_pitch >  kPitchLimit) S.cam_pitch =  kPitchLimit;
+        if (S.cam_pitch < -kPitchLimit) S.cam_pitch = -kPitchLimit;
+    }
+
+    // Wheel to zoom (multiplicative — feels more natural than additive
+    // because the perceived effect is constant in log-distance).
+    if (hovered) {
+        float wheel = ImGui::GetIO().MouseWheel;
+        if (wheel != 0.0f) {
+            S.cam_dist *= (wheel > 0.0f) ? 0.9f : 1.111f;
+            if (S.cam_dist < 0.3f)  S.cam_dist = 0.3f;
+            if (S.cam_dist > 50.0f) S.cam_dist = 50.0f;
+        }
+    }
+
+    apply_orbit_to_flycam();
+    MP_Render(device, g_mp, g_flycam);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (g_mp.srv) {
         dl->AddImage((ImTextureID)g_mp.srv,
                      origin,
                      ImVec2(origin.x + region.x, origin.y + region.y));
-    }
-
-    // Camera input only when this panel is the focus of attention.
-    if (hovered) {
-        render_panel_handle_flycam(dt);
     }
 
     // ESC closes the model so we drop back to the placeholder. Only honor
@@ -136,22 +165,16 @@ void draw_model_in_panel(ID3D11Device* device, float dt) {
         S.model_preview_open = false;
     }
 
-    // Camera-controls hint, top-left.
+    // Compact controls hint, top-left corner.
     dl->AddRectFilled(ImVec2(origin.x + 6, origin.y + 6),
-                      ImVec2(origin.x + 220, origin.y + 132),
+                      ImVec2(origin.x + 196, origin.y + 70),
                       IM_COL32(20, 22, 28, 200), 4.0f);
     ImGui::SetCursorScreenPos(ImVec2(origin.x + 14, origin.y + 12));
-    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Camera Controls");
+    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Controls");
     ImGui::SetCursorScreenPos(ImVec2(origin.x + 14, origin.y + 30));
-    ImGui::TextDisabled("W/S — Forward/Back");
+    ImGui::TextDisabled("L-Drag  rotate");
     ImGui::SetCursorScreenPos(ImVec2(origin.x + 14, origin.y + 46));
-    ImGui::TextDisabled("A/D — Strafe");
-    ImGui::SetCursorScreenPos(ImVec2(origin.x + 14, origin.y + 62));
-    ImGui::TextDisabled("Q/E — Down/Up");
-    ImGui::SetCursorScreenPos(ImVec2(origin.x + 14, origin.y + 78));
-    ImGui::TextDisabled("R-Click — Look");
-    ImGui::SetCursorScreenPos(ImVec2(origin.x + 14, origin.y + 94));
-    ImGui::TextDisabled("ESC — Close model");
+    ImGui::TextDisabled("Wheel  zoom  /  ESC  close");
 }
 #endif // _WIN32
 
@@ -159,11 +182,8 @@ void draw_model_in_panel(ID3D11Device* device, float dt) {
 
 #ifdef _WIN32
 void draw_render_panel(ID3D11Device* device) {
-    float dt = ImGui::GetIO().DeltaTime;
-
-    // Priority: 3D model > texture > placeholder.
     if (g_mp.has_model) {
-        draw_model_in_panel(device, dt);
+        draw_model_in_panel(device);
     } else if (S.texture_window_srv) {
         draw_texture_in_panel();
     } else {
@@ -172,9 +192,6 @@ void draw_render_panel(ID3D11Device* device) {
 }
 #else
 void draw_render_panel() {
-    // Non-Windows path is intentionally minimal — texture/model rendering
-    // backends differ enough that the original full-screen path was
-    // GL-only too.
     UI::draw_placeholder();
 }
 #endif

@@ -11,6 +11,7 @@
 #include "imgui_impl_dx11.h"
 #include <shlobj.h>
 #include "Audio/play_audio.h"
+#include "Audio/AudioPlayer.h"
 #include "../resource.h"
 #else
 #include <GL/glew.h>
@@ -28,6 +29,7 @@
 #include "UI/UI_Panels.h"
 #include "Utilities/Progress.h"
 #include "UI/HexView.h"
+#include "Splashscreen/Splashscreen.h"
 #include "Utilities/Files.h"
 #include <string>
 #include <mutex>
@@ -64,7 +66,9 @@ static bool load_audio_muted() {
     }
     return false;
 }
-static void save_audio_muted(bool muted) {
+// Non-static so Splashscreen can persist the mute state when its FA-icon
+// button is clicked.
+void save_audio_muted(bool muted) {
     std::string cfg_path = get_config_path();
     std::string content;
     bool found = false;
@@ -167,6 +171,9 @@ static void build_theme() {
 }
 #ifdef _WIN32
 int main() {
+    // FFmpeg (libavcodec / libavutil / libswresample) is now linked
+    // statically into the exe — no DLLs to extract or DLL search-path
+    // games at startup. XmaDecoder calls into avcodec directly.
     HINSTANCE hInstance = GetModuleHandle(nullptr);
     WNDCLASSEXA wc{};
     wc.cbSize = sizeof(WNDCLASSEX);
@@ -199,6 +206,10 @@ int main() {
     ImGui::StyleColorsDark();
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+    // Load the FontAwesome icon font BEFORE any frame is rendered. Adding
+    // fonts mid-frame would crash because the DX11 backend has already
+    // built/bound the font atlas texture by then.
+    Splashscreen_init_icon_font_at_startup();
 #else
 int main() {
     glfwSetErrorCallback(glfw_error_callback);
@@ -228,7 +239,8 @@ int main() {
 #ifdef _WIN32
     bool audio_muted = load_audio_muted();
     BackgroundAudio::instance().set_muted(audio_muted);
-    BackgroundAudio::instance().start("include/audio/menu_interlude.wav");
+    // Splash music is embedded as RCDATA — no sidecar file needed.
+    BackgroundAudio::instance().start_from_resource(IDR_MENU_INTERLUDE_WAV);
 #endif
     bool done = false;
     while (!done) {
@@ -252,31 +264,11 @@ int main() {
         ImGui::NewFrame();
 #ifdef _WIN32
         draw_main(hwnd, g_pd3dDevice);
-        if (S.root_dir.empty()) {
-            ImGuiViewport* viewport = ImGui::GetMainViewport();
-            ImVec2 work_pos = viewport->WorkPos;
-            ImVec2 work_size = viewport->WorkSize;
-            ImGui::SetNextWindowPos(ImVec2(work_pos.x + 10, work_pos.y + work_size.y - 50), ImGuiCond_Always);
-            ImGui::SetNextWindowBgAlpha(0.7f);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
-            if (ImGui::Begin("##mute_button", nullptr,
-                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-                ImGuiWindowFlags_NoNav)) {
-                bool muted = BackgroundAudio::instance().is_muted();
-                const char* icon = muted ? "M" : "S";
-                if (ImGui::Button(icon, ImVec2(32, 32))) {
-                    BackgroundAudio::instance().toggle_mute();
-                    save_audio_muted(BackgroundAudio::instance().is_muted());
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip(muted ? "Unmute" : "Mute");
-                }
-            }
-            ImGui::End();
-            ImGui::PopStyleVar(2);
-        } else {
+        // (The legacy "S"/"M" mute button used to live here. The splash
+        // module now owns the mute button — see Splashscreen.cpp — using
+        // FontAwesome icons. We still need to stop the audio when the
+        // user has loaded a Fable 2 root.)
+        if (!S.root_dir.empty()) {
             static bool audio_stopped = false;
             if (!audio_stopped) {
                 BackgroundAudio::instance().stop();
@@ -406,6 +398,7 @@ int main() {
 #endif
     }
     S.exiting = true;
+    AudioPlayer::shutdown();
 #ifdef _WIN32
     BackgroundAudio::instance().stop();
     ImGui_ImplDX11_Shutdown();

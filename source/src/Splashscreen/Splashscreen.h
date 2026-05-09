@@ -32,3 +32,10 @@ void draw(GLFWwindow* window);
 void release_resources();
 
 } // namespace Splash
+
+// Call once after ImGui's renderer backend is initialised, BEFORE the
+// first NewFrame. Pulls the FontAwesome ttf out of the exe and merges
+// it into the default font. Defined here (outside namespace Splash) to
+// keep main.cpp's forward-declare-light style.
+void Splashscreen_init_icon_font_at_startup();
+

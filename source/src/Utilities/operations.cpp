@@ -3,7 +3,7 @@
 #include "Utils.h"
 #include "Files.h"
 #include "../BNKCore.cpp"
-#include "../Audio/audio.cpp"
+#include "../Audio/XmaDecoder.h"
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -47,7 +47,17 @@ void extract_file_one(const std::string &bnk_path, const BNKItemUI &item, const 
     auto dst = std::filesystem::path(base_out_dir) / item.name;
     std::filesystem::create_directories(dst.parent_path());
     extract_one(bnk_path, item.index, dst.string());
-    if (convert_audio && is_audio_file(item.name)) convert_wav_inplace_same_name(dst);
+    if (convert_audio && is_audio_file(item.name)) {
+        // Decode the XMA2 wav we just dumped into a standard PCM .wav so
+        // it plays in any external tool. If decoding fails (e.g. FFmpeg
+        // unavailable), the raw archive payload stays on disk.
+        auto raw = read_all_bytes(dst);
+        if (!raw.empty()) {
+            std::vector<uint8_t> src(raw.begin(), raw.end());
+            std::string err;
+            XmaDecoder::decode_xma_wav_file_to_pcm_wav(src, dst.string(), &err);
+        }
+    }
 }
 
 void on_extract_selected_raw() {

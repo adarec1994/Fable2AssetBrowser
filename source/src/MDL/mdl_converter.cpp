@@ -793,7 +793,14 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
             material_name = std::filesystem::path(geom.diffuse_tex_name).stem().string();
 
             std::vector<unsigned char> tex_buf;
-            if (build_any_tex_buffer_for_name(geom.diffuse_tex_name, tex_buf)) {
+            // Prefer the user's currently-selected (nested) BNK family so a
+            // model exported from a region archive uses that region's
+            // textures instead of generic globals.
+            std::string preferred_for_tex =
+                (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty())
+                    ? S.selected_nested_temp_path
+                    : S.selected_bnk;
+            if (build_any_tex_buffer_for_name(geom.diffuse_tex_name, tex_buf, preferred_for_tex)) {
                 std::vector<uint8_t> png_data;
                 if (decode_texture_to_png(tex_buf, png_data)) {
                     TexInfo tex_info;

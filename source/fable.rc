@@ -19,3 +19,18 @@ IDR_SPARKLE_8   RCDATA    "include/image/sparkle_8.png"
 // Font Awesome 6 Solid (CMake stages this .ttf via FetchContent — see
 // CMakeLists.txt). Embedded so the exe doesn't need a sidecar font file.
 IDR_FA_FONT     RCDATA    "include/image/fa-solid-900.ttf"
+
+// Roboto Regular — the app's default UI font (replaces ImGui's bundled
+// proggy clean). Loaded into the ImGui atlas at startup, with FA glyphs
+// merged on top.
+IDR_ROBOTO_FONT RCDATA    "include/font/Roboto-Regular.ttf"
+
+// Splash-screen background music. PlaySoundA can play directly from a
+// memory buffer (SND_MEMORY), so we extract the bytes from this resource
+// at startup instead of loading from disk.
+IDR_MENU_INTERLUDE_WAV RCDATA "include/audio/menu_interlude.wav"
+
+// FFmpeg used to be bundled here as ~24 MB of DLLs and extracted at
+// startup; now we link libavcodec / libavutil / libswresample statically
+// (the linker drops every codec we don't reference, see CMakeLists.txt).
+// No DLL resources required.

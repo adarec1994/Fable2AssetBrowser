@@ -1,6 +1,7 @@
 #include "Lua.h"
 #include "Utilities/Progress.h"
 #include "Utilities/State.h"
+#include "Utilities/Files.h"
 #include <filesystem>
 #include <algorithm>
 #include <fstream>
@@ -972,35 +973,28 @@ static bool copy_file_simple(const std::string& src, const std::string& dst) {
 }
 
 std::string read_lua_file_content(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) {
+    // Route through read_all_bytes so iso:// virtual paths read from the
+    // mounted disc image. A raw std::ifstream silently failed in ISO mode.
+    auto bytes = read_all_bytes(std::filesystem::path(path));
+    if (bytes.empty()) {
         return "-- Error: Could not open file";
     }
-
-    file.seekg(0, std::ios::end);
-    size_t size = file.tellg();
-    file.seekg(0, std::ios::beg);
-
-    if (size > 10 * 1024 * 1024) {
+    if (bytes.size() > 10 * 1024 * 1024) {
         return "-- Error: File too large to preview (>10MB)";
     }
 
-    std::vector<uint8_t> buffer(size);
-    file.read(reinterpret_cast<char*>(buffer.data()), size);
-    file.close();
-
     bool is_bytecode = false;
-    if (size >= 4) {
-        if (buffer[0] == 0x1B && buffer[1] == 'L' && buffer[2] == 'u' && buffer[3] == 'a') {
+    if (bytes.size() >= 4) {
+        if (bytes[0] == 0x1B && bytes[1] == 'L' && bytes[2] == 'u' && bytes[3] == 'a') {
             is_bytecode = true;
         }
     }
 
     if (!is_bytecode) {
-        return std::string(buffer.begin(), buffer.end());
+        return std::string(bytes.begin(), bytes.end());
     }
 
-    return decompile_lua51_bytecode(buffer.data(), buffer.size());
+    return decompile_lua51_bytecode(bytes.data(), bytes.size());
 }
 
 void dump_single_lua_file(const std::string& path, const std::string& root_dir) {

@@ -20,3 +20,13 @@
 // load it at runtime via FindResource without depending on shipping
 // the file alongside.
 #define IDR_FA_FONT     230
+
+// Roboto Regular (.ttf) — the application's default UI font. Embedded
+// as RCDATA; loaded into ImGui's font atlas at startup so we don't
+// depend on shipping the .ttf alongside the exe.
+#define IDR_ROBOTO_FONT 231
+
+// Splash-screen background music (.wav). Embedded so the exe is
+// fully self-contained — main() loads it from RCDATA into a memory
+// buffer and hands that to PlaySoundA(SND_MEMORY).
+#define IDR_MENU_INTERLUDE_WAV 240

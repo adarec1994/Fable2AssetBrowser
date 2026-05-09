@@ -2,6 +2,7 @@
 #include "../Utilities/State.h"
 #include "../Utilities/Utils.h"
 #include "../Utilities/operations.h"
+#include "../ISO/IsoMount.h"
 #include "../UI/HexView.h"
 #include "UI_Main.h"
 #include "../TexParser.h"
@@ -22,6 +23,7 @@
 #include "../Utilities/Progress.h"
 #include "../Utilities/Files.h"
 #include "../Lua.h"
+#include "AudioPlayerWindow.h"
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -31,6 +33,42 @@
 #endif
 
 void refresh_file_table() { S.selected_file_index = -1; }
+
+// Extract the selected file's raw bytes (going through the user's currently-
+// selected BNK or nested-BNK temp copy) and open the in-app audio player on
+// them. Returns true if the player accepted the data.
+static bool open_audio_player_for_selected(int file_index) {
+    if (file_index < 0 || file_index >= (int)S.files.size()) return false;
+
+    const auto& item = S.files[(size_t)file_index];
+
+    // Pick the BNK we'll extract from. Same logic as the preview/hex paths.
+    std::string bnk_to_use;
+    if (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty()) {
+        bnk_to_use = S.selected_nested_temp_path;
+    } else {
+        bnk_to_use = S.selected_bnk;
+    }
+    if (bnk_to_use.empty()) return false;
+
+    auto tmpdir = std::filesystem::temp_directory_path() / "f2_audio_play";
+    std::error_code ec;
+    std::filesystem::create_directories(tmpdir, ec);
+    auto tmp_file = tmpdir / ("audio_" + std::to_string(std::hash<std::string>{}(item.name + std::to_string(std::time(nullptr)))) + ".bin");
+
+    std::vector<unsigned char> bytes;
+    try {
+        extract_one(bnk_to_use, item.index, tmp_file.string());
+        bytes = read_all_bytes(tmp_file);
+        std::filesystem::remove(tmp_file, ec);
+    } catch (...) {
+        std::filesystem::remove(tmp_file, ec);
+        return false;
+    }
+    if (bytes.empty()) return false;
+
+    return UI::open_audio_player_for(item.name, bytes);
+}
 
 void pick_bnk(const std::string &path) {
     S.selected_bnk = path;
@@ -62,6 +100,68 @@ void pick_bnk(const std::string &path) {
     });
 
     refresh_file_table();
+}
+
+// Forward decl — defined further down (after the TreeNode declaration).
+// Kicks the file-tree build in a worker thread so it's already in
+// progress (or done) by the time the user navigates to the File Tree tab.
+extern void start_tree_build_for_root(const std::string& root_dir,
+                                      std::vector<std::string> bnk_paths);
+
+// Companion to open_folder_logic for the case where the user picked an
+// ISO file. Skips the is_directory check (the path is a regular file)
+// and relies on ISO::IsoMount::is_mounted() being true so the BNK-scan
+// helpers route through the in-memory tree instead of the OS filesystem.
+void open_iso_logic(const std::string& iso_path) {
+    if (iso_path.empty()) { show_error_box("No ISO selected"); return; }
+    S.root_dir = iso_path;
+    S.last_dir = std::filesystem::path(iso_path).parent_path().string();
+    save_last_dir(S.last_dir);
+    try {
+        // Same set of scans as folder mode — they all short-circuit to
+        // IsoMount::list_recursive() when a disc is mounted.
+        S.bnk_paths = scan_bnks_recursive(iso_path);
+        if (S.bnk_paths.empty()) S.bnk_paths = find_bnks(iso_path);
+        S.adb_paths = scan_adbs_recursive(iso_path);
+
+        auto lua_paths = scan_luas_recursive(iso_path);
+        S.lua_files.clear();
+        S.lua_files.reserve(lua_paths.size());
+        for (size_t i = 0; i < lua_paths.size(); ++i) {
+            std::filesystem::path p(lua_paths[i]);
+            // For ISO paths, file_size on the std::filesystem::path will
+            // fail — fall back to the IsoMount entry's recorded size.
+            uint32_t size = 0;
+            if (ISO::IsoMount::is_iso_path(lua_paths[i])) {
+                if (auto* mf = ISO::IsoMount::instance().find(
+                        ISO::IsoMount::strip_iso_prefix(lua_paths[i]))) {
+                    size = mf->size;
+                }
+            } else {
+                std::error_code ec;
+                auto fsize = std::filesystem::file_size(p, ec);
+                size = ec ? 0 : (uint32_t)fsize;
+            }
+            S.lua_files.push_back({(int)i, lua_paths[i], p.filename().string(), size});
+        }
+
+        std::sort(S.lua_files.begin(), S.lua_files.end(), [](const LuaFileUI& a, const LuaFileUI& b) {
+            std::string x = a.filename, y = b.filename;
+            std::transform(x.begin(), x.end(), x.begin(), ::tolower);
+            std::transform(y.begin(), y.end(), y.begin(), ::tolower);
+            return x < y;
+        });
+    } catch (...) {
+        show_error_box("Error indexing BNK files in the ISO");
+        return;
+    }
+    if (S.bnk_paths.empty()) {
+        show_error_box("No .bnk files found in the ISO.");
+        return;
+    }
+    // Kick the file-tree build in the background so the tab is ready by
+    // the time the user navigates to it.
+    start_tree_build_for_root(iso_path, S.bnk_paths);
 }
 
 void open_folder_logic(const std::string &sel) {
@@ -113,6 +213,11 @@ void open_folder_logic(const std::string &sel) {
                 "\n\nPlease select a folder containing Fable 2 BNK files."));
         return;
     }
+
+    // Kick the file-tree build in the background — see equivalent call in
+    // open_iso_logic. Same idea: do the slow work right at root-selection
+    // time so the tab loads instantly.
+    start_tree_build_for_root(sel, S.bnk_paths);
 
     auto get_filename = [](const std::string& p) -> std::string {
         size_t pos = p.find_last_of("/\\");
@@ -246,6 +351,96 @@ struct TreeNode {
 
 static TreeNode g_tree_root;
 
+// Defined later in this file — forward-decl so the eager-start helper
+// below can reference it.
+static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk_paths);
+
+// File-tree build state. Used to be function-static inside draw_left_panel
+// (= the build only kicked off when the user opened the File Tree tab).
+// Now hoisted so we can start the build IMMEDIATELY after open_folder_logic
+// / open_iso_logic — by the time the user clicks into the tab the work is
+// usually already done.
+static std::atomic<bool> g_tree_built{false};
+static std::atomic<bool> g_tree_building{false};
+static std::atomic<bool> g_tree_build_complete{false};
+static float             g_tree_build_start_time = 0.0f;
+static std::string       g_tree_last_root_dir;
+
+// Progress reporting from inside the build thread, used by the loading
+// screen to draw a real percentage instead of an indeterminate stripe.
+// `total` and `done` are both incremented as work is discovered (phase 2
+// nested BNKs aren't known until phase 1 finishes), so progress can
+// briefly stay below 100% near the end as new work is added.
+static std::atomic<int>  g_tree_done_units{0};
+static std::atomic<int>  g_tree_total_units{0};
+static std::mutex        g_tree_label_mutex;
+static std::string       g_tree_current_label;
+static void set_tree_label(std::string s) {
+    std::lock_guard<std::mutex> lk(g_tree_label_mutex);
+    g_tree_current_label = std::move(s);
+}
+extern void  start_tree_build_for_root(const std::string& root_dir,
+                                       std::vector<std::string> bnk_paths);
+// Public accessors — exposed in UI_Panels.h so the LoadingScreen module
+// can react to build state without taking a hard dependency on these
+// file-private atomics.
+bool tree_build_in_progress() { return g_tree_building.load(); }
+bool tree_build_finished()    { return g_tree_built.load(); }
+float tree_build_elapsed_seconds() {
+    if (g_tree_build_start_time <= 0.0f) return 0.0f;
+    return (float)ImGui::GetTime() - g_tree_build_start_time;
+}
+int  tree_build_done_units()  { return g_tree_done_units.load(); }
+int  tree_build_total_units() { return g_tree_total_units.load(); }
+float tree_build_progress() {
+    int total = g_tree_total_units.load();
+    if (total <= 0) return 0.0f;
+    int done = g_tree_done_units.load();
+    if (done > total) done = total;
+    return (float)done / (float)total;
+}
+std::string tree_build_current_label() {
+    std::lock_guard<std::mutex> lk(g_tree_label_mutex);
+    return g_tree_current_label;
+}
+
+void start_tree_build_for_root(const std::string& root_dir,
+                               std::vector<std::string> bnk_paths) {
+    if (root_dir == g_tree_last_root_dir && (g_tree_built.load() || g_tree_building.load()))
+        return;
+    g_tree_last_root_dir   = root_dir;
+    g_tree_built.store(false);
+    g_tree_building.store(true);
+    g_tree_build_complete.store(false);
+    g_tree_build_start_time = (float)ImGui::GetTime();
+    g_tree_root.children.clear();
+    g_tree_done_units.store(0);
+    // Phase 1 only — phase 2's nested-BNK count is added once phase 1
+    // discovers them. Total grows during the run; the loading bar handles
+    // that gracefully because progress is computed as done/total each frame.
+    g_tree_total_units.store((int)bnk_paths.size());
+    set_tree_label("");
+    // Drop any nested-BNK temp-paths from the previous root so we don't
+    // search stale paths (the temp files may have been deleted, and even
+    // if not they belong to a different game install).
+    S.nested_bnk_paths.clear();
+    S.nested_bnk_parents.clear();
+
+    std::thread([bnk_snapshot = std::move(bnk_paths)]() mutable {
+        try {
+            build_unified_file_tree(g_tree_root, std::move(bnk_snapshot));
+        } catch (...) { /* swallow — UI shows empty tree on failure */ }
+        // Flip the visible-state flags directly from the worker. This used
+        // to be a UI-thread promotion buried inside the File Tree tab body,
+        // which meant the loading screen (drawn instead of the tab while
+        // the build was in flight) would stall at 100% forever — the tab
+        // never ran, so the flags never flipped.
+        g_tree_build_complete.store(true);
+        g_tree_built.store(true);
+        g_tree_building.store(false);
+    }).detach();
+}
+
 static bool find_mdl_files_in_folder(TreeNode& root, const std::string& folder_name, std::vector<std::pair<std::string, std::string>>& out_mdl_paths) {
     out_mdl_paths.clear();
 
@@ -335,8 +530,11 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
 
     std::vector<std::pair<std::string, int>> nested_bnks;
 
+    // Phase 1: walk the top-level BNKs and add their entries to the tree.
     for (const auto& bnk_path : bnk_paths) {
+        set_tree_label(std::filesystem::path(bnk_path).filename().string());
         if (is_header_bnk(bnk_path)) {
+            g_tree_done_units.fetch_add(1);
             continue;
         }
 
@@ -354,55 +552,106 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
                 }
             }
         } catch (...) {
-            continue;
+            // fall through — still increment so progress bar advances
         }
+        g_tree_done_units.fetch_add(1);
     }
+
+    // Phase 2 work is now known — fold its count into the total so the
+    // progress bar reflects the full job, not just phase 1.
+    g_tree_total_units.fetch_add((int)nested_bnks.size());
 
     auto tmpdir = std::filesystem::temp_directory_path() / "f2_nested_bnk_tree";
     {
         std::error_code ec;
         std::filesystem::create_directories(tmpdir, ec);
     }
+    // Reset the lazy-extract registry from any previous run before we
+    // populate it for this build.
+    LazyNested::clear_all();
 
+    // Group nested entries by their parent BNK so we can open each parent
+    // exactly once instead of once per nested entry. Previous code did
+    // ~hundreds of redundant BNKReader(parent_path) opens — on ISO that
+    // re-read the parent's header off the disc image every time.
+    std::unordered_map<std::string, std::vector<int>> nested_by_parent;
+    nested_by_parent.reserve(nested_bnks.size());
     for (const auto& [parent_bnk_path, nested_index] : nested_bnks) {
+        nested_by_parent[parent_bnk_path].push_back(nested_index);
+    }
+
+    for (auto& [parent_bnk_path, indices] : nested_by_parent) {
+        // Open the parent once; reuse it for every nested entry below.
+        std::optional<BNKReader> parent_reader;
         try {
-            BNKReader parent_reader(parent_bnk_path);
-            const auto& parent_files = parent_reader.list_files();
-
-            if (nested_index < 0 || nested_index >= (int)parent_files.size()) continue;
-
-            const auto& nested_file = parent_files[nested_index];
-            std::string nested_path = nested_file.name;
-
-            std::string temp_name = "nested_" + std::to_string(std::hash<std::string>{}(parent_bnk_path + nested_path)) + ".bnk";
-            auto temp_bnk_path = tmpdir / temp_name;
-
-            if (!std::filesystem::exists(temp_bnk_path)) {
-                extract_one(parent_bnk_path, nested_index, temp_bnk_path.string());
-            }
-
-            BNKReader nested_reader(temp_bnk_path.string());
-            const auto& nested_files = nested_reader.list_files();
-
-            // Compute the parent-directory prefix using only '/' as a separator.
-            // std::filesystem::path treats '\' as a separator on Windows but not on
-            // POSIX, which made nested .bnks whose stored paths contain backslashes
-            // get prefixed differently across platforms (and hide their contents
-            // under unexpected subtrees on Windows).
-            size_t last_slash = nested_path.find_last_of('/');
-            std::string prefix = (last_slash == std::string::npos)
-                ? std::string()
-                : nested_path.substr(0, last_slash + 1);
-
-            for (size_t i = 0; i < nested_files.size(); ++i) {
-                std::string full_nested_path = prefix + nested_files[i].name;
-                add_to_tree(full_nested_path, temp_bnk_path.string(), (int)i, nested_files[i].uncompressed_size, true);
-            }
-
+            parent_reader.emplace(parent_bnk_path);
         } catch (...) {
+            // Couldn't open parent — just count its nested entries as done
+            // so the progress bar still advances.
+            g_tree_done_units.fetch_add((int)indices.size());
             continue;
         }
+        const auto& parent_files = parent_reader->list_files();
+
+        for (int nested_index : indices) {
+            if (nested_index < 0 || nested_index >= (int)parent_files.size()) {
+                g_tree_done_units.fetch_add(1);
+                continue;
+            }
+            const auto& nested_file = parent_files[nested_index];
+            std::string nested_path = nested_file.name;
+            set_tree_label(std::filesystem::path(parent_bnk_path).filename().string()
+                           + " : " + std::filesystem::path(nested_path).filename().string());
+
+            // Stable temp path — same as before so existing call sites that
+            // open these paths still work. The actual disk write is now
+            // deferred via LazyNested below.
+            std::string nested_base = std::filesystem::path(nested_path).filename().string();
+            std::string temp_name = std::to_string(std::hash<std::string>{}(parent_bnk_path + nested_path))
+                                  + "_" + nested_base;
+            auto temp_bnk_path = (tmpdir / temp_name).string();
+
+            try {
+                // Pull the nested BNK's bytes straight out of the parent
+                // (in-memory). For ISO mode this is one read from the disc
+                // image; for disk mode it's one read from the parent file.
+                // Either way: zero temp-file I/O during enumeration.
+                std::vector<uint8_t> nested_bytes =
+                    parent_reader->extract_index_bytes(nested_index);
+
+                BNKReader nested_reader(std::move(nested_bytes));
+                const auto& nested_files = nested_reader.list_files();
+
+                // Register the temp path for lazy materialization. If/when
+                // anything else tries to OPEN this path (BNKReader ctor or
+                // extract_one), it'll get extracted to disk on demand.
+                LazyNested::register_pending(temp_bnk_path, parent_bnk_path, nested_index);
+
+                {
+                    if (std::find(S.nested_bnk_paths.begin(), S.nested_bnk_paths.end(), temp_bnk_path)
+                        == S.nested_bnk_paths.end()) {
+                        S.nested_bnk_paths.push_back(temp_bnk_path);
+                    }
+                    S.nested_bnk_parents[temp_bnk_path] = parent_bnk_path;
+                }
+
+                size_t last_slash = nested_path.find_last_of('/');
+                std::string prefix = (last_slash == std::string::npos)
+                    ? std::string()
+                    : nested_path.substr(0, last_slash + 1);
+
+                for (size_t i = 0; i < nested_files.size(); ++i) {
+                    std::string full_nested_path = prefix + nested_files[i].name;
+                    add_to_tree(full_nested_path, temp_bnk_path,
+                                (int)i, nested_files[i].uncompressed_size, true);
+                }
+            } catch (...) {
+                // fall through — still increment so progress bar advances
+            }
+            g_tree_done_units.fetch_add(1);
+        }
     }
+    set_tree_label("");
 }
 
 #ifdef _WIN32
@@ -414,6 +663,11 @@ static void draw_tree_node(TreeNode& node) {
         std::string l = name;
         std::transform(l.begin(), l.end(), l.begin(), ::tolower);
         return l.size() >= 4 && l.rfind(".mdl") == l.size() - 4;
+    };
+    auto is_tex = [](const std::string& name) -> bool {
+        std::string l = name;
+        std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+        return l.size() >= 4 && l.rfind(".tex") == l.size() - 4;
     };
 
     if (node.is_file) {
@@ -460,6 +714,17 @@ static void draw_tree_node(TreeNode& node) {
                         g_pending_mdl_full_path = node.full_path;
                         g_pending_mdl_load = true;
                         g_pending_mdl_index = (int)i;
+                    }
+                    // Double-click on a .tex node opens the texture preview,
+                    // matching the flat-file-table behavior. Without this,
+                    // nested-tree .tex nodes had no way to launch the preview.
+                    if (is_tex(node.name) && ImGui::IsMouseDoubleClicked(0)) {
+                        g_pending_tex_load = true;
+                        g_pending_tex_index = (int)i;
+                    }
+                    // Double-click a .wav in the tree -> in-app audio player.
+                    if (is_audio_file(node.name) && ImGui::IsMouseDoubleClicked(0)) {
+                        open_audio_player_for_selected((int)i);
                     }
                     break;
                 }
@@ -519,7 +784,9 @@ void draw_left_panel(ID3D11Device* device) {
 #else
 void draw_left_panel() {
 #endif
-    ImGui::BeginChild("left_panel", ImVec2(360, 0), true);
+    // Fill the parent container — the column width is now decided by the
+    // outer MainLayout, not hardcoded here.
+    ImGui::BeginChild("left_panel", ImVec2(0, 0), true);
 
     if (ImGui::BeginTabBar("LeftPanelTabs", ImGuiTabBarFlags_None)) {
         if (ImGui::BeginTabItem("BNK List")) {
@@ -530,17 +797,6 @@ void draw_left_panel() {
             ImGui::BeginChild("bnk_list", ImVec2(0, 0), false);
 
             auto paths = filtered_bnk_paths();
-
-            std::vector<std::string> audio_bnks;
-            std::vector<std::string> other_bnks;
-
-            for (const auto& p : paths) {
-                if (is_in_audio_folder(p)) {
-                    audio_bnks.push_back(p);
-                } else {
-                    other_bnks.push_back(p);
-                }
-            }
 
             if (!S.adb_paths.empty()) {
                 ImGui::PushID("adb_entry");
@@ -599,145 +855,194 @@ void draw_left_panel() {
                 ImGui::PopID();
             }
 
-            for (size_t idx = 0; idx < paths.size(); ++idx) {
-                auto &p = paths[idx];
-                ImGui::PushID((int)idx);
+            // Cache of nested-BNK file-table reads, keyed by parent BNK
+            // path. Without this we'd open the parent and read its file
+            // table every frame an expanded BNK is on screen — fine on
+            // disk, but very expensive on ISO (each list_files() goes
+            // through the disc reader).
+            struct NestedChild { int index; std::string name; };
+            static std::unordered_map<std::string, std::vector<NestedChild>> s_nested_cache;
+            // Drop the cache whenever the root changed (different folder/
+            // ISO selected); g_tree_last_root_dir is the canonical signal.
+            static std::string s_nested_cache_root;
+            if (s_nested_cache_root != S.root_dir) {
+                s_nested_cache.clear();
+                s_nested_cache_root = S.root_dir;
+            }
 
+            // Build a flat row list so we can virtualize via ImGuiListClipper.
+            // Each row is either a top-level BNK or a nested child shown
+            // because its parent is expanded. Building this is O(N) over
+            // visible BNKs only — no per-frame disc reads thanks to the
+            // cache.
+            struct Row {
+                int kind;            // 0 = top-level, 1 = nested child
+                int top_idx;         // into `paths`
+                int nested_idx;      // BNKReader index inside parent (kind 1)
+                std::string nested_name; // nested file name (kind 1)
+            };
+            std::vector<Row> rows;
+            rows.reserve(paths.size() + 64);
+            for (size_t idx = 0; idx < paths.size(); ++idx) {
+                rows.push_back({0, (int)idx, -1, {}});
+
+                const auto& p = paths[idx];
                 std::string label = std::filesystem::path(p).filename().string();
                 std::string label_lower = label;
                 std::transform(label_lower.begin(), label_lower.end(), label_lower.begin(), ::tolower);
-
                 bool is_nested_bnk = (label_lower == "levels.bnk" || label_lower == "streaming.bnk");
                 bool is_expanded = S.expanded_bnks.count(p) > 0;
 
-                if (is_nested_bnk) {
-                    label = (is_expanded ? "- " : "+ ") + label;
-                }
-
-                bool selected = (p == S.selected_bnk && !S.viewing_adb && S.selected_nested_index == -1);
-                if (ImGui::Selectable(label.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
-                    if (is_nested_bnk) {
-                        if (is_expanded) {
-                            S.expanded_bnks.erase(p);
-                        } else {
-                            S.expanded_bnks.insert(p);
-                        }
-                    }
-                    S.viewing_adb = false;
-                    S.viewing_lua = false;
-                    S.global_search.clear();
-                    S.selected_nested_bnk.clear();
-                    S.selected_nested_index = -1;
-                    pick_bnk(p);
-                }
-                if (!S.hide_tooltips && ImGui::IsItemHovered()) {
-                    ImGui::BeginTooltip();
-                    ImGui::TextUnformatted(p.c_str());
-                    ImGui::EndTooltip();
-                }
-
                 if (is_nested_bnk && is_expanded) {
-                    try {
-                        BNKReader reader(p);
-                        const auto& files = reader.list_files();
-                        for (size_t i = 0; i < files.size(); ++i) {
-                            const auto& file = files[i];
-                            std::string fname_lower = file.name;
-                            std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
-                            if (fname_lower.size() >= 4 && fname_lower.substr(fname_lower.size() - 4) == ".bnk") {
-                                ImGui::PushID((int)i + 100000);
-                                std::string nested_label = "    " + std::filesystem::path(file.name).filename().string();
-                                bool nested_selected = (S.selected_nested_bnk == p && S.selected_nested_index == (int)i);
-                                if (ImGui::Selectable(nested_label.c_str(), nested_selected, ImGuiSelectableFlags_SpanAllColumns)) {
-                                    S.viewing_adb = false;
-                                    S.viewing_lua = false;
-                                    S.selected_bnk = p;
-                                    S.selected_nested_bnk = p;
-                                    S.selected_nested_index = (int)i;
-                                    S.global_search.clear();
-                                    S.files.clear();
-                                    S.selected_file_index = -1;
-
-                                    auto tmpdir = std::filesystem::temp_directory_path() / "f2_nested_bnk";
-                                    std::error_code ec;
-                                    std::filesystem::create_directories(tmpdir, ec);
-                                    auto tmp_nested = tmpdir / (std::to_string(std::hash<std::string>{}(file.name)) + ".bnk");
-
-                                    extract_one(p, (int)i, tmp_nested.string());
-
-                                    S.selected_nested_temp_path = tmp_nested.string();
-
-                                    BNKReader nested_reader(tmp_nested.string());
-                                    const auto& nested_files = nested_reader.list_files();
-                                    S.files.reserve(nested_files.size());
-                                    for (size_t j = 0; j < nested_files.size(); ++j) {
-                                        S.files.push_back({(int)j, nested_files[j].name, nested_files[j].uncompressed_size});
-                                    }
-
-                                    std::sort(S.files.begin(), S.files.end(), [](const BNKItemUI &a, const BNKItemUI &b) {
-                                        std::string x = std::filesystem::path(a.name).filename().string();
-                                        std::string y = std::filesystem::path(b.name).filename().string();
-                                        std::transform(x.begin(), x.end(), x.begin(), ::tolower);
-                                        std::transform(y.begin(), y.end(), y.begin(), ::tolower);
-                                        return x < y;
-                                    });
+                    auto it_cache = s_nested_cache.find(p);
+                    if (it_cache == s_nested_cache.end()) {
+                        std::vector<NestedChild> children;
+                        try {
+                            BNKReader reader(p);
+                            const auto& files = reader.list_files();
+                            for (size_t i = 0; i < files.size(); ++i) {
+                                std::string fname_lower = files[i].name;
+                                std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
+                                if (fname_lower.size() >= 4 && fname_lower.substr(fname_lower.size() - 4) == ".bnk") {
+                                    children.push_back({(int)i, files[i].name});
                                 }
-                                if (!S.hide_tooltips && ImGui::IsItemHovered()) {
-                                    ImGui::BeginTooltip();
-                                    ImGui::TextUnformatted(file.name.c_str());
-                                    ImGui::EndTooltip();
-                                }
-                                ImGui::PopID();
                             }
-                        }
-                    } catch (...) {}
+                        } catch (...) {}
+                        it_cache = s_nested_cache.emplace(p, std::move(children)).first;
+                    }
+                    for (const auto& c : it_cache->second) {
+                        rows.push_back({1, (int)idx, c.index, c.name});
+                    }
                 }
-
-                ImGui::PopID();
             }
+
+            ImGuiListClipper clipper;
+            clipper.Begin((int)rows.size());
+            while (clipper.Step()) {
+                for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r) {
+                    const Row& row = rows[(size_t)r];
+                    if (row.kind == 0) {
+                        const auto& p = paths[(size_t)row.top_idx];
+                        ImGui::PushID(r);
+
+                        std::string label = std::filesystem::path(p).filename().string();
+                        std::string label_lower = label;
+                        std::transform(label_lower.begin(), label_lower.end(), label_lower.begin(), ::tolower);
+                        bool is_nested_bnk = (label_lower == "levels.bnk" || label_lower == "streaming.bnk");
+                        bool is_expanded = S.expanded_bnks.count(p) > 0;
+                        if (is_nested_bnk) {
+                            label = (is_expanded ? "- " : "+ ") + label;
+                        }
+
+                        bool selected = (p == S.selected_bnk && !S.viewing_adb && S.selected_nested_index == -1);
+                        if (ImGui::Selectable(label.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+                            if (is_nested_bnk) {
+                                if (is_expanded) S.expanded_bnks.erase(p);
+                                else             S.expanded_bnks.insert(p);
+                            }
+                            S.viewing_adb = false;
+                            S.viewing_lua = false;
+                            S.global_search.clear();
+                            S.selected_nested_bnk.clear();
+                            S.selected_nested_index = -1;
+                            pick_bnk(p);
+                        }
+                        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                            ImGui::BeginTooltip();
+                            ImGui::TextUnformatted(p.c_str());
+                            ImGui::EndTooltip();
+                        }
+                        ImGui::PopID();
+                    } else {
+                        const auto& p = paths[(size_t)row.top_idx];
+                        const std::string& nested_name = row.nested_name;
+                        int nested_idx = row.nested_idx;
+
+                        ImGui::PushID(r);
+                        std::string nested_label = "    " + std::filesystem::path(nested_name).filename().string();
+                        bool nested_selected = (S.selected_nested_bnk == p && S.selected_nested_index == nested_idx);
+                        if (ImGui::Selectable(nested_label.c_str(), nested_selected, ImGuiSelectableFlags_SpanAllColumns)) {
+                            S.viewing_adb = false;
+                            S.viewing_lua = false;
+                            S.selected_bnk = p;
+                            S.selected_nested_bnk = p;
+                            S.selected_nested_index = nested_idx;
+                            S.global_search.clear();
+                            S.files.clear();
+                            S.selected_file_index = -1;
+
+                            auto tmpdir = std::filesystem::temp_directory_path() / "f2_nested_bnk";
+                            std::error_code ec;
+                            std::filesystem::create_directories(tmpdir, ec);
+                            auto tmp_nested = tmpdir / (std::to_string(std::hash<std::string>{}(nested_name)) + ".bnk");
+
+                            extract_one(p, nested_idx, tmp_nested.string());
+                            S.selected_nested_temp_path = tmp_nested.string();
+
+                            BNKReader nested_reader(tmp_nested.string());
+                            const auto& nested_files = nested_reader.list_files();
+                            S.files.reserve(nested_files.size());
+                            for (size_t j = 0; j < nested_files.size(); ++j) {
+                                S.files.push_back({(int)j, nested_files[j].name, nested_files[j].uncompressed_size});
+                            }
+                            std::sort(S.files.begin(), S.files.end(), [](const BNKItemUI& a, const BNKItemUI& b) {
+                                std::string x = std::filesystem::path(a.name).filename().string();
+                                std::string y = std::filesystem::path(b.name).filename().string();
+                                std::transform(x.begin(), x.end(), x.begin(), ::tolower);
+                                std::transform(y.begin(), y.end(), y.begin(), ::tolower);
+                                return x < y;
+                            });
+                        }
+                        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                            ImGui::BeginTooltip();
+                            ImGui::TextUnformatted(nested_name.c_str());
+                            ImGui::EndTooltip();
+                        }
+                        ImGui::PopID();
+                    }
+                }
+            }
+            clipper.End();
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("File Tree")) {
+        // File Tree is the priority view — flag it selected on the first
+        // frame so the user lands on it when the window opens. After
+        // that ImGui keeps whichever tab the user last clicked.
+        static bool s_file_tree_first_frame = true;
+        ImGuiTabItemFlags ft_flags = s_file_tree_first_frame
+                                     ? ImGuiTabItemFlags_SetSelected
+                                     : ImGuiTabItemFlags_None;
+        s_file_tree_first_frame = false;
+        if (ImGui::BeginTabItem("File Tree", nullptr, ft_flags)) {
             ImGui::BeginChild("file_tree", ImVec2(0, 0), false);
 
-            static TreeNode root;
-            static bool tree_built = false;
-            static bool tree_building = false;
-            static std::atomic<bool> build_complete(false);
-            static float build_start_time = 0.0f;
-            static std::string last_root_dir;
+            // Tree build state was hoisted to file scope so we could
+            // start the work right after open_folder_logic. Here we just
+            // observe and render from those globals.
+            //
+            // (The "promote build_complete -> built/!building" step that
+            // used to live here moved into the worker thread — see
+            // start_tree_build_for_root. Doing it here meant the loading
+            // screen could stall at 100% because this tab body wasn't
+            // being drawn while the loading screen was up.)
 
-            if (last_root_dir != S.root_dir) {
-                last_root_dir = S.root_dir;
-                tree_built = false;
-                tree_building = false;
-                root.children.clear();
+            // If the user re-opened a folder/iso and a build hasn't been
+            // kicked yet for some reason, kick one now (lazy fallback).
+            if (g_tree_last_root_dir != S.root_dir && !S.bnk_paths.empty()
+                && !g_tree_building.load() && !g_tree_built.load())
+            {
+                start_tree_build_for_root(S.root_dir, S.bnk_paths);
             }
 
-            if (!tree_built && !tree_building && !S.bnk_paths.empty()) {
-                tree_building = true;
-                build_complete = false;
-                build_start_time = ImGui::GetTime();
+            // Use the global tree root that the build thread populated.
+            TreeNode& tree_render_root = g_tree_root;
 
-                TreeNode* root_ptr = &root;
-                std::atomic<bool>* complete_ptr = &build_complete;
-                std::vector<std::string> bnk_snapshot = S.bnk_paths;
-
-                std::thread([root_ptr, complete_ptr, bnk_snapshot = std::move(bnk_snapshot)]() mutable {
-                    build_unified_file_tree(*root_ptr, std::move(bnk_snapshot));
-                    complete_ptr->store(true);
-                }).detach();
-            }
-
-            if (tree_building) {
-                if (build_complete) {
-                    tree_building = false;
-                    tree_built = true;
-                } else {
+            if (g_tree_building.load()) {
+                {
                     ImVec2 avail = ImGui::GetContentRegionAvail();
-                    float elapsed = ImGui::GetTime() - build_start_time;
+                    float elapsed = (float)ImGui::GetTime() - g_tree_build_start_time;
 
                     float dot_cycle = fmodf(elapsed * 2.0f, 4.0f);
                     int dot_count = (int)dot_cycle;
@@ -759,8 +1064,8 @@ void draw_left_panel() {
                         ImGui::TextUnformatted("(this may take some time)");
                     }
                 }
-            } else if (tree_built) {
-                for (auto& pair : root.children) {
+            } else if (g_tree_built.load()) {
+                for (auto& pair : tree_render_root.children) {
 #ifdef _WIN32
                     draw_tree_node(pair.second, device);
 #else
@@ -832,6 +1137,11 @@ void draw_file_table() {
                     if (ImGui::IsMouseDoubleClicked(0) && is_tex(S.files[i].name)) {
                         g_pending_tex_load = true;
                         g_pending_tex_index = i;
+                    }
+                    // Double-click a .wav -> open the in-app audio player.
+                    if (ImGui::IsMouseDoubleClicked(0) && is_audio_file(S.files[i].name)
+                        && !S.viewing_adb && !S.viewing_lua) {
+                        open_audio_player_for_selected(i);
                     }
                 }
                 if (!S.hide_tooltips && ImGui::IsItemHovered()) {
@@ -1115,6 +1425,10 @@ void draw_right_panel() {
                 can_wav = l.size() >= 4 && l.rfind(".wav") == l.size() - 4;
             }
             if (can_wav) {
+                ImGui::SameLine();
+                if (ImGui::Button("Play")) {
+                    open_audio_player_for_selected(S.selected_file_index);
+                }
                 ImGui::SameLine();
                 if (ImGui::Button("Extract WAV")) {
                     ImGui::OpenPopup("progress_win");
@@ -1488,12 +1802,19 @@ if (!can_preview) {
 
         progress_open(0, "Loading preview...");
 
-        std::thread([device, item, name, can_tex, can_mdl, bnk_to_use, nested_temp_copy, is_nested]() {
+        // The original (non-copy) nested BNK path is what's keyed in
+        // S.nested_bnk_parents — pass it to build_any_tex_buffer_for_name
+        // so sibling BNKs from the same parent take priority over globals.
+        std::string preferred_for_tex = is_nested
+            ? S.selected_nested_temp_path
+            : S.selected_bnk;
+
+        std::thread([device, item, name, can_tex, can_mdl, bnk_to_use, nested_temp_copy, is_nested, preferred_for_tex]() {
             std::vector<unsigned char> buf;
             bool ok = false;
             try {
                 if (can_tex) {
-                    ok = build_any_tex_buffer_for_name(name, buf);
+                    ok = build_any_tex_buffer_for_name(name, buf, preferred_for_tex);
                 } else if (can_mdl) {
                     if (is_nested) {
                         ok = reconstruct_nested_mdl(bnk_to_use, item.index, buf);
@@ -2053,9 +2374,15 @@ if (!can_preview) {
         auto name = item.name;
         S.texture_window_name = name;
 
-        std::thread([name]() {
+        // Pass the user's clicked BNK so nested-region sibling BNKs are
+        // searched before generic globals.
+        std::string preferred_for_tex = (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty())
+            ? S.selected_nested_temp_path
+            : S.selected_bnk;
+
+        std::thread([name, preferred_for_tex]() {
             std::vector<unsigned char> tex_buf;
-            if (!build_any_tex_buffer_for_name(name, tex_buf)) {
+            if (!build_any_tex_buffer_for_name(name, tex_buf, preferred_for_tex)) {
                 log_tagged("texture window",
                            "build_any_tex_buffer_for_name failed for " + name);
                 S.texture_window_name = "ERROR: Could not load texture file (see tex_errors.log)";

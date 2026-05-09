@@ -1044,12 +1044,19 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         m.normal_visible    = true;
         m.specular_visible  = true;
         m.tint_visible      = true;
+        // Prefer textures from the same nested BNK family the model came
+        // from (the user's currently-selected BNK), so a model loaded from
+        // a region archive uses that region's textures instead of globals.
+        std::string preferred_for_tex =
+            (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty())
+                ? S.selected_nested_temp_path
+                : S.selected_bnk;
         auto load_named_srv = [&](const std::string& tex_name,
                                   ID3D11ShaderResourceView** out_srv,
                                   bool* out_has_alpha) {
             if (tex_name.empty()) return;
             std::vector<unsigned char> tex_buf;
-            if (build_any_tex_buffer_for_name(tex_name, tex_buf)) {
+            if (build_any_tex_buffer_for_name(tex_name, tex_buf, preferred_for_tex)) {
                 bool dummyA = false;
                 bool* alpha_ptr = out_has_alpha ? out_has_alpha : &dummyA;
                 srv_from_tex_blob_auto(dev, tex_buf, out_srv, alpha_ptr);
@@ -1341,7 +1348,12 @@ void MP_Resize(ModelPreview& mp, int w, int h) {
 static unsigned int load_tex_from_name(const std::string& name, bool* out_has_alpha) {
     if (name.empty()) return 0;
     std::vector<unsigned char> tex_buf;
-    if (build_any_tex_buffer_for_name(name, tex_buf)) {
+    // Prefer the user's clicked nested BNK family over globals for textures.
+    std::string preferred_for_tex =
+        (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty())
+            ? S.selected_nested_temp_path
+            : S.selected_bnk;
+    if (build_any_tex_buffer_for_name(name, tex_buf, preferred_for_tex)) {
         std::vector<uint8_t> rgba;
         int w, h;
         if (decode_tex_to_rgba(tex_buf, rgba, w, h, out_has_alpha)) {

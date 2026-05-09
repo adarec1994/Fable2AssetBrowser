@@ -4,6 +4,12 @@ project(Fable_2_Asset_Browser CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Force the Release CRT (/MD) for every configuration. The FFmpeg static
+# libs we ship are built with /MD; mixing them with /MDd in Debug
+# produces LNK2038 (RuntimeLibrary mismatch). Losing /MDd costs us only
+# a few CRT-level debug asserts; the C++ debugger still works fine.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+
 set(APP_SOURCES
         src/main.cpp
         src/Utilities/State.cpp
@@ -17,14 +23,25 @@ set(APP_SOURCES
         src/UI/HexView.cpp
         src/UI/UI_Main.cpp
         src/UI/UI_Panels.cpp
+        src/UI/AudioPlayerWindow.cpp
+        src/UI/Layout/LoadingScreen.cpp
+        src/UI/Layout/Sidebar.cpp
+        src/UI/Layout/MainLayout.cpp
         src/Splashscreen/Splashscreen.cpp
         src/Splashscreen/SplashSparkles.cpp
         src/Splashscreen/LogoMap.cpp
         src/Splashscreen/IconFont.cpp
         src/ISO/IsoExtract.cpp
+        src/ISO/IsoMount.cpp
         src/MDL/mdl_converter.cpp
         src/BNKCore.cpp
-        src/Audio/audio.cpp
+        src/Audio/AudioPlayer.cpp
+        src/Audio/XmaDecoder.cpp
+        # Minimal override of libavcodec/allcodecs.obj — defines codec_list
+        # with only XMA1/XMA2/WMAPro so the linker drops every other codec
+        # via /OPT:REF instead of dragging the full FFmpeg surface (~25MB)
+        # into the exe. See the file header for the link-order trick.
+        src/Audio/Xma2Codec/xma_codec_list.cpp
         src/UI/ModelPreview.cpp
         src/UI/ModelPreview.h
         src/Lua.cpp
@@ -129,6 +146,49 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fontawesome)
 
+# miniaudio: single-header public-domain audio output library. We use it
+# as the playback backend for the in-app audio player so we don't have to
+# write our own WASAPI/CoreAudio/ALSA wrapper.
+FetchContent_Declare(
+        miniaudio
+        GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+        GIT_TAG 0.11.21
+        GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(miniaudio)
+
+# FFmpeg (libavcodec) for XMA2 decoding. The Xbox 360 audio format in
+# Fable 2's BNKs is hardware-decoded on console; there is no software
+# decoder in the game binary. FFmpeg's libavcodec is the de-facto solution.
+#
+# On Windows we expect prebuilt MSVC libraries and headers under
+# external/ffmpeg/ (.lib + include/), shipped with the project. The user
+# can drop ShiftMediaProject prebuilts there. If absent, we fall back to
+# the legacy towav.exe path so the rest of the app still builds.
+set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/external/ffmpeg" CACHE PATH "FFmpeg prebuilt root")
+set(FFMPEG_AVAILABLE FALSE)
+if(EXISTS "${FFMPEG_ROOT}/include/libavcodec/avcodec.h")
+    # Prefer the static archives (libavcodec.lib) so we can link FFmpeg
+    # directly into the exe without shipping ~24 MB of DLLs alongside.
+    # The linker (/OPT:REF) drops every codec we don't reference, so the
+    # final exe footprint of the FFmpeg surface is roughly just the
+    # XMA2/WMA Pro decode path + math/transform helpers.
+    set(_FFMPEG_LIB_PATHS "${FFMPEG_ROOT}/lib" "${FFMPEG_ROOT}/lib/x86" "${FFMPEG_ROOT}/lib/x64")
+    find_library(AVCODEC_LIB    NAMES libavcodec    avcodec     PATHS ${_FFMPEG_LIB_PATHS} NO_DEFAULT_PATH)
+    find_library(AVUTIL_LIB     NAMES libavutil     avutil      PATHS ${_FFMPEG_LIB_PATHS} NO_DEFAULT_PATH)
+    find_library(SWRESAMPLE_LIB NAMES libswresample swresample  PATHS ${_FFMPEG_LIB_PATHS} NO_DEFAULT_PATH)
+    if(AVCODEC_LIB AND AVUTIL_LIB AND SWRESAMPLE_LIB)
+        set(FFMPEG_AVAILABLE TRUE)
+        message(STATUS "FFmpeg found at ${FFMPEG_ROOT} -- enabling XMA2 decoder (static link)")
+        message(STATUS "  avcodec    : ${AVCODEC_LIB}")
+        message(STATUS "  avutil     : ${AVUTIL_LIB}")
+        message(STATUS "  swresample : ${SWRESAMPLE_LIB}")
+    endif()
+endif()
+if(NOT FFMPEG_AVAILABLE)
+    message(STATUS "FFmpeg prebuilts not found at ${FFMPEG_ROOT} -- audio player will only play uncompressed PCM. Drop libavcodec/avutil/swresample (.lib + include/) under external/ffmpeg/ to enable XMA2 decoding.")
+endif()
+
 if(WIN32)
     FetchContent_Declare(
             directxmath
@@ -152,7 +212,6 @@ if(WIN32)
 
     target_include_directories(Fable_2_Asset_Browser PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
-            ${CMAKE_CURRENT_SOURCE_DIR}/include/towav
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${imgui_SOURCE_DIR}
             ${imgui_SOURCE_DIR}/misc/cpp
@@ -162,6 +221,7 @@ if(WIN32)
             ${directxmath_SOURCE_DIR}/Inc
             ${stb_SOURCE_DIR}
             ${iconfontcpp_SOURCE_DIR}
+            ${miniaudio_SOURCE_DIR}
     )
 
     # Stage the FontAwesome 6 Solid ttf at a stable path that fable.rc
@@ -174,6 +234,30 @@ if(WIN32)
     endif()
 
     target_link_libraries(Fable_2_Asset_Browser PRIVATE d3d11 dxgi d3dcompiler dwmapi winmm)
+
+    if(FFMPEG_AVAILABLE)
+        target_compile_definitions(Fable_2_Asset_Browser PRIVATE F2_HAVE_FFMPEG=1)
+        target_include_directories(Fable_2_Asset_Browser PRIVATE "${FFMPEG_ROOT}/include")
+        target_link_libraries(Fable_2_Asset_Browser PRIVATE
+                "${AVCODEC_LIB}" "${AVUTIL_LIB}" "${SWRESAMPLE_LIB}"
+                # System libs that the static FFmpeg builds depend on.
+                bcrypt secur32 ws2_32 mfplat mfuuid strmiids)
+
+        # /OPT:REF drops every COMDAT (function/global) the linker can prove
+        # is unreachable from the entry point. /OPT:ICF folds identical
+        # COMDATs into one. With FFmpeg statically linked these are the
+        # whole game: avcodec.lib carries hundreds of codecs as static
+        # COMDATs and we only call the XMA2/WMA Pro path. Without these
+        # flags the exe ends up enormous; with them it's a few MB.
+        #
+        # /INCREMENTAL is the Debug default; it disables /OPT:REF/ICF
+        # because those rewrite already-laid-out sections. Force it off
+        # so the size optimizations actually take effect — we trade
+        # incremental-link speed for an exe that's an order of magnitude
+        # smaller.
+        target_link_options(Fable_2_Asset_Browser PRIVATE
+                "/INCREMENTAL:NO" "/OPT:REF" "/OPT:ICF")
+    endif()
 else()
     find_package(OpenGL REQUIRED)
     find_package(glfw3 REQUIRED)
@@ -193,7 +277,6 @@ else()
 
     target_include_directories(Fable_2_Asset_Browser PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
-            ${CMAKE_CURRENT_SOURCE_DIR}/include/towav
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${imgui_SOURCE_DIR}
             ${imgui_SOURCE_DIR}/misc/cpp
@@ -201,6 +284,7 @@ else()
             ${imguifiledialog_SOURCE_DIR}
             ${imgui_hex_editor_SOURCE_DIR}
             ${stb_SOURCE_DIR}
+            ${miniaudio_SOURCE_DIR}
             ${OPENGL_INCLUDE_DIR}
             ${GLEW_INCLUDE_DIRS}
     )

@@ -4,6 +4,7 @@
 #include "SplashSparkles.h"
 #include "IconFont.h"
 #include "../Audio/play_audio.h"
+#include "../ISO/IsoMount.h"
 #include "../Utilities/State.h"
 #include "../Utilities/Files.h"
 #include "../UI/UI_Panels.h"  // open_folder_logic
@@ -13,6 +14,9 @@
 #include <string>
 #include <vector>
 #include <cstdio>
+
+// Defined in main.cpp — used to persist the mute setting between sessions.
+void save_audio_muted(bool muted);
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -178,10 +182,17 @@ void handle_dialog_pick() {
     if (!file_path.empty() && std::filesystem::is_regular_file(file_path)
         && ends_with_lower(file_path, ".iso"))
     {
-        // ISO mount path is not yet wired (avoiding extraction). Show a
-        // friendly message; the user can extract manually for now.
-        g_status_msg = "ISO mounting is not yet wired up — please pick a "
-                       "folder, or extract the ISO manually for now.";
+        // Mount the ISO in-memory (no extraction). The rest of the app
+        // walks BNK files via scan_bnks_recursive / find_bnks which
+        // detect IsoMount::is_mounted() and return "iso://..." paths
+        // that BNKReader can stream from.
+        std::string err;
+        if (!ISO::IsoMount::instance().mount(file_path, &err)) {
+            g_status_msg = "ISO mount failed: " + err;
+            return;
+        }
+        open_iso_logic(file_path);
+        g_status_msg.clear();
         return;
     }
 
@@ -285,7 +296,7 @@ void draw(GLFWwindow* /*window*/) {
 
     // Mute / unmute toggle in the bottom-left corner. Drawn BEFORE the
     // full-window invisible click-target so it gets first dibs on clicks.
-    IconFont::ensure_loaded();
+    // (FA font was loaded once in main.cpp before any frame.)
     {
         const float btn_size = 44.0f;
         const float pad      = 16.0f;
@@ -296,17 +307,27 @@ void draw(GLFWwindow* /*window*/) {
         ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.40f,0.40f,0.40f,0.95f));
         ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1,1,1,1));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btn_size * 0.5f);
+        // Centre the glyph inside the round button — by default ImGui
+        // aligns button text to (0,0) which makes single-glyph labels
+        // sit in the top-left.
+        ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
+        // FontAwesome glyph metrics include a small bottom-side bearing,
+        // so a "centred" glyph lands a couple of pixels above the
+        // optical centre. Bump frame padding so the visual centre lines
+        // up with the geometric centre of the circle.
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 1));
 
         bool muted = BackgroundAudio::instance().is_muted();
         const char* label = muted ? ICON_FA_VOLUME_XMARK : ICON_FA_VOLUME_HIGH;
         if (ImGui::Button(label, ImVec2(btn_size, btn_size))) {
             BackgroundAudio::instance().toggle_mute();
+            save_audio_muted(BackgroundAudio::instance().is_muted());
         }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("%s", muted ? "Unmute music" : "Mute music");
         }
 
-        ImGui::PopStyleVar();
+        ImGui::PopStyleVar(3);
         ImGui::PopStyleColor(4);
     }
 

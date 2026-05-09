@@ -25,15 +25,20 @@ struct FileEntry {
 
 class BNKReader {
 public:
-    explicit BNKReader(const std::string& path) {
-        _fh.open(path, std::ios::binary);
-        if(!_fh) throw std::runtime_error("open failed");
-        _fh.seekg(0, std::ios::end);
-        _size = static_cast<uint64_t>(_fh.tellg());
-        _fh.seekg(0, std::ios::beg);
+    explicit BNKReader(const std::string& path);
+
+    // Memory-backed constructor: takes ownership of `bytes` and parses the
+    // BNK without ever touching disk. Useful for tests / when the caller
+    // already has the bytes; ISO-streaming uses a separate path below.
+    explicit BNKReader(std::vector<uint8_t> bytes) {
+        _mem = std::move(bytes);
+        _mode = Mode::Memory;
+        _size = (uint64_t)_mem.size();
+        _pos = 0;
         uint8_t head[8];
+        seek_to(0);
         read_exact(head, 8);
-        _fh.seekg(0, std::ios::beg);
+        seek_to(0);
         uint32_t header_offset = be_u32(head);
         uint32_t ver = be_u32(head+4);
         if (ver == 2) {
@@ -71,11 +76,42 @@ public:
         }
     }
 
-    void close() { if (_fh.is_open()) _fh.close(); }
+    // In-memory extraction: returns the decompressed bytes of one entry.
+    // Used by the file-tree builder so it can enumerate nested BNKs
+    // without a temp-disk round-trip — feed the bytes directly into a
+    // BNKReader(std::vector<uint8_t>) constructor.
+    std::vector<uint8_t> extract_index_bytes(int index) {
+        if (index < 0 || index >= (int)file_entries.size())
+            throw std::runtime_error("extract_index_bytes: index out of range");
+        return extract_entry_bytes_impl(file_entries[(size_t)index]);
+    }
+
+    void close() {
+        if (_mode == Mode::Disk && _fh.is_open()) _fh.close();
+        _mem.clear();
+        _iso_vpath.clear();
+    }
     ~BNKReader() { close(); }
 
 private:
+    // BNKReader has three back-ends. All reads go through seek_to /
+    // read_exact below which dispatch on _mode.
+    enum class Mode { Disk, Memory, IsoStream };
+    Mode _mode = Mode::Disk;
+
+    // Disk-backed
     std::ifstream _fh;
+
+    // Memory-backed (Mode::Memory): bytes live in _mem.
+    std::vector<uint8_t> _mem;
+
+    // ISO-streamed (Mode::IsoStream): seek/read translate to random-access
+    // calls into the mounted disc image; nothing loaded into RAM upfront.
+    std::string _iso_vpath;
+
+    uint64_t _pos = 0;
+    bool _use_mem = false;   // legacy alias, kept until we audit removals
+
     uint64_t _size = 0;
     uint32_t base_offset = 16;
     uint8_t compress_file_data = 0;
@@ -87,10 +123,22 @@ private:
         return (uint32_t(p[0])<<24)|(uint32_t(p[1])<<16)|(uint32_t(p[2])<<8)|uint32_t(p[3]);
     }
 
-    void read_exact(void* dst, size_t n) {
-        _fh.read(reinterpret_cast<char*>(dst), std::streamsize(n));
-        if (size_t(_fh.gcount()) != n) throw std::runtime_error("Premature EOF");
+    void seek_to(uint64_t off) {
+        switch (_mode) {
+            case Mode::Disk:
+                _fh.clear();
+                _fh.seekg((std::streamoff)off, std::ios::beg);
+                break;
+            case Mode::Memory:
+            case Mode::IsoStream:
+                _pos = off;
+                break;
+        }
     }
+
+    void read_exact(void* dst, size_t n);  // defined out-of-line because it
+                                           // calls into IsoMount when in
+                                           // IsoStream mode.
 
     uint32_t read_u32_be() {
         uint8_t b[4]; read_exact(b,4); return be_u32(b);
@@ -203,14 +251,14 @@ private:
     }
 
     void read_header_v2(uint32_t file_table_offset) {
-        _fh.seekg(8, std::ios::beg);
+        seek_to(8);
         compress_file_data = read_u8() != 0 ? 1 : 0;
         uint8_t pad[7]; read_exact(pad,7);
         base_offset = 0;
         std::vector<std::tuple<uint64_t,uint32_t,uint32_t>> metas;
         uint64_t cur = file_table_offset;
         while (cur + 8 <= _size) {
-            _fh.seekg(cur, std::ios::beg);
+            seek_to(cur);
             uint32_t comp = read_u32_be();
             uint32_t uncomp = read_u32_be();
             if (comp == 0) break;
@@ -230,7 +278,7 @@ private:
                 std::vector<uint8_t> out;
                 for (auto& m : metas) {
                     uint64_t off = std::get<0>(m); uint32_t comp = std::get<1>(m);
-                    _fh.seekg(off, std::ios::beg);
+                    seek_to(off);
                     std::vector<uint8_t> buf(comp);
                     read_exact(buf.data(), buf.size());
                     z.next_in = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(buf.data()));
@@ -309,8 +357,66 @@ private:
         file_entries.swap(entries);
     }
 
+    // In-memory analogue of extract_entry_to — same logic, but appends
+    // decompressed bytes to a returned vector instead of an ofstream.
+    // Used by the file-tree builder so nested BNKs can be enumerated
+    // without extracting them to a temp file first.
+    std::vector<uint8_t> extract_entry_bytes_impl(const FileEntry& e) {
+        std::vector<uint8_t> out;
+        seek_to(e.offset);
+
+        if (!e.is_compressed) {
+            out.resize(e.uncompressed_size);
+            read_exact(out.data(), out.size());
+            return out;
+        }
+
+        std::vector<uint8_t> comp_blob(e.compressed_size);
+        read_exact(comp_blob.data(), comp_blob.size());
+
+        const size_t CHUNK_SIZE = 0x8000;  // 32KB
+
+        for (size_t i = 0; i < e.decompressed_chunk_sizes.size(); ++i) {
+            uint32_t out_len = e.decompressed_chunk_sizes[i];
+
+            size_t comp_offset = i * CHUNK_SIZE;
+            size_t comp_available = comp_blob.size() - comp_offset;
+            size_t comp_size = std::min(CHUNK_SIZE, comp_available);
+
+            if (comp_offset >= comp_blob.size()) {
+                throw std::runtime_error("Invalid chunk offset");
+            }
+
+            std::optional<std::vector<uint8_t>> chunk;
+
+            for (int wbits : {15, -15, 31}) {
+                z_stream z;
+                memset(&z, 0, sizeof(z));
+                if (inflateInit2(&z, wbits) != Z_OK) continue;
+                z.next_in  = const_cast<Bytef*>(comp_blob.data() + comp_offset);
+                z.avail_in = (uInt)comp_size;
+                std::vector<uint8_t> outbuf(out_len);
+                z.next_out  = outbuf.data();
+                z.avail_out = (uInt)outbuf.size();
+                int ret = inflate(&z, Z_SYNC_FLUSH);
+                size_t produced = outbuf.size() - z.avail_out;
+                inflateEnd(&z);
+                if (ret == Z_OK || ret == Z_STREAM_END) {
+                    if (produced != out_len) outbuf.resize(out_len, 0);
+                    chunk = std::move(outbuf);
+                    break;
+                }
+            }
+            if (!chunk.has_value()) {
+                throw std::runtime_error("Failed to inflate chunk");
+            }
+            out.insert(out.end(), chunk->begin(), chunk->end());
+        }
+        return out;
+    }
+
     void extract_entry_to(const FileEntry& e, std::ofstream& out) {
-        _fh.seekg(e.offset, std::ios::beg);
+        seek_to(e.offset);
 
         if (!e.is_compressed) {
             std::vector<uint8_t> buf(e.uncompressed_size);
@@ -382,5 +488,80 @@ private:
         char buf[32]; std::snprintf(buf,sizeof(buf),"file_%08X.bin",off); return std::string(buf);
     }
 };
+
+#include "ISO/IsoMount.h"
+
+inline void BNKReader::read_exact(void* dst, size_t n) {
+    switch (_mode) {
+        case Mode::Disk:
+            _fh.read(reinterpret_cast<char*>(dst), std::streamsize(n));
+            if (size_t(_fh.gcount()) != n) throw std::runtime_error("Premature EOF");
+            return;
+        case Mode::Memory:
+            if (_pos + n > _size) throw std::runtime_error("Premature EOF");
+            std::memcpy(dst, _mem.data() + _pos, n);
+            _pos += n;
+            return;
+        case Mode::IsoStream:
+            if (_pos + n > _size) throw std::runtime_error("Premature EOF");
+            if (!ISO::IsoMount::instance().read_at(_iso_vpath, _pos, dst, n))
+                throw std::runtime_error("ISO read failed at " + _iso_vpath);
+            _pos += n;
+            return;
+    }
+}
+
+// Forward declaration of the lazy-nested materializer (defined in
+// BNKCore.cpp). Lets the BNKReader path constructor turn a registered-
+// but-not-yet-extracted nested-BNK temp path into a real file before
+// trying to open it. Safe no-op when the path isn't registered.
+namespace LazyNested { bool materialize(const std::string& temp_path); }
+
+// Disk-path constructor — handles both real disk paths AND iso://...
+// virtual paths. For ISO paths we read the file out of the mounted image
+// into a vector and route through the memory-backed parsing path.
+inline BNKReader::BNKReader(const std::string& path) {
+    LazyNested::materialize(path);
+    if (ISO::IsoMount::is_iso_path(path)) {
+        // Streaming mode — keep the virtual path and ask IsoMount to do
+        // random-access reads on demand. No big up-front buffer.
+        std::string vpath = ISO::IsoMount::strip_iso_prefix(path);
+        const ISO::MountedFile* mf = ISO::IsoMount::instance().find(vpath);
+        if (!mf) throw std::runtime_error("ISO entry not found: " + vpath);
+        _mode = Mode::IsoStream;
+        _iso_vpath = vpath;
+        _size = (uint64_t)mf->size;
+        _pos = 0;
+        uint8_t head[8];
+        seek_to(0);
+        read_exact(head, 8);
+        seek_to(0);
+        uint32_t header_offset = be_u32(head);
+        uint32_t ver = be_u32(head + 4);
+        if (ver == 2) { _is_v2 = true; read_header_v2(header_offset); }
+        else          { _is_v2 = false; read_header_continuous_stream(); }
+        if (_file_table_blob.empty())
+            throw std::runtime_error("Failed to read BNK header (decompressed file table is empty).");
+        parse_tables();
+        return;
+    }
+
+    _mode = Mode::Disk;
+    _fh.open(path, std::ios::binary);
+    if (!_fh) throw std::runtime_error("open failed");
+    _fh.seekg(0, std::ios::end);
+    _size = static_cast<uint64_t>(_fh.tellg());
+    seek_to(0);
+    uint8_t head[8];
+    read_exact(head, 8);
+    seek_to(0);
+    uint32_t header_offset = be_u32(head);
+    uint32_t ver = be_u32(head + 4);
+    if (ver == 2) { _is_v2 = true; read_header_v2(header_offset); }
+    else          { _is_v2 = false; read_header_continuous_stream(); }
+    if (_file_table_blob.empty())
+        throw std::runtime_error("Failed to read BNK header (decompressed file table is empty).");
+    parse_tables();
+}
 
 #endif // BNKREADER_CPP_INCLUDED

@@ -120,6 +120,14 @@ std::optional<std::string> find_bnk_by_filename(const std::string &fname_lower) 
         std::transform(b.begin(), b.end(), b.begin(), ::tolower);
         if (b == fname_lower) return p;
     }
+    // Fall back to BNKs that the file-tree builder extracted out of
+    // parent BNKs — needed so textures/models/etc. that live in nested
+    // region archives can still be located by filename.
+    for (auto &p: S.nested_bnk_paths) {
+        std::string b = std::filesystem::path(p).filename().string();
+        std::transform(b.begin(), b.end(), b.begin(), ::tolower);
+        if (b == fname_lower) return p;
+    }
     return std::nullopt;
 }
 

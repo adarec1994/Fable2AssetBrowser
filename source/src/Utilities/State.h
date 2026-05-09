@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <set>
 #include <cstdint>
@@ -63,6 +64,16 @@ struct LuaFileUI {
 struct State {
     std::string root_dir;
     std::vector<std::string> bnk_paths;
+    // Disk-extracted nested BNKs the file-tree builder pulled out of
+    // parent BNKs. build_any_tex_buffer_for_name() and friends search
+    // these in addition to bnk_paths so textures that live inside a
+    // nested BNK (region archives, etc.) can be opened from the preview.
+    std::vector<std::string> nested_bnk_paths;
+    // Map from nested BNK temp path -> the parent BNK it was extracted from.
+    // Used by texture lookup to prefer sibling nested BNKs (header+body+mip0
+    // from the same parent) over generic top-level globals when the user
+    // clicks a texture inside a nested BNK.
+    std::map<std::string, std::string> nested_bnk_parents;
     std::vector<std::string> adb_paths;
     std::vector<LuaFileUI> lua_files;
     std::string bnk_filter;

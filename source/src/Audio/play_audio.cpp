@@ -1,74 +1,71 @@
 #ifdef _WIN32
 #include "play_audio.h"
+#include "../../resource.h"
+
 #include <mmsystem.h>
-#include <fstream>
 
 #pragma comment(lib, "winmm.lib")
 
-void BackgroundAudio::start(const std::string& wav_path) {
+namespace {
+
+// Load an RCDATA resource into a vector. Same pattern the splash and
+// icon-font modules use.
+bool load_rcdata(int resource_id, std::vector<unsigned char>& out) {
+    HMODULE mod = GetModuleHandleA(nullptr);
+    HRSRC h = FindResourceA(mod, MAKEINTRESOURCEA(resource_id), (LPCSTR)RT_RCDATA);
+    if (!h) return false;
+    DWORD sz = SizeofResource(mod, h);
+    if (!sz) return false;
+    HGLOBAL g = LoadResource(mod, h);
+    if (!g) return false;
+    const void* p = LockResource(g);
+    if (!p) return false;
+    out.assign((const unsigned char*)p, (const unsigned char*)p + sz);
+    return true;
+}
+
+} // namespace
+
+bool BackgroundAudio::start_from_resource(int resource_id) {
     stop();
 
-    char exe_path[MAX_PATH];
-    GetModuleFileNameA(NULL, exe_path, MAX_PATH);
-    std::string exe_dir = exe_path;
-    size_t last_slash = exe_dir.find_last_of("\\/");
-    if (last_slash != std::string::npos) {
-        exe_dir = exe_dir.substr(0, last_slash + 1);
+    if (!load_rcdata(resource_id, wav_bytes)) {
+        return false;
     }
 
-    audio_path = exe_dir + "..\\" + wav_path;
     running = true;
 
-    audio_thread = std::thread([this]() { audio_loop(); });
+    // PlaySound holds onto the buffer for the duration of playback when
+    // SND_ASYNC|SND_MEMORY is used; our `wav_bytes` member is kept alive
+    // for the lifetime of the singleton (or until stop() clears it), so
+    // the pointer stays valid.
+    if (!muted.load()) {
+        PlaySoundA(reinterpret_cast<LPCSTR>(wav_bytes.data()), nullptr,
+                   SND_MEMORY | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
+    }
+    return true;
 }
 
 void BackgroundAudio::stop() {
-    if (running) {
-        running = false;
-        PlaySound(NULL, NULL, 0);
-        if (audio_thread.joinable()) {
-            audio_thread.join();
-        }
-    }
+    if (!running.exchange(false)) return;
+    PlaySoundA(nullptr, nullptr, 0);
+    wav_bytes.clear();
+    wav_bytes.shrink_to_fit();
 }
 
 void BackgroundAudio::toggle_mute() {
-    bool new_state = !muted.load();
-    set_muted(new_state);
+    set_muted(!muted.load());
 }
 
 void BackgroundAudio::set_muted(bool m) {
-    bool was_muted = muted.load();
-    muted = m;
-
-    if (m && !was_muted) {
-        PlaySound(NULL, NULL, 0);
-    } else if (!m && was_muted && running && !audio_path.empty()) {
-        PlaySoundA(audio_path.c_str(), NULL, SND_FILENAME | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
+    bool was = muted.exchange(m);
+    if (m && !was) {
+        // Mute: stop playback but keep the buffer so we can resume.
+        PlaySoundA(nullptr, nullptr, 0);
+    } else if (!m && was && running.load() && !wav_bytes.empty()) {
+        PlaySoundA(reinterpret_cast<LPCSTR>(wav_bytes.data()), nullptr,
+                   SND_MEMORY | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
     }
 }
 
-void BackgroundAudio::audio_loop() {
-    while (running) {
-        if (!muted.load() && !audio_path.empty()) {
-            std::ifstream test(audio_path, std::ios::binary);
-            if (!test.good()) {
-                running = false;
-                break;
-            }
-            test.close();
-
-            if (!PlaySoundA(audio_path.c_str(), NULL, SND_FILENAME | SND_ASYNC | SND_LOOP | SND_NODEFAULT)) {
-                running = false;
-                break;
-            }
-
-            while (running) {
-                Sleep(100);
-            }
-        } else {
-            Sleep(100);
-        }
-    }
-}
-#endif
+#endif // _WIN32

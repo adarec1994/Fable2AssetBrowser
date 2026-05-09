@@ -318,7 +318,13 @@ bool build_tex_buffer_for_name(const std::string &tex_name, std::vector<unsigned
 
 bool build_gui_tex_buffer_for_name(const std::string &tex_name, std::vector<unsigned char> &out) {
     std::vector<std::string> all_headers, all_bodies;
-    for (const auto& path : S.bnk_paths) {
+    // Search the union of top-level + nested BNKs (textures may live
+    // inside a region's nested archive).
+    std::vector<std::string> all_paths;
+    all_paths.reserve(S.bnk_paths.size() + S.nested_bnk_paths.size());
+    all_paths.insert(all_paths.end(), S.bnk_paths.begin(), S.bnk_paths.end());
+    all_paths.insert(all_paths.end(), S.nested_bnk_paths.begin(), S.nested_bnk_paths.end());
+    for (const auto& path : all_paths) {
         std::string fname = std::filesystem::path(path).filename().string();
         std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
         if (fname == "gui_texture_headers.bnk") {
@@ -409,14 +415,46 @@ bool build_gui_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
     }
 }
 
-bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsigned char> &out) {
+bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsigned char> &out,
+                                   const std::string &preferred_bnk) {
     std::string key = std::filesystem::path(tex_name).filename().string();
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+
+    // Search the union of top-level BNKs + the nested ones that the
+    // file-tree builder extracted. Without the nested set, textures
+    // stored inside a region's nested archive (e.g. region.bnk →
+    // region_textures.bnk) are invisible to this lookup.
+    std::vector<std::string> search_paths;
+    search_paths.reserve(S.bnk_paths.size() + S.nested_bnk_paths.size());
+    search_paths.insert(search_paths.end(), S.bnk_paths.begin(), S.bnk_paths.end());
+    search_paths.insert(search_paths.end(), S.nested_bnk_paths.begin(), S.nested_bnk_paths.end());
+
+    // If the caller passed a preferred BNK (the one the user clicked into),
+    // hoist it AND its sibling nested BNKs (same parent) to the front of the
+    // search order. This is what makes a texture clicked inside a nested
+    // region archive preview from THAT region's textures.bnk instead of
+    // globals_textures.bnk.
+    if (!preferred_bnk.empty()) {
+        std::string preferred_parent;
+        auto it_pp = S.nested_bnk_parents.find(preferred_bnk);
+        if (it_pp != S.nested_bnk_parents.end()) {
+            preferred_parent = it_pp->second;
+        }
+
+        auto is_sibling = [&](const std::string& p) -> bool {
+            if (p == preferred_bnk) return true;
+            if (preferred_parent.empty()) return false;
+            auto it = S.nested_bnk_parents.find(p);
+            return it != S.nested_bnk_parents.end() && it->second == preferred_parent;
+        };
+
+        std::stable_partition(search_paths.begin(), search_paths.end(), is_sibling);
+    }
 
     std::string header_bnk_path;
     int header_idx = -1;
 
-    for (const auto& bnk_path : S.bnk_paths) {
+    for (const auto& bnk_path : search_paths) {
         std::string fname = std::filesystem::path(bnk_path).filename().string();
         std::string fname_lower = fname;
         std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
@@ -448,7 +486,7 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
     std::string mip0_bnk_path;
     int mip0_idx = -1;
 
-    for (const auto& bnk_path : S.bnk_paths) {
+    for (const auto& bnk_path : search_paths) {
         std::string fname = std::filesystem::path(bnk_path).filename().string();
         std::string fname_lower = fname;
         std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
@@ -476,7 +514,7 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
     std::string body_bnk_path;
     int body_idx = -1;
 
-    for (const auto& bnk_path : S.bnk_paths) {
+    for (const auto& bnk_path : search_paths) {
         std::string fname = std::filesystem::path(bnk_path).filename().string();
         std::string fname_lower = fname;
         std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);

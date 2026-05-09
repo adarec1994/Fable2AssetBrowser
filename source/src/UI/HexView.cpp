@@ -279,13 +279,20 @@ void open_hex_for_selected() {
     progress_open(0, "Loading hex.");
     S.hex_loading.store(true);
 
-    std::thread([item, name, want_tex, want_mdl, bnk_to_use, nested_temp_copy, is_nested]() {
+    // Original (non-copy) nested BNK path — keyed in S.nested_bnk_parents,
+    // so passing it lets build_any_tex_buffer_for_name prefer sibling
+    // nested BNKs over globals.
+    std::string preferred_for_tex = is_nested
+        ? S.selected_nested_temp_path
+        : S.selected_bnk;
+
+    std::thread([item, name, want_tex, want_mdl, bnk_to_use, nested_temp_copy, is_nested, preferred_for_tex]() {
         std::vector<unsigned char> buf;
         bool ok = false;
 
         try {
             if (want_tex) {
-                ok = build_any_tex_buffer_for_name(name, buf);
+                ok = build_any_tex_buffer_for_name(name, buf, preferred_for_tex);
             } else if (want_mdl) {
                 if (is_nested) {
                     ok = reconstruct_nested_mdl(bnk_to_use, item.index, buf);

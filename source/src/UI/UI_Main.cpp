@@ -5,6 +5,9 @@
 #include "../Utilities/Files.h"
 #include "../Utilities/Progress.h"
 #include "UI_Panels.h"
+#include "AudioPlayerWindow.h"
+#include "Layout/LoadingScreen.h"
+#include "Layout/MainLayout.h"
 #include "../Splashscreen/Splashscreen.h"
 #include "imgui.h"
 #include "imgui_stdlib.h"
@@ -104,58 +107,9 @@ struct Sparkle {
 };
 static Sparkle g_sparkles[400];
 static bool g_sparkles_initialized = false;
-#ifdef _WIN32
-static bool LoadTextureFromFile(const char* filename, ID3D11Device* device, ID3D11ShaderResourceView** out_srv, int* out_width, int* out_height) {
-    int width, height, channels;
-    unsigned char* image_data = stbi_load(filename, &width, &height, &channels, 4);
-    if (image_data == NULL) return false;
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = width;
-    desc.Height = height;
-    desc.MipLevels = 1;
-    desc.ArraySize = 1;
-    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    desc.CPUAccessFlags = 0;
-    ID3D11Texture2D* pTexture = NULL;
-    D3D11_SUBRESOURCE_DATA subResource{};
-    subResource.pSysMem = image_data;
-    subResource.SysMemPitch = desc.Width * 4;
-    subResource.SysMemSlicePitch = 0;
-    device->CreateTexture2D(&desc, &subResource, &pTexture);
-    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Texture2D.MipLevels = desc.MipLevels;
-    srvDesc.Texture2D.MostDetailedMip = 0;
-    device->CreateShaderResourceView(pTexture, &srvDesc, out_srv);
-    pTexture->Release();
-    *out_width = width;
-    *out_height = height;
-    stbi_image_free(image_data);
-    return true;
-}
-#else
-static bool LoadTextureFromFile(const char* filename, unsigned int* out_texture, int* out_width, int* out_height) {
-    int width, height, channels;
-    unsigned char* image_data = stbi_load(filename, &width, &height, &channels, 4);
-    if (image_data == NULL) return false;
-    unsigned int texture;
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    *out_texture = texture;
-    *out_width = width;
-    *out_height = height;
-    stbi_image_free(image_data);
-    return true;
-}
-#endif
+// All splash assets (logo, panorama, sparkles) are embedded in the exe as
+// RCDATA on Windows; the loaders live in Splashscreen.cpp. Older disk-loading
+// helpers were removed so there are no runtime file dependencies.
 static void handle_flycam_input(float dt) {
     ImGuiIO& io = ImGui::GetIO();
     bool w_pressed = ImGui::IsKeyDown(ImGuiKey_W);
@@ -220,93 +174,81 @@ void draw_main(GLFWwindow* window) {
                  ImGuiWindowFlags_NoBringToFrontOnFocus |
                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     float dt = ImGui::GetIO().DeltaTime;
+
+    // ---- Top-level dispatch ------------------------------------------------
+    // 1. No data picked → splash screen.
+    // 2. Data picked + model preview active → 3D model viewer (full-window).
+    // 3. Data picked + tree still building → loading screen (full-window).
+    // 4. Data picked + tree ready → 3-column main layout.
     if (S.root_dir.empty()) {
 #ifdef _WIN32
         Splash::draw(device);
 #else
         Splash::draw(window);
 #endif
-    } else {
-        ImVec2 window_pos = ImGui::GetWindowPos();
+    } else if (g_mp.has_model) {
+        ImVec2 window_pos  = ImGui::GetWindowPos();
         ImVec2 window_size = ImGui::GetWindowSize();
-
-        if (g_mp.has_model) {
-            if (!g_mp_initialized) {
+        if (!g_mp_initialized) {
 #ifdef _WIN32
-                MP_Init(device, g_mp, (int)window_size.x, (int)window_size.y);
+            MP_Init(device, g_mp, (int)window_size.x, (int)window_size.y);
 #else
-                MP_Init(g_mp, (int)window_size.x, (int)window_size.y);
+            MP_Init(g_mp, (int)window_size.x, (int)window_size.y);
 #endif
-                g_mp_initialized = true;
-            }
-#ifdef _WIN32
-            MP_Resize(device, g_mp, (int)window_size.x, (int)window_size.y);
-            MP_Render(device, g_mp, g_flycam);
-#else
-            MP_Resize(g_mp, (int)window_size.x, (int)window_size.y);
-            MP_Render(g_mp, g_flycam);
-#endif
-            ImDrawList* draw_list = ImGui::GetWindowDrawList();
-#ifdef _WIN32
-            if (g_mp.srv) {
-                draw_list->AddImage((ImTextureID)g_mp.srv, window_pos, ImVec2(window_pos.x + window_size.x, window_pos.y + window_size.y));
-            }
-#else
-            if (g_mp.color_tex) {
-                draw_list->AddImage((ImTextureID)(intptr_t)g_mp.color_tex, window_pos, ImVec2(window_pos.x + window_size.x, window_pos.y + window_size.y));
-            }
-#endif
-            if (!ImGui::IsAnyItemActive() && !ImGui::IsAnyItemHovered()) {
-                handle_flycam_input(dt);
-            }
-            ImGui::SetCursorPos(ImVec2(10, 10));
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.1f, 0.1f, 0.1f, 0.8f));
-            ImGui::BeginChild("controls_hint", ImVec2(220, 140), true);
-            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Camera Controls");
-            ImGui::Separator();
-            ImGui::Text("W/S - Forward/Back");
-            ImGui::Text("A/D - Strafe Left/Right");
-            ImGui::Text("Q/E - Down/Up");
-            ImGui::Text("Right-Click - Look");
-            ImGui::Text("ESC - Close Model");
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
-            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-                MP_Release(g_mp);
-                g_mp.has_model = false;
-                g_mp_initialized = false;
-            }
+            g_mp_initialized = true;
         }
+#ifdef _WIN32
+        MP_Resize(device, g_mp, (int)window_size.x, (int)window_size.y);
+        MP_Render(device, g_mp, g_flycam);
+#else
+        MP_Resize(g_mp, (int)window_size.x, (int)window_size.y);
+        MP_Render(g_mp, g_flycam);
+#endif
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+#ifdef _WIN32
+        if (g_mp.srv) {
+            draw_list->AddImage((ImTextureID)g_mp.srv, window_pos,
+                                ImVec2(window_pos.x + window_size.x, window_pos.y + window_size.y));
+        }
+#else
+        if (g_mp.color_tex) {
+            draw_list->AddImage((ImTextureID)(intptr_t)g_mp.color_tex, window_pos,
+                                ImVec2(window_pos.x + window_size.x, window_pos.y + window_size.y));
+        }
+#endif
+        if (!ImGui::IsAnyItemActive() && !ImGui::IsAnyItemHovered()) {
+            handle_flycam_input(dt);
+        }
+        ImGui::SetCursorPos(ImVec2(10, 10));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.1f, 0.1f, 0.1f, 0.8f));
+        ImGui::BeginChild("controls_hint", ImVec2(220, 140), true);
+        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Camera Controls");
+        ImGui::Separator();
+        ImGui::Text("W/S - Forward/Back");
+        ImGui::Text("A/D - Strafe Left/Right");
+        ImGui::Text("Q/E - Down/Up");
+        ImGui::Text("Right-Click - Look");
+        ImGui::Text("ESC - Close Model");
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            MP_Release(g_mp);
+            g_mp.has_model = false;
+            g_mp_initialized = false;
+        }
+    } else if (UI::loading_in_progress() || S.bnk_paths.empty()) {
+        // Either the tree is still being built, or we don't have any
+        // BNKs scanned yet (e.g. the open thread hasn't finished). Show
+        // the loading screen rather than a half-populated layout.
+        UI::draw_loading_screen();
+    } else {
+#ifdef _WIN32
+        UI::draw_main_layout(device);
+#else
+        UI::draw_main_layout();
+#endif
     }
     ImGui::End();
-
-    if (!S.bnk_paths.empty()) {
-        ImGuiViewport* viewport = ImGui::GetMainViewport();
-
-        ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + 10, viewport->WorkPos.y + 10), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(900, viewport->WorkSize.y - 20), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSizeConstraints(ImVec2(600, 300), ImVec2(viewport->WorkSize.x - 50, viewport->WorkSize.y));
-
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.10f, 0.95f));
-
-        if (ImGui::Begin("Asset Browser", nullptr, ImGuiWindowFlags_None)) {
-            ImGui::BeginChild("left_panel_wrap", ImVec2(360, 0), false);
-#ifdef _WIN32
-            draw_left_panel(device);
-#else
-            draw_left_panel();
-#endif
-            ImGui::EndChild();
-            ImGui::SameLine();
-#ifdef _WIN32
-            draw_right_panel(device);
-#else
-            draw_right_panel();
-#endif
-        }
-        ImGui::End();
-        ImGui::PopStyleColor();
-    }
 
 #ifdef _WIN32
     if (S.pending_texture_load) {
@@ -397,4 +339,7 @@ void draw_main(GLFWwindow* window) {
 #endif
         }
     }
+
+    // In-app audio player (only renders when a source is loaded).
+    UI::draw_audio_player_window();
 }

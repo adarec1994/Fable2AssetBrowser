@@ -77,8 +77,114 @@ void draw_placeholder() {
     ImGui::Dummy(region);
 }
 
+// Full-bleed Lua source viewer. Reads from S.lua_preview_content (the
+// decompiled string the BNK List drill-in click handler populates via
+// the worker thread that wraps `read_lua_file_content`). Bytecode
+// files (Lua 5.1, magic `\x1BLua`) are auto-decompiled inside that
+// helper; plain-text scripts pass through unchanged. So whatever
+// arrives here is human-readable source.
+//
+// Layout: dark background, a header row with the script's filename
+// and a close button (✕) on the right that flips off
+// `S.show_lua_render`, then a scrollable monospace text region with
+// the decompiled body.
+void draw_lua_in_panel() {
+    ImVec2 region = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(origin,
+                      ImVec2(origin.x + region.x, origin.y + region.y),
+                      IM_COL32(18, 18, 22, 255));
+
+    // Title + close row.
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.92f, 0.70f, 1.0f));
+    ImGui::TextUnformatted(S.lua_preview_title.empty()
+                               ? "(no script)"
+                               : S.lua_preview_title.c_str());
+    ImGui::PopStyleColor();
+
+    // Close button — drag-aligned to the right end of the title row.
+    {
+        const float btn_w = ImGui::CalcTextSize("Close").x +
+                            ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f;
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x +
+                        ImGui::GetCursorPosX() - btn_w);
+        if (ImGui::SmallButton("Close##lua_render")) {
+            S.show_lua_render = false;
+        }
+    }
+    ImGui::Separator();
+
+    // Body — scrollable, dark background, tinted text. Loading state
+    // shows a stub; failed reads from read_lua_file_content come back
+    // prefixed with "-- Error" so they render in-place as a comment
+    // block, which is fine for the user.
+    ImGui::BeginChild("##lua_render_body", ImVec2(0, 0), false,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+    if (S.lua_preview_loading) {
+        ImGui::TextDisabled("Decompiling...");
+    } else if (S.lua_preview_content.empty()) {
+        ImGui::TextDisabled("(empty)");
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text,
+                              ImVec4(0.85f, 0.92f, 0.82f, 1.0f));
+        ImGui::TextUnformatted(S.lua_preview_content.c_str());
+        ImGui::PopStyleColor();
+    }
+    ImGui::EndChild();
+}
+
 #ifdef _WIN32
-void draw_texture_in_panel() {
+
+// ---------------------------------------------------------------------------
+// Point-sampler bind for the texture preview
+// ---------------------------------------------------------------------------
+// ImGui's dx11 backend uses a single global sampler with
+// D3D11_FILTER_MIN_MAG_MIP_LINEAR. That's fine for atlas glyphs but
+// makes small game textures (e.g. a 32×32 BC3 card-back) look blurry
+// when stretched 4×. The user reported this as "tex files are blurry";
+// the source bytes are decoded correctly, the bilinear upscale was
+// the culprit.
+//
+// Fix: lazily create our own POINT-filter sampler keyed off the
+// caller's device, then use ImDrawList::AddCallback to swap to it
+// before the AddImage and let ImDrawCallback_ResetRenderState
+// re-bind the default afterwards. That gives small textures
+// pixel-accurate display while everything else (fonts, the rest of
+// the UI) keeps the linear sampler.
+namespace {
+ID3D11SamplerState*  g_tex_point_sampler = nullptr;
+ID3D11DeviceContext* g_tex_preview_ctx   = nullptr;
+
+void ensure_point_sampler(ID3D11Device* device) {
+    if (g_tex_point_sampler || !device) return;
+    if (!g_tex_preview_ctx) {
+        // GetImmediateContext AddRefs — release at process teardown
+        // (the OS will reclaim if we forget). Storing it lets the
+        // draw callback bind the sampler without needing a device
+        // pointer (callbacks get no caller-supplied args).
+        device->GetImmediateContext(&g_tex_preview_ctx);
+    }
+    D3D11_SAMPLER_DESC desc{};
+    desc.Filter   = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    desc.AddressU = desc.AddressV = desc.AddressW =
+        D3D11_TEXTURE_ADDRESS_CLAMP;
+    desc.MinLOD   = 0.0f;
+    desc.MaxLOD   = D3D11_FLOAT32_MAX;
+    device->CreateSamplerState(&desc, &g_tex_point_sampler);
+}
+
+void bind_point_sampler_cb(const ImDrawList* /*dl*/,
+                           const ImDrawCmd*  /*cmd*/) {
+    if (g_tex_preview_ctx && g_tex_point_sampler) {
+        g_tex_preview_ctx->PSSetSamplers(0, 1, &g_tex_point_sampler);
+    }
+}
+} // anonymous
+
+void draw_texture_in_panel(ID3D11Device* device) {
+    ensure_point_sampler(device);
+
     ImVec2 region = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -107,9 +213,22 @@ void draw_texture_in_panel() {
     float dh = th * scale;
     float x0 = origin.x + (region.x - dw) * 0.5f;
     float y0 = origin.y + (region.y - dh) * 0.5f;
+
+    // Swap to the point sampler, draw, then ask ImGui to reset the
+    // render state so subsequent AddImage / AddText calls see the
+    // backend's default linear sampler again. Without the reset the
+    // rest of the panel (overlays, icons, popout images) would also
+    // render with point filtering — usually fine but a regression
+    // for content that actually wants bilinear.
+    if (g_tex_point_sampler) {
+        dl->AddCallback(bind_point_sampler_cb, nullptr);
+    }
     dl->AddImage((ImTextureID)S.texture_window_srv,
                  ImVec2(x0, y0),
                  ImVec2(x0 + dw, y0 + dh));
+    if (g_tex_point_sampler) {
+        dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+    }
 
     // Right-click → "Export to" menu. The dl->AddImage above is just a
     // draw-list line item, not an interactive ImGui item, so we lay an
@@ -1409,10 +1528,19 @@ void draw_model_in_panel(ID3D11Device* device) {
 
 #ifdef _WIN32
 void draw_render_panel(ID3D11Device* device) {
+    // Priority order: model > texture > lua > placeholder. The Lua
+    // click handler explicitly clears the model + texture state when
+    // setting `show_lua_render`, so a Lua selection wins by virtue of
+    // the others being false. Any subsequent model / texture click
+    // sets its own state, leaves `show_lua_render` alone, and wins
+    // back priority on this dispatch — lua becomes invisible until
+    // the user picks another script (or closes the lua view).
     if (g_mp.has_model) {
         draw_model_in_panel(device);
     } else if (S.texture_window_srv) {
-        draw_texture_in_panel();
+        draw_texture_in_panel(device);
+    } else if (S.show_lua_render) {
+        draw_lua_in_panel();
     } else {
         draw_placeholder();
     }

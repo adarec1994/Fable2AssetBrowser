@@ -83,6 +83,19 @@ bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index,
 bool is_in_audio_folder(const std::string& path);  // Selection.cpp
 void load_flat_asset_entry(const FlatAssetEntry& e, int kind);  // LeftPanel.cpp
 
+// Bulk extract every file in a single BNK to ${S.export_dir}, preserving
+// each entry's asset path. Same plumbing the right-click "Export" on
+// individual files uses (extract_file_one with audio conversion on for
+// .wav), just looped over every entry. Runs on a worker thread, drives
+// the progress modal, and posts a completion box at the end.
+//
+// Used by: BNK List right-click in the left tabs panel. Lives in
+// Selection.cpp so it can share the file-level export plumbing the
+// right-click context menu already uses; if a future caller (e.g. a
+// future right-click on a tree-view BNK row) wants the same behaviour
+// it picks this up via the same declaration.
+void extract_single_bnk_contents(const std::string& bnk_path);  // Selection.cpp
+
 // Right-click context menu attached to the most-recently-rendered file
 // item (Selectable / TreeNodeEx). Currently shows up to two entries:
 //   - "Hex View" (dev mode only)        — reroutes selection state

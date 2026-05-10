@@ -252,6 +252,13 @@ struct State {
     std::string lua_preview_title;
     int lua_preview_selected = -1;
     std::atomic<bool> lua_preview_loading{false};
+    // Set to true when the user clicks a Lua script in the BNK List
+    // drill-in view. The render panel checks this and renders the
+    // decompiled Lua source full-bleed in place of the model / texture
+    // / placeholder. Cleared automatically when the user clicks a
+    // model or texture (by the relevant load path setting its own
+    // state); the in-panel close button also clears it explicitly.
+    bool show_lua_render = false;
 
     // ---- Animations -----------------------------------------------------
     // Single global TOC parsed at root-load time from

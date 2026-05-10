@@ -1,6 +1,11 @@
 #pragma once
 // IsoDump — bulk raw-extract every loaded asset out of a mounted ISO
 // into the user's configured export directory.
+
+// Pulled in for the TexExportFormat enum used by dump_tex_files_as.
+// Slightly heavier than a forward declaration but TextureExport.h is
+// already a leaf header so the cost is minimal.
+#include "../textures/export/TextureExport.h"
 //
 // "Loaded" here means the three asset families the rest of the app
 // scans the disc for: .bnk, .adb, .lua. Files are written byte-for-byte
@@ -37,6 +42,19 @@ void dump_mdl_files();
 // produces for the in-app preview, so a downstream decoder can ingest
 // it without any awareness that it came from three BNKs.
 void dump_tex_files();
+
+// Decoded variant of dump_tex_files: walks S.all_tex_files and writes
+// every texture as `fmt` (PNG / JPG / TIFF / DDS) to
+//   `${S.export_dir}/<asset_path>.<ext>`
+// Each entry runs through `tex_export_begin_named` — same plumbing
+// the per-file right-click "Export to" menu uses, just looped over
+// every flat-list entry. Worker thread + progress modal so the UI
+// stays responsive on a 5000-texture batch.
+//
+// `fmt` must be one of PNG / JPG / TIFF / DDS; passing TEX falls
+// through to `dump_tex_files()` (raw bytes — pointless to re-route
+// through the decode pipeline just to land at the same bytes).
+void dump_tex_files_as(TexExportFormat fmt);
 
 // Dump every .wav file the asset browser has scanned (S.all_wav_files).
 // Wavs aren't split — this is just a per-BNK extract loop, no

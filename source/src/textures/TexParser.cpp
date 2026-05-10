@@ -67,9 +67,40 @@ static bool parse_bare_chain(const std::vector<unsigned char>& d, TexInfo& out) 
             out.TextureWidth = md.MipWidth;
             out.TextureHeight = md.MipHeight;
         }
-        // Track whether ANY mip used dual sub-block layout (used to set
-        // a sensible default PixelFormat for bare-chain BC5 files).
-        if (dual && out.PixelFormat == 0) out.PixelFormat = 40;  // BC5
+        // Distinguish BC3 (color+alpha) from BC5 (X+Y) on the first dual
+        // sub-block we see. Both layouts look identical at the header
+        // level — two bodies stacked inside one record — but their
+        // CompFlag distribution differs:
+        //   - BC3 stores its colour half via the Lionhead BC1 codec
+        //     (CompFlag 1 or 11) and its alpha half separately, OR raw
+        //     (CompFlag 7) on both halves for the smallest mips.
+        //   - BC5 stores both X and Y via the variant_2_3_4 codec
+        //     (CompFlag 2/3/4) for big mips, falling through to raw
+        //     (CompFlag 7) on the smallest.
+        // Before this split, every dual-sub-block bare-chain texture
+        // defaulted to BC5 (PixelFormat 40) regardless of the codec
+        // it actually used — so a split-stored BC3 colour map ended up
+        // in the BC5 X/Y reconstruction path and rendered as a
+        // false-normal-map blob with shifted-block artifacts. Reading
+        // the first mip's CompFlag to pick the right family is enough
+        // to route BC3 splits through the colour-plus-alpha decoder
+        // they need.
+        if (dual && out.PixelFormat == 0) {
+            const uint32_t cf = md.CompFlag;
+            if (cf == 1 || cf == 11) {
+                out.PixelFormat = 39;   // BC3 (Lionhead BC1 colour codec)
+            } else if (cf == 2 || cf == 3 || cf == 4) {
+                out.PixelFormat = 40;   // BC5 (variant_2_3_4 X+Y)
+            } else {
+                // CompFlag 7 (raw) is ambiguous — both BC3 and BC5
+                // can land here for the smallest mip in a chain. Most
+                // bare-chain dual files in our corpus are normal maps,
+                // so default to BC5; the user can override via the
+                // explicit-format dropdown if a specific texture turns
+                // out to be BC3.
+                out.PixelFormat = 40;
+            }
+        }
         off += advance;
     }
     // Bare chain has no PixelFormat field; default to BC1 (35) — most

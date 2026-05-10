@@ -21,6 +21,8 @@
 #endif
 #include "ModelPreview.h"
 #include "../textures/export/TextureExport.h"
+#include "../ISO/IsoMount.h"
+#include "../ISO/IsoDump.h"
 #include "OutputLog.h"
 #ifndef _WIN32
 #include <GL/glew.h>
@@ -231,6 +233,18 @@ void draw_main(GLFWwindow* window) {
         extern void settings_save();
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("File")) {
+                // Dump shortcut — only meaningful in ISO mode AND only
+                // surfaced in developer mode. Outside ISO mode there's
+                // no equivalent "loaded files" set (the extracted-folder
+                // case already has the BNKs on disk); outside dev mode
+                // the action is too footgunny to expose to a casual
+                // user (multi-GB write, no undo).
+                if (S.dev_mode && ISO::IsoMount::instance().is_mounted()) {
+                    if (ImGui::MenuItem("Dump BNK's")) {
+                        ISO::dump_iso_contents();
+                    }
+                    ImGui::Separator();
+                }
                 if (ImGui::MenuItem("Quit", "Alt+F4")) {
 #ifdef _WIN32
                     PostQuitMessage(0);

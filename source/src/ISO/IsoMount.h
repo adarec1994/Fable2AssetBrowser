@@ -65,6 +65,14 @@ public:
     bool read_at(const std::string& virtual_path,
                  uint64_t off, void* dst, size_t n);
 
+    // Drop every cached file blob without unmounting. The LRU cache can
+    // sit at up to 512 MB after a session of model/texture browsing —
+    // and on x86 (2 GB user-space) that's enough heap fragmentation to
+    // make a sustained sequence of fresh allocations fail. Bulk
+    // operations (the BNK dump in particular) call this before
+    // starting so they get a fresh, unfragmented heap to work with.
+    void clear_cache();
+
     // Synthesise a path that the rest of the app can carry around like a
     // disk path — we use the prefix "iso://" and append the virtual path.
     // is_iso_path() recognises these so we can route reads through here.

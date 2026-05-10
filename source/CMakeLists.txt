@@ -46,6 +46,7 @@ set(APP_SOURCES
         src/Splashscreen/IconFont.cpp
         src/ISO/IsoExtract.cpp
         src/ISO/IsoMount.cpp
+        src/ISO/IsoDump.cpp
         src/MDL/mdl_converter.cpp
         src/BNKCore.cpp
         src/Audio/AudioPlayer.cpp

@@ -29,6 +29,7 @@
 #include "UI/UI_Panels.h"
 #include "Utilities/Progress.h"
 #include "UI/HexView.h"
+#include "UI/OutputLog.h"
 #include "Splashscreen/Splashscreen.h"
 #include "Utilities/Files.h"
 #include "Splashscreen/IconFont.h"
@@ -480,9 +481,12 @@ int main() {
             }
             ImGui::Dummy(ImVec2(0, 6));
             if (ImGui::Button("Cancel", ImVec2(-1, 0))) {
+                // Status surfaces through the OutputLog strip — no
+                // modal popup. Same convention as the BNK dump and
+                // texture export flows.
                 S.cancel_requested = true;
                 progress_done();
-                show_completion_box("Extraction cancelled.");
+                OutputLog::warn("Extraction cancelled.");
             }
             if (!S.show_progress.load()) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();

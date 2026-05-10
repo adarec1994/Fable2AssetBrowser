@@ -233,6 +233,13 @@ void IsoMount::cache_put(const std::string& key_lower, std::vector<uint8_t> byte
     cache_bytes_ += cache_.front().bytes.size();
 }
 
+void IsoMount::clear_cache() {
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    cache_.clear();
+    cache_index_.clear();
+    cache_bytes_ = 0;
+}
+
 std::vector<uint8_t> IsoMount::read_file(const std::string& virtual_path) {
     std::vector<uint8_t> out;
     const MountedFile* mf = find(virtual_path);

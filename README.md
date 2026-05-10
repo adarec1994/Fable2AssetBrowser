@@ -22,6 +22,12 @@ Here is a preview of a Balverine in Fable 2 Asset Browser:
 Here is a preview of an Oak Tree:
 ![OakTree.png](images/OakTree.png)
 
+Skeleton preview is also available!
+![SkeletonPreview.png](images/SkeletonPreview.png)
+
+You can mess around rotating bones; though animations are currently WIP!
+![BoneRotation.png](images/BoneRotation.png)
+
 And here is an example of some textures:
 ![TextureSample1.png](images/TextureSample1.png)
 ![TextureSample2.png](images/TextureSample2.png)

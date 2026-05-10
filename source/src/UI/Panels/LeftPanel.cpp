@@ -759,8 +759,14 @@ void draw_left_panel() {
                                         g_pending_tex_load = true;
                                         g_pending_tex_index = (int)j;
                                     } else if (ln.size() >= 4 &&
-                                               ln.rfind(".wav") == ln.size() - 4 &&
-                                               ImGui::IsMouseDoubleClicked(0)) {
+                                               ln.rfind(".wav") == ln.size() - 4) {
+                                        // Single-click playback —
+                                        // matches Audio tab and the
+                                        // file-table flat list. The
+                                        // earlier IsMouseDoubleClicked
+                                        // gate was the reason
+                                        // playback didn't fire from
+                                        // the BNK drill view.
                                         open_audio_player_for_selected((int)j);
                                     }
                                     break;

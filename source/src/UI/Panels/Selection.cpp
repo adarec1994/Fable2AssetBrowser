@@ -619,6 +619,49 @@ bool ext_is(const std::string& name, const char* ext) {
 // the user's right-click is a deliberate single-asset operation, so
 // adding a worker thread + progress modal would just add latency.
 // The existing `dump_*_files()` functions are the path for bulk.
+// Per-file raw .xma extract for the right-click audio submenu's
+// "raw" entry. Reads the bytes verbatim (no XMA→PCM decode) and
+// writes them with a `.xma` extension to keep the file
+// distinguishable on disk from the PCM/MP3/M4A variants.
+//
+// The bytes are still a RIFF/WAVE wrapper with XMA codec inside —
+// same as the BNK stores. We rename the extension only to make
+// "this is the raw archive byte stream" obvious in the export tree.
+static void asset_export_audio_raw_xma(const std::string& bnk_path,
+                                       int file_index,
+                                       const std::string& file_name)
+{
+    auto out = build_export_target(file_name);
+    out.replace_extension(".xma");
+    std::error_code ec;
+    if (auto parent = out.parent_path(); !parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            OutputLog::error(std::string(".xma export: cannot create ") +
+                             parent.string() + " — " + ec.message());
+            return;
+        }
+    }
+    bool ok = false;
+    try {
+        extract_one(bnk_path, file_index, out.string());
+        ok = std::filesystem::exists(out, ec) && !ec;
+    } catch (const std::exception& ex) {
+        OutputLog::error(std::string(".xma export exception on ") +
+                         file_name + ": " + ex.what());
+    } catch (...) {
+        OutputLog::error(std::string(".xma export exception on ") +
+                         file_name);
+    }
+    if (ok) {
+        OutputLog::success(std::string("Exported ") +
+                           std::filesystem::path(file_name).filename().string()
+                           + " as raw .xma → " + out.string());
+    } else {
+        OutputLog::error(std::string(".xma export failed: ") + file_name);
+    }
+}
+
 // Per-file MP3 / AAC encoder for the right-click "Extract as ..."
 // audio submenu. Mirrors the encoded-format branch in IsoDump.cpp's
 // `dump_wav_files_as`, just for a single asset:
@@ -851,32 +894,40 @@ void file_hex_context_menu(const std::string& bnk_path,
             tex_export_menu_named(file_name, file_name, bnk_path,
                                   /*mip_index=*/0);
         } else if (is_audio_file(file_name)) {
-            // Audio gets the same set of formats the Audio tab's
-            // "Extract All as..." footer offers, just for one file.
-            // PCM and Raw write `.wav`; MP3 writes `.mp3`; AAC writes
-            // `.m4a` (MP4 container — required by Media Foundation's
-            // SinkWriter, which selects the muxer from the URL
-            // extension). Each lands at `${export_dir}/<asset_path>`
-            // with the extension swapped, overwriting any previous
-            // export of the same asset in that format.
-            if (ImGui::MenuItem("Extract (.wav PCM)")) {
-                asset_export_to_export_dir(bnk_path, file_index,
-                                           is_nested, file_name,
-                                           /*convert_audio=*/true);
-            }
-            if (ImGui::MenuItem("Extract Raw")) {
-                asset_export_to_export_dir(bnk_path, file_index,
-                                           is_nested, file_name,
-                                           /*convert_audio=*/false);
-            }
-            ImGui::Separator();
-            if (ImGui::MenuItem("Extract MP3")) {
-                asset_export_audio_encoded(bnk_path, file_index,
-                                           file_name, /*aac=*/false);
-            }
-            if (ImGui::MenuItem("Extract AAC (.m4a)")) {
-                asset_export_audio_encoded(bnk_path, file_index,
-                                           file_name, /*aac=*/true);
+            // "Export to" submenu — same shape the .tex menu has,
+            // matching the user's requested layout:
+            //
+            //   Export to
+            //     ├─ MP3
+            //     ├─ M4A           (AAC in MP4)
+            //     ├─ WAV           (PCM)
+            //     ├─ ─────
+            //     └─ .xma (raw)    (verbatim BNK bytes, .xma extension)
+            //
+            // Each lands at `${export_dir}/<asset_path>` with the
+            // extension swapped to match the format, so MP3 / M4A /
+            // WAV / .xma versions of the same asset coexist on disk
+            // instead of clobbering each other.
+            if (ImGui::BeginMenu("Export to")) {
+                if (ImGui::MenuItem("MP3")) {
+                    asset_export_audio_encoded(bnk_path, file_index,
+                                               file_name, /*aac=*/false);
+                }
+                if (ImGui::MenuItem("M4A")) {
+                    asset_export_audio_encoded(bnk_path, file_index,
+                                               file_name, /*aac=*/true);
+                }
+                if (ImGui::MenuItem("WAV")) {
+                    asset_export_to_export_dir(bnk_path, file_index,
+                                               is_nested, file_name,
+                                               /*convert_audio=*/true);
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem(".xma (raw)")) {
+                    asset_export_audio_raw_xma(bnk_path, file_index,
+                                               file_name);
+                }
+                ImGui::EndMenu();
             }
         } else {
             if (ImGui::MenuItem("Export")) {

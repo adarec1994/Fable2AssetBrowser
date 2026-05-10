@@ -502,6 +502,64 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
     }
 
     // ----------------------------------------------------------------------
+    // Y-up → Z-up rotation, baked into the data.
+    // ----------------------------------------------------------------------
+    // The MDL stores vertices and bones in Y-up (matches glTF), and our
+    // GLB exporter relies on Blender's GLB importer to rotate Y-up →
+    // Z-up at load time. Blender's *FBX* importer wasn't doing the
+    // same auto-rotation for our output ("model lying face up" =
+    // +Y went to +Y in Blender's Z-up world, so the head ended up
+    // along Y instead of Z). Easiest reliable fix: pre-rotate the
+    // data ourselves and declare GlobalSettings as Z-up so no
+    // importer needs to make an axis decision.
+    //
+    // Rotation = +90° around X. (x, y, z) → (x, -z, y).
+    // As a quaternion (qx, qy, qz, qw) = (√½, 0, 0, √½). We apply it
+    // by:
+    //   - rotating root bones' local translation + quaternion (the FK
+    //     chain propagates to children),
+    //   - recomputing every bone's world matrix from the updated
+    //     locals (TransformLink + Pose Matrix entries are written
+    //     from these, so Cluster skinning stays consistent),
+    //   - rotating each mesh's vertex positions and normals at emit
+    //     time (further down in the per-mesh loop).
+    //
+    // The previous declaration was UpAxis = Y; below that's flipped
+    // to UpAxis = Z so Blender / Maya / 3ds Max see a Z-up file
+    // and don't try to auto-rotate either way.
+    {
+        constexpr double kS2 = 0.70710678118654752440;  // √½
+        for (auto& b : bones) {
+            if (b.parent_filt >= 0) continue;  // root bones only
+            // Translation: (x, y, z) → (x, -z, y)
+            double old_ty = b.ty, old_tz = b.tz;
+            b.ty = -old_tz;
+            b.tz =  old_ty;
+            // Quaternion: q_new = q_Rx * q_old (Hamilton, left-multiply).
+            // q_Rx = (kS2, 0, 0, kS2).
+            double q2x = b.qx, q2y = b.qy, q2z = b.qz, q2w = b.qw;
+            b.qx = kS2 * (q2x + q2w);
+            b.qy = kS2 * (q2y - q2z);
+            b.qz = kS2 * (q2z + q2y);
+            b.qw = kS2 * (q2w - q2x);
+            // Rebuild local matrix from updated TRS so the FK chain
+            // and the world recompute below pick up the rotation.
+            b.local = Mat4::from_trs_quat(b.qx, b.qy, b.qz, b.qw,
+                                          b.tx, b.ty, b.tz,
+                                          b.sx, b.sy, b.sz);
+        }
+        // World matrices need to reflect the new root locals — the
+        // existing chain logic handles the recompute.
+        for (auto& b : bones) {
+            if (b.parent_filt < 0) {
+                b.world = b.local;
+            } else {
+                b.world = Mat4::multiply(bones[b.parent_filt].world, b.local);
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------------
     // Build per-mesh FBX data: one Geometry + one Model + one Material
     // (with optional Texture + Video) per MDLMeshGeom. Skin clusters are
     // shared with the same bone Model objects so multiple meshes can
@@ -663,18 +721,27 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
     root.add_child(Node("CreationTime")).add_prop(Prop::S("1970-01-01 00:00:00:000"));
     root.add_child(Node("Creator")).add_prop(Prop::S("Fable 2 Asset Browser"));
 
-    // GlobalSettings — minimal set of fields importers expect.
+    // GlobalSettings — Z-up declaration. We baked Y-up → Z-up into
+    // the vertex / bone data above (rotation +90° around X), so the
+    // file is now natively Z-up. Declaring it that way here means
+    // Blender / Maya / 3ds Max all read the data as-is without
+    // applying their own axis-correction rotation. FrontAxisSign is
+    // -1 to match Blender's convention (front = -Y in Z-up), which
+    // is what the engine + glTF spec also use as "look forward".
     {
         Node gs("GlobalSettings");
         gs.add_child(Node("Version")).add_prop(Prop::I(1000));
         Node props70("Properties70");
-        props70.add_child(make_p("UpAxis", "int", "Integer", "", { Prop::I(1) }));
-        props70.add_child(make_p("UpAxisSign", "int", "Integer", "", { Prop::I(1) }));
-        props70.add_child(make_p("FrontAxis", "int", "Integer", "", { Prop::I(2) }));
-        props70.add_child(make_p("FrontAxisSign", "int", "Integer", "", { Prop::I(1) }));
-        props70.add_child(make_p("CoordAxis", "int", "Integer", "", { Prop::I(0) }));
-        props70.add_child(make_p("CoordAxisSign", "int", "Integer", "", { Prop::I(1) }));
-        props70.add_child(make_p("UnitScaleFactor", "double", "Number", "", { Prop::D(1.0) }));
+        props70.add_child(make_p("UpAxis",         "int", "Integer", "", { Prop::I(2)  })); // Z
+        props70.add_child(make_p("UpAxisSign",     "int", "Integer", "", { Prop::I(1)  }));
+        props70.add_child(make_p("FrontAxis",      "int", "Integer", "", { Prop::I(1)  })); // Y
+        props70.add_child(make_p("FrontAxisSign",  "int", "Integer", "", { Prop::I(-1) })); // -Y forward
+        props70.add_child(make_p("CoordAxis",      "int", "Integer", "", { Prop::I(0)  })); // X
+        props70.add_child(make_p("CoordAxisSign",  "int", "Integer", "", { Prop::I(1)  }));
+        props70.add_child(make_p("OriginalUpAxis",     "int", "Integer", "", { Prop::I(2) }));
+        props70.add_child(make_p("OriginalUpAxisSign", "int", "Integer", "", { Prop::I(1) }));
+        props70.add_child(make_p("UnitScaleFactor",         "double", "Number", "", { Prop::D(1.0) }));
+        props70.add_child(make_p("OriginalUnitScaleFactor", "double", "Number", "", { Prop::D(1.0) }));
         gs.add_child(std::move(props70));
         root.add_child(std::move(gs));
     }
@@ -796,8 +863,16 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         gn.add_prop(Prop::S("Geometry::" + mo.name));
         gn.add_prop(Prop::S("Mesh"));
 
-        // Vertices: doubles, x y z for each.
+        // Vertices: doubles, x y z for each. Y-up → Z-up bake here
+        // so the file declares Z-up and importers don't try to
+        // auto-rotate. (x, y, z) → (x, -z, y) — same +90° X rotation
+        // applied to bones above.
         std::vector<double> verts(g.positions.begin(), g.positions.end());
+        for (size_t i = 0; i + 2 < verts.size(); i += 3) {
+            double y = verts[i + 1], z = verts[i + 2];
+            verts[i + 1] = -z;
+            verts[i + 2] =  y;
+        }
         gn.add_child(Node("Vertices")).add_prop(Prop::AD(std::move(verts)));
 
         // PolygonVertexIndex: triangle list. FBX marks the last index
@@ -824,6 +899,15 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
             n.add_child(Node("MappingInformationType")).add_prop(Prop::S("ByVertice"));
             n.add_child(Node("ReferenceInformationType")).add_prop(Prop::S("Direct"));
             std::vector<double> nv(g.normals.begin(), g.normals.end());
+            // Same Y-up → Z-up rotation as the positions above. Normals
+            // are direction vectors, but the rotation matrix is
+            // orthogonal so the same component swap applies (no
+            // inverse-transpose needed).
+            for (size_t i = 0; i + 2 < nv.size(); i += 3) {
+                double y = nv[i + 1], z = nv[i + 2];
+                nv[i + 1] = -z;
+                nv[i + 2] =  y;
+            }
             n.add_child(Node("Normals")).add_prop(Prop::AD(std::move(nv)));
             gn.add_child(std::move(n));
         }

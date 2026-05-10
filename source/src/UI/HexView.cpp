@@ -3,8 +3,8 @@
 #include "../Utilities/Utils.h"
 #include "../Utilities/Progress.h"
 #include "../Utilities/Files.h"
-#include "../TexParser.h"
-#include "../LhTexCodec.h"
+#include "../textures/TexParser.h"
+#include "../textures/LhTexCodec.h"
 #include "../MDL/ModelParser.h"
 #include "ModelPreview.h"
 #include "../BNKCore.cpp"
@@ -352,6 +352,13 @@ void draw_hex_window(ID3D11Device *device) {
 #else
 void draw_hex_window() {
 #endif
+    // Hex view is a developer-mode feature. Outside dev mode, force
+    // any open hex window closed and skip rendering entirely so users
+    // can't even see a stale window from a prior toggle.
+    if (!S.dev_mode) {
+        S.hex_open = false;
+        return;
+    }
     if (S.hex_open && S.hex_data.empty()) S.hex_open = false;
     const bool show_hex = S.hex_open && !S.hex_loading.load() && !S.hex_data.empty();
     if (show_hex) {
@@ -461,18 +468,9 @@ void draw_hex_window() {
                                 ImGui::Text("Derived Size: %ux%u", w, h);
                             }
                             ImGui::Text("MipMapData@ 0x%zX, Size %zu", m.MipDataOffset, m.MipDataSizeParsed);
-#ifdef _WIN32
-                            // Allow preview for raw (comp=7) mips of any BC format,
-                            // and for compressed BC1 mips via the Lionhead codec port.
-                            bool can_preview = (m.CompFlag == 7) ||
-                                               (S.tex_info.PixelFormat == 35 /* BC1 */);
-                            if(can_preview){
-                                if(ImGui::Button("Preview")){
-                                    S.preview_mip_index = i;
-                                    S.show_preview_popup = true;
-                                }
-                            }
-#endif
+                            // (Per-mip "Preview" button removed — texture
+                            // preview now lives in the central RenderPanel
+                            // with its own mip selector.)
                             ImGui::TreePop();
                         }
                     }

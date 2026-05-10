@@ -1,6 +1,7 @@
 #include "RenderPanel.h"
 #include "../../Utilities/State.h"
 #include "../ModelPreview.h"
+#include "../../textures/export/TextureExport.h"
 
 #include "imgui.h"
 
@@ -106,10 +107,110 @@ void draw_texture_in_panel() {
                  ImVec2(x0, y0),
                  ImVec2(x0 + dw, y0 + dh));
 
-    char info[128];
-    std::snprintf(info, sizeof(info), "%dx%d", S.texture_window_width, S.texture_window_height);
-    dl->AddText(ImVec2(origin.x + 8, origin.y + 6),
-                IM_COL32(180, 190, 205, 220), info);
+    // Right-click → "Export to" menu. The dl->AddImage above is just a
+    // draw-list line item, not an interactive ImGui item, so we lay an
+    // InvisibleButton over the image's pixel rect to give the popup
+    // something to anchor to. The export uses the *currently displayed*
+    // mip (S.texture_mip_index), per the user spec.
+    {
+        ImGui::SetCursorScreenPos(ImVec2(x0, y0));
+        ImGui::InvisibleButton("##tex_preview_hit", ImVec2(dw, dh));
+        if (S.tex_info_ok && !S.texture_blob.empty() &&
+            ImGui::BeginPopupContextItem()) {
+            tex_export_menu_blob(S.texture_window_name,
+                                 S.texture_blob,
+                                 S.texture_mip_index);
+            ImGui::EndPopup();
+        }
+    }
+
+    // (Resolution-in-top-left text removed — the mip selector overlay
+    // already shows the active mip's dimensions next to the Mip arrows.)
+
+    // Texture preview overlay — top-right of the panel. Always renders
+    // when a .tex is loaded so the channel toggles are reachable; the
+    // mip selector row only renders when there are 2+ mips.
+    //
+    // Toggling a checkbox or arrow flips pending_texture_mip_change so
+    // UI_Main re-runs decode_tex_to_rgba + apply_tex_channel_mask, then
+    // swaps the SRV. (One flag covers both mip-change and channel-mask
+    // change because the same handler does both.)
+    if (S.tex_info_ok && !S.texture_blob.empty()) {
+        const int total = (int)S.tex_info.Mips.size();
+        // Clamp the active index defensively — a previous load may have
+        // set it past the new file's range.
+        if (S.texture_mip_index < 0) S.texture_mip_index = 0;
+        if (S.texture_mip_index >= std::max(1, total))
+            S.texture_mip_index = std::max(0, total - 1);
+
+        // Pull current mip's dimensions from the parsed TexInfo so the
+        // hint reflects what's actually being viewed (not the mip-0
+        // dimensions stored in S.texture_window_*).
+        int mw = 0, mh = 0;
+        if (S.texture_mip_index >= 0 && S.texture_mip_index < total) {
+            const auto& mm = S.tex_info.Mips[(size_t)S.texture_mip_index];
+            mw = mm.HasWH ? (int)mm.MipWidth
+                          : std::max(1, (int)S.tex_info.TextureWidth  >> S.texture_mip_index);
+            mh = mm.HasWH ? (int)mm.MipHeight
+                          : std::max(1, (int)S.tex_info.TextureHeight >> S.texture_mip_index);
+        }
+
+        const float kOverlayW = 230.0f;
+        ImGui::SetNextWindowPos(ImVec2(origin.x + region.x - kOverlayW - 8.0f,
+                                       origin.y + 6.0f));
+        ImGui::SetNextWindowSize(ImVec2(kOverlayW, 0), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.78f);
+        ImGuiWindowFlags fl = ImGuiWindowFlags_NoTitleBar
+                            | ImGuiWindowFlags_NoResize
+                            | ImGuiWindowFlags_NoMove
+                            | ImGuiWindowFlags_NoCollapse
+                            | ImGuiWindowFlags_NoSavedSettings
+                            | ImGuiWindowFlags_AlwaysAutoResize;
+        if (ImGui::Begin("##tex_mip_selector", nullptr, fl)) {
+            // Mip row — only shown when there's more than one mip.
+            if (total > 1) {
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Mip");
+                ImGui::SameLine();
+                if (ImGui::ArrowButton("##mip_prev", ImGuiDir_Left)) {
+                    if (S.texture_mip_index > 0) {
+                        S.texture_mip_index--;
+                        S.pending_texture_mip_change = true;
+                    }
+                }
+                ImGui::SameLine();
+                ImGui::Text("%d / %d", S.texture_mip_index, total - 1);
+                ImGui::SameLine();
+                if (ImGui::ArrowButton("##mip_next", ImGuiDir_Right)) {
+                    if (S.texture_mip_index < total - 1) {
+                        S.texture_mip_index++;
+                        S.pending_texture_mip_change = true;
+                    }
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("(%dx%d)", mw, mh);
+            } else {
+                // Single-mip texture — show the dimensions inline so the
+                // overlay isn't oddly empty above the channel toggles.
+                ImGui::TextDisabled("%dx%d", mw, mh);
+            }
+
+            // Channel toggles. Each checkbox flips the corresponding
+            // S.tex_show_* flag and re-uses pending_texture_mip_change
+            // so UI_Main re-runs the decode + mask pipeline.
+            if (ImGui::Checkbox("R", &S.tex_show_r))
+                S.pending_texture_mip_change = true;
+            ImGui::SameLine();
+            if (ImGui::Checkbox("G", &S.tex_show_g))
+                S.pending_texture_mip_change = true;
+            ImGui::SameLine();
+            if (ImGui::Checkbox("B", &S.tex_show_b))
+                S.pending_texture_mip_change = true;
+            ImGui::SameLine();
+            if (ImGui::Checkbox("A", &S.tex_show_a))
+                S.pending_texture_mip_change = true;
+        }
+        ImGui::End();
+    }
 
     ImGui::Dummy(region);
 }
@@ -764,6 +865,19 @@ void draw_model_in_panel(ID3D11Device* device) {
                         // so the UV overlay can locate the right geom.
                         ::g_tex_popout_mesh_idx = (int)mi;
                     }
+                    // Right-click → "Export to" — mip 0 from the named
+                    // texture asset. Same lookup logic the model uses
+                    // (prefer the nested-region BNK if active).
+                    if (ImGui::BeginPopupContextItem()) {
+                        const std::string& preferred_bnk =
+                            (S.selected_nested_index != -1 &&
+                             !S.selected_nested_temp_path.empty())
+                                ? S.selected_nested_temp_path
+                                : S.selected_bnk;
+                        tex_export_menu_named(*t.name, *t.name,
+                                              preferred_bnk, /*mip=*/0);
+                        ImGui::EndPopup();
+                    }
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("%s\n[%s]",
                                           t.name->c_str(), t.slot_id);
@@ -836,6 +950,26 @@ void draw_model_in_panel(ID3D11Device* device) {
 
                 ImGui::Image((ImTextureID)::g_tex_popout_srv,
                              ImVec2((float)tw, (float)th));
+                // Right-click → "Export to" — mip 0 (highest, per spec).
+                // ImGui::Image isn't an interactive item, so layer an
+                // InvisibleButton over the same rect to anchor the popup.
+                {
+                    ImVec2 img_min = ImGui::GetItemRectMin();
+                    ImGui::SetCursorScreenPos(img_min);
+                    ImGui::InvisibleButton("##popout_hit",
+                                           ImVec2((float)tw, (float)th));
+                    if (ImGui::BeginPopupContextItem()) {
+                        const std::string& preferred_bnk =
+                            (S.selected_nested_index != -1 &&
+                             !S.selected_nested_temp_path.empty())
+                                ? S.selected_nested_temp_path
+                                : S.selected_bnk;
+                        tex_export_menu_named(::g_tex_popout_name,
+                                              ::g_tex_popout_name,
+                                              preferred_bnk, /*mip=*/0);
+                        ImGui::EndPopup();
+                    }
+                }
 
                 if (::g_tex_popout_show_uvs &&
                     ::g_tex_popout_mesh_idx >= 0 &&

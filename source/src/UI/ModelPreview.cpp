@@ -12,8 +12,8 @@
 #include "../Utilities/Utils.h"
 #include "../Utilities/State.h"
 #include "../BNKCore.cpp"
-#include "../TexParser.h"
-#include "../LhTexCodec.h"
+#include "../textures/TexParser.h"
+#include "../textures/LhTexCodec.h"
 #ifdef _WIN32
 #include <initguid.h>
 #include <d3d11.h>
@@ -54,8 +54,13 @@ static void decode_bc1_block(const uint8_t* b, uint32_t* outRGBA) {
     cols[0] = (0xFFu<<24) | ((uint32_t)b0<<16) | ((uint32_t)g0<<8) | (uint32_t)r0;
     cols[1] = (0xFFu<<24) | ((uint32_t)b1<<16) | ((uint32_t)g1<<8) | (uint32_t)r1;
     if(c0 > c1){
-        cols[2] = (0xFFu<<24) | ((uint32_t)((2*b0+b1)/3)<<16) | ((uint32_t)((2*g0+g1)/3)<<8) | (uint32_t)((2*r0+r1)/3);
-        cols[3] = (0xFFu<<24) | ((uint32_t)((b0+2*b1)/3)<<16) | ((uint32_t)((g0+2*g1)/3)<<8) | (uint32_t)((r0+2*r1)/3);
+        // Rounded /3 division — matches GPU BC1 decode + matches the
+        // behaviour we already use for BC4 in decode_bc4_block. Plain
+        // truncation biases all interpolated colours one unit toward
+        // colour 0 / colour 1, producing a faint ramp-step visible as
+        // banding/blurriness on smooth gradients.
+        cols[2] = (0xFFu<<24) | ((uint32_t)((2*b0+b1+1)/3)<<16) | ((uint32_t)((2*g0+g1+1)/3)<<8) | (uint32_t)((2*r0+r1+1)/3);
+        cols[3] = (0xFFu<<24) | ((uint32_t)((b0+2*b1+1)/3)<<16) | ((uint32_t)((g0+2*g1+1)/3)<<8) | (uint32_t)((r0+2*r1+1)/3);
     }else{
         cols[2] = (0xFFu<<24) | ((uint32_t)((b0+b1)>>1)<<16) | ((uint32_t)((g0+g1)>>1)<<8) | (uint32_t)((r0+r1)>>1);
         cols[3] = 0x00000000u;
@@ -74,8 +79,10 @@ static void decode_bc3_block(const uint8_t* b, uint32_t* outRGBA){
     for(int i=0;i<6;++i) abits |= (uint64_t)b[2+i] << (8*i);
     uint8_t atab[8];
     atab[0]=a0; atab[1]=a1;
-    if(a0>a1){ for(int i=1;i<=6;i++) atab[i+1]=(uint8_t)(((7-i)*a0 + i*a1)/7); }
-    else{ for(int i=1;i<=4;i++) atab[i+1]=(uint8_t)(((5-i)*a0 + i*a1)/5); atab[6]=0; atab[7]=255; }
+    // Rounded interpolation — matches decode_bc4_block's recently-fixed
+    // formula and the inner op table at 0x82B8D9E0..D9FC in the binary.
+    if(a0>a1){ for(int i=1;i<=6;i++) atab[i+1]=(uint8_t)(((7-i)*a0 + i*a1 + 3)/7); }
+    else{ for(int i=1;i<=4;i++) atab[i+1]=(uint8_t)(((5-i)*a0 + i*a1 + 2)/5); atab[6]=0; atab[7]=255; }
     uint32_t color[16];
     decode_bc1_block(b+8, color);
     for(int i=0;i<16;++i){
@@ -260,7 +267,8 @@ static void blit_bc5_to_rgba(const uint8_t* src, int w, int h,
 
 bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                         std::vector<uint8_t>& rgba,
-                        int& out_w, int& out_h, bool* out_has_alpha) {
+                        int& out_w, int& out_h, bool* out_has_alpha,
+                        int mip_index) {
     if (out_has_alpha) *out_has_alpha = false;
     TexInfo ti{};
     if (!parse_tex_info(blob, ti) || ti.Mips.empty()) {
@@ -283,10 +291,15 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         return false;
     };
 
-    // Pick the LARGEST mip available — compressed mips count too now that
-    // we have a Lionhead-codec implementation.
+    // Pick the requested mip if the caller passed a valid index;
+    // otherwise auto-select the largest. The largest is usually
+    // index 0 in well-formed files but we don't assume that — if a
+    // file lists mips out of order the auto path still finds the
+    // biggest by area.
     size_t best = 0;
-    {
+    if (mip_index >= 0 && (size_t)mip_index < ti.Mips.size()) {
+        best = (size_t)mip_index;
+    } else {
         int bw = 0, bh = 0; mip_wh(0, bw, bh);
         size_t best_area = (size_t)bw * (size_t)bh;
         for (size_t i = 1; i < ti.Mips.size(); ++i) {

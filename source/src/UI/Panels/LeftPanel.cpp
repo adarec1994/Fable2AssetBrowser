@@ -145,6 +145,9 @@ void draw_left_panel() {
                                       ImGuiSelectableFlags_SpanAllColumns)) {
                     load_flat_asset_entry(e, kind);
                 }
+                // Right-click → "Hex View" (dev mode only) + "Export to" for .tex.
+                file_hex_context_menu(e.bnk_path, e.file_index,
+                                      e.from_nested, e.name);
                 if (!S.hide_tooltips && ImGui::IsItemHovered()) {
                     ImGui::BeginTooltip();
                     if (S.dev_mode) {

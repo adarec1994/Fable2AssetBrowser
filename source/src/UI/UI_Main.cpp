@@ -20,6 +20,7 @@
 #include <windows.h>
 #endif
 #include "ModelPreview.h"
+#include "../textures/export/TextureExport.h"
 #ifndef _WIN32
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
@@ -30,6 +31,22 @@ ModelPreview g_mp;
 // Non-static so RenderPanel.cpp can reference it as extern. Tracks
 // whether MP_Init has run for the current model.
 bool g_mp_initialized = false;
+
+// Apply the user's R/G/B/A display toggles in-place to a freshly-decoded
+// RGBA buffer. Disabled colour channels are zeroed, disabled alpha is
+// forced to 255 (opaque) so the image still shows. Fast-paths the
+// common "all on" case so a typical preview pays nothing for the
+// per-pixel walk. Called right before SRV creation in both the
+// initial-load and mip/channel-change handlers below.
+static void apply_tex_channel_mask(std::vector<uint8_t>& rgba) {
+    if (S.tex_show_r && S.tex_show_g && S.tex_show_b && S.tex_show_a) return;
+    for (size_t i = 0; i + 3 < rgba.size(); i += 4) {
+        if (!S.tex_show_r) rgba[i + 0] = 0;
+        if (!S.tex_show_g) rgba[i + 1] = 0;
+        if (!S.tex_show_b) rgba[i + 2] = 0;
+        if (!S.tex_show_a) rgba[i + 3] = 255;
+    }
+}
 #ifdef _WIN32
 static ID3D11ShaderResourceView* g_splash_texture = nullptr;
 static ID3D11ShaderResourceView* g_logo_texture = nullptr;
@@ -283,6 +300,7 @@ void draw_main(GLFWwindow* window) {
             S.texture_window_srv = nullptr;
         }
         if (S.pending_texture_w > 0 && S.pending_texture_h > 0 && !S.pending_texture_rgba.empty()) {
+            apply_tex_channel_mask(S.pending_texture_rgba);
             S.texture_window_srv = create_srv_from_rgba(device, S.pending_texture_w, S.pending_texture_h, S.pending_texture_rgba);
             S.texture_window_width = S.pending_texture_w;
             S.texture_window_height = S.pending_texture_h;
@@ -293,6 +311,32 @@ void draw_main(GLFWwindow* window) {
         S.show_texture_window = true;
         S.pending_texture_rgba.clear();
     }
+
+    // Mip / channel re-decode path — the texture preview's overlay
+    // sets pending_texture_mip_change for both arrow clicks AND R/G/B/A
+    // checkbox flips. Re-decodes from the cached blob (no BNK round
+    // trip), applies the channel mask, and swaps the SRV in-place.
+    // No-op if we don't have a blob (e.g. last load failed).
+    if (S.pending_texture_mip_change.exchange(false)) {
+        if (!S.texture_blob.empty() && S.tex_info_ok) {
+            std::vector<uint8_t> rgba;
+            int w = 0, h = 0;
+            bool has_alpha = false;
+            if (decode_tex_to_rgba(S.texture_blob, rgba, w, h, &has_alpha,
+                                   S.texture_mip_index)) {
+                apply_tex_channel_mask(rgba);
+                if (S.texture_window_srv) {
+                    S.texture_window_srv->Release();
+                    S.texture_window_srv = nullptr;
+                }
+                if (w > 0 && h > 0 && !rgba.empty()) {
+                    S.texture_window_srv = create_srv_from_rgba(device, w, h, rgba);
+                    S.texture_window_width  = w;
+                    S.texture_window_height = h;
+                }
+            }
+        }
+    }
 #else
     if (S.pending_texture_load) {
         S.pending_texture_load = false;
@@ -301,6 +345,7 @@ void draw_main(GLFWwindow* window) {
             S.texture_window_gl = 0;
         }
         if (S.pending_texture_w > 0 && S.pending_texture_h > 0 && !S.pending_texture_rgba.empty()) {
+            apply_tex_channel_mask(S.pending_texture_rgba);
             S.texture_window_gl = create_gl_texture_from_rgba(S.pending_texture_w, S.pending_texture_h, S.pending_texture_rgba.data());
             S.texture_window_width = S.pending_texture_w;
             S.texture_window_height = S.pending_texture_h;
@@ -310,6 +355,27 @@ void draw_main(GLFWwindow* window) {
         }
         S.show_texture_window = true;
         S.pending_texture_rgba.clear();
+    }
+
+    if (S.pending_texture_mip_change.exchange(false)) {
+        if (!S.texture_blob.empty() && S.tex_info_ok) {
+            std::vector<uint8_t> rgba;
+            int w = 0, h = 0;
+            bool has_alpha = false;
+            if (decode_tex_to_rgba(S.texture_blob, rgba, w, h, &has_alpha,
+                                   S.texture_mip_index)) {
+                apply_tex_channel_mask(rgba);
+                if (S.texture_window_gl) {
+                    glDeleteTextures(1, &S.texture_window_gl);
+                    S.texture_window_gl = 0;
+                }
+                if (w > 0 && h > 0 && !rgba.empty()) {
+                    S.texture_window_gl = create_gl_texture_from_rgba(w, h, rgba.data());
+                    S.texture_window_width  = w;
+                    S.texture_window_height = h;
+                }
+            }
+        }
     }
 #endif
 
@@ -326,6 +392,11 @@ void draw_main(GLFWwindow* window) {
 #else
     process_pending_loads();
 #endif
+
+    // Drive the texture-export ImGuiFileDialog. No-op when no export
+    // is pending. Runs after the rest of the UI so the dialog renders
+    // on top of everything.
+    tex_export_drive();
 
     // (Settings used to live in a floating window here; it's now a
     // dropdown directly off the menu bar.)

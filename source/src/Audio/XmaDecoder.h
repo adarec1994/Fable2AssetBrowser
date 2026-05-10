@@ -2,7 +2,7 @@
 //
 // XmaDecoder — Xbox 360 XMA2 -> PCM decoder using FFmpeg's libavcodec.
 //
-// Compiled in only when the project finds FFmpeg under external/ffmpeg/
+// Compiled in only when the project finds FFmpeg under include/ffmpeg/
 // at CMake configure time (sets F2_HAVE_FFMPEG=1). Without it, the
 // implementation is a stub that returns false with an explanatory error.
 //

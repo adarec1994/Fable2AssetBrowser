@@ -7,6 +7,9 @@
 #include "../../BNKCore.cpp"
 #include "../UI_Main.h"
 #include "../AudioPlayerWindow.h"
+#include "../HexView.h"
+#include "../../textures/export/TextureExport.h"
+#include "imgui.h"
 #include <filesystem>
 #include <algorithm>
 #include <ctime>
@@ -295,4 +298,69 @@ bool is_in_audio_folder(const std::string& path) {
     std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
     return lower_path.find("/audio/") != std::string::npos ||
            lower_path.find("\\audio\\") != std::string::npos;
+}
+
+// Right-click context menu attached to the most-recently-rendered file
+// item. ImGui::BeginPopupContextItem ties the popup's lifecycle to the
+// last item's ID, so the caller just needs to render its Selectable /
+// TreeNodeEx then call this function. The menu only renders in dev
+// mode — outside dev mode this is a no-op so non-dev users don't even
+// see a hint of the hex view.
+//
+// Selecting "Hex View" reroutes S.selected_bnk / S.selected_file_index
+// to point at the right-clicked file (mirroring what a normal click
+// does), then calls open_hex_for_selected() which kicks the bytes
+// load on a worker thread.
+void file_hex_context_menu(const std::string& bnk_path,
+                           int file_index, bool is_nested,
+                           const std::string& file_name) {
+    const bool show_hex    = S.dev_mode;
+    const bool show_export = is_tex_file(file_name);
+    if (!show_hex && !show_export) return;
+
+    if (ImGui::BeginPopupContextItem()) {
+        if (show_hex) {
+            if (ImGui::MenuItem("Hex View")) {
+                // Switch active BNK if needed — pick_bnk repopulates
+                // S.files for the new BNK, which we need so
+                // open_hex_for_selected can resolve the entry name.
+                if (S.selected_bnk != bnk_path) {
+                    S.viewing_adb = false;
+                    S.viewing_lua = false;
+                    S.global_search.clear();
+                    S.selected_nested_bnk.clear();
+                    S.selected_nested_index = -1;
+                    pick_bnk(bnk_path);
+                }
+                // pick_bnk wipes nested state — re-establish it for nested
+                // files so extract paths route through the right archive.
+                if (is_nested) {
+                    S.selected_nested_temp_path = bnk_path;
+                    S.selected_nested_index = 0;
+                }
+                // Find the entry in S.files whose BNK index matches and
+                // mark it selected. open_hex_for_selected reads
+                // S.selected_file_index, not the BNK's intrinsic index,
+                // so this mapping step is required.
+                S.selected_file_index = -1;
+                for (size_t i = 0; i < S.files.size(); ++i) {
+                    if (S.files[i].index == file_index) {
+                        S.selected_file_index = (int)i;
+                        break;
+                    }
+                }
+                if (S.selected_file_index >= 0) {
+                    open_hex_for_selected();
+                }
+            }
+        }
+        if (show_export) {
+            // The export menu defers the actual decode + write until
+            // after the user picks a path in the save dialog. mip 0 is
+            // the highest-resolution mip per the .tex format convention.
+            tex_export_menu_named(file_name, file_name, bnk_path,
+                                  /*mip_index=*/0);
+        }
+        ImGui::EndPopup();
+    }
 }

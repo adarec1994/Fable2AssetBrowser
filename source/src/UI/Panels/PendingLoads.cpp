@@ -1,8 +1,8 @@
 #include "../UI_Panels.h"
 #include "PanelInternal.h"
 #include "../ModelPreview.h"
-#include "../../TexParser.h"
-#include "../../LhTexCodec.h"
+#include "../../textures/TexParser.h"
+#include "../../textures/LhTexCodec.h"
 #include "../../MDL/ModelParser.h"
 #include "../../MDL/mdl_converter.h"
 #include "../../Utilities/Files.h"
@@ -160,20 +160,32 @@ void process_pending_loads() {
                 S.pending_texture_load = true;
                 S.pending_texture_w = 0;
                 S.pending_texture_h = 0;
+                S.texture_blob.clear();
+                S.tex_info_ok = false;
                 progress_done();
                 return;
             }
+            // Parse + cache the blob's mip layout so the preview's mip
+            // selector knows what to show without round-tripping through
+            // the BNK extract again. Reset to mip 0 (= largest in
+            // well-formed files) for each fresh load.
+            S.tex_info_ok = parse_tex_info(tex_buf, S.tex_info);
+            S.texture_mip_index = 0;
             std::vector<uint8_t> rgba;
             int w = 0, h = 0;
             bool has_alpha = false;
-            if (!decode_tex_to_rgba(tex_buf, rgba, w, h, &has_alpha)) {
+            if (!decode_tex_to_rgba(tex_buf, rgba, w, h, &has_alpha,
+                                    /*mip_index=*/0)) {
                 S.texture_window_name = "ERROR: Could not decode texture";
                 S.pending_texture_load = true;
                 S.pending_texture_w = 0;
                 S.pending_texture_h = 0;
+                S.texture_blob.clear();
+                S.tex_info_ok = false;
                 progress_done();
                 return;
             }
+            S.texture_blob = std::move(tex_buf);
             // Switching to a texture closes any active model preview so
             // the render panel paints just the texture, not both.
 #ifdef _WIN32

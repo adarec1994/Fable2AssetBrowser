@@ -3,8 +3,8 @@
 #include "../UI_Main.h"
 #include "../HexView.h"
 #include "../ModelPreview.h"
-#include "../../TexParser.h"
-#include "../../LhTexCodec.h"
+#include "../../textures/TexParser.h"
+#include "../../textures/LhTexCodec.h"
 #include "../../MDL/ModelParser.h"
 #include "../../MDL/mdl_converter.h"
 #include "../../Utilities/Utils.h"
@@ -285,37 +285,42 @@ void draw_right_panel() {
 
     bool has_selection = (S.selected_file_index >= 0 && S.selected_file_index < (int)S.files.size());
 
-    if (!has_selection) {
-        ImGui::BeginDisabled();
-    }
-    if (ImGui::Button("Hex View")) {
-        ImGui::OpenPopup("progress_win");
-        if (S.viewing_adb) {
-            auto item = S.files[(size_t)S.selected_file_index];
-            progress_open(0, "Decompressing ADB...");
-            std::thread([item]() {
-                auto entries = decompress_adb(item.name);
-                if (!entries.empty() && !entries[0].data.empty()) {
-                    S.hex_data = entries[0].data;
-                    S.hex_title = "Hex Editor - " + std::filesystem::path(item.name).filename().string() + " (decompressed)";
-                    S.hex_open = true;
-                    memset(&S.hex_state, 0, sizeof(S.hex_state));
-                    S.hex_state.Bytes = (void*)S.hex_data.data();
-                    S.hex_state.MaxBytes = (int)S.hex_data.size();
-                    S.hex_state.ReadOnly = true;
-                    S.hex_state.ShowAscii = true;
-                    S.hex_state.ShowAddress = true;
-                    S.hex_state.BytesPerLine = 16;
-                }
-                progress_done();
-                if (entries.empty() || entries[0].data.empty()) show_error_box("Failed to decompress ADB file.");
-            }).detach();
-        } else {
-            open_hex_for_selected();
+    // Hex view is a dev-mode feature — hide the button entirely outside
+    // dev mode (matches the right-click menu in the file lists, which
+    // also skips rendering for non-dev users).
+    if (S.dev_mode) {
+        if (!has_selection) {
+            ImGui::BeginDisabled();
         }
-    }
-    if (!has_selection) {
-        ImGui::EndDisabled();
+        if (ImGui::Button("Hex View")) {
+            ImGui::OpenPopup("progress_win");
+            if (S.viewing_adb) {
+                auto item = S.files[(size_t)S.selected_file_index];
+                progress_open(0, "Decompressing ADB...");
+                std::thread([item]() {
+                    auto entries = decompress_adb(item.name);
+                    if (!entries.empty() && !entries[0].data.empty()) {
+                        S.hex_data = entries[0].data;
+                        S.hex_title = "Hex Editor - " + std::filesystem::path(item.name).filename().string() + " (decompressed)";
+                        S.hex_open = true;
+                        memset(&S.hex_state, 0, sizeof(S.hex_state));
+                        S.hex_state.Bytes = (void*)S.hex_data.data();
+                        S.hex_state.MaxBytes = (int)S.hex_data.size();
+                        S.hex_state.ReadOnly = true;
+                        S.hex_state.ShowAscii = true;
+                        S.hex_state.ShowAddress = true;
+                        S.hex_state.BytesPerLine = 16;
+                    }
+                    progress_done();
+                    if (entries.empty() || entries[0].data.empty()) show_error_box("Failed to decompress ADB file.");
+                }).detach();
+            } else {
+                open_hex_for_selected();
+            }
+        }
+        if (!has_selection) {
+            ImGui::EndDisabled();
+        }
     }
 
     ImGui::SameLine();

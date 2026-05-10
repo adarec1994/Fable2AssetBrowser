@@ -83,6 +83,26 @@ bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index,
 bool is_in_audio_folder(const std::string& path);  // Selection.cpp
 void load_flat_asset_entry(const FlatAssetEntry& e, int kind);  // LeftPanel.cpp
 
+// Right-click context menu attached to the most-recently-rendered file
+// item (Selectable / TreeNodeEx). Currently shows up to two entries:
+//   - "Hex View" (dev mode only)        — reroutes selection state
+//                                          and calls open_hex_for_selected()
+//   - "Export to → PNG/JPG/TIFF/DDS"   — only for .tex files; routes
+//                                          through tex_export_begin_named
+//                                          which decodes mip 0 then
+//                                          opens an ImGuiFileDialog.
+// Called right after the file's UI item in TreeRender, the Models/
+// Textures/Audio flat tabs, the file table, and the global results table.
+//   bnk_path   : top-level BNK or nested-BNK temp path the file lives in
+//   file_index : entry's position inside that BNK's directory
+//   is_nested  : true when bnk_path is a nested-BNK temp path
+//   file_name  : asset name (e.g. "art/foo/bar.tex") — used to decide
+//                whether to show the export submenu and as the suggested
+//                filename in the save dialog.
+void file_hex_context_menu(const std::string& bnk_path,
+                           int file_index, bool is_nested,
+                           const std::string& file_name);  // Selection.cpp
+
 // draw_tree_node lives in TreeRender.cpp; signature varies with platform.
 #ifdef _WIN32
 void draw_tree_node(TreeNode& node, ID3D11Device* device);

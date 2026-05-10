@@ -78,6 +78,17 @@ void draw_file_table() {
                         open_audio_player_for_selected(i);
                     }
                 }
+                // Right-click → "Hex View" (dev mode only) + "Export to"
+                // for .tex. Skip for the ADB / Lua views since those use
+                // special-cased decoders routed through draw_right_panel.
+                if (!S.viewing_adb && !S.viewing_lua) {
+                    bool is_nested = (S.selected_nested_index != -1 &&
+                                      !S.selected_nested_temp_path.empty());
+                    const std::string& bp = is_nested ? S.selected_nested_temp_path
+                                                      : S.selected_bnk;
+                    file_hex_context_menu(bp, S.files[i].index, is_nested,
+                                          S.files[i].name);
+                }
                 if (!S.hide_tooltips && ImGui::IsItemHovered()) {
                     ImGui::BeginTooltip();
                     ImGui::TextUnformatted(S.files[i].name.c_str());
@@ -164,6 +175,14 @@ void draw_global_results_table() {
                             break;
                         }
                     }
+                }
+                // Right-click → "Hex View" (dev mode only) + "Export to"
+                // for .tex. A hit's BNK is "nested" if it's known in
+                // nested_bnk_parents.
+                {
+                    bool is_nested = (S.nested_bnk_parents.count(hit.bnk_path) > 0);
+                    file_hex_context_menu(hit.bnk_path, hit.index, is_nested,
+                                          hit.file_name);
                 }
 
                 if (!S.hide_tooltips && ImGui::IsItemHovered()) {

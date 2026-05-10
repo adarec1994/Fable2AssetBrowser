@@ -31,7 +31,7 @@
 // to interoperate with the prebuilt libavcodec.lib. The headers we
 // include (codec.h, avcodec.h) are FFmpeg's public LGPL headers shipped
 // with the prebuilt and consumed unchanged. See
-// external/ffmpeg/README.txt for the source/version of the libs we link.
+// include/ffmpeg/README.txt for the source/version of the libs we link.
 
 #include <cstring>
 #include <cstdint>

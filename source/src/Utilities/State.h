@@ -179,6 +179,30 @@ struct State {
     int pending_texture_w = 0;
     int pending_texture_h = 0;
 
+    // ---- Texture mip browsing ----
+    // Cache of the .tex blob currently displayed in the texture preview,
+    // plus the user-chosen mip index. The mip selector overlay re-decodes
+    // out of `texture_blob` when the index changes, avoiding a re-extract
+    // from BNK. `pending_texture_mip_change` signals UI_Main to do the
+    // re-decode + SRV swap; the worker thread that originally loaded the
+    // texture also primes these fields so the dropdown shows up at first
+    // open. tex_info already lives above (`bool tex_info_ok` / `TexInfo
+    // tex_info`) and gets populated alongside `texture_blob`.
+    std::vector<unsigned char> texture_blob;
+    int  texture_mip_index = 0;
+    std::atomic<bool> pending_texture_mip_change{false};
+
+    // Per-channel display toggles for the texture preview. When a flag
+    // is false, that channel is masked out as the RGBA buffer is
+    // uploaded to the GPU — R/G/B get zeroed, A is forced to 255 so the
+    // image still shows opaque. See apply_tex_channel_mask in UI_Main.
+    // Toggling a checkbox flips the flag AND raises
+    // pending_texture_mip_change so the mask is re-applied.
+    bool tex_show_r = true;
+    bool tex_show_g = true;
+    bool tex_show_b = true;
+    bool tex_show_a = true;
+
     bool mdl_info_ok = false;
     MDLInfo mdl_info;
 

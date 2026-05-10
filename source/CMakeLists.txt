@@ -15,8 +15,13 @@ set(APP_SOURCES
         src/Utilities/State.cpp
         src/Utilities/Utils.cpp
         src/Utilities/Files.cpp
-        src/TexParser.cpp
-        src/LhTexCodec.cpp
+        src/textures/TexParser.cpp
+        src/textures/LhTexCodec.cpp
+        src/textures/export/TextureExport.cpp
+        src/textures/export/PngExport.cpp
+        src/textures/export/JpgExport.cpp
+        src/textures/export/TiffExport.cpp
+        src/textures/export/DdsExport.cpp
         src/MDL/ModelParser.cpp
         src/Utilities/Progress.cpp
         src/Utilities/operations.cpp
@@ -169,10 +174,10 @@ FetchContent_MakeAvailable(miniaudio)
 # decoder in the game binary. FFmpeg's libavcodec is the de-facto solution.
 #
 # On Windows we expect prebuilt MSVC libraries and headers under
-# external/ffmpeg/ (.lib + include/), shipped with the project. The user
+# include/ffmpeg/ (.lib + include/), shipped with the project. The user
 # can drop ShiftMediaProject prebuilts there. If absent, we fall back to
 # the legacy towav.exe path so the rest of the app still builds.
-set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/external/ffmpeg" CACHE PATH "FFmpeg prebuilt root")
+set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/include/ffmpeg" CACHE PATH "FFmpeg prebuilt root")
 set(FFMPEG_AVAILABLE FALSE)
 if(EXISTS "${FFMPEG_ROOT}/include/libavcodec/avcodec.h")
     # Prefer the static archives (libavcodec.lib) so we can link FFmpeg
@@ -193,7 +198,7 @@ if(EXISTS "${FFMPEG_ROOT}/include/libavcodec/avcodec.h")
     endif()
 endif()
 if(NOT FFMPEG_AVAILABLE)
-    message(STATUS "FFmpeg prebuilts not found at ${FFMPEG_ROOT} -- audio player will only play uncompressed PCM. Drop libavcodec/avutil/swresample (.lib + include/) under external/ffmpeg/ to enable XMA2 decoding.")
+    message(STATUS "FFmpeg prebuilts not found at ${FFMPEG_ROOT} -- audio player will only play uncompressed PCM. Drop libavcodec/avutil/swresample (.lib + include/) under include/ffmpeg/ to enable XMA2 decoding.")
 endif()
 
 if(WIN32)

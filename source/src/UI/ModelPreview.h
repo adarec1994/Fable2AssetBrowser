@@ -163,7 +163,13 @@ unsigned int MP_GetTexture(ModelPreview& mp);
 #endif
 void FlyCam_Reset(FlyCam& cam, float cx, float cy, float cz, float radius);
 void FlyCam_Update(FlyCam& cam, float dt, bool w, bool s, bool a, bool d, bool q, bool e, float mouse_dx, float mouse_dy);
-bool decode_tex_to_rgba(const std::vector<unsigned char>& blob, std::vector<uint8_t>& rgba, int& out_w, int& out_h, bool* out_has_alpha);
+// Decode one mip of a Fable 2 .tex file to RGBA8. `mip_index` selects
+// which mip to decode: pass a non-negative value to pick that exact
+// entry from TexInfo::Mips, or -1 (default) to auto-select the largest.
+bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
+                        std::vector<uint8_t>& rgba,
+                        int& out_w, int& out_h, bool* out_has_alpha,
+                        int mip_index = -1);
 #ifdef _WIN32
 ID3D11ShaderResourceView* create_srv_from_rgba(ID3D11Device* dev, int w, int h, const std::vector<uint8_t>& rgba);
 #else

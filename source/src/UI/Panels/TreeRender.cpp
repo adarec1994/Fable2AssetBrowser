@@ -44,6 +44,10 @@ void draw_tree_node(TreeNode& node) {
         std::string label = node.name;
         ImGui::TreeNodeEx(label.c_str(), flags);
 
+        // Right-click → "Hex View" (dev mode only) + "Export to" for .tex.
+        file_hex_context_menu(node.bnk_source, node.bnk_index,
+                              node.is_nested_source, node.name);
+
         if (ImGui::IsItemClicked()) {
             S.selected_folder_path.clear();
 

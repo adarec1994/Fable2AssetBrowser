@@ -11,7 +11,7 @@ runtime.
 Expected layout
 ---------------
 
-    external/ffmpeg/
+    include/ffmpeg/
         include/
             libavcodec/avcodec.h
             libavutil/...
@@ -59,7 +59,7 @@ libs in every configuration; don't switch the FFmpeg libs to /MT or
 
 After populating the directory, re-run CMake configure. You should see:
 
-    -- FFmpeg found at .../external/ffmpeg -- enabling XMA2 decoder (static link)
+    -- FFmpeg found at .../include/ffmpeg -- enabling XMA2 decoder (static link)
 
 Why not bundle it?
 ------------------

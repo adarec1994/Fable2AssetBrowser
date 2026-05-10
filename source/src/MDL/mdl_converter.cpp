@@ -1,7 +1,9 @@
 // mdl_converter.cpp
 #include "mdl_converter.h"
 #include "ModelParser.h"
+#include "MdlTexExport.h"
 #include "../textures/TexParser.h"
+#include "../Utilities/State.h"
 #include "../Utilities/Files.h"
 #include <vector>
 #include <string>
@@ -12,6 +14,16 @@
 #include <algorithm>
 #include <sstream>
 #include <cmath>
+
+// decode_tex_to_rgba lives in ModelPreview.cpp at file scope. We
+// declare it here at the same scope (before opening our anonymous
+// namespace) so the linker resolves the call across translation
+// units. Putting the declaration inside the anon namespace below
+// would bind it to a local symbol the linker can never satisfy.
+extern bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
+                               std::vector<uint8_t>& rgba,
+                               int& out_w, int& out_h, bool* out_has_alpha,
+                               int mip_index);
 
 namespace {
 
@@ -302,97 +314,25 @@ static void swap_bc5_endian(uint8_t* data, size_t size) {
     }
 }
 
+// decode_tex_to_rgba is declared at file scope above the anonymous
+// namespace; we only call it from here. Routing through the unified
+// RGBA decoder gives us mip 0 + every CompFlag for free — the inline
+// decoder this replaced filtered to comp=7 only and silently dropped
+// the largest mip on every Lionhead-codec texture in the corpus.
 static bool decode_texture_to_png(const std::vector<unsigned char>& tex_buf, std::vector<uint8_t>& png_out) {
-    TexInfo tex_info;
-    if (!parse_tex_info(tex_buf, tex_info) || tex_info.Mips.empty()) return false;
-
-    size_t best = 0;
-    size_t best_area = 0;
-    for (size_t i = 0; i < tex_info.Mips.size(); ++i) {
-        if (tex_info.Mips[i].CompFlag != 7) continue;
-        int w = tex_info.Mips[i].HasWH ? (int)tex_info.Mips[i].MipWidth : std::max(1, (int)tex_info.TextureWidth >> (int)i);
-        int h = tex_info.Mips[i].HasWH ? (int)tex_info.Mips[i].MipHeight : std::max(1, (int)tex_info.TextureHeight >> (int)i);
-        size_t area = (size_t)w * (size_t)h;
-        if (area > best_area) {
-            best_area = area;
-            best = i;
-        }
-    }
-
-    const auto& mip = tex_info.Mips[best];
-    int w = mip.HasWH ? (int)mip.MipWidth : std::max(1, (int)tex_info.TextureWidth >> (int)best);
-    int h = mip.HasWH ? (int)mip.MipHeight : std::max(1, (int)tex_info.TextureHeight >> (int)best);
-
-    if (mip.MipDataOffset + mip.MipDataSizeParsed > tex_buf.size()) return false;
-
-    size_t bx = (size_t)((w+3)/4), by = (size_t)((h+3)/4);
-    std::vector<uint8_t> rgba((size_t)w*(size_t)h*4, 0xFF);
-    const uint8_t* src = tex_buf.data() + mip.MipDataOffset;
-
-    if (tex_info.PixelFormat == 35) {
-        size_t sz_bc1 = bx*by*8;
-        if (mip.MipDataSizeParsed < sz_bc1) return false;
-
-        std::vector<uint8_t> swapped(src, src + sz_bc1);
-        swap_bc1_endian(swapped.data(), swapped.size());
-
-        size_t off=0;
-        for(size_t byy=0; byy<by; ++byy){
-            for(size_t bxx=0; bxx<bx; ++bxx){
-                uint32_t block[16];
-                decode_bc1_block(swapped.data()+off, block); off += 8;
-                for(int py=0; py<4; ++py){
-                    int yy = (int)byy*4 + py; if(yy>=h) break;
-                    for(int px=0; px<4; ++px){
-                        int xx=(int)bxx*4 + px; if(xx>=w) break;
-                        ((uint32_t*)rgba.data())[yy*w+xx] = block[py*4+px];
-                    }
-                }
-            }
-        }
-    } else if (tex_info.PixelFormat == 39) {
-        size_t sz_bc3 = bx*by*16;
-        if (mip.MipDataSizeParsed < sz_bc3) return false;
-
-        std::vector<uint8_t> swapped(src, src + sz_bc3);
-        swap_bc3_endian(swapped.data(), swapped.size());
-
-        size_t off=0;
-        for(size_t byy=0; byy<by; ++byy){
-            for(size_t bxx=0; bxx<bx; ++bxx){
-                uint32_t block[16];
-                decode_bc3_block(swapped.data()+off, block); off += 16;
-                for(int py=0; py<4; ++py){
-                    int yy = (int)byy*4 + py; if(yy>=h) break;
-                    for(int px=0; px<4; ++px){
-                        int xx=(int)bxx*4 + px; if(xx>=w) break;
-                        ((uint32_t*)rgba.data())[yy*w+xx] = block[py*4+px];
-                    }
-                }
-            }
-        }
-    } else if (tex_info.PixelFormat == 40) {
-        size_t sz_bc5 = bx*by*16;
-        if (mip.MipDataSizeParsed < sz_bc5) return false;
-
-        std::vector<uint8_t> swapped(src, src + sz_bc5);
-        swap_bc5_endian(swapped.data(), swapped.size());
-
-        size_t off=0;
-        for(size_t byy=0; byy<by; ++byy){
-            for(size_t bxx=0; bxx<bx; ++bxx){
-                uint32_t block[16];
-                decode_bc5_block(swapped.data()+off, block); off += 16;
-                for(int py=0; py<4; ++py){
-                    int yy = (int)byy*4 + py; if(yy>=h) break;
-                    for(int px=0; px<4; ++px){
-                        int xx=(int)bxx*4 + px; if(xx>=w) break;
-                        ((uint32_t*)rgba.data())[yy*w+xx] = block[py*4+px];
-                    }
-                }
-            }
-        }
-    } else {
+    // Use the unified RGBA decoder so we get mip 0 every time —
+    // the previous inline decode here filtered to `CompFlag == 7`
+    // (raw mips only), which silently skipped the largest mip on
+    // every texture that uses the Lionhead BC1 codec (comp=1) and
+    // landed on a far-smaller comp=7 fallback. That's why exported
+    // GLB / FBX textures looked low-resolution.
+    //
+    // mip_index = -1 picks the largest mip across all CompFlags.
+    std::vector<uint8_t> rgba;
+    int w = 0, h = 0;
+    bool has_alpha = false;
+    if (!decode_tex_to_rgba(tex_buf, rgba, w, h, &has_alpha, -1) ||
+        rgba.empty() || w <= 0 || h <= 0) {
         return false;
     }
 
@@ -784,59 +724,115 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
         if (mesh_count > 0) meshes << ",";
         meshes << "{\"name\":\"" << json_escape(mesh_name) << "\",\"primitives\":[";
 
-        int tex_idx = -1;
+        // Per-mesh material — wires up every map the geom carries
+        // (diffuse / normal / specular / tint). Each map runs through
+        // the unified MdlTexExport encoder so the user's chosen
+        // texture format (DDS / PNG / JPG, set in Settings) drives
+        // every embedded blob in this GLB.
         bool has_alpha = false;
         int this_mat_idx = -1;
         std::string material_name = "material_" + std::to_string(gi);
-
         if (!geom.diffuse_tex_name.empty()) {
             material_name = std::filesystem::path(geom.diffuse_tex_name).stem().string();
+        }
 
+        // Resolve the active texture format once per GLB build.
+        const MdlTexExport::Format tex_fmt =
+            MdlTexExport::format_from_string(S.mdl_texture_export_format);
+
+        // Prefer the user's currently-selected (nested) BNK family so
+        // a model exported from a region archive uses that region's
+        // textures instead of generic globals.
+        const std::string preferred_for_tex =
+            (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty())
+                ? S.selected_nested_temp_path
+                : S.selected_bnk;
+
+        // Helper that embeds one texture, returning the glTF
+        // texture index (or -1 if the source resolve / encode
+        // failed). Each successful embed adds one bufferView, one
+        // image, and one texture entry to the GLB tables.
+        auto embed_one_tex = [&](const std::string& tex_name) -> int {
+            if (tex_name.empty()) return -1;
             std::vector<unsigned char> tex_buf;
-            // Prefer the user's currently-selected (nested) BNK family so a
-            // model exported from a region archive uses that region's
-            // textures instead of generic globals.
-            std::string preferred_for_tex =
-                (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty())
-                    ? S.selected_nested_temp_path
-                    : S.selected_bnk;
-            if (build_any_tex_buffer_for_name(geom.diffuse_tex_name, tex_buf, preferred_for_tex)) {
-                std::vector<uint8_t> png_data;
-                if (decode_texture_to_png(tex_buf, png_data)) {
-                    TexInfo tex_info;
-                    if (parse_tex_info(tex_buf, tex_info)) {
-                        has_alpha = (tex_info.PixelFormat == 39);
-                    }
+            if (!build_any_tex_buffer_for_name(tex_name, tex_buf, preferred_for_tex)) {
+                return -1;
+            }
+            MdlTexExport::EncodedTex enc;
+            if (!MdlTexExport::encode_largest_mip(tex_buf, tex_fmt, enc)) {
+                return -1;
+            }
+            size_t img_off = add_data(enc.bytes.data(), enc.bytes.size());
+            if (bv_count > 0) bufferViews << ",";
+            bufferViews << "{\"buffer\":0,\"byteOffset\":" << img_off
+                        << ",\"byteLength\":" << enc.bytes.size() << "}";
+            int img_bv = bv_count++;
+            if (img_count > 0) images << ",";
+            images << "{\"bufferView\":" << img_bv
+                   << ",\"mimeType\":\"" << enc.mime_type << "\"}";
+            int img_idx = img_count++;
+            if (tex_count > 0) textures << ",";
+            textures << "{\"source\":" << img_idx << "}";
+            return tex_count++;
+        };
 
-                    size_t img_offset = add_data(png_data.data(), png_data.size());
-
-                    if (bv_count > 0) bufferViews << ",";
-                    bufferViews << "{\"buffer\":0,\"byteOffset\":" << img_offset << ",\"byteLength\":" << png_data.size() << "}";
-                    int img_bv = bv_count++;
-
-                    if (img_count > 0) images << ",";
-                    images << "{\"bufferView\":" << img_bv << ",\"mimeType\":\"image/png\"}";
-                    int img_idx = img_count++;
-
-                    if (tex_count > 0) textures << ",";
-                    textures << "{\"source\":" << img_idx << "}";
-                    tex_idx = tex_count++;
+        // BC3 source means the diffuse carries alpha — flag the
+        // material as BLEND so transparent areas render correctly
+        // in glTF viewers.
+        if (!geom.diffuse_tex_name.empty()) {
+            std::vector<unsigned char> dtex;
+            if (build_any_tex_buffer_for_name(geom.diffuse_tex_name, dtex,
+                                              preferred_for_tex)) {
+                TexInfo ti;
+                if (parse_tex_info(dtex, ti)) {
+                    has_alpha = (ti.PixelFormat == 39);
                 }
             }
-
-            if (mat_count > 0) materials << ",";
-            materials << "{\"name\":\"" << json_escape(material_name) << "\"";
-            materials << ",\"doubleSided\":true";
-            if (has_alpha) {
-                materials << ",\"alphaMode\":\"BLEND\"";
-            }
-            materials << ",\"pbrMetallicRoughness\":{";
-            if (tex_idx >= 0) {
-                materials << "\"baseColorTexture\":{\"index\":" << tex_idx << "},";
-            }
-            materials << "\"metallicFactor\":0.0,\"roughnessFactor\":0.9}}";
-            this_mat_idx = mat_count++;
         }
+
+        const int diff_tex   = embed_one_tex(geom.diffuse_tex_name);
+        const int normal_tex = embed_one_tex(geom.normal_tex_name);
+        const int spec_tex   = embed_one_tex(geom.specular_tex_name);
+        const int tint_tex   = embed_one_tex(geom.tint_tex_name);
+
+        if (mat_count > 0) materials << ",";
+        materials << "{\"name\":\"" << json_escape(material_name) << "\"";
+        materials << ",\"doubleSided\":true";
+        if (has_alpha) materials << ",\"alphaMode\":\"BLEND\"";
+
+        // PBR core: baseColor = diffuse, metallic/roughness held
+        // constant since Fable 2 doesn't author MR maps. We feed the
+        // specular map into pbrSpecularGlossiness's specular slot
+        // when the glTF KHR_materials_specular extension is
+        // available, but the default sampler doesn't require the
+        // extension — we just leave that channel for runtime
+        // use. Normal map goes in `normalTexture`. Tint has no
+        // standard glTF channel; we emit it as `emissiveTexture`
+        // so it's at least retained on round-trip and DCC tools
+        // surface it in their material editor.
+        materials << ",\"pbrMetallicRoughness\":{";
+        if (diff_tex >= 0) {
+            materials << "\"baseColorTexture\":{\"index\":" << diff_tex << "},";
+        }
+        materials << "\"metallicFactor\":0.0,\"roughnessFactor\":0.9}";
+        if (normal_tex >= 0) {
+            materials << ",\"normalTexture\":{\"index\":" << normal_tex << "}";
+        }
+        if (spec_tex >= 0) {
+            // glTF 2.0 doesn't have a standalone specular slot in
+            // the metallic-roughness model; the closest reusable
+            // channel is occlusionTexture. We park the specular map
+            // there so DCC importers surface it (Blender's material
+            // editor reads it as "Ambient Occlusion") rather than
+            // dropping it entirely.
+            materials << ",\"occlusionTexture\":{\"index\":" << spec_tex << "}";
+        }
+        if (tint_tex >= 0) {
+            materials << ",\"emissiveTexture\":{\"index\":" << tint_tex << "}";
+            materials << ",\"emissiveFactor\":[1.0,1.0,1.0]";
+        }
+        materials << "}";
+        this_mat_idx = mat_count++;
 
         meshes << "{";
         meshes << "\"attributes\":{";

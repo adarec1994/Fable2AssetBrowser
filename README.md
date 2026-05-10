@@ -28,6 +28,9 @@ Skeleton preview is also available!
 You can mess around rotating bones; though animations are currently WIP!
 ![BoneRotation.png](images/BoneRotation.png)
 
+Quick sample of a Hobbe in blender!
+![HobbeBlender.png](images/HobbeBlender.png)
+
 And here is an example of some textures:
 ![TextureSample1.png](images/TextureSample1.png)
 ![TextureSample2.png](images/TextureSample2.png)

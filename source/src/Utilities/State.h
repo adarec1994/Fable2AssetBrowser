@@ -147,6 +147,11 @@ struct State {
     // creating any intermediate dirs as it goes. Persisted to
     // config.ini ("export_dir" key).
     std::string export_dir;
+    // Texture format used for textures embedded in MDL exports
+    // (GLB / FBX). One of "DDS", "PNG", "JPG". Default DDS — closest
+    // to a 1:1 of the source mip 0 in a format every DCC reads.
+    // Persisted to config.ini (key "mdl_texture_export_format").
+    std::string mdl_texture_export_format = "DDS";
     std::atomic<bool> cancel_requested{false};
     std::atomic<bool> exiting{false};
     std::mutex progress_mutex;

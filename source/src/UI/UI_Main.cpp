@@ -372,6 +372,29 @@ void draw_main(GLFWwindow* window) {
                         cfg);
                 }
 
+                // Texture format used for textures embedded in MDL
+                // (GLB / FBX) exports. DDS keeps the largest mip in
+                // an uncompressed RGBA8 wrapper that every DCC reads
+                // without recompression; PNG and JPG go through
+                // stb_image_write. Persisted to config.ini.
+                ImGui::Separator();
+                ImGui::TextUnformatted("MDL export texture format");
+                ImGui::SetNextItemWidth(160);
+                static const char* kTexFmts[] = { "DDS", "PNG", "JPG" };
+                if (ImGui::BeginCombo("##mdl_tex_fmt",
+                                      S.mdl_texture_export_format.c_str())) {
+                    for (const char* opt : kTexFmts) {
+                        bool selected =
+                            (S.mdl_texture_export_format == opt);
+                        if (ImGui::Selectable(opt, selected)) {
+                            S.mdl_texture_export_format = opt;
+                            settings_save();
+                        }
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+
                 ImGui::EndMenu();
             }
             // Help menu — currently just the About window. Lives at

@@ -147,6 +147,10 @@ void settings_load() {
     } else {
         S.export_dir = default_export_dir();
     }
+    if (auto it = kv.find("mdl_texture_export_format");
+        it != kv.end() && !it->second.empty()) {
+        S.mdl_texture_export_format = it->second;
+    }
 }
 
 // Persist the current S.* settings. Called from the Settings dropdown
@@ -159,6 +163,7 @@ void settings_save() {
     std::snprintf(buf, sizeof(buf), "%.0f", S.font_size_dirty ? S.pending_font_size : S.font_size);
     kv["font_size"] = buf;
     kv["export_dir"] = S.export_dir;
+    kv["mdl_texture_export_format"] = S.mdl_texture_export_format;
     write_config_kv(kv);
 }
 #ifdef _WIN32

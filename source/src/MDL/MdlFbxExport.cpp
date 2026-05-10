@@ -27,7 +27,9 @@
 
 #include "MdlFbxExport.h"
 #include "ModelParser.h"
+#include "MdlTexExport.h"
 #include "../textures/TexParser.h"
+#include "../Utilities/State.h"
 #include "../Utilities/Utils.h"
 #include "../Utilities/Files.h"
 #include "../UI/OutputLog.h"
@@ -505,14 +507,34 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
     // shared with the same bone Model objects so multiple meshes can
     // skin to a common skeleton.
     // ----------------------------------------------------------------------
+    // Texture channels we wire per material. Order matters because
+    // the same indices feed both the Video / Texture allocation
+    // pass and the Connections pass below — keep them in sync.
+    enum TexChannel { CH_DIFFUSE, CH_NORMAL, CH_SPECULAR, CH_TINT, CH_COUNT };
+
+    // Per-mesh, per-channel embedded texture metadata. video_id == 0
+    // means "no texture for this channel"; the Video / Texture nodes
+    // and Connections entries are skipped when that's the case. The
+    // FBX channel name (DiffuseColor / NormalMap / SpecularColor /
+    // EmissiveColor) is what binds the texture to the material on
+    // the importer side.
+    struct EmbeddedTex {
+        int64_t  video_id   = 0;
+        int64_t  tex_id     = 0;
+        std::string name;          // texture/video name in the FBX
+        std::string filename;      // Filename / RelativeFilename property
+        std::string mime_ext;      // ".png" / ".dds" / ".jpg"
+        std::vector<uint8_t> bytes; // file bytes — moved into the Video.Content emit
+        const char* fbx_property = "DiffuseColor";
+    };
+
     struct MeshOut {
         int64_t geom_id;
         int64_t model_id;
         int64_t mat_id;
-        int64_t tex_id;       // 0 = no texture
-        int64_t video_id;     // 0 = no embedded image
         int64_t skin_id;      // 0 = no skin
         std::string name;
+        EmbeddedTex tex[CH_COUNT];
         // Cluster bookkeeping: one Cluster per bone the mesh actually
         // weights to. (clusters_for_bone[b] != 0 means we emitted a
         // Cluster for filtered bone b on this mesh.)
@@ -523,45 +545,58 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
     std::vector<MeshOut> meshes_out;
     meshes_out.reserve(geoms.size());
 
+    // Pick the embedding format up-front so every texture in this
+    // FBX uses the same one — Settings dropdown in UI_Main.cpp.
+    const MdlTexExport::Format tex_fmt =
+        MdlTexExport::format_from_string(S.mdl_texture_export_format);
+
     for (size_t gi = 0; gi < geoms.size(); ++gi) {
         const auto& g = geoms[gi];
         MeshOut mo{};
         mo.geom_id  = ids.make();
         mo.model_id = ids.make();
         mo.mat_id   = ids.make();
-        mo.tex_id   = 0;
-        mo.video_id = 0;
         mo.skin_id  = ids.make();
         mo.name     = g.name.empty() ? ("mesh_" + std::to_string(gi)) : g.name;
 
-        // Resolve diffuse texture bytes the same way the GLB path
-        // does — `build_any_tex_buffer_for_name` walks the BNK pair
-        // including any nested-archive sibling tex BNKs. Mip 0 is
-        // the largest mip; we decode it to RGBA and re-encode as
-        // PNG so the Video.Content blob is portable across importers.
-        if (!g.diffuse_tex_name.empty()) {
+        // Channel → (source name on the geom, FBX property name on
+        // the material) bindings. NormalMap and SpecularColor are
+        // standard FBX 7.x material props; ambient gets "AmbientColor"
+        // in materials with Phong shading. Tint goes into
+        // EmissiveColor — same workaround the GLB exporter uses
+        // since neither glTF nor FBX has a dedicated "tint" channel.
+        struct ChanBinding {
+            const std::string& src;
+            const char* fbx_prop;
+        };
+        const ChanBinding bindings[CH_COUNT] = {
+            { g.diffuse_tex_name,  "DiffuseColor"  },
+            { g.normal_tex_name,   "NormalMap"     },
+            { g.specular_tex_name, "SpecularColor" },
+            { g.tint_tex_name,     "EmissiveColor" },
+        };
+
+        for (int ch = 0; ch < CH_COUNT; ++ch) {
+            const auto& bind = bindings[ch];
+            if (bind.src.empty()) continue;
             std::vector<unsigned char> tex_buf;
-            if (build_any_tex_buffer_for_name(g.diffuse_tex_name, tex_buf,
-                                              /*preferred_bnk=*/std::string())) {
-                std::vector<uint8_t> png;
-                if (mdl_export_decode_texture_to_png(tex_buf, png) &&
-                    !png.empty()) {
-                    mo.video_id = ids.make();
-                    mo.tex_id   = ids.make();
-                    // Stashed for later — the Video node is built
-                    // during the Objects pass below using these IDs
-                    // and the PNG bytes.
-                    static std::unordered_map<int64_t, std::vector<uint8_t>> g_pngs_by_video;
-                    (void)g_pngs_by_video;  // see comment in the
-                                            // emitter section below;
-                                            // we hand the bytes
-                                            // through `MeshOut` for
-                                            // simpler scoping.
-                }
-                // Stash the PNG on the MeshOut directly — single ref,
-                // moved into the Video node when we emit it.
-                mo.cluster_indexes;  // (touch — placeholder)
+            if (!build_any_tex_buffer_for_name(bind.src, tex_buf,
+                                               /*preferred_bnk=*/std::string())) {
+                continue;
             }
+            MdlTexExport::EncodedTex enc;
+            if (!MdlTexExport::encode_largest_mip(tex_buf, tex_fmt, enc) ||
+                enc.bytes.empty()) {
+                continue;
+            }
+            EmbeddedTex& et = mo.tex[ch];
+            et.video_id     = ids.make();
+            et.tex_id       = ids.make();
+            et.name         = bind.src;
+            et.mime_ext     = enc.extension;
+            et.filename     = bind.src + et.mime_ext;
+            et.bytes        = std::move(enc.bytes);
+            et.fbx_property = bind.fbx_prop;
         }
 
         // Build cluster vertex/weight lists. geoms carry up to 4
@@ -582,10 +617,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
                 mo.cluster_weights[filt].push_back((double)w);
             }
         }
-        // Allocate cluster IDs — one per (mesh, bone) that has any
-        // weight. The bone's Model is shared across meshes; the
-        // cluster object itself is per-mesh because the deformer
-        // chain is keyed off the mesh's geometry.
         for (auto& kv : mo.cluster_indexes) {
             int filt = kv.first;
             int64_t cid = ids.make();
@@ -594,28 +625,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         }
 
         meshes_out.push_back(std::move(mo));
-    }
-
-    // We need per-mesh PNG bytes available when we emit the Video
-    // nodes. Park them in a parallel map keyed by video_id.
-    std::unordered_map<int64_t, std::vector<uint8_t>> png_by_video;
-    for (size_t gi = 0; gi < geoms.size(); ++gi) {
-        const auto& g = geoms[gi];
-        auto& mo = meshes_out[gi];
-        if (mo.video_id == 0) continue;
-        std::vector<unsigned char> tex_buf;
-        if (build_any_tex_buffer_for_name(g.diffuse_tex_name, tex_buf, std::string())) {
-            std::vector<uint8_t> png;
-            if (mdl_export_decode_texture_to_png(tex_buf, png) && !png.empty()) {
-                png_by_video[mo.video_id] = std::move(png);
-            } else {
-                mo.video_id = 0;
-                mo.tex_id   = 0;
-            }
-        } else {
-            mo.video_id = 0;
-            mo.tex_id   = 0;
-        }
     }
 
     // ----------------------------------------------------------------------
@@ -690,11 +699,14 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
     {
         Node defs("Definitions");
         defs.add_child(Node("Version")).add_prop(Prop::I(100));
-        // Total = 1 (GlobalSettings) + meshes + bones + skins + clusters + materials + textures + videos
+        // Total = 1 (GlobalSettings) + per-mesh objects (geom +
+        // model + material) + per-mesh embedded textures (1 Video +
+        // 1 Texture per channel) + skin/cluster + per-bone objects.
         int total = 1 + (int)meshes_out.size() * 3;
         for (auto& m : meshes_out) {
-            if (m.tex_id)   ++total;
-            if (m.video_id) ++total;
+            for (int ch = 0; ch < CH_COUNT; ++ch) {
+                if (m.tex[ch].video_id) total += 2;  // Video + Texture
+            }
             total += (int)m.cluster_for_bone.size() + 1; // skin + clusters
         }
         total += (int)bones.size() * 2; // model + attr per bone
@@ -892,37 +904,44 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         mat.add_child(std::move(matp));
         objects.add_child(std::move(mat));
 
-        // Video + Texture pair for the diffuse — optional.
-        if (mo.video_id && mo.tex_id) {
-            const auto& png = png_by_video[mo.video_id];
+        // Video + Texture pair per active channel. Each populated
+        // EmbeddedTex slot in mo.tex[] adds one Video (with embedded
+        // bytes) and one Texture (TextureVideoClip referencing the
+        // Video). The Connections pass below wires each Texture to
+        // the material at the appropriate property name (DiffuseColor
+        // / NormalMap / SpecularColor / EmissiveColor).
+        for (int ch = 0; ch < CH_COUNT; ++ch) {
+            const EmbeddedTex& et = mo.tex[ch];
+            if (et.video_id == 0) continue;
+
             Node vn("Video");
-            vn.add_prop(Prop::L(mo.video_id));
-            vn.add_prop(Prop::S("Video::" + g.diffuse_tex_name));
+            vn.add_prop(Prop::L(et.video_id));
+            vn.add_prop(Prop::S("Video::" + et.name));
             vn.add_prop(Prop::S("Clip"));
             vn.add_child(Node("Type")).add_prop(Prop::S("Clip"));
             Node vp("Properties70");
             vp.add_child(make_p("Path", "KString", "XRefUrl", "",
-                                { Prop::S(g.diffuse_tex_name + ".png") }));
+                                { Prop::S(et.filename) }));
             vn.add_child(std::move(vp));
             vn.add_child(Node("UseMipMap")).add_prop(Prop::I(0));
-            vn.add_child(Node("Filename")).add_prop(Prop::S(g.diffuse_tex_name + ".png"));
-            vn.add_child(Node("RelativeFilename")).add_prop(Prop::S(g.diffuse_tex_name + ".png"));
-            // The actual PNG bytes — type-code 'R'.
-            vn.add_child(Node("Content")).add_prop(Prop::R(png));
+            vn.add_child(Node("Filename")).add_prop(Prop::S(et.filename));
+            vn.add_child(Node("RelativeFilename")).add_prop(Prop::S(et.filename));
+            // The actual encoded image bytes — type-code 'R' (raw).
+            vn.add_child(Node("Content")).add_prop(Prop::R(et.bytes));
             objects.add_child(std::move(vn));
 
             Node tn("Texture");
-            tn.add_prop(Prop::L(mo.tex_id));
-            tn.add_prop(Prop::S("Texture::" + g.diffuse_tex_name));
+            tn.add_prop(Prop::L(et.tex_id));
+            tn.add_prop(Prop::S("Texture::" + et.name));
             tn.add_prop(Prop::S(""));
             tn.add_child(Node("Type")).add_prop(Prop::S("TextureVideoClip"));
             tn.add_child(Node("Version")).add_prop(Prop::I(202));
-            tn.add_child(Node("TextureName")).add_prop(Prop::S("Texture::" + g.diffuse_tex_name));
+            tn.add_child(Node("TextureName")).add_prop(Prop::S("Texture::" + et.name));
             Node tp("Properties70");
             tp.add_child(make_p("UVSet", "KString", "", "", { Prop::S("UVMap") }));
             tn.add_child(std::move(tp));
-            tn.add_child(Node("FileName")).add_prop(Prop::S(g.diffuse_tex_name + ".png"));
-            tn.add_child(Node("RelativeFilename")).add_prop(Prop::S(g.diffuse_tex_name + ".png"));
+            tn.add_child(Node("FileName")).add_prop(Prop::S(et.filename));
+            tn.add_child(Node("RelativeFilename")).add_prop(Prop::S(et.filename));
             objects.add_child(std::move(tn));
         }
 
@@ -1024,11 +1043,14 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         add_oo(mo.geom_id, mo.model_id);  // geometry → mesh model
         add_oo(mo.model_id, 0);            // mesh model → scene root
         add_oo(mo.mat_id, mo.model_id);    // material → mesh model
-        if (mo.tex_id) {
-            add_op(mo.tex_id, mo.mat_id, "DiffuseColor");
-        }
-        if (mo.video_id && mo.tex_id) {
-            add_oo(mo.video_id, mo.tex_id);
+        // Per-channel texture wiring: every populated EmbeddedTex
+        // adds a Video → Texture (OO) edge and a Texture → Material
+        // (OP) edge bound to the channel's FBX property name.
+        for (int ch = 0; ch < CH_COUNT; ++ch) {
+            const EmbeddedTex& et = mo.tex[ch];
+            if (et.video_id == 0) continue;
+            add_oo(et.video_id, et.tex_id);
+            add_op(et.tex_id,   mo.mat_id, et.fbx_property);
         }
         if (!mo.cluster_for_bone.empty()) {
             add_oo(mo.skin_id, mo.geom_id);  // skin → geometry
@@ -1061,24 +1083,36 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
     // Final null record (13 zero bytes) terminates the top-level.
     for (int i = 0; i < 13; ++i) out.put_u8(0);
 
-    // Footer — Blender accepts a permissive footer; we just pad zeros.
-    // Strict importers want a 16-byte sentinel + alignment; the
-    // following has been observed to work across Blender, Maya, 3ds
-    // Max for FBX 7400.
-    while (out.data.size() & 0xF) out.put_u8(0);
-    static const uint8_t kFooter[] = {
-        0xFA, 0xBC, 0xAB, 0x09, 0xD0, 0xC8, 0xD4, 0x66,
-        0xB1, 0x76, 0xFB, 0x83, 0x1C, 0xF7, 0x26, 0x7E
-    };
-    out.put_bytes(kFooter, 16);
-    for (int i = 0; i < 4; ++i) out.put_u32(0);
-    out.put_u32(7400);
-    for (int i = 0; i < 30; ++i) out.put_u8(0);
-    static const uint8_t kFooter2[] = {
+    // ----------------------------------------------------------------
+    // Footer (160 bytes total + alignment padding).
+    //
+    // Layout per Blender's reverse-engineered FBX-7.x spec:
+    //   16 bytes: timestamp-derived hash. Blender / Maya / 3ds Max
+    //             tolerate zeros here; the strict FBX SDK validator
+    //             does not, but no game-asset pipeline runs that.
+    //   N bytes : pad to 16-byte file alignment (0..15)
+    //   4 bytes : zero
+    //   4 bytes : version u32 LE (7400)
+    //   120 bytes: zero
+    //   16 bytes: end-of-file magic
+    //
+    // The previous version of this writer had:
+    //   • 16 zero bytes (4 × u32) where 4 zero bytes were expected
+    //   • only 30 trailing zero bytes where 120 were expected
+    // …leaving the file ~78 bytes shorter than Blender's importer
+    // expects when it reads the trailer from the end of the file
+    // → the "Failed to load" the user reported. Sizes corrected.
+    // ----------------------------------------------------------------
+    for (int i = 0; i < 16; ++i) out.put_u8(0);          // 16-byte hash
+    while (out.data.size() & 0xF) out.put_u8(0);         // 16-byte align
+    out.put_u32(0);                                       // 4 bytes zero
+    out.put_u32(7400);                                    // 4 bytes version
+    for (int i = 0; i < 120; ++i) out.put_u8(0);         // 120 bytes zero
+    static const uint8_t kFooterMagic[] = {
         0xF8, 0x5A, 0x8C, 0x6A, 0xDE, 0xF5, 0xD9, 0x7E,
         0xEC, 0xE9, 0x0C, 0xE3, 0x75, 0x8F, 0x29, 0x0B
     };
-    out.put_bytes(kFooter2, 16);
+    out.put_bytes(kFooterMagic, 16);                      // 16-byte magic
 
     // Write to disk.
     std::ofstream f(fbx_path, std::ios::binary | std::ios::trunc);

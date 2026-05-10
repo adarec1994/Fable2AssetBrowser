@@ -2,8 +2,6 @@
 
 IDI_ICON1       ICON      "fable.ico"
 
-// Splash screen — bundled into the exe so we don't depend on
-// include/image/* being shipped alongside.
 IDR_SPLASH_PNG  RCDATA    "include/image/splash_pano.png"
 IDR_LOGO_PNG    RCDATA    "include/image/f2_logo.png"
 
@@ -16,27 +14,10 @@ IDR_SPARKLE_6   RCDATA    "include/image/sparkle_6.png"
 IDR_SPARKLE_7   RCDATA    "include/image/sparkle_7.png"
 IDR_SPARKLE_8   RCDATA    "include/image/sparkle_8.png"
 
-// Font Awesome 6 Solid (CMake stages this .ttf via FetchContent — see
-// CMakeLists.txt). Embedded so the exe doesn't need a sidecar font file.
 IDR_FA_FONT     RCDATA    "include/image/fa-solid-900.ttf"
 
-// Roboto Regular — the app's default UI font (replaces ImGui's bundled
-// proggy clean). Loaded into the ImGui atlas at startup, with FA glyphs
-// merged on top.
 IDR_ROBOTO_FONT RCDATA    "include/font/Roboto-Regular.ttf"
 
-// Splash-screen background music. PlaySoundA can play directly from a
-// memory buffer (SND_MEMORY), so we extract the bytes from this resource
-// at startup instead of loading from disk.
 IDR_MENU_INTERLUDE_WAV RCDATA "include/audio/menu_interlude.wav"
 
-// About window image. Currently points at ob_tarotcards.png — to
-// swap, change the path below (or overwrite the file in place). The
-// About dialog loads this from RCDATA on first open via FindResource
-// + stb_image, the same way the splash images are loaded.
 IDR_ABOUT_IMAGE RCDATA "include/image/ob_tarotcards.png"
-
-// FFmpeg used to be bundled here as ~24 MB of DLLs and extracted at
-// startup; now we link libavcodec / libavutil / libswresample statically
-// (the linker drops every codec we don't reference, see CMakeLists.txt).
-// No DLL resources required.

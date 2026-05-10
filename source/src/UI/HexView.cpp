@@ -279,9 +279,6 @@ void open_hex_for_selected() {
     progress_open(0, "Loading hex.");
     S.hex_loading.store(true);
 
-    // Original (non-copy) nested BNK path — keyed in S.nested_bnk_parents,
-    // so passing it lets build_any_tex_buffer_for_name prefer sibling
-    // nested BNKs over globals.
     std::string preferred_for_tex = is_nested
         ? S.selected_nested_temp_path
         : S.selected_bnk;
@@ -352,9 +349,7 @@ void draw_hex_window(ID3D11Device *device) {
 #else
 void draw_hex_window() {
 #endif
-    // Hex view is a developer-mode feature. Outside dev mode, force
-    // any open hex window closed and skip rendering entirely so users
-    // can't even see a stale window from a prior toggle.
+
     if (!S.dev_mode) {
         S.hex_open = false;
         return;
@@ -468,9 +463,7 @@ void draw_hex_window() {
                                 ImGui::Text("Derived Size: %ux%u", w, h);
                             }
                             ImGui::Text("MipMapData@ 0x%zX, Size %zu", m.MipDataOffset, m.MipDataSizeParsed);
-                            // (Per-mip "Preview" button removed — texture
-                            // preview now lives in the central RenderPanel
-                            // with its own mip selector.)
+
                             ImGui::TreePop();
                         }
                     }
@@ -572,7 +565,7 @@ void draw_hex_window() {
         ImGui::EndChild();
     }
     ImGui::End();
-    } // end if (show_hex) — model preview windows below render unconditionally
+    }
 
 #ifdef _WIN32
     if(S.show_preview_popup){
@@ -599,17 +592,17 @@ void draw_hex_window() {
                     std::vector<uint8_t> payload;
 
                     if (m.CompFlag == 7) {
-                        // Raw mip — bytes are big-endian on disk; swap to LE for D3D.
+
                         payload.assign(src, src + src_sz);
                         if (S.tex_info.PixelFormat == 39) {
-                            // BC3: alpha block (8 bytes) needs its own swap, then color block as BC1
+
                             for (size_t i = 0; i + 16 <= payload.size(); i += 16) {
                                 uint64_t alpha_bits = 0;
                                 for (int j = 0; j < 6; j++) alpha_bits |= ((uint64_t)payload[i+2+j]) << (j*8);
                                 uint64_t alpha_swapped = 0;
                                 for (int j = 0; j < 6; j++) alpha_swapped |= ((alpha_bits >> (j*8)) & 0xFF) << ((5-j)*8);
                                 for (int j = 0; j < 6; j++) payload[i+2+j] = (alpha_swapped >> (j*8)) & 0xFF;
-                                // color block (8 bytes) — same as BC1 swap
+
                                 size_t k = i + 8;
                                 uint16_t c0 = (payload[k+0] << 8) | payload[k+1];
                                 uint16_t c1 = (payload[k+2] << 8) | payload[k+3];
@@ -620,7 +613,7 @@ void draw_hex_window() {
                                 payload[k+6] = (idx >> 16) & 0xFF; payload[k+7] = (idx >> 24) & 0xFF;
                             }
                         } else {
-                            // BC1
+
                             for (size_t i = 0; i + 8 <= payload.size(); i += 8) {
                                 uint16_t c0 = (payload[i+0] << 8) | payload[i+1];
                                 uint16_t c1 = (payload[i+2] << 8) | payload[i+3];
@@ -632,7 +625,7 @@ void draw_hex_window() {
                             }
                         }
                     } else {
-                        // Compressed Lionhead BC1
+
                         if (S.tex_info.PixelFormat != 35) {
                             std::ostringstream os;
                             os << "CompFlag=" << m.CompFlag
@@ -644,10 +637,7 @@ void draw_hex_window() {
                             ImGui::EndPopup();
                             return;
                         }
-                        // The codec wants the WHOLE body (u16 mw, u16 mh,
-                        // UnkData[440], payload). MipDataOffset already
-                        // skipped the 444-byte header; reconstruct from
-                        // DefOffset + sizeof(mip-header)=48.
+
                         const size_t body_start = m.DefOffset + 48;
                         const size_t body_size  = m.DataSize;
                         if (body_start + body_size > S.hex_data.size()) {
@@ -672,7 +662,7 @@ void draw_hex_window() {
                             ImGui::EndPopup();
                             return;
                         }
-                        // Codec output is little-endian BC1; D3D consumes that directly.
+
                         w = (uint32_t)dec_w;
                         h = (uint32_t)dec_h;
                         fmt = DXGI_FORMAT_BC1_UNORM;
@@ -713,7 +703,7 @@ void draw_hex_window() {
     }
 
     {
-        // Trigger: opens both the preview window and the materials window.
+
         if (S.show_model_preview) {
             S.show_model_preview = false;
             S.model_preview_open = true;
@@ -726,7 +716,6 @@ void draw_hex_window() {
         const ImVec2 canvas(960, 640);
         const ImVec2 preview_size(canvas.x + 32.0f, canvas.y + 110.0f);
 
-        // ----- Model Preview window (3D canvas) -----
         if (S.model_preview_open) {
             ImGui::SetNextWindowSize(preview_size, ImGuiCond_FirstUseEver);
             if (ImGui::Begin("Model Preview", &S.model_preview_open,
@@ -734,7 +723,6 @@ void draw_hex_window() {
             {
             MP_Render(device, g_mp, g_flycam);
 
-            // Left column: 3D canvas
             ImGui::BeginChild("##canvas_col", canvas, ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
             ImVec2 pos = ImGui::GetCursorScreenPos();
             if(g_mp.srv) ImGui::GetWindowDrawList()->AddImage((ImTextureID)g_mp.srv, pos, ImVec2(pos.x + canvas.x, pos.y + canvas.y));
@@ -783,7 +771,6 @@ void draw_hex_window() {
 
             FlyCam_Update(g_flycam, dt, kw, ks, ka, kd, kq, ke, mdx, mdy);
 
-            // Scroll to move forward/backward
             if(canvas_hovered){
                 float wheel = io.MouseWheel;
                 if(fabsf(wheel) > 0.0001f){
@@ -808,19 +795,16 @@ void draw_hex_window() {
             if(ImGui::Button("Close", ImVec2(-1,0))) {
                 S.model_preview_open = false;
             }
-            ImGui::EndChild();   // end canvas column
+            ImGui::EndChild();
             }
             ImGui::End();
 
-            // If user closed the preview window, release model resources and
-            // also close the materials companion.
             if (!S.model_preview_open) {
                 MP_Release(g_mp);
                 S.model_materials_open = false;
             }
         }
 
-        // ----- Materials/Textures window (separate floating window) -----
         if (S.model_materials_open) {
             ImGui::SetNextWindowSize(ImVec2(380.0f, 600.0f), ImGuiCond_FirstUseEver);
             if (ImGui::Begin("Materials & Textures", &S.model_materials_open,
@@ -828,9 +812,7 @@ void draw_hex_window() {
             {
 
             if (g_mp.has_model && !g_mp.meshes.empty()) {
-                // Per-slot dedup: each slot (diffuse/normal/specular/tint) gets
-                // its own entry list grouped by texture name. Toggle a name and
-                // every mesh using it flips visibility for that slot.
+
                 struct TexEntry {
                     std::string name;
                     std::vector<size_t> mesh_idx;

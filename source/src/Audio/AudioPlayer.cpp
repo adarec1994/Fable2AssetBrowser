@@ -14,34 +14,22 @@
 
 namespace AudioPlayer {
 
-// -----------------------------------------------------------------------------
-// State
-// -----------------------------------------------------------------------------
-
 namespace {
 
 struct PlayerState {
     std::atomic<bool> initialized{false};
     ma_device device{};
 
-    // Source PCM (interleaved int16). Guarded by source_mutex for swaps;
-    // the audio callback only reads the buffer pointer + frame count under
-    // the same mutex, so swap-while-playing is safe.
     std::mutex source_mutex;
     std::vector<int16_t> pcm;
     int sample_rate = 0;
     int channels = 0;
     std::string display_name;
 
-    // Pre-computed waveform envelope (low/high peaks per slot, normalized
-    // to [-1,1]). Built once at load time and used by the UI to draw the
-    // visualization without touching the PCM buffer on every frame.
     static constexpr int kWaveformSlots = 1024;
-    std::vector<float> wf_low;   // size kWaveformSlots
-    std::vector<float> wf_high;  // size kWaveformSlots
+    std::vector<float> wf_low;
+    std::vector<float> wf_high;
 
-    // Playback state. cursor_frames is read+written from the audio callback
-    // and read by the UI thread, so it's atomic.
     std::atomic<uint64_t> cursor_frames{0};
     std::atomic<bool> playing{false};
     std::atomic<bool> loop{false};
@@ -53,17 +41,12 @@ PlayerState& state() {
     return s;
 }
 
-// -----------------------------------------------------------------------------
-// Audio callback
-// -----------------------------------------------------------------------------
-
 void audio_data_callback(ma_device* dev, void* output, const void* input, ma_uint32 frame_count) {
     (void)input;
     auto& S = state();
     int16_t* out = static_cast<int16_t*>(output);
     int channels = (int)dev->playback.channels;
 
-    // Silence by default.
     std::memset(out, 0, sizeof(int16_t) * frame_count * channels);
 
     if (!S.playing.load(std::memory_order_relaxed)) return;
@@ -90,8 +73,6 @@ void audio_data_callback(ma_device* dev, void* output, const void* input, ma_uin
         const int16_t* src = &S.pcm[(size_t)(cursor * (uint64_t)src_ch)];
         int16_t* dst = &out[(size_t)i * (size_t)channels];
 
-        // Channel layout — the source might be mono and the device stereo.
-        // Mix accordingly.
         if (src_ch == channels) {
             for (int c = 0; c < channels; ++c) {
                 int v = (int)((float)src[c] * gain);
@@ -105,14 +86,14 @@ void audio_data_callback(ma_device* dev, void* output, const void* input, ma_uin
             if (v < -32768) v = -32768;
             for (int c = 0; c < channels; ++c) dst[c] = (int16_t)v;
         } else if (src_ch >= 2 && channels == 1) {
-            // Downmix to mono.
+
             int v = ((int)src[0] + (int)src[1]) / 2;
             v = (int)((float)v * gain);
             if (v >  32767) v =  32767;
             if (v < -32768) v = -32768;
             dst[0] = (int16_t)v;
         } else {
-            // Channel-count mismatch: copy what we can, zero the rest.
+
             const int ncopy = std::min(src_ch, channels);
             for (int c = 0; c < ncopy; ++c) {
                 int v = (int)((float)src[c] * gain);
@@ -127,10 +108,6 @@ void audio_data_callback(ma_device* dev, void* output, const void* input, ma_uin
     S.cursor_frames.store(cursor, std::memory_order_relaxed);
 }
 
-// -----------------------------------------------------------------------------
-// PCM WAV parsing (the simple case that doesn't need FFmpeg)
-// -----------------------------------------------------------------------------
-
 uint32_t rd_u32_le(const uint8_t* p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
@@ -138,14 +115,12 @@ uint16_t rd_u16_le(const uint8_t* p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
-// Returns true if the buffer is a vanilla PCM WAV (format == 1 or 3).
-// Fills `pcm` with int16 samples, plus rate/channels.
 bool decode_pcm_wav(const std::vector<uint8_t>& buf,
                     std::vector<int16_t>& pcm_out,
                     int& sample_rate,
                     int& channels) {
     if (buf.size() < 44) return false;
-    // Locate RIFF/WAVE — buffer may have an "xma\0" prefix.
+
     size_t base = 0;
     if (buf.size() >= 4 && buf[0] == 'x' && buf[1] == 'm' && buf[2] == 'a' && buf[3] == 0) {
         base = 4;
@@ -186,7 +161,7 @@ bool decode_pcm_wav(const std::vector<uint8_t>& buf,
 
     if (!data_ptr || data_size == 0) return false;
     if (rate <= 0 || ch <= 0) return false;
-    // 1 = PCM, 3 = IEEE float. XMA2 is 0x166 — handled by FFmpeg path elsewhere.
+
     if (format != 1 && format != 3) return false;
 
     sample_rate = rate;
@@ -199,7 +174,7 @@ bool decode_pcm_wav(const std::vector<uint8_t>& buf,
         return true;
     }
     if (format == 1 && bits == 8) {
-        const size_t n_samples = data_size; // u8
+        const size_t n_samples = data_size;
         pcm_out.resize(n_samples);
         for (size_t i = 0; i < n_samples; ++i) {
             int v = (int)data_ptr[i] - 128;
@@ -240,11 +215,7 @@ bool decode_pcm_wav(const std::vector<uint8_t>& buf,
     return false;
 }
 
-} // anonymous namespace
-
-// -----------------------------------------------------------------------------
-// Public API
-// -----------------------------------------------------------------------------
+}
 
 bool ensure_initialized() {
     auto& S = state();
@@ -269,21 +240,12 @@ bool ensure_initialized() {
 
 void shutdown() {
     auto& S = state();
-    // Atomic exchange so concurrent / repeated shutdown calls are safe —
-    // only the first caller actually tears the device down. The static
-    // PlayerState's destructor at process exit also lands here; making
-    // this idempotent avoids ma_device_uninit() running twice on the
-    // same handle (which trips a CRT debug assert in some miniaudio
-    // builds).
+
     bool was = S.initialized.exchange(false);
     if (!was) return;
 
     S.playing.store(false);
 
-    // Stop first so the audio thread drains naturally, then uninit. Skip
-    // the source mutex — no other threads should be running by now and
-    // taking it during static-destruction risks a deadlock if the mutex
-    // itself is being torn down.
     try {
         ma_device_stop(&S.device);
         ma_device_uninit(&S.device);
@@ -308,11 +270,8 @@ bool load_wav_bytes(const std::vector<uint8_t>& bytes,
     std::vector<int16_t> pcm;
     int rate = 0, ch = 0;
 
-    // Try plain PCM first — many extracted WAVs are already PCM after a
-    // previous towav run.
     if (!decode_pcm_wav(bytes, pcm, rate, ch)) {
-        // Fall back to the XMA2 path. This is a no-op stub when FFmpeg
-        // wasn't built in — load fails with a clear error message.
+
         std::string xma_err;
         if (!XmaDecoder::decode_xma_to_pcm(bytes, pcm, rate, ch, &xma_err)) {
             if (err_out) {
@@ -323,9 +282,6 @@ bool load_wav_bytes(const std::vector<uint8_t>& bytes,
         }
     }
 
-    // Compute waveform envelope once. Iterate the source PCM in fixed
-    // slots and record the min/max sample seen — the UI uses these to
-    // draw a static peak meter without re-scanning the buffer per frame.
     std::vector<float> wf_low(PlayerState::kWaveformSlots, 0.0f);
     std::vector<float> wf_high(PlayerState::kWaveformSlots, 0.0f);
     if (!pcm.empty() && ch > 0) {
@@ -338,7 +294,7 @@ bool load_wav_bytes(const std::vector<uint8_t>& bytes,
                 if (s1 > total_frames) s1 = total_frames;
                 int16_t lo = 0, hi = 0;
                 for (size_t f = s0; f < s1; ++f) {
-                    // Mix down to mono for the envelope.
+
                     int sum = 0;
                     for (int c = 0; c < ch; ++c) sum += pcm[f * (size_t)ch + (size_t)c];
                     int v = sum / ch;
@@ -364,9 +320,6 @@ bool load_wav_bytes(const std::vector<uint8_t>& bytes,
     S.cursor_frames.store(0);
     S.playing.store(false);
 
-    // Reconfigure the device for the source's sample rate. miniaudio
-    // resampling is internal — for sample-accurate playback we restart
-    // the device matching the source rate.
     if ((int)S.device.sampleRate != rate) {
         ma_device_uninit(&S.device);
         ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
@@ -401,8 +354,6 @@ bool has_source() {
     return !S.pcm.empty() && S.sample_rate > 0 && S.channels > 0;
 }
 
-// If the playhead has reached the end of the source, rewind to 0 so
-// pressing play again restarts the clip rather than no-op'ing.
 static void rewind_if_finished() {
     auto& S = state();
     std::lock_guard<std::mutex> lk(S.source_mutex);
@@ -505,4 +456,4 @@ int get_waveform_peaks(float* low_out, float* high_out, int max_slots) {
     return n;
 }
 
-} // namespace AudioPlayer
+}

@@ -27,9 +27,6 @@ class BNKReader {
 public:
     explicit BNKReader(const std::string& path);
 
-    // Memory-backed constructor: takes ownership of `bytes` and parses the
-    // BNK without ever touching disk. Useful for tests / when the caller
-    // already has the bytes; ISO-streaming uses a separate path below.
     explicit BNKReader(std::vector<uint8_t> bytes) {
         _mem = std::move(bytes);
         _mode = Mode::Memory;
@@ -76,10 +73,6 @@ public:
         }
     }
 
-    // In-memory extraction: returns the decompressed bytes of one entry.
-    // Used by the file-tree builder so it can enumerate nested BNKs
-    // without a temp-disk round-trip — feed the bytes directly into a
-    // BNKReader(std::vector<uint8_t>) constructor.
     std::vector<uint8_t> extract_index_bytes(int index) {
         if (index < 0 || index >= (int)file_entries.size())
             throw std::runtime_error("extract_index_bytes: index out of range");
@@ -94,23 +87,18 @@ public:
     ~BNKReader() { close(); }
 
 private:
-    // BNKReader has three back-ends. All reads go through seek_to /
-    // read_exact below which dispatch on _mode.
+
     enum class Mode { Disk, Memory, IsoStream };
     Mode _mode = Mode::Disk;
 
-    // Disk-backed
     std::ifstream _fh;
 
-    // Memory-backed (Mode::Memory): bytes live in _mem.
     std::vector<uint8_t> _mem;
 
-    // ISO-streamed (Mode::IsoStream): seek/read translate to random-access
-    // calls into the mounted disc image; nothing loaded into RAM upfront.
     std::string _iso_vpath;
 
     uint64_t _pos = 0;
-    bool _use_mem = false;   // legacy alias, kept until we audit removals
+    bool _use_mem = false;
 
     uint64_t _size = 0;
     uint32_t base_offset = 16;
@@ -136,9 +124,7 @@ private:
         }
     }
 
-    void read_exact(void* dst, size_t n);  // defined out-of-line because it
-                                           // calls into IsoMount when in
-                                           // IsoStream mode.
+    void read_exact(void* dst, size_t n);
 
     uint32_t read_u32_be() {
         uint8_t b[4]; read_exact(b,4); return be_u32(b);
@@ -357,10 +343,6 @@ private:
         file_entries.swap(entries);
     }
 
-    // In-memory analogue of extract_entry_to — same logic, but appends
-    // decompressed bytes to a returned vector instead of an ofstream.
-    // Used by the file-tree builder so nested BNKs can be enumerated
-    // without extracting them to a temp file first.
     std::vector<uint8_t> extract_entry_bytes_impl(const FileEntry& e) {
         std::vector<uint8_t> out;
         seek_to(e.offset);
@@ -374,7 +356,7 @@ private:
         std::vector<uint8_t> comp_blob(e.compressed_size);
         read_exact(comp_blob.data(), comp_blob.size());
 
-        const size_t CHUNK_SIZE = 0x8000;  // 32KB
+        const size_t CHUNK_SIZE = 0x8000;
 
         for (size_t i = 0; i < e.decompressed_chunk_sizes.size(); ++i) {
             uint32_t out_len = e.decompressed_chunk_sizes[i];
@@ -428,7 +410,7 @@ private:
         std::vector<uint8_t> comp_blob(e.compressed_size);
         read_exact(comp_blob.data(), comp_blob.size());
 
-        const size_t CHUNK_SIZE = 0x8000;  // 32KB
+        const size_t CHUNK_SIZE = 0x8000;
 
         for (size_t i = 0; i < e.decompressed_chunk_sizes.size(); ++i) {
             uint32_t out_len = e.decompressed_chunk_sizes[i];
@@ -472,7 +454,7 @@ private:
                         break;
                     }
                 } catch (...) {
-                    // try next wbits value
+
                 }
             }
 
@@ -511,20 +493,12 @@ inline void BNKReader::read_exact(void* dst, size_t n) {
     }
 }
 
-// Forward declaration of the lazy-nested materializer (defined in
-// BNKCore.cpp). Lets the BNKReader path constructor turn a registered-
-// but-not-yet-extracted nested-BNK temp path into a real file before
-// trying to open it. Safe no-op when the path isn't registered.
 namespace LazyNested { bool materialize(const std::string& temp_path); }
 
-// Disk-path constructor — handles both real disk paths AND iso://...
-// virtual paths. For ISO paths we read the file out of the mounted image
-// into a vector and route through the memory-backed parsing path.
 inline BNKReader::BNKReader(const std::string& path) {
     LazyNested::materialize(path);
     if (ISO::IsoMount::is_iso_path(path)) {
-        // Streaming mode — keep the virtual path and ask IsoMount to do
-        // random-access reads on demand. No big up-front buffer.
+
         std::string vpath = ISO::IsoMount::strip_iso_prefix(path);
         const ISO::MountedFile* mf = ISO::IsoMount::instance().find(vpath);
         if (!mf) throw std::runtime_error("ISO entry not found: " + vpath);
@@ -564,4 +538,4 @@ inline BNKReader::BNKReader(const std::string& path) {
     parse_tables();
 }
 
-#endif // BNKREADER_CPP_INCLUDED
+#endif

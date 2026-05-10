@@ -8,9 +8,6 @@
 #include <unordered_map>
 #include <algorithm>
 
-// Walk a bare-chain mip layout (no top-level header): just (12 u32 + body)
-// records concatenated. Produced by some extraction tools and the raw mip
-// payloads from BNK files when stripped of their wrapper.
 static bool parse_bare_chain(const std::vector<unsigned char>& d, TexInfo& out) {
     size_t off = 0;
     while (off + 48 <= d.size()) {
@@ -25,7 +22,7 @@ static bool parse_bare_chain(const std::vector<unsigned char>& d, TexInfo& out) 
               rd(md.Unknown_3) && rd(md.Unknown_4) && rd(md.Unknown_5) &&
               rd(md.Unknown_6) && rd(md.Unknown_7) && rd(md.Unknown_8) &&
               rd(md.Unknown_9) && rd(md.Unknown_10) && rd(md.Unknown_11))) break;
-        // Sanity: DataOffset must be 48, CompFlag must be in [0,24]
+
         if (md.DataOffset != 48 || md.CompFlag > 24) break;
         if (off + 48 + md.DataSize > d.size() + 32) break;
 
@@ -34,7 +31,7 @@ static bool parse_bare_chain(const std::vector<unsigned char>& d, TexInfo& out) 
             md.MipDataOffset = off + 48;
             md.MipDataSizeParsed = std::min<size_t>(md.DataSize, d.size() - (off + 48));
         } else {
-            // Compressed body starts with u16 mw, u16 mh, then 440-byte tables, then payload
+
             if (off + 48 + 4 > d.size()) break;
             uint16_t w16 = 0, h16 = 0;
             size_t whp = off + 48;
@@ -47,11 +44,8 @@ static bool parse_bare_chain(const std::vector<unsigned char>& d, TexInfo& out) 
             md.MipDataOffset = off + 48 + header_bytes;
             md.MipDataSizeParsed = md.DataSize - header_bytes;
         }
-        // Detect a SECOND sub-block (BC5 X+Y, or BC3 color+alpha): u3
-        // looks like a CompFlag, u4 == 48 + DataSize (= immediately after
-        // the X / color body), u5 has a plausible byte size. If so, the
-        // next mip starts after BOTH bodies, not just one.
-        size_t advance = 48 + md.DataSize;  // default: just first body
+
+        size_t advance = 48 + md.DataSize;
         bool dual = false;
         if (md.Unknown_3 <= 24 &&
             md.Unknown_4 == 48 + md.DataSize &&
@@ -62,49 +56,26 @@ static bool parse_bare_chain(const std::vector<unsigned char>& d, TexInfo& out) 
         }
 
         out.Mips.push_back(md);
-        // Use the first mip's declared (mw, mh) for the texture dimensions
+
         if (out.TextureWidth == 0 && md.HasWH) {
             out.TextureWidth = md.MipWidth;
             out.TextureHeight = md.MipHeight;
         }
-        // Distinguish BC3 (color+alpha) from BC5 (X+Y) on the first dual
-        // sub-block we see. Both layouts look identical at the header
-        // level — two bodies stacked inside one record — but their
-        // CompFlag distribution differs:
-        //   - BC3 stores its colour half via the Lionhead BC1 codec
-        //     (CompFlag 1 or 11) and its alpha half separately, OR raw
-        //     (CompFlag 7) on both halves for the smallest mips.
-        //   - BC5 stores both X and Y via the variant_2_3_4 codec
-        //     (CompFlag 2/3/4) for big mips, falling through to raw
-        //     (CompFlag 7) on the smallest.
-        // Before this split, every dual-sub-block bare-chain texture
-        // defaulted to BC5 (PixelFormat 40) regardless of the codec
-        // it actually used — so a split-stored BC3 colour map ended up
-        // in the BC5 X/Y reconstruction path and rendered as a
-        // false-normal-map blob with shifted-block artifacts. Reading
-        // the first mip's CompFlag to pick the right family is enough
-        // to route BC3 splits through the colour-plus-alpha decoder
-        // they need.
+
         if (dual && out.PixelFormat == 0) {
             const uint32_t cf = md.CompFlag;
             if (cf == 1 || cf == 11) {
-                out.PixelFormat = 39;   // BC3 (Lionhead BC1 colour codec)
+                out.PixelFormat = 39;
             } else if (cf == 2 || cf == 3 || cf == 4) {
-                out.PixelFormat = 40;   // BC5 (variant_2_3_4 X+Y)
+                out.PixelFormat = 40;
             } else {
-                // CompFlag 7 (raw) is ambiguous — both BC3 and BC5
-                // can land here for the smallest mip in a chain. Most
-                // bare-chain dual files in our corpus are normal maps,
-                // so default to BC5; the user can override via the
-                // explicit-format dropdown if a specific texture turns
-                // out to be BC3.
+
                 out.PixelFormat = 40;
             }
         }
         off += advance;
     }
-    // Bare chain has no PixelFormat field; default to BC1 (35) — most
-    // bare-chain textures we've seen are BC1 or BC1-style (comp=11).
+
     if (out.PixelFormat == 0) out.PixelFormat = 35;
     return !out.Mips.empty();
 }
@@ -112,9 +83,7 @@ static bool parse_bare_chain(const std::vector<unsigned char>& d, TexInfo& out) 
 bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
     out = TexInfo{};
     if (d.size() < 32) return false;
-    // Heuristic: if the first u32 is a small number (0..24, looks like a
-    // CompFlag) AND the second u32 is exactly 48 (DataOffset), this is a
-    // bare-chain file with no top-level header.
+
     {
         uint32_t a = 0, b = 0;
         size_t p = 0;
@@ -349,8 +318,7 @@ bool build_tex_buffer_for_name(const std::string &tex_name, std::vector<unsigned
 
 bool build_gui_tex_buffer_for_name(const std::string &tex_name, std::vector<unsigned char> &out) {
     std::vector<std::string> all_headers, all_bodies;
-    // Search the union of top-level + nested BNKs (textures may live
-    // inside a region's nested archive).
+
     std::vector<std::string> all_paths;
     all_paths.reserve(S.bnk_paths.size() + S.nested_bnk_paths.size());
     all_paths.insert(all_paths.end(), S.bnk_paths.begin(), S.bnk_paths.end());
@@ -451,20 +419,11 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
     std::string key = std::filesystem::path(tex_name).filename().string();
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
 
-    // Search the union of top-level BNKs + the nested ones that the
-    // file-tree builder extracted. Without the nested set, textures
-    // stored inside a region's nested archive (e.g. region.bnk →
-    // region_textures.bnk) are invisible to this lookup.
     std::vector<std::string> search_paths;
     search_paths.reserve(S.bnk_paths.size() + S.nested_bnk_paths.size());
     search_paths.insert(search_paths.end(), S.bnk_paths.begin(), S.bnk_paths.end());
     search_paths.insert(search_paths.end(), S.nested_bnk_paths.begin(), S.nested_bnk_paths.end());
 
-    // If the caller passed a preferred BNK (the one the user clicked into),
-    // hoist it AND its sibling nested BNKs (same parent) to the front of the
-    // search order. This is what makes a texture clicked inside a nested
-    // region archive preview from THAT region's textures.bnk instead of
-    // globals_textures.bnk.
     if (!preferred_bnk.empty()) {
         std::string preferred_parent;
         auto it_pp = S.nested_bnk_parents.find(preferred_bnk);

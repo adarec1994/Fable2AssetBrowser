@@ -62,31 +62,21 @@ struct LuaFileUI {
     uint32_t size;
 };
 
-// Flat-list entry used by the Models / Textures tabs in the left panel.
-// Built once during build_unified_file_tree() — covers files in every
-// top-level BNK plus nested BNKs that were extracted to disk. Click-load
-// uses the same g_pending_*_load pipe the tree click does.
 struct FlatAssetEntry {
-    std::string name;       // logical filename, e.g. "props_barrel_01.tex"
-    std::string full_path;  // full asset path inside the BNK (e.g. "props/foo/bar.mdl")
-    std::string bnk_path;   // BNK (top-level or nested temp path) it lives in
-    int file_index;         // index inside that BNK's directory listing
-    uint32_t size;          // file size in bytes (0 if unknown)
-    bool from_nested;       // true if bnk_path is a nested-BNK temp path
+    std::string name;
+    std::string full_path;
+    std::string bnk_path;
+    int file_index;
+    uint32_t size;
+    bool from_nested;
 };
 
 struct State {
     std::string root_dir;
     std::vector<std::string> bnk_paths;
-    // Disk-extracted nested BNKs the file-tree builder pulled out of
-    // parent BNKs. build_any_tex_buffer_for_name() and friends search
-    // these in addition to bnk_paths so textures that live inside a
-    // nested BNK (region archives, etc.) can be opened from the preview.
+
     std::vector<std::string> nested_bnk_paths;
-    // Map from nested BNK temp path -> the parent BNK it was extracted from.
-    // Used by texture lookup to prefer sibling nested BNKs (header+body+mip0
-    // from the same parent) over generic top-level globals when the user
-    // clicks a texture inside a nested BNK.
+
     std::map<std::string, std::string> nested_bnk_parents;
     std::vector<std::string> adb_paths;
     std::vector<LuaFileUI> lua_files;
@@ -102,55 +92,27 @@ struct State {
     int selected_file_index = -1;
     bool hide_tooltips = false;
 
-    // Flat caches for the Models / Textures tabs in the left panel.
-    // Populated by build_unified_file_tree() — one pass over every BNK
-    // (top-level + nested) collecting .mdl / .tex entries respectively.
-    // Filter strings live next to them so the UI keeps the input
-    // value across tab switches.
     std::vector<FlatAssetEntry> all_mdl_files;
     std::vector<FlatAssetEntry> all_tex_files;
     std::vector<FlatAssetEntry> all_wav_files;
-    // Per-character animation config files (.anim). Each .anim
-    // contains a hash → clip-name table that, once parsed, lets us
-    // override the global TOC's id_HHHHHHHH names with friendly
-    // strings. Indexed at file-tree-build time alongside the other
-    // flat-list extensions.
+
     std::vector<FlatAssetEntry> all_anim_files;
     std::string mdl_filter;
     std::string tex_filter;
     std::string wav_filter;
     std::string anim_filter_files;
 
-    // ---- User-facing settings (persisted to config.ini) ----
-    // show_paths controls whether the tree/file-table tooltips show the
-    // full asset path on hover. Mirrors the inverse of hide_tooltips —
-    // we keep both because hide_tooltips is the legacy flag that older
-    // code paths still check.
     bool show_paths = true;
-    // Developer mode — when off (the default) the tree tooltips and
-    // any in-panel info overlays show only the filename. When on, they
-    // also include file size, BNK source, decoder/format details etc.
-    // Toggled from the Settings dropdown.
+
     bool dev_mode = false;
-    // Base font size in pixels. The actual ImGui atlas only rebuilds
-    // when font_size_dirty flips true (handled before NewFrame in
-    // main.cpp). pending_font_size lets the slider preview without
-    // hammering the atlas every frame mid-drag.
+
     float font_size           = 17.0f;
     float pending_font_size   = 17.0f;
     bool  font_size_dirty     = false;
     bool  show_settings       = false;
-    // Texture / asset export root. Default initialised to
-    // <exe_dir>/extracted on first startup; user-changeable via the
-    // Settings dropdown. Each export writes to
-    //   `${export_dir}/${asset_relative_path}.${ext}`
-    // creating any intermediate dirs as it goes. Persisted to
-    // config.ini ("export_dir" key).
+
     std::string export_dir;
-    // Texture format used for textures embedded in MDL exports
-    // (GLB / FBX). One of "DDS", "PNG", "JPG". Default DDS — closest
-    // to a 1:1 of the source mip 0 in a format every DCC reads.
-    // Persisted to config.ini (key "mdl_texture_export_format").
+
     std::string mdl_texture_export_format = "DDS";
     std::atomic<bool> cancel_requested{false};
     std::atomic<bool> exiting{false};
@@ -199,25 +161,10 @@ struct State {
     int pending_texture_w = 0;
     int pending_texture_h = 0;
 
-    // ---- Texture mip browsing ----
-    // Cache of the .tex blob currently displayed in the texture preview,
-    // plus the user-chosen mip index. The mip selector overlay re-decodes
-    // out of `texture_blob` when the index changes, avoiding a re-extract
-    // from BNK. `pending_texture_mip_change` signals UI_Main to do the
-    // re-decode + SRV swap; the worker thread that originally loaded the
-    // texture also primes these fields so the dropdown shows up at first
-    // open. tex_info already lives above (`bool tex_info_ok` / `TexInfo
-    // tex_info`) and gets populated alongside `texture_blob`.
     std::vector<unsigned char> texture_blob;
     int  texture_mip_index = 0;
     std::atomic<bool> pending_texture_mip_change{false};
 
-    // Per-channel display toggles for the texture preview. When a flag
-    // is false, that channel is masked out as the RGBA buffer is
-    // uploaded to the GPU — R/G/B get zeroed, A is forced to 255 so the
-    // image still shows opaque. See apply_tex_channel_mask in UI_Main.
-    // Toggling a checkbox flips the flag AND raises
-    // pending_texture_mip_change so the mask is re-applied.
     bool tex_show_r = true;
     bool tex_show_g = true;
     bool tex_show_b = true;
@@ -226,24 +173,15 @@ struct State {
     bool mdl_info_ok = false;
     MDLInfo mdl_info;
 
-    bool show_model_preview = false;        // trigger: set true to open the model preview window
-    bool model_preview_open = false;          // window visibility (kept in sync with the &open close button)
-    bool model_materials_open = false;        // separate Materials window, opens automatically with model
+    bool show_model_preview = false;
+    bool model_preview_open = false;
+    bool model_materials_open = false;
     std::atomic<bool> pending_preview_build{false};
     std::vector<MDLMeshGeom> mdl_meshes;
 
-    // ---- Bone editing (skeleton overlay + R-rotate keybind) ----
-    // Per-bone rotation deltas applied on top of the rest pose.
-    // Stored as quaternions xyzw (so length is BoneCount*4). Empty when
-    // no model is loaded; resized + zeroed (identity quat = (0,0,0,1))
-    // by MP_Build whenever a new model is built.
-    //
-    // Both ModelPreview's skinning shader and RenderPanel's skeleton
-    // overlay consume these — so editing one bone updates skeleton + mesh
-    // simultaneously.
     std::vector<float> bone_rot_deltas;
-    int  selected_bone     = -1;   // -1 when nothing is picked
-    bool bone_rotate_mode  = false; // true while the user is in R-rotate
+    int  selected_bone     = -1;
+    bool bone_rotate_mode  = false;
     float cam_yaw = 0.0f;
     float cam_pitch = 0.2f;
     float cam_dist = 3.0f;
@@ -257,23 +195,9 @@ struct State {
     std::string lua_preview_title;
     int lua_preview_selected = -1;
     std::atomic<bool> lua_preview_loading{false};
-    // Set to true when the user clicks a Lua script in the BNK List
-    // drill-in view. The render panel checks this and renders the
-    // decompiled Lua source full-bleed in place of the model / texture
-    // / placeholder. Cleared automatically when the user clicks a
-    // model or texture (by the relevant load path setting its own
-    // state); the in-panel close button also clears it explicitly.
+
     bool show_lua_render = false;
 
-    // ---- Animations -----------------------------------------------------
-    // Single global TOC parsed at root-load time from
-    //   <root>/data/animation/fable2_anims.animation_toc
-    // (or the equivalent virtual path inside a mounted ISO). Each clip
-    // points into the .animation_data blob via byte offset/length —
-    // we don't read the data file itself yet (Phase C).
-    //
-    // anim_filter is the search box value used by the UI panels. Lives
-    // here so it persists across tab switches like the other filters.
     std::vector<Anim::AnimClip> anim_clips;
     std::string                 anim_filter;
     int                         anim_selected_clip = -1;

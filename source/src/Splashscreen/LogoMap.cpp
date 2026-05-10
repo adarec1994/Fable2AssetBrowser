@@ -48,4 +48,4 @@ const std::vector<std::pair<float, float>>& get_letter_positions() {
     return positions;
 }
 
-} // namespace Splash
+}

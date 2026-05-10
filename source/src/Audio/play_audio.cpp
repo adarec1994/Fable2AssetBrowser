@@ -8,8 +8,6 @@
 
 namespace {
 
-// Load an RCDATA resource into a vector. Same pattern the splash and
-// icon-font modules use.
 bool load_rcdata(int resource_id, std::vector<unsigned char>& out) {
     HMODULE mod = GetModuleHandleA(nullptr);
     HRSRC h = FindResourceA(mod, MAKEINTRESOURCEA(resource_id), (LPCSTR)RT_RCDATA);
@@ -24,7 +22,7 @@ bool load_rcdata(int resource_id, std::vector<unsigned char>& out) {
     return true;
 }
 
-} // namespace
+}
 
 bool BackgroundAudio::start_from_resource(int resource_id) {
     stop();
@@ -35,10 +33,6 @@ bool BackgroundAudio::start_from_resource(int resource_id) {
 
     running = true;
 
-    // PlaySound holds onto the buffer for the duration of playback when
-    // SND_ASYNC|SND_MEMORY is used; our `wav_bytes` member is kept alive
-    // for the lifetime of the singleton (or until stop() clears it), so
-    // the pointer stays valid.
     if (!muted.load()) {
         PlaySoundA(reinterpret_cast<LPCSTR>(wav_bytes.data()), nullptr,
                    SND_MEMORY | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
@@ -60,7 +54,7 @@ void BackgroundAudio::toggle_mute() {
 void BackgroundAudio::set_muted(bool m) {
     bool was = muted.exchange(m);
     if (m && !was) {
-        // Mute: stop playback but keep the buffer so we can resume.
+
         PlaySoundA(nullptr, nullptr, 0);
     } else if (!m && was && running.load() && !wav_bytes.empty()) {
         PlaySoundA(reinterpret_cast<LPCSTR>(wav_bytes.data()), nullptr,
@@ -68,4 +62,4 @@ void BackgroundAudio::set_muted(bool m) {
     }
 }
 
-#endif // _WIN32
+#endif

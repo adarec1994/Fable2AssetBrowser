@@ -1,4 +1,4 @@
-// mdl_converter.cpp
+
 #include "mdl_converter.h"
 #include "ModelParser.h"
 #include "MdlTexExport.h"
@@ -15,11 +15,6 @@
 #include <sstream>
 #include <cmath>
 
-// decode_tex_to_rgba lives in ModelPreview.cpp at file scope. We
-// declare it here at the same scope (before opening our anonymous
-// namespace) so the linker resolves the call across translation
-// units. Putting the declaration inside the anon namespace below
-// would bind it to a local symbol the linker can never satisfy.
 extern bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                                std::vector<uint8_t>& rgba,
                                int& out_w, int& out_h, bool* out_has_alpha,
@@ -314,20 +309,8 @@ static void swap_bc5_endian(uint8_t* data, size_t size) {
     }
 }
 
-// decode_tex_to_rgba is declared at file scope above the anonymous
-// namespace; we only call it from here. Routing through the unified
-// RGBA decoder gives us mip 0 + every CompFlag for free — the inline
-// decoder this replaced filtered to comp=7 only and silently dropped
-// the largest mip on every Lionhead-codec texture in the corpus.
 static bool decode_texture_to_png(const std::vector<unsigned char>& tex_buf, std::vector<uint8_t>& png_out) {
-    // Use the unified RGBA decoder so we get mip 0 every time —
-    // the previous inline decode here filtered to `CompFlag == 7`
-    // (raw mips only), which silently skipped the largest mip on
-    // every texture that uses the Lionhead BC1 codec (comp=1) and
-    // landed on a far-smaller comp=7 fallback. That's why exported
-    // GLB / FBX textures looked low-resolution.
-    //
-    // mip_index = -1 picks the largest mip across all CompFlags.
+
     std::vector<uint8_t> rgba;
     int w = 0, h = 0;
     bool has_alpha = false;
@@ -724,11 +707,6 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
         if (mesh_count > 0) meshes << ",";
         meshes << "{\"name\":\"" << json_escape(mesh_name) << "\",\"primitives\":[";
 
-        // Per-mesh material — wires up every map the geom carries
-        // (diffuse / normal / specular / tint). Each map runs through
-        // the unified MdlTexExport encoder so the user's chosen
-        // texture format (DDS / PNG / JPG, set in Settings) drives
-        // every embedded blob in this GLB.
         bool has_alpha = false;
         int this_mat_idx = -1;
         std::string material_name = "material_" + std::to_string(gi);
@@ -736,22 +714,14 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
             material_name = std::filesystem::path(geom.diffuse_tex_name).stem().string();
         }
 
-        // Resolve the active texture format once per GLB build.
         const MdlTexExport::Format tex_fmt =
             MdlTexExport::format_from_string(S.mdl_texture_export_format);
 
-        // Prefer the user's currently-selected (nested) BNK family so
-        // a model exported from a region archive uses that region's
-        // textures instead of generic globals.
         const std::string preferred_for_tex =
             (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty())
                 ? S.selected_nested_temp_path
                 : S.selected_bnk;
 
-        // Helper that embeds one texture, returning the glTF
-        // texture index (or -1 if the source resolve / encode
-        // failed). Each successful embed adds one bufferView, one
-        // image, and one texture entry to the GLB tables.
         auto embed_one_tex = [&](const std::string& tex_name) -> int {
             if (tex_name.empty()) return -1;
             std::vector<unsigned char> tex_buf;
@@ -776,9 +746,6 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
             return tex_count++;
         };
 
-        // BC3 source means the diffuse carries alpha — flag the
-        // material as BLEND so transparent areas render correctly
-        // in glTF viewers.
         if (!geom.diffuse_tex_name.empty()) {
             std::vector<unsigned char> dtex;
             if (build_any_tex_buffer_for_name(geom.diffuse_tex_name, dtex,
@@ -800,16 +767,6 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
         materials << ",\"doubleSided\":true";
         if (has_alpha) materials << ",\"alphaMode\":\"BLEND\"";
 
-        // PBR core: baseColor = diffuse, metallic/roughness held
-        // constant since Fable 2 doesn't author MR maps. We feed the
-        // specular map into pbrSpecularGlossiness's specular slot
-        // when the glTF KHR_materials_specular extension is
-        // available, but the default sampler doesn't require the
-        // extension — we just leave that channel for runtime
-        // use. Normal map goes in `normalTexture`. Tint has no
-        // standard glTF channel; we emit it as `emissiveTexture`
-        // so it's at least retained on round-trip and DCC tools
-        // surface it in their material editor.
         materials << ",\"pbrMetallicRoughness\":{";
         if (diff_tex >= 0) {
             materials << "\"baseColorTexture\":{\"index\":" << diff_tex << "},";
@@ -819,12 +776,7 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
             materials << ",\"normalTexture\":{\"index\":" << normal_tex << "}";
         }
         if (spec_tex >= 0) {
-            // glTF 2.0 doesn't have a standalone specular slot in
-            // the metallic-roughness model; the closest reusable
-            // channel is occlusionTexture. We park the specular map
-            // there so DCC importers surface it (Blender's material
-            // editor reads it as "Ambient Occlusion") rather than
-            // dropping it entirely.
+
             materials << ",\"occlusionTexture\":{\"index\":" << spec_tex << "}";
         }
         if (tint_tex >= 0) {
@@ -950,9 +902,6 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
     return true;
 }
 
-// Public wrapper around the file-static decode_texture_to_png so the
-// FBX exporter can re-use the BC1/BC3/Lionhead decode + PNG-encode
-// path without duplicating the code. Same input/output contract.
 bool mdl_export_decode_texture_to_png(
     const std::vector<unsigned char>& tex_buf,
     std::vector<uint8_t>& png_out)

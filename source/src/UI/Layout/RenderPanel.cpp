@@ -29,35 +29,21 @@
 
 extern ModelPreview g_mp;
 extern bool g_mp_initialized;
-extern FlyCam g_flycam;       // declared in ModelPreview.h with external linkage
+extern FlyCam g_flycam;
 
-// Defined in this TU. Lifted to file scope (out of the overlay block's
-// static-local) so the input-handling code earlier in draw_model_in_panel
-// can route picking + R-rotate based on whether the skeleton overlay is
-// currently visible.
 bool g_skel_overlay_show = false;
 
-// Materials-overlay state — driven by the Materials overlay below the
-// skeleton overlay. Spec: only ONE submesh can have either flag set at
-// a time, AND the two flags are mutually exclusive across all
-// submeshes. Stored as indices instead of booleans so the radio
-// behaviour is intrinsic. -1 = nothing selected.
 int g_highlight_mesh_idx = -1;
 int g_isolate_mesh_idx   = -1;
 
-// Texture popout — set when the user clicks a thumbnail in the
-// Materials overlay. The window stays up until the user closes it.
 #ifdef _WIN32
 ID3D11ShaderResourceView* g_tex_popout_srv = nullptr;
 #endif
 std::string g_tex_popout_name;
 bool        g_tex_popout_open    = false;
-// Index into g_mp.meshes that the popout was opened from — used by the
-// "Show UVs" overlay to find the matching MDLMeshGeom (UVs/indices) in
-// S.mdl_meshes via that mesh's source_mesh_idx.
+
 int         g_tex_popout_mesh_idx = -1;
-// Persists across popout opens so the user doesn't have to re-tick it
-// every time they click a different thumbnail.
+
 bool        g_tex_popout_show_uvs = false;
 
 namespace UI {
@@ -65,9 +51,7 @@ namespace UI {
 namespace {
 
 void draw_placeholder() {
-    // No hint text — leave the empty render panel as a flat dark
-    // background that blends into the surrounding UI when nothing is
-    // loaded. The tree itself signals where the user should click.
+
     ImVec2 region = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -77,17 +61,6 @@ void draw_placeholder() {
     ImGui::Dummy(region);
 }
 
-// Full-bleed Lua source viewer. Reads from S.lua_preview_content (the
-// decompiled string the BNK List drill-in click handler populates via
-// the worker thread that wraps `read_lua_file_content`). Bytecode
-// files (Lua 5.1, magic `\x1BLua`) are auto-decompiled inside that
-// helper; plain-text scripts pass through unchanged. So whatever
-// arrives here is human-readable source.
-//
-// Layout: dark background, a header row with the script's filename
-// and a close button (✕) on the right that flips off
-// `S.show_lua_render`, then a scrollable monospace text region with
-// the decompiled body.
 void draw_lua_in_panel() {
     ImVec2 region = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -96,14 +69,12 @@ void draw_lua_in_panel() {
                       ImVec2(origin.x + region.x, origin.y + region.y),
                       IM_COL32(18, 18, 22, 255));
 
-    // Title + close row.
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.92f, 0.70f, 1.0f));
     ImGui::TextUnformatted(S.lua_preview_title.empty()
                                ? "(no script)"
                                : S.lua_preview_title.c_str());
     ImGui::PopStyleColor();
 
-    // Close button — drag-aligned to the right end of the title row.
     {
         const float btn_w = ImGui::CalcTextSize("Close").x +
                             ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f;
@@ -115,10 +86,6 @@ void draw_lua_in_panel() {
     }
     ImGui::Separator();
 
-    // Body — scrollable, dark background, tinted text. Loading state
-    // shows a stub; failed reads from read_lua_file_content come back
-    // prefixed with "-- Error" so they render in-place as a comment
-    // block, which is fine for the user.
     ImGui::BeginChild("##lua_render_body", ImVec2(0, 0), false,
                       ImGuiWindowFlags_HorizontalScrollbar);
     if (S.lua_preview_loading) {
@@ -136,22 +103,6 @@ void draw_lua_in_panel() {
 
 #ifdef _WIN32
 
-// ---------------------------------------------------------------------------
-// Point-sampler bind for the texture preview
-// ---------------------------------------------------------------------------
-// ImGui's dx11 backend uses a single global sampler with
-// D3D11_FILTER_MIN_MAG_MIP_LINEAR. That's fine for atlas glyphs but
-// makes small game textures (e.g. a 32×32 BC3 card-back) look blurry
-// when stretched 4×. The user reported this as "tex files are blurry";
-// the source bytes are decoded correctly, the bilinear upscale was
-// the culprit.
-//
-// Fix: lazily create our own POINT-filter sampler keyed off the
-// caller's device, then use ImDrawList::AddCallback to swap to it
-// before the AddImage and let ImDrawCallback_ResetRenderState
-// re-bind the default afterwards. That gives small textures
-// pixel-accurate display while everything else (fonts, the rest of
-// the UI) keeps the linear sampler.
 namespace {
 ID3D11SamplerState*  g_tex_point_sampler = nullptr;
 ID3D11DeviceContext* g_tex_preview_ctx   = nullptr;
@@ -159,10 +110,7 @@ ID3D11DeviceContext* g_tex_preview_ctx   = nullptr;
 void ensure_point_sampler(ID3D11Device* device) {
     if (g_tex_point_sampler || !device) return;
     if (!g_tex_preview_ctx) {
-        // GetImmediateContext AddRefs — release at process teardown
-        // (the OS will reclaim if we forget). Storing it lets the
-        // draw callback bind the sampler without needing a device
-        // pointer (callbacks get no caller-supplied args).
+
         device->GetImmediateContext(&g_tex_preview_ctx);
     }
     D3D11_SAMPLER_DESC desc{};
@@ -180,7 +128,7 @@ void bind_point_sampler_cb(const ImDrawList* /*dl*/,
         g_tex_preview_ctx->PSSetSamplers(0, 1, &g_tex_point_sampler);
     }
 }
-} // anonymous
+}
 
 void draw_texture_in_panel(ID3D11Device* device) {
     ensure_point_sampler(device);
@@ -214,12 +162,6 @@ void draw_texture_in_panel(ID3D11Device* device) {
     float x0 = origin.x + (region.x - dw) * 0.5f;
     float y0 = origin.y + (region.y - dh) * 0.5f;
 
-    // Swap to the point sampler, draw, then ask ImGui to reset the
-    // render state so subsequent AddImage / AddText calls see the
-    // backend's default linear sampler again. Without the reset the
-    // rest of the panel (overlays, icons, popout images) would also
-    // render with point filtering — usually fine but a regression
-    // for content that actually wants bilinear.
     if (g_tex_point_sampler) {
         dl->AddCallback(bind_point_sampler_cb, nullptr);
     }
@@ -230,11 +172,6 @@ void draw_texture_in_panel(ID3D11Device* device) {
         dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
     }
 
-    // Right-click → "Export to" menu. The dl->AddImage above is just a
-    // draw-list line item, not an interactive ImGui item, so we lay an
-    // InvisibleButton over the image's pixel rect to give the popup
-    // something to anchor to. The export uses the *currently displayed*
-    // mip (S.texture_mip_index), per the user spec.
     {
         ImGui::SetCursorScreenPos(ImVec2(x0, y0));
         ImGui::InvisibleButton("##tex_preview_hit", ImVec2(dw, dh));
@@ -247,28 +184,13 @@ void draw_texture_in_panel(ID3D11Device* device) {
         }
     }
 
-    // (Resolution-in-top-left text removed — the mip selector overlay
-    // already shows the active mip's dimensions next to the Mip arrows.)
-
-    // Texture preview overlay — top-right of the panel. Always renders
-    // when a .tex is loaded so the channel toggles are reachable; the
-    // mip selector row only renders when there are 2+ mips.
-    //
-    // Toggling a checkbox or arrow flips pending_texture_mip_change so
-    // UI_Main re-runs decode_tex_to_rgba + apply_tex_channel_mask, then
-    // swaps the SRV. (One flag covers both mip-change and channel-mask
-    // change because the same handler does both.)
     if (S.tex_info_ok && !S.texture_blob.empty()) {
         const int total = (int)S.tex_info.Mips.size();
-        // Clamp the active index defensively — a previous load may have
-        // set it past the new file's range.
+
         if (S.texture_mip_index < 0) S.texture_mip_index = 0;
         if (S.texture_mip_index >= std::max(1, total))
             S.texture_mip_index = std::max(0, total - 1);
 
-        // Pull current mip's dimensions from the parsed TexInfo so the
-        // hint reflects what's actually being viewed (not the mip-0
-        // dimensions stored in S.texture_window_*).
         int mw = 0, mh = 0;
         if (S.texture_mip_index >= 0 && S.texture_mip_index < total) {
             const auto& mm = S.tex_info.Mips[(size_t)S.texture_mip_index];
@@ -290,7 +212,7 @@ void draw_texture_in_panel(ID3D11Device* device) {
                             | ImGuiWindowFlags_NoSavedSettings
                             | ImGuiWindowFlags_AlwaysAutoResize;
         if (ImGui::Begin("##tex_mip_selector", nullptr, fl)) {
-            // Mip row — only shown when there's more than one mip.
+
             if (total > 1) {
                 ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Mip");
                 ImGui::SameLine();
@@ -312,14 +234,10 @@ void draw_texture_in_panel(ID3D11Device* device) {
                 ImGui::SameLine();
                 ImGui::TextDisabled("(%dx%d)", mw, mh);
             } else {
-                // Single-mip texture — show the dimensions inline so the
-                // overlay isn't oddly empty above the channel toggles.
+
                 ImGui::TextDisabled("%dx%d", mw, mh);
             }
 
-            // Channel toggles. Each checkbox flips the corresponding
-            // S.tex_show_* flag and re-uses pending_texture_mip_change
-            // so UI_Main re-runs the decode + mask pipeline.
             if (ImGui::Checkbox("R", &S.tex_show_r))
                 S.pending_texture_mip_change = true;
             ImGui::SameLine();
@@ -338,10 +256,6 @@ void draw_texture_in_panel(ID3D11Device* device) {
     ImGui::Dummy(region);
 }
 
-// Convert the orbit-camera state (S.cam_yaw, S.cam_pitch, S.cam_dist)
-// into a FlyCam positioned around the model's center, looking toward
-// it. The model preview's MP_Render still consumes a FlyCam — we just
-// drive that FlyCam from orbit math instead of WASD/right-click input.
 void apply_orbit_to_flycam() {
     float r = std::max(g_mp.radius, 0.5f) * std::max(S.cam_dist, 0.1f);
     float yaw   = S.cam_yaw;
@@ -354,19 +268,14 @@ void apply_orbit_to_flycam() {
     g_flycam.pos[0] = g_mp.center[0] + r * cy * sx;
     g_flycam.pos[1] = g_mp.center[1] + r * sy;
     g_flycam.pos[2] = g_mp.center[2] + r * cy * cx;
-    // Camera looks back at the model center — the FlyCam yaw/pitch must
-    // produce a forward vector that is the negative of the offset above.
+
     g_flycam.yaw   = yaw + 3.14159265f;
     g_flycam.pitch = -pitch;
-    g_flycam.is_looking = false;          // suppress legacy mouse-look state
+    g_flycam.is_looking = false;
 }
 
-// Project every bone's joint origin into screen space, given the same
-// W * V * P chain MP_Render uses. Returns visibility flags and screen
-// positions per bone. Used both for drawing the skeleton overlay AND
-// for click-picking (so picking and rendering see the same positions).
 static void project_bones_to_screen(
-    const std::vector<float>& world_pose,        // [bone_count*16] from MP_ComputeWorldPose
+    const std::vector<float>& world_pose,
     uint32_t bone_count,
     const ImVec2& origin,
     const ImVec2& region,
@@ -420,9 +329,6 @@ static void project_bones_to_screen(
     }
 }
 
-// Draw skeleton overlay using the live pose (rest + per-bone deltas).
-// Highlights the currently-selected bone (S.selected_bone) with a
-// brighter colour and a larger marker.
 void draw_skeleton_overlay(const ImVec2& origin, const ImVec2& region) {
     if (g_mp.bone_count == 0) return;
 
@@ -442,8 +348,6 @@ void draw_skeleton_overlay(const ImVec2& origin, const ImVec2& region) {
 
     const uint32_t n = g_mp.bone_count;
 
-    // Bone segments (parent -> child). Tint segments adjacent to the
-    // selected bone so the user can trace the chain at a glance.
     for (uint32_t i = 0; i < n; ++i) {
         if (!visible[i]) continue;
         int pid = (i < g_mp.bone_parents.size()) ? g_mp.bone_parents[i] : -1;
@@ -454,7 +358,7 @@ void draw_skeleton_overlay(const ImVec2& origin, const ImVec2& region) {
                     sel ? sel_line : line_col,
                     sel ? 2.0f : 1.5f);
     }
-    // Joint markers — selected bone gets a thicker ringed dot.
+
     for (uint32_t i = 0; i < n; ++i) {
         if (!visible[i]) continue;
         if ((int)i == S.selected_bone) {
@@ -465,7 +369,6 @@ void draw_skeleton_overlay(const ImVec2& origin, const ImVec2& region) {
         }
     }
 
-    // Status line in the corner — mode + selected bone name.
     if (S.selected_bone >= 0 && S.selected_bone < (int)S.mdl_info.Bones.size()) {
         const std::string& bn = S.mdl_info.Bones[(size_t)S.selected_bone].Name;
         char buf[256];
@@ -484,9 +387,6 @@ void draw_skeleton_overlay(const ImVec2& origin, const ImVec2& region) {
     }
 }
 
-// Click-pick: find nearest projected bone within `radius_px`. Returns
-// -1 on miss. Reuses the same projection helper the renderer uses so
-// what the user sees IS what they click.
 static int pick_bone_at(const ImVec2& mouse, const ImVec2& origin,
                         const ImVec2& region, float radius_px) {
     if (g_mp.bone_count == 0) return -1;
@@ -521,33 +421,12 @@ void draw_model_in_panel(ID3D11Device* device) {
     }
     MP_Resize(device, g_mp, w, h);
 
-    // Reserve the area as an item so we can hover-test for camera input.
     ImGui::InvisibleButton("##model_render", region);
     bool hovered = ImGui::IsItemHovered();
     bool active  = ImGui::IsItemActive();
 
-    // Skeleton picking + edit are gated on the overlay being visible —
-    // the file-scope flag g_skel_overlay_show (defined at the top of
-    // this TU) is owned by the overlay block further down. Reading it
-    // here lets the input-handling block route to picking / rotate
-    // appropriately on the same frame.
     bool skel_visible = ::g_skel_overlay_show && (g_mp.bone_count > 0);
 
-    // ROTATE MODE: takes precedence over picking and orbit. Behaviour:
-    //   R           — enter rotate mode (must already have a bone picked).
-    //                  Snapshots the bone's current delta quaternion so
-    //                  RMB/ESC can revert.
-    //   mouse move  — rotates the selected bone (NO button required).
-    //                  Horizontal motion spins around bone-local Y,
-    //                  vertical motion around bone-local X. Per-frame
-    //                  delta is post-multiplied onto the bone's quaternion
-    //                  in S.bone_rot_deltas, which the skinning shader
-    //                  AND the skeleton overlay both consume.
-    //   LMB / R     — confirm and exit rotate mode (changes kept).
-    //   RMB / ESC   — cancel; restore the snapshot and exit rotate mode.
-    //
-    // Snapshot lives in this function so it survives across frames within
-    // a single rotate session and resets on the next R-press.
     static float s_rot_snapshot[4]    = {0, 0, 0, 1};
     static int   s_rot_snapshot_bone  = -1;
     static bool  s_rot_snapshot_valid = false;
@@ -575,16 +454,13 @@ void draw_model_in_panel(ID3D11Device* device) {
                           S.selected_bone < (int)g_mp.bone_count);
 
     if (rotate_active) {
-        // Apply mouse motion as a rotation delta. Hover-gated so cursor
-        // wandering off the panel doesn't perturb the bone — the mouse
-        // buttons that confirm/cancel are handled below WITHOUT the
-        // hover gate so the user can click anywhere to commit.
+
         if (hovered) {
             ImVec2 d = ImGui::GetIO().MouseDelta;
             if (d.x != 0.0f || d.y != 0.0f) {
-                const float kRotSensitivity = 0.01f;   // radians per pixel
-                float a_y = d.x * kRotSensitivity;      // around bone-local Y
-                float a_x = d.y * kRotSensitivity;      // around bone-local X
+                const float kRotSensitivity = 0.01f;
+                float a_y = d.x * kRotSensitivity;
+                float a_x = d.y * kRotSensitivity;
 
                 using namespace DirectX;
                 XMVECTOR qx = XMQuaternionRotationAxis(XMVectorSet(1, 0, 0, 0), a_x);
@@ -597,8 +473,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                     S.bone_rot_deltas[(size_t)b * 4 + 1],
                     S.bone_rot_deltas[(size_t)b * 4 + 2],
                     S.bone_rot_deltas[(size_t)b * 4 + 3]);
-                // Post-multiply: extends the existing rotation by `delta`
-                // in the bone's already-rotated local frame.
+
                 XMVECTOR nxt = XMQuaternionNormalize(XMQuaternionMultiply(cur, delta));
                 XMFLOAT4 nf;
                 XMStoreFloat4(&nf, nxt);
@@ -609,8 +484,6 @@ void draw_model_in_panel(ID3D11Device* device) {
             }
         }
 
-        // Confirm / cancel buttons are NOT hover-gated — the user might
-        // travel to a panel edge in the heat of editing.
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             cancel_rotate();
         } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -618,11 +491,6 @@ void draw_model_in_panel(ID3D11Device* device) {
         }
     }
 
-    // PICKING (skeleton visible, NOT in rotate mode): single-click on or
-    // near a projected joint selects that bone. Click on empty area
-    // clears the selection. Uses IsMouseClicked so drag-to-orbit still
-    // works — pick fires at press, then orbit kicks in if the user
-    // keeps dragging.
     if (skel_visible && !rotate_active && hovered &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         ImVec2 mp = ImGui::GetIO().MousePos;
@@ -630,20 +498,17 @@ void draw_model_in_panel(ID3D11Device* device) {
         S.selected_bone = picked;
     }
 
-    // ORBIT: original camera control, suppressed in rotate-mode.
     if (!rotate_active && active && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
         ImVec2 d = ImGui::GetIO().MouseDelta;
         const float kOrbitSensitivity = 0.008f;
         S.cam_yaw   += d.x * kOrbitSensitivity;
         S.cam_pitch += d.y * kOrbitSensitivity;
-        // Clamp pitch so we don't flip past straight-up / straight-down.
-        const float kPitchLimit = 1.5f;        // ~85°
+
+        const float kPitchLimit = 1.5f;
         if (S.cam_pitch >  kPitchLimit) S.cam_pitch =  kPitchLimit;
         if (S.cam_pitch < -kPitchLimit) S.cam_pitch = -kPitchLimit;
     }
 
-    // Wheel to zoom (multiplicative — feels more natural than additive
-    // because the perceived effect is constant in log-distance).
     if (hovered) {
         float wheel = ImGui::GetIO().MouseWheel;
         if (wheel != 0.0f) {
@@ -653,9 +518,6 @@ void draw_model_in_panel(ID3D11Device* device) {
         }
     }
 
-    // R: enter rotate-mode (saving snapshot) or confirm-and-exit. Needs
-    // skeleton visible AND a bone selected — otherwise it's a no-op so a
-    // stray R press while the panel has focus doesn't engage anything.
     if (skel_visible && hovered && ImGui::IsKeyPressed(ImGuiKey_R)) {
         if (S.selected_bone >= 0 && S.selected_bone < (int)g_mp.bone_count &&
             (size_t)S.selected_bone * 4 + 4 <= S.bone_rot_deltas.size()) {
@@ -674,10 +536,6 @@ void draw_model_in_panel(ID3D11Device* device) {
         }
     }
 
-    // Sync materials-overlay selection into per-mesh flags so MP_Render
-    // sees the latest user choice. The radio behaviour is enforced when
-    // the user toggles a checkbox below — here we just project the
-    // single global index onto every submesh.
     for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
         g_mp.meshes[i].highlight = ((int)i == ::g_highlight_mesh_idx);
         g_mp.meshes[i].isolated  = ((int)i == ::g_isolate_mesh_idx);
@@ -693,8 +551,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                      ImVec2(origin.x + region.x, origin.y + region.y));
     }
 
-    // ESC: in rotate-mode it cancels (restores the snapshot). Outside
-    // rotate-mode it closes the model as before.
     if (hovered && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         if (S.bone_rotate_mode) {
             cancel_rotate();
@@ -708,7 +564,6 @@ void draw_model_in_panel(ID3D11Device* device) {
         }
     }
 
-    // Compact controls hint, top-left corner.
     dl->AddRectFilled(ImVec2(origin.x + 6, origin.y + 6),
                       ImVec2(origin.x + 196, origin.y + 70),
                       IM_COL32(20, 22, 28, 200), 4.0f);
@@ -719,41 +574,21 @@ void draw_model_in_panel(ID3D11Device* device) {
     ImGui::SetCursorScreenPos(ImVec2(origin.x + 14, origin.y + 46));
     ImGui::TextDisabled("Wheel  zoom  /  ESC  close");
 
-    // Track where the next overlay should be placed vertically — starts
-    // just below the Controls box, advances past the skeleton overlay if
-    // that one renders. Used by the Materials overlay below.
     float next_overlay_y = origin.y + 76.0f;
 
-    // Skeleton overlay — only when the loaded MDL carries bone data. Sits
-    // directly below the Controls hint, same width. Faded to ~30% alpha
-    // when not hovered so it doesn't fight with the model behind it; full
-    // alpha while the user is mousing over it.
-    //
-    // Gate on g_mp.has_model + g_mp.bone_count rather than S.mdl_info_ok.
-    // S.mdl_info_ok flips to true on the worker thread BEFORE MP_Build
-    // finishes populating the bone cache; gating on g_mp.has_model
-    // (which is now flipped at the very end of MP_Build) guarantees
-    // anything we read from g_mp downstream is consistent.
     bool has_skeleton = g_mp.has_model && g_mp.bone_count > 0;
     if (has_skeleton) {
-        // Visible state lives in the file-scope g_skel_overlay_show so
-        // the input handlers above can read it without an extra round
-        // trip. Default off so a fresh load doesn't slap rigging on top
-        // of the user's first look at the mesh.
-        // Smoothed alpha — eased toward 1.0 while hovered, 0.3 otherwise.
-        // Keeps the fade tactile without strobing on edge crossings.
+
         static float s_skel_alpha    = 0.30f;
 
         const float kIdleAlpha   = 0.30f;
         const float kHoverAlpha  = 1.00f;
 
         const ImVec2 win_pos (origin.x + 6, origin.y + 76);
-        const ImVec2 win_size(190, 0); // height auto-sized to contents
+        const ImVec2 win_size(190, 0);
         ImGui::SetNextWindowPos(win_pos);
         ImGui::SetNextWindowSize(win_size, ImGuiCond_Always);
-        // Match the Controls box's filled-bg look — same dark colour at
-        // ~78% of the window's overall alpha so it sits on the same
-        // visual layer.
+
         ImGui::SetNextWindowBgAlpha(s_skel_alpha * 0.78f);
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha, s_skel_alpha);
 
@@ -764,30 +599,24 @@ void draw_model_in_panel(ID3D11Device* device) {
                             | ImGuiWindowFlags_NoSavedSettings
                             | ImGuiWindowFlags_AlwaysAutoResize;
         if (ImGui::Begin("##skeleton_overlay", nullptr, fl)) {
-            // Hover-test inside the window so the alpha eases up the
-            // moment the cursor enters. ChildWindows flag covers the
-            // checkbox's inner widgets.
+
             bool hovering = ImGui::IsWindowHovered(
                 ImGuiHoveredFlags_AllowWhenBlockedByPopup |
                 ImGuiHoveredFlags_ChildWindows);
             float target = hovering ? kHoverAlpha : kIdleAlpha;
-            // Exponential ease — feels natural, no settling jitter near
-            // the target thanks to the snap inside ~0.5%.
+
             s_skel_alpha += (target - s_skel_alpha) * 0.18f;
             if (std::fabs(s_skel_alpha - target) < 0.005f) s_skel_alpha = target;
 
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Skeleton");
             ImGui::Checkbox("Show", &::g_skel_overlay_show);
             if (S.selected_bone >= 0 && S.selected_bone < (int)S.mdl_info.Bones.size()) {
-                // Selected-bone hint inside the overlay — user-discoverable
-                // R/RMB hotkeys without cluttering the empty-selection state.
+
                 ImGui::TextDisabled(S.bone_rotate_mode
                                         ? "RMB cancel  /  LMB confirm"
                                         : "R: rotate selected");
             }
-            // Capture the overlay's actual bottom so the Materials
-            // overlay below can sit flush against it. Done inside Begin
-            // so we read the current frame's auto-resized size.
+
             ImVec2 wp = ImGui::GetWindowPos();
             ImVec2 ws = ImGui::GetWindowSize();
             next_overlay_y = wp.y + ws.y + 6.0f;
@@ -795,7 +624,6 @@ void draw_model_in_panel(ID3D11Device* device) {
         ImGui::End();
         ImGui::PopStyleVar();
 
-        // Hide picking and rotate-mode when the overlay is off.
         if (!::g_skel_overlay_show) {
             S.selected_bone     = -1;
             S.bone_rotate_mode  = false;
@@ -805,18 +633,12 @@ void draw_model_in_panel(ID3D11Device* device) {
             draw_skeleton_overlay(origin, region);
         }
     } else {
-        // No skeleton — make sure stale state from a previous model
-        // doesn't leak into picking/rotation paths.
+
         ::g_skel_overlay_show = false;
         S.selected_bone       = -1;
         S.bone_rotate_mode    = false;
     }
 
-    // ---- Wireframe overlay ----------------------------------------------
-    // Single-checkbox overlay sitting between the Skeleton (if present)
-    // and the Materials overlay below. Hover-fade matches the others.
-    // Drives g_mp.wireframe, which MP_Render uses to swap the rasterizer
-    // state between FILL_SOLID and FILL_WIREFRAME.
     if (g_mp.has_model) {
         static float s_wire_alpha = 0.30f;
         const float kIdleAlpha   = 0.30f;
@@ -846,7 +668,6 @@ void draw_model_in_panel(ID3D11Device* device) {
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Wireframe");
             ImGui::Checkbox("Show", &g_mp.wireframe);
 
-            // Capture bottom for the Materials overlay placement.
             ImVec2 wp = ImGui::GetWindowPos();
             ImVec2 ws = ImGui::GetWindowSize();
             next_overlay_y = wp.y + ws.y + 6.0f;
@@ -855,28 +676,11 @@ void draw_model_in_panel(ID3D11Device* device) {
         ImGui::PopStyleVar();
     }
 
-    // ---- Materials overlay ----------------------------------------------
-    // Sits beneath the skeleton overlay (or right under Controls if the
-    // model has no skeleton). One section per submesh: name header,
-    // Highlight + Isolate checkboxes, and clickable texture thumbnails.
-    // Hover-fade alpha mirrors the skeleton overlay's behaviour.
-    //
-    // Highlight / Isolate are mutually exclusive across ALL submeshes —
-    // a single global index per flag (g_highlight_mesh_idx /
-    // g_isolate_mesh_idx) is the source of truth. Clicking a checkbox
-    // sets/clears that index AND clears the other flag's index, so
-    // ticking Highlight on submesh B automatically unticks Highlight on
-    // submesh A and any active Isolate elsewhere.
     if (g_mp.has_model && !g_mp.meshes.empty()) {
         static float s_mat_alpha = 0.30f;
         const float kIdleAlpha   = 0.30f;
         const float kHoverAlpha  = 1.00f;
 
-        // Width is fixed (the per-section row of thumbnails + checkboxes
-        // is sized for this width). Height is dynamic: ImGui auto-fits
-        // the window to its content, but a max-height constraint caps
-        // the growth at whatever vertical space is left in the panel —
-        // beyond that, the scrollbar takes over.
         const float kMatW = 296.0f;
         float max_h = std::max(160.0f,
                                region.y - (next_overlay_y - origin.y) - 20.0f);
@@ -887,9 +691,6 @@ void draw_model_in_panel(ID3D11Device* device) {
         ImGui::SetNextWindowBgAlpha(s_mat_alpha * 0.78f);
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha, s_mat_alpha);
 
-        // AlwaysAutoResize asks ImGui to size the window to fit its
-        // content; the size constraint above clamps that to [kMatW,
-        // max_h] so a tall list doesn't overflow off-panel.
         ImGuiWindowFlags fl = ImGuiWindowFlags_NoTitleBar
                             | ImGuiWindowFlags_NoResize
                             | ImGuiWindowFlags_NoMove
@@ -910,22 +711,15 @@ void draw_model_in_panel(ID3D11Device* device) {
             const ImVec2 thumb_size(48, 48);
 
             for (size_t mi = 0; mi < g_mp.meshes.size(); ++mi) {
-                auto& mesh = g_mp.meshes[mi];   // non-const so the
-                                                // per-slot visibility
-                                                // checkbox below can
-                                                // write through it.
+                auto& mesh = g_mp.meshes[mi];
+
                 ImGui::PushID((int)mi);
 
-                // Submesh name header. Truncated rendering relies on the
-                // window's clip rect — long names wrap into the next row.
                 ImGui::TextUnformatted(mesh.name.c_str());
 
                 bool h   = (::g_highlight_mesh_idx == (int)mi);
                 bool iso = (::g_isolate_mesh_idx   == (int)mi);
 
-                // Highlight: mutex with Isolate-on-anything AND with
-                // Highlight on every other submesh. We model that by
-                // single global indices.
                 if (ImGui::Checkbox("Highlight", &h)) {
                     if (h) {
                         ::g_highlight_mesh_idx = (int)mi;
@@ -944,18 +738,11 @@ void draw_model_in_panel(ID3D11Device* device) {
                     }
                 }
 
-                // Texture thumbnails — only render slots that have a
-                // real (non-default) SRV with a known name. Click = open
-                // popout, hover = tooltip with the texture name. Each
-                // thumbnail also gets a visibility checkbox stacked
-                // beneath it: when unchecked, MP_Render swaps the slot's
-                // SRV for the white default so the user can isolate
-                // which channel contributes what to the lit colour.
                 struct ThumbSpec {
                     const char*               slot_id;
                     ID3D11ShaderResourceView* srv;
                     const std::string*        name;
-                    bool*                     visible;  // -> mesh.<slot>_visible
+                    bool*                     visible;
                 };
                 ThumbSpec thumbs[4] = {
                     {"diffuse",  mesh.srv_diffuse,  &mesh.diffuse_tex_name,  &mesh.diffuse_visible},
@@ -971,12 +758,9 @@ void draw_model_in_panel(ID3D11Device* device) {
                     if (any_thumb) ImGui::SameLine();
                     any_thumb = true;
                     ImGui::PushID(t.slot_id);
-                    // Group keeps the thumbnail + checkbox stacked so
-                    // SameLine() between groups places the next slot's
-                    // pair next to this one.
+
                     ImGui::BeginGroup();
-                    // Disabled slots get a dim tint so the icon clearly
-                    // reflects "this won't show in render".
+
                     ImVec4 tint = (*t.visible) ? ImVec4(1, 1, 1, 1)
                                                : ImVec4(0.45f, 0.45f, 0.45f, 1);
                     if (ImGui::ImageButton("##t",
@@ -987,13 +771,10 @@ void draw_model_in_panel(ID3D11Device* device) {
                         ::g_tex_popout_srv      = t.srv;
                         ::g_tex_popout_name     = *t.name;
                         ::g_tex_popout_open     = true;
-                        // Remember which submesh this popout came from
-                        // so the UV overlay can locate the right geom.
+
                         ::g_tex_popout_mesh_idx = (int)mi;
                     }
-                    // Right-click → "Export to" — mip 0 from the named
-                    // texture asset. Same lookup logic the model uses
-                    // (prefer the nested-region BNK if active).
+
                     if (ImGui::BeginPopupContextItem()) {
                         const std::string& preferred_bnk =
                             (S.selected_nested_index != -1 &&
@@ -1008,8 +789,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                         ImGui::SetTooltip("%s\n[%s]",
                                           t.name->c_str(), t.slot_id);
                     }
-                    // Visibility toggle directly under the thumbnail —
-                    // anonymous label so only the checkbox glyph shows.
+
                     ImGui::Checkbox("##vis", t.visible);
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Show %s in render", t.slot_id);
@@ -1028,7 +808,7 @@ void draw_model_in_panel(ID3D11Device* device) {
         ImGui::End();
         ImGui::PopStyleVar();
     } else {
-        // No model — clear materials state so a new load starts fresh.
+
         ::g_highlight_mesh_idx  = -1;
         ::g_isolate_mesh_idx    = -1;
         ::g_tex_popout_open     = false;
@@ -1037,18 +817,6 @@ void draw_model_in_panel(ID3D11Device* device) {
         ::g_tex_popout_mesh_idx = -1;
     }
 
-    // ---- Animations overlay (RIGHT side) --------------------------------
-    // Mirrors the Materials overlay shape (floating ImGui window inside
-    // the render panel, hover-fade alpha) but lives along the right
-    // edge instead of the left. Lists every clip in the global TOC;
-    // click selects, playback hookup lands in Phase E.
-    //
-    // Only renders when:
-    //   - an .mdl is fully loaded (g_mp.has_model — flipped at the end
-    //     of MP_Build, see the comment in MP_Build)
-    //   - it has a skeleton (animation needs bones to bind to — props
-    //     and other rigid meshes can't play clips)
-    //   - we have any clips parsed from the TOC
     if (g_mp.has_model && g_mp.bone_count > 0 && !S.anim_clips.empty()) {
         static float s_anim_alpha = 0.30f;
         const float kIdleAlpha   = 0.30f;
@@ -1056,10 +824,7 @@ void draw_model_in_panel(ID3D11Device* device) {
 
         const float kAnimW   = 280.0f;
         const float kAnimPad = 6.0f;
-        // Anchor to the right edge of the render panel. The window's
-        // height tracks the panel's height (with a small inset top/
-        // bottom) so it visually mirrors the Materials column's reach
-        // on the left.
+
         const float anim_h = std::max(160.0f, region.y - 2 * kAnimPad);
         const ImVec2 anim_pos(origin.x + region.x - kAnimW - kAnimPad,
                               origin.y + kAnimPad);
@@ -1076,12 +841,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                             | ImGuiWindowFlags_NoCollapse
                             | ImGuiWindowFlags_NoSavedSettings;
         if (ImGui::Begin("##anims_overlay", nullptr, fl)) {
-            // Hover test by raw mouse-vs-rect (NOT ImGui::IsWindowHovered
-            // — that fights with Selectable's active-item state, see
-            // earlier notes). Plus a "sticky" carry-over while the
-            // left mouse button is held: dragging the scrollbar can
-            // pull the mouse outside the window rect, and we don't
-            // want the panel to fade mid-drag.
+
             ImVec2 wp = ImGui::GetWindowPos();
             ImVec2 ws = ImGui::GetWindowSize();
             ImVec2 mp = ImGui::GetIO().MousePos;
@@ -1089,9 +849,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                            mp.y >= wp.y && mp.y < wp.y + ws.y;
             static bool s_was_hovering = false;
             bool hovering = in_rect;
-            // Sticky-hover during drag — if we were over the panel
-            // and the user is still holding the mouse button, treat
-            // it as still-hovered even if the cursor escaped the rect.
+
             if (!hovering && s_was_hovering &&
                 ImGui::GetIO().MouseDown[0]) {
                 hovering = true;
@@ -1104,13 +862,6 @@ void draw_model_in_panel(ID3D11Device* device) {
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Animations");
             ImGui::Separator();
 
-            // Transport bar — same shape as the audio player: round
-            // FA icon buttons (Stop / Play|Pause / Loop) above a
-            // scrubber that shows playhead + event markers. The
-            // decode side is still a no-op (Phase E scaffold) so the
-            // model holds rest pose while the clock advances; once
-            // the bit-packed body decoder lands, motion shows up
-            // automatically with no UI change needed.
             {
                 auto& pl = Anim::global_player();
                 const auto* cur = pl.clip();
@@ -1121,7 +872,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                     const bool paused  =
                         (pl.state() == Anim::AnimPlayer::State::Paused);
 
-                    // ---- Transport row (Stop  Play/Pause  Loop) -----------
                     const float btn_lg = 36.0f;
                     const float btn_sm = 26.0f;
                     const float gap    = 10.0f;
@@ -1139,8 +889,7 @@ void draw_model_in_panel(ID3D11Device* device) {
 
                     ImGui::SetCursorPos(ImVec2(group_x + btn_sm + gap, row_y));
                     const char* play_glyph = playing ? ICON_FA_PAUSE : ICON_FA_PLAY;
-                    // Play triangle's optical centre is left of its
-                    // bbox centre — same nudge the audio player uses.
+
                     float play_dx = playing ? 0.0f : 0.17f;
                     if (UI::icon_button("##anim_playpause", play_glyph,
                                         btn_lg, true, false, play_dx)) {
@@ -1157,13 +906,10 @@ void draw_model_in_panel(ID3D11Device* device) {
                         pl.set_loop(!loop);
                     }
 
-                    // Move past the transport row.
                     ImGui::Dummy(ImVec2(0, btn_lg + 4.0f));
 
-                    // ---- Time readout ------------------------------------
                     ImGui::Text("%.2fs / %.2fs", pl.time(), dur_s);
 
-                    // ---- Scrubber + event markers ------------------------
                     {
                         const float scrub_h = 18.0f;
                         ImGui::InvisibleButton("##anim_scrub",
@@ -1173,7 +919,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                         bool active = ImGui::IsItemActive();
                         ImDrawList* dl = ImGui::GetWindowDrawList();
 
-                        // Bar background.
                         dl->AddRectFilled(r0, r1,
                                           IM_COL32(20, 22, 28, 255), 4.0f);
 
@@ -1183,15 +928,11 @@ void draw_model_in_panel(ID3D11Device* device) {
                             ? (pl.time() / dur_s) : 0.0f;
                         const float playhead_x = r0.x + w * prog;
 
-                        // Filled "played" portion in blue accent.
                         dl->AddRectFilled(r0,
                                           ImVec2(playhead_x, r1.y),
                                           IM_COL32(120, 200, 255, 200),
                                           4.0f);
 
-                        // Event markers — vertical ticks at each event
-                        // time. Tooltip on hover (only if the user is
-                        // actually mousing the scrubber).
                         bool hovered_event = false;
                         std::string ev_tip;
                         const ImVec2 mp = ImGui::GetIO().MousePos;
@@ -1204,7 +945,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                                         ImVec2(ex, r1.y - 2),
                                         IM_COL32(255, 200, 90, 230),
                                         1.5f);
-                            // Detect cursor near this tick.
+
                             if (ImGui::IsItemHovered() &&
                                 std::fabs(mp.x - ex) <= 4.0f &&
                                 !hovered_event) {
@@ -1219,16 +960,11 @@ void draw_model_in_panel(ID3D11Device* device) {
                             }
                         }
 
-                        // Playhead — white vertical line, 2 px thick.
                         dl->AddLine(ImVec2(playhead_x, r0.y + 1),
                                     ImVec2(playhead_x, r1.y - 1),
                                     IM_COL32(240, 245, 250, 255),
                                     2.0f);
 
-                        // Drag-to-seek. Click anywhere on the bar
-                        // jumps the playhead; dragging works because
-                        // InvisibleButton stays Active while the
-                        // mouse is held.
                         if (active && dur_s > 0.0f) {
                             float t = (mp.x - r0.x) / w;
                             if (t < 0.0f) t = 0.0f;
@@ -1240,10 +976,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                             ImGui::SetTooltip("%s", ev_tip.c_str());
                         }
                     }
-                    // Only emit the trailing separator when a clip
-                    // is selected — otherwise the header separator
-                    // and this one would stack with no content
-                    // between, which looked like a duplicated line.
+
                     ImGui::Separator();
                 }
             }
@@ -1252,14 +985,6 @@ void draw_model_in_panel(ID3D11Device* device) {
             ImGui::InputTextWithHint("##anims_overlay_filter", "Filter",
                                      &S.anim_filter);
 
-            // Per-model filter: only show clips whose bone count
-            // matches the loaded skeleton. Clip header carries the
-            // bone count; mismatched clips were authored for a
-            // different rig and would skin into nonsense (or get
-            // refused by AnimPlayer::apply_to_skeleton anyway).
-            //
-            // The filter is opt-out via a "Show all" toggle in dev
-            // mode so we can still browse the full bank when needed.
             static bool s_show_all_clips = false;
             if (S.dev_mode) {
                 ImGui::Checkbox("Show all (ignore skeleton)",
@@ -1296,10 +1021,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                                     g_mp.bone_count);
             }
 
-            // Dev-only peek at the selected clip's parsed header.
-            // Header summary plus a collapsible per-bone byte view —
-            // useful while the bit-packed body decoder (Phase F) is
-            // being reverse-engineered. No-op outside dev mode.
             if (S.dev_mode &&
                 S.anim_selected_clip >= 0 &&
                 S.anim_selected_clip < (int)S.anim_clips.size())
@@ -1313,13 +1034,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                             "bones=%u idx_bits=%u frames=%u",
                             h.bone_count, h.bone_idx_bits, h.field_C);
 
-                        // Per-bone byte stats. Each entry: bone index,
-                        // body byte length (between consecutive
-                        // offsets in the directory), and the first 4
-                        // bytes of the body in hex. Helps eyeball
-                        // whether sibling bones use the same encoding
-                        // (similar prefixes) or wildly different
-                        // ones.
                         if (ImGui::TreeNodeEx("##anim_bone_view",
                                               ImGuiTreeNodeFlags_None,
                                               "Per-bone bodies")) {
@@ -1380,10 +1094,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                     if (ImGui::Selectable(label, selected,
                                           ImGuiSelectableFlags_SpanAllColumns)) {
                         S.anim_selected_clip = vis[(size_t)row];
-                        // Click → play. Holds the pointer into
-                        // S.anim_clips (lifetime is the session, so
-                        // the player's reference stays valid until
-                        // the user opens a different root).
+
                         Anim::global_player().play(
                             &S.anim_clips[(size_t)vis[(size_t)row]],
                             /*loop=*/Anim::global_player().is_loop());
@@ -1410,18 +1121,12 @@ void draw_model_in_panel(ID3D11Device* device) {
         ImGui::PopStyleVar();
     }
 
-    // ---- Texture popout window ------------------------------------------
-    // Floating window showing whichever thumbnail the user last clicked.
-    // Window auto-sizes to the texture's native dimensions and is locked
-    // (NoResize) — the image displays at its true pixel size. Closes via
-    // the X button on the title bar.
     if (::g_tex_popout_open && ::g_tex_popout_srv) {
         int tw = 0, th = 0;
         ID3D11Resource* res = nullptr;
         ::g_tex_popout_srv->GetResource(&res);
         if (res) {
-            // SRV resource for our textures is always a Texture2D — same
-            // creation path goes through CreateTexture2D + CSRV.
+
             ID3D11Texture2D* t2d = (ID3D11Texture2D*)res;
             D3D11_TEXTURE2D_DESC desc{};
             t2d->GetDesc(&desc);
@@ -1433,25 +1138,17 @@ void draw_model_in_panel(ID3D11Device* device) {
             std::string title = "Texture: "
                 + std::filesystem::path(::g_tex_popout_name).filename().string()
                 + "##tex_popout";
-            // AlwaysAutoResize + NoResize: window snaps to fit content
-            // (the image at native size + the UV checkbox above it),
-            // and the user cannot drag-resize.
+
             ImGuiWindowFlags fl = ImGuiWindowFlags_NoCollapse
                                 | ImGuiWindowFlags_NoResize
                                 | ImGuiWindowFlags_AlwaysAutoResize;
             if (ImGui::Begin(title.c_str(), &::g_tex_popout_open, fl)) {
-                // UV overlay toggle. The geom that owns this texture
-                // was recorded in g_tex_popout_mesh_idx when the user
-                // clicked the thumbnail. We only draw the overlay if
-                // that index is still valid AND the source MDLMeshGeom
-                // has UV/index data we can walk.
+
                 ImGui::Checkbox("Show UVs", &::g_tex_popout_show_uvs);
 
                 ImGui::Image((ImTextureID)::g_tex_popout_srv,
                              ImVec2((float)tw, (float)th));
-                // Right-click → "Export to" — mip 0 (highest, per spec).
-                // ImGui::Image isn't an interactive item, so layer an
-                // InvisibleButton over the same rect to anchor the popup.
+
                 {
                     ImVec2 img_min = ImGui::GetItemRectMin();
                     ImGui::SetCursorScreenPos(img_min);
@@ -1483,14 +1180,10 @@ void draw_model_in_panel(ID3D11Device* device) {
                             float w_px = img_max.x - img_min.x;
                             float h_px = img_max.y - img_min.y;
                             ImDrawList* dl = ImGui::GetWindowDrawList();
-                            // Soft white at moderate alpha — readable on
-                            // most textures, doesn't drown the image.
+
                             const ImU32 col = IM_COL32(255, 255, 255, 200);
                             const float thickness = 1.0f;
 
-                            // Each triangle = 3 indices. Convert UV
-                            // (assumed [0,1] with V going down to match
-                            // ImGui's Y-down convention) to screen px.
                             for (size_t i = 0; i + 2 < geom.indices.size(); i += 3) {
                                 uint32_t a = geom.indices[i];
                                 uint32_t b = geom.indices[i + 1];
@@ -1514,27 +1207,20 @@ void draw_model_in_panel(ID3D11Device* device) {
             }
             ImGui::End();
         }
-        // X-button close path — drop the SRV reference so the next load
-        // doesn't accidentally reopen with a stale pointer.
+
         if (!::g_tex_popout_open) {
             ::g_tex_popout_srv = nullptr;
             ::g_tex_popout_name.clear();
         }
     }
 }
-#endif // _WIN32
+#endif
 
-} // namespace
+}
 
 #ifdef _WIN32
 void draw_render_panel(ID3D11Device* device) {
-    // Priority order: model > texture > lua > placeholder. The Lua
-    // click handler explicitly clears the model + texture state when
-    // setting `show_lua_render`, so a Lua selection wins by virtue of
-    // the others being false. Any subsequent model / texture click
-    // sets its own state, leaves `show_lua_render` alone, and wins
-    // back priority on this dispatch — lua becomes invisible until
-    // the user picks another script (or closes the lua view).
+
     if (g_mp.has_model) {
         draw_model_in_panel(device);
     } else if (S.texture_window_srv) {
@@ -1551,4 +1237,4 @@ void draw_render_panel() {
 }
 #endif
 
-} // namespace UI
+}

@@ -285,9 +285,6 @@ void draw_right_panel() {
 
     bool has_selection = (S.selected_file_index >= 0 && S.selected_file_index < (int)S.files.size());
 
-    // Hex view is a dev-mode feature — hide the button entirely outside
-    // dev mode (matches the right-click menu in the file lists, which
-    // also skips rendering for non-dev users).
     if (S.dev_mode) {
         if (!has_selection) {
             ImGui::BeginDisabled();
@@ -342,9 +339,6 @@ void draw_right_panel() {
         can_preview = can_folder_preview;
     }
 
-    // Always-available toggle for the Materials & Textures window. Useful
-    // when the auto-open didn't fire or you closed the window and want it
-    // back without reloading the model.
     {
         bool m_open = S.model_materials_open;
         if (ImGui::Checkbox("Materials Window", &m_open)) {
@@ -423,19 +417,16 @@ if (!can_preview) {
         auto item = S.files[(size_t)S.selected_file_index];
         auto name = item.name;
 
-
         {
             std::string filename = std::filesystem::path(name).filename().string();
             std::string filename_lower = filename;
             std::transform(filename_lower.begin(), filename_lower.end(), filename_lower.begin(), ::tolower);
             bool is_interior_or_exterior = (filename_lower == "interior.mdl" || filename_lower == "exterior.mdl");
 
-
             if (is_interior_or_exterior && can_mdl) {
 
                 std::filesystem::path full_path(name);
                 std::string folder_path = full_path.parent_path().string();
-
 
                 std::vector<std::pair<std::string, int>> mdl_files;
 
@@ -445,7 +436,6 @@ if (!can_preview) {
                     std::string file_folder = file_path.parent_path().string();
                     std::string file_name_lower = file_path.filename().string();
                     std::transform(file_name_lower.begin(), file_name_lower.end(), file_name_lower.begin(), ::tolower);
-
 
                     if (file_folder == folder_path &&
                         (file_name_lower == "interior.mdl" || file_name_lower == "exterior.mdl")) {
@@ -515,7 +505,6 @@ if (!can_preview) {
             }
         }
 
-
         {
         std::string bnk_to_use;
         std::string nested_temp_copy;
@@ -554,9 +543,6 @@ if (!can_preview) {
 
         progress_open(0, "Loading preview...");
 
-        // The original (non-copy) nested BNK path is what's keyed in
-        // S.nested_bnk_parents — pass it to build_any_tex_buffer_for_name
-        // so sibling BNKs from the same parent take priority over globals.
         std::string preferred_for_tex = is_nested
             ? S.selected_nested_temp_path
             : S.selected_bnk;
@@ -606,8 +592,7 @@ if (!can_preview) {
                 if (can_tex) {
                     S.tex_info_ok = parse_tex_info(S.hex_data, S.tex_info);
                     if (S.tex_info_ok && !S.tex_info.Mips.empty()) {
-                        // Pick the LARGEST mip overall — compressed mips are
-                        // now decodable via the Lionhead codec port.
+
                         int best_mip = -1;
                         size_t best_area = 0;
                         for (int i = 0; i < (int)S.tex_info.Mips.size(); ++i) {
@@ -651,8 +636,6 @@ if (!can_preview) {
         skip_preview:;
     }
 #else
-
-
 
         if (can_folder_preview && !S.selected_folder_path.empty()) {
             std::vector<std::pair<std::string, std::string>> mdl_paths;
@@ -921,9 +904,6 @@ if (!can_preview) {
                                         BNKReader nested_reader(temp_bnk_path.string());
                                         const auto& nested_files = nested_reader.list_files();
 
-                                        // Use '/' as the only separator to keep behavior consistent
-                                        // with POSIX; std::filesystem::path on Windows would also
-                                        // recognize '\', causing the prefix to change shape per platform.
                                         size_t fname_last_slash = fname.find_last_of('/');
                                         std::string prefix = (fname_last_slash == std::string::npos)
                                             ? std::string()
@@ -1126,14 +1106,10 @@ if (!can_preview) {
         auto name = item.name;
         S.texture_window_name = name;
 
-        // Pass the user's clicked BNK so nested-region sibling BNKs are
-        // searched before generic globals.
         std::string preferred_for_tex = (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty())
             ? S.selected_nested_temp_path
             : S.selected_bnk;
 
-        // Show the loading popup while the texture decode runs in the
-        // background. Matches the MDL preview path.
         progress_open(0, "Loading texture...");
 
         std::thread([name, preferred_for_tex]() {
@@ -1149,9 +1125,6 @@ if (!can_preview) {
                 return;
             }
 
-            // decode_tex_to_rgba picks the largest mip available — comp=7 raw
-            // for BC1/BC3, or Lionhead-compressed (comp != 7) BC1 via the
-            // codec we ported from default.xex.
             std::vector<uint8_t> rgba;
             int w = 0, h = 0;
             bool has_alpha = false;

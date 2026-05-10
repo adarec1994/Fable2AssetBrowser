@@ -38,7 +38,7 @@ struct MDLMeshBufferInfo {
     uint32_t SubMeshCount = 0;
     bool     IsAltPath = false;
     bool     IsFoliagePath = false;
-    uint32_t FoliageVertexStride = 0; // 48=plant float32, 36=tree half-float
+    uint32_t FoliageVertexStride = 0;
     std::vector<MDLSubMeshInfo> SubMeshes;
     uint32_t MeshIndex = 0;
 };

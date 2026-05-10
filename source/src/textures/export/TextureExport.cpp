@@ -1,32 +1,17 @@
-// Texture-export dispatcher + UI workflow.
-//
-// Two responsibilities:
-//   1. Dispatch tex_export_rgba() to the right format-specific writer.
-//   2. Provide the user-facing menu workflow: "Export to" submenu items
-//      that immediately write the result to disk under S.export_dir,
-//      preserving the asset's relative path. Status is reported through
-//      OutputLog (success / error toasts in the bottom slide-up panel).
-//
-// File-dialog UX is intentionally gone — every export goes to
-//   ${S.export_dir}/${asset_relative_path}.${ext}
-// with parent directories created on demand. The user changes the
-// export root from the Settings dropdown.
 
 #include "TextureExport.h"
 
 #include "../TexParser.h"
-#include "../../UI/ModelPreview.h"   // decode_tex_to_rgba
+#include "../../UI/ModelPreview.h"
 #include "../../UI/OutputLog.h"
 #include "../../Utilities/State.h"
-#include "../../BNKCore.cpp"          // build_any_tex_buffer_for_name
+#include "../../BNKCore.cpp"
 
 #include "imgui.h"
 
 #include <filesystem>
 #include <fstream>
 #include <utility>
-
-// ---------------------------------------------------------------------------
 
 const char* tex_export_extension(TexExportFormat fmt) {
     switch (fmt) {
@@ -39,9 +24,6 @@ const char* tex_export_extension(TexExportFormat fmt) {
     return ".bin";
 }
 
-// Write a raw blob verbatim — no decoding, no header munging. Used by
-// the TEX format. Lives here (not in its own file) because it's a one-
-// liner and doesn't share any infrastructure with the image writers.
 static bool write_raw_blob(const std::string& path,
                            const unsigned char* data, size_t size) {
     if (!data || size == 0) return false;
@@ -59,39 +41,24 @@ bool tex_export_rgba(const std::string& path, TexExportFormat fmt,
         case TexExportFormat::TIFF: return tex_export_tiff(path, rgba, w, h);
         case TexExportFormat::DDS:  return tex_export_dds (path, rgba, w, h);
         case TexExportFormat::TEX:
-            // RGBA can't reconstruct the original .tex bytes — only the
-            // blob/named code paths can satisfy a TEX export.
+
             return false;
     }
     return false;
 }
 
-// ---------------------------------------------------------------------------
-// Path helpers
-// ---------------------------------------------------------------------------
-
 namespace {
 
-// Build the on-disk export path for an asset.
-//   asset_path       — relative asset path (e.g. "props/foo/bar.tex").
-//                      May or may not include the original extension.
-//   fmt              — output format; its extension replaces any
-//                      existing one on `asset_path`.
-// Returns ${S.export_dir} / sanitized(asset_path with replaced ext).
 std::filesystem::path build_export_path(const std::string& asset_path,
                                         TexExportFormat fmt) {
     std::filesystem::path root = S.export_dir.empty() ? "." : S.export_dir;
 
-    // Normalise: drop leading slashes, swap backslashes so we don't
-    // accidentally root the path on Windows ("/foo" → "foo").
     std::string rel = asset_path;
     while (!rel.empty() && (rel.front() == '/' || rel.front() == '\\'))
         rel.erase(rel.begin());
 
     std::filesystem::path p(rel);
-    // If the asset already has any extension, drop it — we're writing
-    // a different format. replace_extension("") on a directoryless stem
-    // works the same way.
+
     p.replace_extension();
 
     std::filesystem::path out = root / p;
@@ -99,9 +66,6 @@ std::filesystem::path build_export_path(const std::string& asset_path,
     return out;
 }
 
-// Make sure the parent directory of `p` exists. Creates the whole
-// chain if necessary. Errors here become export errors at the call
-// site (the subsequent ofstream open will fail).
 bool ensure_parent_dir(const std::filesystem::path& p) {
     auto parent = p.parent_path();
     if (parent.empty()) return true;
@@ -110,10 +74,6 @@ bool ensure_parent_dir(const std::filesystem::path& p) {
     return !ec;
 }
 
-// Fire the right OutputLog level + a single human-readable line. We
-// keep the asset name in the message (rather than the full path) so the
-// log stays scannable; the full path is appended in dev mode for
-// debugging.
 void log_export_result(bool ok, const std::string& asset_label,
                        const std::filesystem::path& out_path,
                        TexExportFormat fmt) {
@@ -133,12 +93,7 @@ void log_export_result(bool ok, const std::string& asset_label,
     }
 }
 
-} // anonymous
-
-// ---------------------------------------------------------------------------
-// Begin-* entry points: synchronous now. They resolve bytes, build the
-// path, mkdir, write, and emit a log line. No deferred state.
-// ---------------------------------------------------------------------------
+}
 
 void tex_export_begin_rgba(TexExportFormat fmt,
                            const std::string& base_name,
@@ -146,8 +101,7 @@ void tex_export_begin_rgba(TexExportFormat fmt,
     std::filesystem::path out = build_export_path(base_name, fmt);
     bool ok = false;
     if (fmt == TexExportFormat::TEX) {
-        // No original blob to dump — RGBA path can't satisfy a raw .tex
-        // request. Caller shouldn't have offered it; bail loudly.
+
         ok = false;
     } else if (!rgba.empty() && w > 0 && h > 0 && ensure_parent_dir(out)) {
         ok = tex_export_rgba(out.string(), fmt, rgba.data(), w, h);
@@ -214,19 +168,9 @@ void tex_export_begin_named(TexExportFormat fmt,
                       out, fmt);
 }
 
-// Stub kept so the main loop's "drive once per frame" call still
-// compiles. Exports are synchronous now — there's nothing to drive.
-// Left in place because removing it would ripple into UI_Main.cpp; if
-// we ever want to revive deferred / threaded export this is where it
-// would resume from.
 void tex_export_drive() {
-    // intentionally empty
-}
 
-// ---------------------------------------------------------------------------
-// "Export to" submenu helpers — caller is inside an open popup.
-// Each item dispatches to the matching tex_export_begin_*() flavour.
-// ---------------------------------------------------------------------------
+}
 
 namespace {
 
@@ -244,7 +188,7 @@ void render_raw_tex_item(const BeginRaw& begin_raw) {
     if (ImGui::MenuItem(".tex (raw)")) begin_raw();
 }
 
-} // anonymous
+}
 
 void tex_export_menu_rgba(const std::string& base_name,
                           const std::vector<uint8_t>& rgba, int w, int h) {
@@ -254,7 +198,7 @@ void tex_export_menu_rgba(const std::string& base_name,
             tex_export_begin_rgba(fmt, base_name,
                                   std::vector<uint8_t>(rgba), w, h);
         });
-        // No raw .tex option — the rgba flavour has no original bytes.
+
         ImGui::EndMenu();
     }
 }

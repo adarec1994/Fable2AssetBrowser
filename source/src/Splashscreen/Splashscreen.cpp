@@ -7,7 +7,7 @@
 #include "../ISO/IsoMount.h"
 #include "../Utilities/State.h"
 #include "../Utilities/Files.h"
-#include "../UI/UI_Panels.h"  // open_folder_logic
+#include "../UI/UI_Panels.h"
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
 #include <filesystem>
@@ -15,7 +15,6 @@
 #include <vector>
 #include <cstdio>
 
-// Defined in main.cpp — used to persist the mute setting between sessions.
 void save_audio_muted(bool muted);
 
 #ifdef _WIN32
@@ -24,15 +23,10 @@ void save_audio_muted(bool muted);
 #include "../../resource.h"
 #endif
 
-// stb_image's STB_IMAGE_IMPLEMENTATION is defined in UI_Main.cpp; here we
-// include only the declarations.
 #include "stb_image.h"
 
 namespace Splash {
 
-// ---------------------------------------------------------------------------
-// Texture cache + Win32 resource loader
-// ---------------------------------------------------------------------------
 namespace {
 
 #ifdef _WIN32
@@ -52,15 +46,10 @@ float g_splash_time_elapsed = 0.0f;
 constexpr float kFadeInDelay    = 5.0f;
 constexpr float kFadeInDuration = 2.0f;
 
-std::string g_status_msg;   // shown under the logo when something is happening
-                            // (e.g. "ISO mounting not yet available")
+std::string g_status_msg;
 
 #ifdef _WIN32
-// Pull a Windows RCDATA resource into a byte buffer. Returns true on success.
-//
-// Note: the type argument MUST be MAKEINTRESOURCE(RT_RCDATA) (integer 10),
-// not the literal string "RCDATA" — system resource types are integer-typed
-// and a string lookup would fail to match.
+
 bool load_resource_bytes(int resource_id, std::vector<unsigned char>& out) {
     HMODULE mod = GetModuleHandleA(nullptr);
     HRSRC hRes = FindResourceA(mod, MAKEINTRESOURCEA(resource_id), (LPCSTR)RT_RCDATA);
@@ -96,7 +85,7 @@ bool create_d3d_texture(ID3D11Device* device, const unsigned char* rgba, int w, 
 bool load_texture_from_resource(ID3D11Device* device, int resource_id,
                                 ID3D11ShaderResourceView** out_srv,
                                 int* out_w, int* out_h) {
-    if (*out_srv) return true;     // already loaded
+    if (*out_srv) return true;
     std::vector<unsigned char> bytes;
     if (!load_resource_bytes(resource_id, bytes)) return false;
     int w, h, channels;
@@ -118,8 +107,7 @@ void load_textures_if_needed(ID3D11Device* device) {
     }
 }
 #else
-// Non-Windows: load PNGs from disk relative to the working dir. The
-// embed-into-exe path is Windows-only for now.
+
 bool LoadTextureFromFile(const char* filename, unsigned int* out_tex, int* out_w, int* out_h) {
     int width, height, channels;
     unsigned char* image_data = stbi_load(filename, &width, &height, &channels, 4);
@@ -161,10 +149,6 @@ std::string pick_browse_base_dir() {
     return ".";
 }
 
-// Decide what the user picked (file vs. folder) and route to the right
-// open path. We open one dialog with a `.iso` filter that *also* lets
-// the user pick a folder; this branch chooses based on what ImGuiFileDialog
-// returns.
 void handle_dialog_pick() {
     std::string file_path = ImGuiFileDialog::Instance()->GetFilePathName();
     std::string current   = ImGuiFileDialog::Instance()->GetCurrentPath();
@@ -182,10 +166,7 @@ void handle_dialog_pick() {
     if (!file_path.empty() && std::filesystem::is_regular_file(file_path)
         && ends_with_lower(file_path, ".iso"))
     {
-        // Mount the ISO in-memory (no extraction). The rest of the app
-        // walks BNK files via scan_bnks_recursive / find_bnks which
-        // detect IsoMount::is_mounted() and return "iso://..." paths
-        // that BNKReader can stream from.
+
         std::string err;
         if (!ISO::IsoMount::instance().mount(file_path, &err)) {
             g_status_msg = "ISO mount failed: " + err;
@@ -196,9 +177,6 @@ void handle_dialog_pick() {
         return;
     }
 
-    // Otherwise: treat the dialog's current path as the chosen folder.
-    // (When a user navigates *into* a folder and clicks OK without a file
-    // selection, IGFD reports that path via GetCurrentPath.)
     std::string folder;
     if (std::filesystem::is_directory(file_path)) folder = file_path;
     else if (!current.empty() && std::filesystem::is_directory(current)) folder = current;
@@ -228,18 +206,13 @@ void draw_dialogs() {
 void open_picker() {
     IGFD::FileDialogConfig cfg;
     cfg.path = pick_browse_base_dir();
-    // Show .iso files explicitly; "((.*))" lets *all* files appear in the
-    // listing too so the user can navigate freely. They can either pick
-    // an .iso file or "OK" out of the desired folder.
+
     ImGuiFileDialog::Instance()->OpenDialog("PickPath",
         "Select Fable 2 folder or .iso", ".iso,((.*))", cfg);
 }
 
-} // anonymous
+}
 
-// ---------------------------------------------------------------------------
-// Public entry
-// ---------------------------------------------------------------------------
 #ifdef _WIN32
 void draw(ID3D11Device* device) {
     load_textures_if_needed(device);
@@ -254,7 +227,6 @@ void draw(GLFWwindow* /*window*/) {
     ImVec2 window_size = ImGui::GetWindowSize();
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
-    // Scrolling background ----------------------------------------------------
     if (g_splash_texture && g_splash_width > 0) {
         float scale = window_size.y / (float)g_splash_height;
         float scaled_width = g_splash_width * scale;
@@ -273,7 +245,6 @@ void draw(GLFWwindow* /*window*/) {
         }
     }
 
-    // Logo + sparkles ---------------------------------------------------------
     float logo_x = 0, logo_y = 0, scaled_w = 0, scaled_h = 0;
     if (g_logo_texture && g_logo_width > 0) {
         float logo_scale = window_size.x / (g_logo_width * 1.5f);
@@ -294,9 +265,6 @@ void draw(GLFWwindow* /*window*/) {
 #endif
     }
 
-    // Mute / unmute toggle in the bottom-left corner. Drawn BEFORE the
-    // full-window invisible click-target so it gets first dibs on clicks.
-    // (FA font was loaded once in main.cpp before any frame.)
     {
         const float btn_size = 44.0f;
         const float pad      = 16.0f;
@@ -307,14 +275,9 @@ void draw(GLFWwindow* /*window*/) {
         ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.40f,0.40f,0.40f,0.95f));
         ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1,1,1,1));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btn_size * 0.5f);
-        // Centre the glyph inside the round button — by default ImGui
-        // aligns button text to (0,0) which makes single-glyph labels
-        // sit in the top-left.
+
         ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
-        // FontAwesome glyph metrics include a small bottom-side bearing,
-        // so a "centred" glyph lands a couple of pixels above the
-        // optical centre. Bump frame padding so the visual centre lines
-        // up with the geometric centre of the circle.
+
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 1));
 
         bool muted = BackgroundAudio::instance().is_muted();
@@ -331,17 +294,11 @@ void draw(GLFWwindow* /*window*/) {
         ImGui::PopStyleColor(4);
     }
 
-    // Click anywhere ELSE to open the picker. The InvisibleButton fills
-    // the whole splash, but ImGui's click handling gives priority to
-    // items drawn earlier (including the mute button above), so clicks
-    // on the mute icon don't fall through to "open picker".
     ImGui::SetCursorScreenPos(window_pos);
     if (ImGui::InvisibleButton("##splash_click", window_size)) {
         open_picker();
     }
 
-    // Hint text + optional status. Drawn AFTER the InvisibleButton so the
-    // hint visually sits on top of the click-area.
     {
         float text_alpha = 1.0f;
         if (g_splash_time_elapsed < kFadeInDelay + kFadeInDuration) {
@@ -397,4 +354,4 @@ void release_resources() {
 #endif
 }
 
-} // namespace Splash
+}

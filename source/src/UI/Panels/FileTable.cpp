@@ -72,15 +72,13 @@ void draw_file_table() {
                         g_pending_tex_load = true;
                         g_pending_tex_index = i;
                     }
-                    // Double-click a .wav -> open the in-app audio player.
+
                     if (ImGui::IsMouseDoubleClicked(0) && is_audio_file(S.files[i].name)
                         && !S.viewing_adb && !S.viewing_lua) {
                         open_audio_player_for_selected(i);
                     }
                 }
-                // Right-click → "Hex View" (dev mode only) + "Export to"
-                // for .tex. Skip for the ADB / Lua views since those use
-                // special-cased decoders routed through draw_right_panel.
+
                 if (!S.viewing_adb && !S.viewing_lua) {
                     bool is_nested = (S.selected_nested_index != -1 &&
                                       !S.selected_nested_temp_path.empty());
@@ -176,9 +174,7 @@ void draw_global_results_table() {
                         }
                     }
                 }
-                // Right-click → "Hex View" (dev mode only) + "Export to"
-                // for .tex. A hit's BNK is "nested" if it's known in
-                // nested_bnk_parents.
+
                 {
                     bool is_nested = (S.nested_bnk_parents.count(hit.bnk_path) > 0);
                     file_hex_context_menu(hit.bnk_path, hit.index, is_nested,

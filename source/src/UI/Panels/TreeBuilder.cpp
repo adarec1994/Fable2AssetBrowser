@@ -15,26 +15,14 @@
 
 TreeNode g_tree_root;
 
-// Defined later in this file — forward-decl so the eager-start helper
-// below can reference it.
 static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk_paths);
 
-// File-tree build state. Used to be function-static inside draw_left_panel
-// (= the build only kicked off when the user opened the File Tree tab).
-// Now hoisted so we can start the build IMMEDIATELY after open_folder_logic
-// / open_iso_logic — by the time the user clicks into the tab the work is
-// usually already done.
 std::atomic<bool> g_tree_built{false};
 std::atomic<bool> g_tree_building{false};
 std::atomic<bool> g_tree_build_complete{false};
 float             g_tree_build_start_time = 0.0f;
 std::string       g_tree_last_root_dir;
 
-// Progress reporting from inside the build thread, used by the loading
-// screen to draw a real percentage instead of an indeterminate stripe.
-// `total` and `done` are both incremented as work is discovered (phase 2
-// nested BNKs aren't known until phase 1 finishes), so progress can
-// briefly stay below 100% near the end as new work is added.
 std::atomic<int>  g_tree_done_units{0};
 std::atomic<int>  g_tree_total_units{0};
 std::mutex        g_tree_label_mutex;
@@ -45,9 +33,7 @@ void set_tree_label(std::string s) {
 }
 extern void  start_tree_build_for_root(const std::string& root_dir,
                                        std::vector<std::string> bnk_paths);
-// Public accessors — exposed in UI_Panels.h so the LoadingScreen module
-// can react to build state without taking a hard dependency on these
-// file-private atomics.
+
 bool tree_build_in_progress() { return g_tree_building.load(); }
 bool tree_build_finished()    { return g_tree_built.load(); }
 float tree_build_elapsed_seconds() {
@@ -79,14 +65,10 @@ void start_tree_build_for_root(const std::string& root_dir,
     g_tree_build_start_time = (float)ImGui::GetTime();
     g_tree_root.children.clear();
     g_tree_done_units.store(0);
-    // Phase 1 only — phase 2's nested-BNK count is added once phase 1
-    // discovers them. Total grows during the run; the loading bar handles
-    // that gracefully because progress is computed as done/total each frame.
+
     g_tree_total_units.store((int)bnk_paths.size());
     set_tree_label("");
-    // Drop any nested-BNK temp-paths from the previous root so we don't
-    // search stale paths (the temp files may have been deleted, and even
-    // if not they belong to a different game install).
+
     S.nested_bnk_paths.clear();
     S.nested_bnk_parents.clear();
 
@@ -94,11 +76,7 @@ void start_tree_build_for_root(const std::string& root_dir,
         try {
             build_unified_file_tree(g_tree_root, std::move(bnk_snapshot));
         } catch (...) { /* swallow — UI shows empty tree on failure */ }
-        // Flip the visible-state flags directly from the worker. This used
-        // to be a UI-thread promotion buried inside the File Tree tab body,
-        // which meant the loading screen (drawn instead of the tab while
-        // the build was in flight) would stall at 100% forever — the tab
-        // never ran, so the flags never flipped.
+
         g_tree_build_complete.store(true);
         g_tree_built.store(true);
         g_tree_building.store(false);
@@ -139,8 +117,7 @@ bool find_mdl_files_in_folder(TreeNode& root, const std::string& folder_name, st
 
 static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk_paths) {
     root.children.clear();
-    // Reset flat caches consumed by the Models / Textures / Audio tabs.
-    // They get appended to inside add_to_tree below as we walk every BNK.
+
     S.all_mdl_files.clear();
     S.all_tex_files.clear();
     S.all_wav_files.clear();
@@ -159,8 +136,6 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
         return lower.size() >= 4 && lower.substr(lower.size() - 4) == ".bnk";
     };
 
-    // Match by filename suffix — case insensitive. Cheaper than building
-    // a temporary lowered string just to compare 4 chars.
     auto ends_with_ci = [](const std::string& s, const char* suffix) -> bool {
         size_t n = std::strlen(suffix);
         if (s.size() < n) return false;
@@ -176,9 +151,7 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
 
     auto add_to_tree = [&root, &ends_with_ci](const std::string& path, const std::string& bnk_source,
                                int bnk_index, uint32_t file_size, bool is_nested = false) {
-        // Bookkeeping for the Models / Textures tabs. Use the leaf
-        // filename for display so the user isn't seeing internal asset
-        // paths cluttering the list.
+
         std::string leaf;
         size_t slash = path.find_last_of("/\\");
         leaf = (slash == std::string::npos) ? path : path.substr(slash + 1);
@@ -259,7 +232,6 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
 
     std::vector<std::pair<std::string, int>> nested_bnks;
 
-    // Phase 1: walk the top-level BNKs and add their entries to the tree.
     for (const auto& bnk_path : bnk_paths) {
         set_tree_label(std::filesystem::path(bnk_path).filename().string());
         if (is_header_bnk(bnk_path)) {
@@ -281,13 +253,11 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
                 }
             }
         } catch (...) {
-            // fall through — still increment so progress bar advances
+
         }
         g_tree_done_units.fetch_add(1);
     }
 
-    // Phase 2 work is now known — fold its count into the total so the
-    // progress bar reflects the full job, not just phase 1.
     g_tree_total_units.fetch_add((int)nested_bnks.size());
 
     auto tmpdir = std::filesystem::temp_directory_path() / "f2_nested_bnk_tree";
@@ -295,14 +265,9 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
         std::error_code ec;
         std::filesystem::create_directories(tmpdir, ec);
     }
-    // Reset the lazy-extract registry from any previous run before we
-    // populate it for this build.
+
     LazyNested::clear_all();
 
-    // Group nested entries by their parent BNK so we can open each parent
-    // exactly once instead of once per nested entry. Previous code did
-    // ~hundreds of redundant BNKReader(parent_path) opens — on ISO that
-    // re-read the parent's header off the disc image every time.
     std::unordered_map<std::string, std::vector<int>> nested_by_parent;
     nested_by_parent.reserve(nested_bnks.size());
     for (const auto& [parent_bnk_path, nested_index] : nested_bnks) {
@@ -310,13 +275,12 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
     }
 
     for (auto& [parent_bnk_path, indices] : nested_by_parent) {
-        // Open the parent once; reuse it for every nested entry below.
+
         std::optional<BNKReader> parent_reader;
         try {
             parent_reader.emplace(parent_bnk_path);
         } catch (...) {
-            // Couldn't open parent — just count its nested entries as done
-            // so the progress bar still advances.
+
             g_tree_done_units.fetch_add((int)indices.size());
             continue;
         }
@@ -332,28 +296,19 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
             set_tree_label(std::filesystem::path(parent_bnk_path).filename().string()
                            + " : " + std::filesystem::path(nested_path).filename().string());
 
-            // Stable temp path — same as before so existing call sites that
-            // open these paths still work. The actual disk write is now
-            // deferred via LazyNested below.
             std::string nested_base = std::filesystem::path(nested_path).filename().string();
             std::string temp_name = std::to_string(std::hash<std::string>{}(parent_bnk_path + nested_path))
                                   + "_" + nested_base;
             auto temp_bnk_path = (tmpdir / temp_name).string();
 
             try {
-                // Pull the nested BNK's bytes straight out of the parent
-                // (in-memory). For ISO mode this is one read from the disc
-                // image; for disk mode it's one read from the parent file.
-                // Either way: zero temp-file I/O during enumeration.
+
                 std::vector<uint8_t> nested_bytes =
                     parent_reader->extract_index_bytes(nested_index);
 
                 BNKReader nested_reader(std::move(nested_bytes));
                 const auto& nested_files = nested_reader.list_files();
 
-                // Register the temp path for lazy materialization. If/when
-                // anything else tries to OPEN this path (BNKReader ctor or
-                // extract_one), it'll get extracted to disk on demand.
                 LazyNested::register_pending(temp_bnk_path, parent_bnk_path, nested_index);
 
                 {
@@ -375,17 +330,12 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
                                 (int)i, nested_files[i].uncompressed_size, true);
                 }
             } catch (...) {
-                // fall through — still increment so progress bar advances
+
             }
             g_tree_done_units.fetch_add(1);
         }
     }
 
-    // Alphabetize each flat cache once at the end of the build —
-    // case-insensitive so MyAsset.tex and myasset.tex end up adjacent.
-    // Doing it here (rather than every frame inside the tab) keeps the
-    // per-frame cost of the Models / Textures / Audio tabs down to the
-    // filter walk.
     auto cmp_ci = [](const FlatAssetEntry& a, const FlatAssetEntry& b) {
         const std::string& sa = a.name;
         const std::string& sb = b.name;

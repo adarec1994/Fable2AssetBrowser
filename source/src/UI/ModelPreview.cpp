@@ -49,16 +49,11 @@ static void decode_bc1_block(const uint8_t* b, uint32_t* outRGBA) {
     uint8_t r0=ex5((c0>>11)&31), g0=ex6((c0>>5)&63),  b0=ex5(c0&31);
     uint8_t r1=ex5((c1>>11)&31), g1=ex6((c1>>5)&63),  b1=ex5(c1&31);
     uint32_t cols[4];
-    // Pack as RGBA in LE memory order: byte 0 = R, byte 1 = G, byte 2 = B, byte 3 = A.
-    // (DXGI_FORMAT_R8G8B8A8_UNORM expects this byte order.)
+
     cols[0] = (0xFFu<<24) | ((uint32_t)b0<<16) | ((uint32_t)g0<<8) | (uint32_t)r0;
     cols[1] = (0xFFu<<24) | ((uint32_t)b1<<16) | ((uint32_t)g1<<8) | (uint32_t)r1;
     if(c0 > c1){
-        // Rounded /3 division — matches GPU BC1 decode + matches the
-        // behaviour we already use for BC4 in decode_bc4_block. Plain
-        // truncation biases all interpolated colours one unit toward
-        // colour 0 / colour 1, producing a faint ramp-step visible as
-        // banding/blurriness on smooth gradients.
+
         cols[2] = (0xFFu<<24) | ((uint32_t)((2*b0+b1+1)/3)<<16) | ((uint32_t)((2*g0+g1+1)/3)<<8) | (uint32_t)((2*r0+r1+1)/3);
         cols[3] = (0xFFu<<24) | ((uint32_t)((b0+2*b1+1)/3)<<16) | ((uint32_t)((g0+2*g1+1)/3)<<8) | (uint32_t)((r0+2*r1+1)/3);
     }else{
@@ -79,8 +74,7 @@ static void decode_bc3_block(const uint8_t* b, uint32_t* outRGBA){
     for(int i=0;i<6;++i) abits |= (uint64_t)b[2+i] << (8*i);
     uint8_t atab[8];
     atab[0]=a0; atab[1]=a1;
-    // Rounded interpolation — matches decode_bc4_block's recently-fixed
-    // formula and the inner op table at 0x82B8D9E0..D9FC in the binary.
+
     if(a0>a1){ for(int i=1;i<=6;i++) atab[i+1]=(uint8_t)(((7-i)*a0 + i*a1 + 3)/7); }
     else{ for(int i=1;i<=4;i++) atab[i+1]=(uint8_t)(((5-i)*a0 + i*a1 + 2)/5); atab[6]=0; atab[7]=255; }
     uint32_t color[16];
@@ -122,18 +116,7 @@ static void swap_bc3_endian(uint8_t* data, size_t size) {
         swap_bc1_endian(data + i + 8, 8);
     }
 }
-// Decode one BC4 sub-block (8 bytes) → 16 bytes of single-channel output.
-// Used as the building block for BC5 (= 2 BC4 blocks per BC5 block, one
-// for X, one for Y).
-//
-// Interpolation uses round-to-nearest (the +3 / +2 numerator add). The
-// game's hardware-decoded BC4 path (and Fable's CPU codec at
-// 0x82B8D9E0..D9FC) uses `addi r11, r11, 3; divw r11, r11, r23` for the
-// 8-level mode and the equivalent +2 round for the 5-way mode — i.e.
-// rounded division, not truncation. Plain integer-truncation
-// `((7-i)*a0 + i*a1)/7` produces a slightly biased ramp which shows up
-// as low-frequency banding when the result is fed to a Z-reconstruction
-// step (BC5 normal maps).
+
 static void decode_bc4_block(const uint8_t* b, uint8_t* out16) {
     uint8_t a0 = b[0], a1 = b[1];
     uint64_t abits = 0;
@@ -141,11 +124,11 @@ static void decode_bc4_block(const uint8_t* b, uint8_t* out16) {
     uint8_t atab[8];
     atab[0] = a0; atab[1] = a1;
     if (a0 > a1) {
-        // 8-level mode: 6 interpolated values, rounded /7.
+
         for (int i = 1; i <= 6; i++)
             atab[i+1] = (uint8_t)(((7-i)*a0 + i*a1 + 3) / 7);
     } else {
-        // 6-level mode: 4 interpolated values rounded /5, plus 0 and 255.
+
         for (int i = 1; i <= 4; i++)
             atab[i+1] = (uint8_t)(((5-i)*a0 + i*a1 + 2) / 5);
         atab[6] = 0; atab[7] = 255;
@@ -155,12 +138,10 @@ static void decode_bc4_block(const uint8_t* b, uint8_t* out16) {
         out16[i] = atab[ai];
     }
 }
-// BC5 endian-swap: each 16-byte BC5 block is 2 BC4 sub-blocks; swap each.
+
 static void swap_bc5_endian(uint8_t* data, size_t size) {
     for (size_t i = 0; i + 16 <= size; i += 16) {
-        // Each BC4 block: 2 endpoint bytes + 6 index bytes (3-bit indices,
-        // 16 indices total = 48 bits = 6 bytes). BE→LE swap is the same
-        // as swap_bc3_endian's alpha portion for BOTH halves.
+
         for (int half = 0; half < 2; ++half) {
             uint8_t* blk = data + i + 8 * half;
             uint64_t bits = 0;
@@ -171,7 +152,7 @@ static void swap_bc5_endian(uint8_t* data, size_t size) {
         }
     }
 }
-// Helper: BC1 → RGBA blit (assumes input is little-endian BC1 blocks)
+
 static void blit_bc1_to_rgba(const uint8_t* src, int w, int h,
                              std::vector<uint8_t>& rgba) {
     const size_t bx = (size_t)((w + 3) / 4);
@@ -196,7 +177,6 @@ static void blit_bc1_to_rgba(const uint8_t* src, int w, int h,
     }
 }
 
-// Helper: BC3 → RGBA blit (assumes input is little-endian BC3 blocks)
 static void blit_bc3_to_rgba(const uint8_t* src, int w, int h,
                              std::vector<uint8_t>& rgba) {
     const size_t bx = (size_t)((w + 3) / 4);
@@ -220,11 +200,7 @@ static void blit_bc3_to_rgba(const uint8_t* src, int w, int h,
         }
     }
 }
-// Helper: BC5 (ATI2 / two-channel normal map) → RGBA blit.
-// Each 16-byte BC5 block = 2 BC4 sub-blocks (X, then Y).
-// Output RGBA: R=X, G=Y, B=Z (reconstructed via Z = sqrt(1 - X^2 - Y^2)),
-// A=255. Z reconstruction makes the visualization look like a real
-// normal map instead of just two grayscale channels.
+
 static void blit_bc5_to_rgba(const uint8_t* src, int w, int h,
                              std::vector<uint8_t>& rgba) {
     const size_t bx = (size_t)((w + 3) / 4);
@@ -234,8 +210,8 @@ static void blit_bc5_to_rgba(const uint8_t* src, int w, int h,
     for (size_t byy = 0; byy < by; ++byy) {
         for (size_t bxx = 0; bxx < bx; ++bxx) {
             uint8_t xch[16], ych[16];
-            decode_bc4_block(src + off,     xch);   // first BC4 = X
-            decode_bc4_block(src + off + 8, ych);   // second BC4 = Y
+            decode_bc4_block(src + off,     xch);
+            decode_bc4_block(src + off + 8, ych);
             off += 16;
             for (int py = 0; py < 4; ++py) {
                 int yy = (int)byy * 4 + py;
@@ -246,7 +222,7 @@ static void blit_bc5_to_rgba(const uint8_t* src, int w, int h,
                     int idx = py * 4 + px;
                     int xi = xch[idx];
                     int yi = ych[idx];
-                    // Reconstruct Z. nx, ny in [-1,1].
+
                     float nx = (xi / 255.0f) * 2.0f - 1.0f;
                     float ny = (yi / 255.0f) * 2.0f - 1.0f;
                     float nz2 = 1.0f - nx*nx - ny*ny;
@@ -276,7 +252,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         return false;
     }
 
-    // Helper: width/height for a given mip
     auto mip_wh = [&](size_t i, int& mw, int& mh) {
         const auto& m = ti.Mips[i];
         mw = m.HasWH ? (int)m.MipWidth  : std::max(1, (int)ti.TextureWidth  >> (int)i);
@@ -291,11 +266,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         return false;
     };
 
-    // Pick the requested mip if the caller passed a valid index;
-    // otherwise auto-select the largest. The largest is usually
-    // index 0 in well-formed files but we don't assume that — if a
-    // file lists mips out of order the auto path still finds the
-    // biggest by area.
     size_t best = 0;
     if (mip_index >= 0 && (size_t)mip_index < ti.Mips.size()) {
         best = (size_t)mip_index;
@@ -326,9 +296,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
     const size_t sz_bc3 = bx * by * 16;
     const uint8_t* src = blob.data() + m.MipDataOffset;
 
-    // ---------------------------------------------------------------
-    // CompFlag == 7 → raw mip data (already-DXT, big-endian on Xbox 360).
-    // ---------------------------------------------------------------
     if (m.CompFlag == 7) {
         if (ti.PixelFormat == 35) {
             if (m.MipDataSizeParsed < sz_bc1) {
@@ -359,7 +326,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             return true;
         }
         if (ti.PixelFormat == 40) {
-            // BC5 = 16 bytes/block (2 BC4 sub-blocks: X then Y).
+
             if (m.MipDataSizeParsed < sz_bc3) {
                 std::ostringstream os;
                 os << "BC5 raw mip too small (" << m.MipDataSizeParsed << " < " << sz_bc3 << ")";
@@ -370,10 +337,10 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             swap_bc5_endian(swapped.data(), swapped.size());
             blit_bc5_to_rgba(swapped.data(), w, h, rgba);
             out_w = w; out_h = h;
-            if (out_has_alpha) *out_has_alpha = false; // BC5 has no alpha
+            if (out_has_alpha) *out_has_alpha = false;
             return true;
         }
-        // Fallback: assume the raw bytes already are RGBA (rare format)
+
         size_t sz_raw = (size_t)w * (size_t)h * 4;
         if (m.MipDataSizeParsed < sz_raw) {
             std::ostringstream os;
@@ -390,22 +357,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         return true;
     }
 
-    // ---------------------------------------------------------------
-    // CompFlag = 3 (variant_2_3_4 codec) for BC5 normal maps (PF=40 / 4).
-    //
-    // BC5 layout (verified from dumped files): each mip is a 48-byte
-    // header containing TWO sub-headers:
-    //   bytes 0..11  = X channel: (CompFlag, DataOffset=48, DataSize)
-    //   bytes 12..23 = Y channel: (CompFlag, DataOffset=48+DS_X, DataSize)
-    // Then body[X bytes][Y bytes] follow.  We call variant_2_3_4 once
-    // for each channel, then interleave into BC5 blocks for the
-    // existing BC5→RGBA blit.
-    //
-    // Currently the codec's op_type 3 has correct bit consumption but
-    // a simplified output (full BC4 index packing is a follow-up), so
-    // expect a low-frequency approximation rather than pixel-accurate
-    // normal map decode. Still strictly better than failing.
-    // ---------------------------------------------------------------
     if (m.CompFlag == 3 && (ti.PixelFormat == 40 || ti.PixelFormat == 4)) {
         const size_t x_body_start = m.DefOffset + 48;
         const size_t x_body_size  = m.DataSize;
@@ -432,13 +383,13 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 const size_t n_blocks = (size_t)(w / 4) * (size_t)(h / 4);
                 std::vector<uint8_t> bc5_blocks(n_blocks * 16);
                 for (size_t i = 0; i < n_blocks; ++i) {
-                    // X channel
+
                     memcpy(bc5_blocks.data() + i * 16, bc4_x.data() + i * 8, 8);
                     if (ok_y) {
-                        // Y channel from second codec call
+
                         memcpy(bc5_blocks.data() + i * 16 + 8, bc4_y.data() + i * 8, 8);
                     } else {
-                        // Y unavailable / decode failed: flat 0x80 placeholder
+
                         bc5_blocks[i * 16 + 8] = 0x80;
                         bc5_blocks[i * 16 + 9] = 0x80;
                         for (int k = 10; k < 16; ++k) bc5_blocks[i * 16 + k] = 0;
@@ -453,31 +404,20 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 os << "variant_2_3_4 BC5 X-channel (" << w << "x" << h
                    << ") failed: " << err_x << " — falling back to comp=7";
                 log_tagged("decode_tex_to_rgba", os.str());
-                // fall through to comp=7 fallback
+
             }
         }
     }
 
-    // ---------------------------------------------------------------
-    // CompFlag != 7 → Lionhead-compressed mip body.
-    // The codec yields little-endian BC1 (no further endian swap needed).
-    // ---------------------------------------------------------------
     {
-        // BC1 (PixelFormat 35) and BC3 (PixelFormat 39, plus the older
-        // dispatcher-style codes 1/2/3 used by some files like
-        // alphastipple.tex) both use the Lionhead BC1 codec on their
-        // color-half body. For BC3, the parser sees the color sub-block as
-        // a comp=1 record — we run the codec on it, get BC1, and present
-        // alpha=255. The alpha sub-block uses a different (currently
-        // unsupported) sub-codec; for now we just show the color half.
-        // Other formats fall back to whichever uncompressed mip is largest.
+
         const bool pf_is_bc1_family =
             (ti.PixelFormat == 35) || (ti.PixelFormat == 0) || (ti.PixelFormat == 12);
         const bool pf_is_bc3_family =
             (ti.PixelFormat == 39) || (ti.PixelFormat == 1) ||
             (ti.PixelFormat == 2)  || (ti.PixelFormat == 3);
         if (!pf_is_bc1_family && !pf_is_bc3_family) {
-            // Try to find the best comp=7 mip as a fallback
+
             int fallback_idx = -1;
             int fallback_area = 0;
             for (size_t i = 0; i < ti.Mips.size(); ++i) {
@@ -517,9 +457,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 return true;
             }
             if (ti.PixelFormat == 40) {
-                // BC5 normal map fallback: BC5 textures use comp=3 for their
-                // big mips (variant_2_3_4 codec — not ported yet) and comp=7
-                // for the smallest. So this path always uses the tiny mip.
+
                 if (fm.MipDataSizeParsed < fbx * fby * 16) {
                     log_tagged("decode_tex_to_rgba", "BC5 fallback mip too small");
                     return false;
@@ -539,11 +477,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             return false;
         }
 
-        // PixelFormat 35 (BC1) — run the Lionhead codec.
-        // The codec wants the WHOLE body (u16 mw, u16 mh, UnkData[440],
-        // payload), but parse_tex_info's MipDataOffset already skips the
-        // 4-byte w/h + 440-byte UnkData, pointing at just the payload.
-        // Reconstruct the full body via DefOffset + sizeof(mip-header)=48.
         const size_t body_start = m.DefOffset + 48;
         const size_t body_size  = m.DataSize;
         if (body_start + body_size > blob.size()) {
@@ -558,9 +491,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         std::vector<uint8_t> bc1;
         int dec_w = 0, dec_h = 0;
         std::string err;
-        // Route to the right codec based on CompFlag:
-        //   1  -> standard Lionhead BC1 codec (Z-order index layout)
-        //   11 -> same codec, column-major index layout (sub_82B8C900)
+
         const bool comp11 = (m.CompFlag == 11);
         bool ok = lh_decode_compressed_mip(body_ptr, body_size,
                                            dec_w, dec_h, bc1, &err, comp11);
@@ -571,7 +502,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             log_tagged("decode_tex_to_rgba", os.str());
             return false;
         }
-        // Sanity-check decoded dims match what we expected from the mip header
+
         if (dec_w != w || dec_h != h) {
             std::ostringstream os;
             os << "WARNING: codec reported " << dec_w << "x" << dec_h
@@ -582,11 +513,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         blit_bc1_to_rgba(bc1.data(), w, h, rgba);
         out_w = w; out_h = h;
 
-        // BC3 alpha sub-block. The Lionhead BC1 codec produces 8 bytes per
-        // block; when the encoder wrote BC3 alpha data, those 8 bytes are
-        // a BC4 alpha block (a0=byte[0], a1=byte[1], 48-bit index stream
-        // in bytes 2..7). For comp=3 alpha (variant_2_3_4 codec) we use
-        // the variant codec in mode=2 which already produces BC4 blocks.
         if (pf_is_bc3_family && m.Unknown_5 > 0) {
             const size_t a_body_start = m.DefOffset + (size_t)m.Unknown_4;
             const size_t a_body_size  = (size_t)m.Unknown_5;
@@ -607,27 +533,25 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 bool aok = false;
 
                 if (a_cf == 1 || a_cf == 11) {
-                    // BC1-codec variants: comp=1 (Z-order) or comp=11 (column-major)
+
                     aok = lh_decode_compressed_mip(
                         blob.data() + a_body_start, a_body_size,
                         adec_w, adec_h, alpha_blocks, &aerr,
                         /*comp11_layout=*/(a_cf == 11));
                 } else if (a_cf == 3 || a_cf == 2 || a_cf == 4) {
-                    // variant_2_3_4 codec — produces BC4 alpha blocks directly
+
                     aok = lh_decode_variant_2_3_4(
                         blob.data() + a_body_start, a_body_size,
                         /*mode=*/2, w, h, alpha_blocks, &aerr);
-                    adec_w = w; adec_h = h;  // variant doesn't return dims
+                    adec_w = w; adec_h = h;
                 } else if (a_cf == 7) {
-                    // Raw BC4 alpha blocks — body size = (w/4) * (h/4) * 8 bytes
+
                     const size_t expected = (size_t)((w + 3) / 4)
                                           * (size_t)((h + 3) / 4) * 8;
                     if (a_body_size >= expected) {
                         alpha_blocks.assign(blob.data() + a_body_start,
                                             blob.data() + a_body_start + expected);
-                        // Endian-swap each 8-byte BC4 block: bytes [2..7] are
-                        // an LE 48-bit packed index field on PC; on Xbox the
-                        // bytes were stored BE inside the block's index half.
+
                         for (size_t i = 0; i + 8 <= alpha_blocks.size(); i += 8) {
                             uint8_t* blk = alpha_blocks.data() + i;
                             uint64_t bits = 0;
@@ -675,7 +599,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                     std::ostringstream os;
                     os << "BC3 alpha decode failed (cf=" << a_cf << "): " << aerr;
                     log_tagged("decode_tex_to_rgba", os.str());
-                    // keep alpha = 255 from BC1 decode
+
                 }
             }
         }
@@ -724,8 +648,7 @@ static bool extract_tex_bytes_by_candidate(const std::vector<std::string>& candi
         if(blob.empty()) continue;
         TexInfo ti{};
         if(!parse_tex_info(blob, ti)) continue;
-        // Accept textures with at least one decodable mip (comp=7 raw,
-        // or comp!=7 BC1 that the Lionhead codec can decode).
+
         if (ti.Mips.empty()) continue;
         size_t area = (size_t)ti.TextureWidth * (size_t)ti.TextureHeight;
         if(area > best_area){ best_area = area; best_idx = (int)i; out.swap(blob); }
@@ -991,10 +914,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     if(!compile_shader(g_ps,"PS","ps_5_0",&psb)){ if(vsb) vsb->Release(); return false; }
     if(FAILED(dev->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &mp.vs))){ vsb->Release(); psb->Release(); return false; }
     if(FAILED(dev->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &mp.ps))){ vsb->Release(); psb->Release(); return false; }
-    // 5-element input layout: pos / normal / uv / 4-bone-IDs / 4-weights.
-    // Bone IDs come in as R8G8B8A8_UINT (matches MPVertex's b0..b3 bytes
-    // exactly); weights as a regular float4. See MPVertex layout in
-    // ModelPreview.h for byte offsets.
+
     D3D11_INPUT_ELEMENT_DESC il[] = {
         {"POSITION",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"NORMAL",     0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
@@ -1008,7 +928,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     D3D11_BUFFER_DESC cbd{};
     cbd.BindFlags=D3D11_BIND_CONSTANT_BUFFER; cbd.ByteWidth=sizeof(CB); cbd.Usage=D3D11_USAGE_DYNAMIC; cbd.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
     if(FAILED(dev->CreateBuffer(&cbd,nullptr,&mp.cbuffer))) return false;
-    // Bones cbuffer (b1): MP_MAX_BONES row-major float4x4 = 256*64 = 16 KB.
+
     D3D11_BUFFER_DESC bcb{};
     bcb.BindFlags     = D3D11_BIND_CONSTANT_BUFFER;
     bcb.ByteWidth     = (UINT)(MP_MAX_BONES * sizeof(XMFLOAT4X4));
@@ -1023,8 +943,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     rd.DepthClipEnable = TRUE;
     rd.MultisampleEnable = FALSE;
     if(FAILED(dev->CreateRasterizerState(&rd,&mp.rs))) return false;
-    // Wireframe variant — same cull/clip settings, just FILL_WIREFRAME.
-    // MP_Render picks between mp.rs and mp.rs_wire based on mp.wireframe.
+
     D3D11_RASTERIZER_DESC rd_w = rd;
     rd_w.FillMode = D3D11_FILL_WIREFRAME;
     if(FAILED(dev->CreateRasterizerState(&rd_w, &mp.rs_wire))) return false;
@@ -1067,11 +986,7 @@ void MP_Resize(ID3D11Device* dev, ModelPreview& mp, int w, int h){
 void MP_Release(ModelPreview& mp){
     mp_release(mp);
 }
-// Build a row-major 4x4 from an 11-float bone TRS (rotQuat[0..3],
-// trans[4..6], scale[7..9]). Optional `delta` quaternion (xyzw) is
-// applied as an extra rotation in the bone's LOCAL frame BEFORE the
-// rest rotation — same convention used by the skinning math elsewhere
-// (children inherit the rotated frame). Pass nullptr for the rest pose.
+
 static XMMATRIX bone_local_matrix(const float* tf, const float* delta /*xyzw or null*/){
     XMVECTOR q = XMVectorSet(tf[0], tf[1], tf[2], tf[3]);
     XMVECTOR t = XMVectorSet(tf[4], tf[5], tf[6], 0.0f);
@@ -1080,8 +995,7 @@ static XMMATRIX bone_local_matrix(const float* tf, const float* delta /*xyzw or 
     XMMATRIX R_ = XMMatrixRotationQuaternion(q);
     if (delta) {
         XMVECTOR qd = XMVectorSet(delta[0], delta[1], delta[2], delta[3]);
-        // Apply delta in LOCAL space — i.e., multiply rotation BEFORE the
-        // rest rotation in row-vector terms (S * (R_delta * R_rest)).
+
         XMMATRIX D_ = XMMatrixRotationQuaternion(qd);
         R_ = D_ * R_;
     }
@@ -1089,17 +1003,6 @@ static XMMATRIX bone_local_matrix(const float* tf, const float* delta /*xyzw or 
     return S_ * R_ * T_;
 }
 
-// Compute world-space rest pose matrices for every bone in `info`. Output
-// is XMFLOAT4X4 (16 floats, row-major) — NOT XMMATRIX. The reason: on x86
-// std::vector<XMMATRIX> has been observed to produce stack-cookie /
-// alignment failures during SSE loads on some MSVC toolchains, since
-// XMMATRIX wants 16-byte alignment but the std::allocator path doesn't
-// always honour it. Storing as XMFLOAT4X4 (plain 16-float struct, no
-// alignment requirement) sidesteps the whole class of bug — we just
-// XMLoadFloat4x4 / XMStoreFloat4x4 around the SIMD operations.
-//
-// `n_cap` lets the caller bound the output to MP_MAX_BONES so a corrupt
-// MDL that reports a wild BoneCount can't trigger a multi-GB allocation.
 static void compute_rest_world(const MDLInfo& info,
                                uint32_t n_cap,
                                std::vector<XMFLOAT4X4>& out_world){
@@ -1173,9 +1076,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         std::vector<MPVertex> vtx(vcount);
         bool hasN = (g.normals.size()==vcount*3);
         bool hasT = (g.uvs.size()==vcount*2);
-        // Bone-data presence tracked per-mesh: a mesh might have weights
-        // even if other meshes in the same model don't. When absent we
-        // fall back to bone[0] with full weight (= rest pose, no skin).
+
         bool hasBI = (g.bone_ids.size()     == vcount * 4);
         bool hasBW = (g.bone_weights.size() == vcount * 4);
         for(size_t v=0; v<vcount; ++v){
@@ -1187,8 +1088,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             vtx[v].nz = hasN ? g.normals[v*3+2] : 0.0f;
             vtx[v].u  = hasT ? g.uvs[v*2+0] : 0.0f;
             vtx[v].v  = hasT ? g.uvs[v*2+1] : 0.0f;
-            // Cap each ID to the cbuffer size so out-of-range never
-            // reads garbage past the bone matrix array.
+
             auto cap = [](uint16_t id) -> uint8_t {
                 uint32_t x = (uint32_t)id;
                 if (x >= MP_MAX_BONES) x = 0;
@@ -1229,9 +1129,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         m.normal_visible    = true;
         m.specular_visible  = true;
         m.tint_visible      = true;
-        // Submesh display name — falls back to mesh_<i>/sub_<j> if the
-        // parsed name is empty so the Materials overlay always has
-        // something to show in the section header.
+
         if (!g.name.empty()) {
             m.name = g.name;
         } else {
@@ -1240,13 +1138,9 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         }
         m.highlight = false;
         m.isolated  = false;
-        // Original geom index — preserved so the UV overlay can find
-        // the matching MDLMeshGeom in S.mdl_meshes (which keeps every
-        // entry, including the empty ones we skip here).
+
         m.source_mesh_idx = (uint32_t)i;
-        // Prefer textures from the same nested BNK family the model came
-        // from (the user's currently-selected BNK), so a model loaded from
-        // a region archive uses that region's textures instead of globals.
+
         std::string preferred_for_tex =
             (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty())
                 ? S.selected_nested_temp_path
@@ -1274,19 +1168,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         m.has_alpha = hasA;
         mp.meshes.push_back(m);
     }
-    // NOTE: `mp.has_model = true` is deferred to the END of this
-    // function so the bone cache is fully populated before any
-    // main-thread reader (skeleton overlay, animation overlay)
-    // sees has_model and dereferences `mp.local_rest`. This used
-    // to live here, which created a window where bone_count was
-    // already n but local_rest was still empty — clicking the
-    // skeleton "Show" checkbox during that window was UB and
-    // crashed the process.
 
-    // ---- Cache the rest skeleton ----
-    // Used per-frame in MP_Render to compute the pose, and by
-    // MP_ComputeWorldPose for the on-screen skeleton overlay. Cap at
-    // MP_MAX_BONES so the cbuffer indexing stays in range.
     mp.bone_count = 0;
     mp.bone_parents.clear();
     mp.local_rest.clear();
@@ -1303,8 +1185,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
 
         for (uint32_t i = 0; i < n; ++i){
             int pid = info.Bones[i].ParentID;
-            // Clamp parent index — out-of-range parents are treated as
-            // root, otherwise the chain walk could read junk.
+
             if (pid >= (int)n) pid = -1;
             mp.bone_parents[i] = pid;
 
@@ -1314,9 +1195,6 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             }
         }
 
-        // Compute rest world matrices, then their inverses for inv-bind.
-        // Stored as XMFLOAT4X4 to avoid the alignment trap described in
-        // compute_rest_world's header comment.
         std::vector<XMFLOAT4X4> rest_world;
         compute_rest_world(info, n, rest_world);
         for (uint32_t i = 0; i < n && i < rest_world.size(); ++i){
@@ -1328,17 +1206,13 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         }
     }
 
-    // Reset per-model bone editing state. Identity quat is (0,0,0,1).
     S.bone_rot_deltas.assign((size_t)mp.bone_count * 4, 0.0f);
     for (uint32_t i = 0; i < mp.bone_count; ++i){
-        S.bone_rot_deltas[(size_t)i * 4 + 3] = 1.0f;  // w
+        S.bone_rot_deltas[(size_t)i * 4 + 3] = 1.0f;
     }
     S.selected_bone     = -1;
     S.bone_rotate_mode  = false;
 
-    // Bone cache is now consistent with bone_count — safe to flip the
-    // public-facing flag. Anything reading mp.has_model from another
-    // thread now sees a fully-populated state.
     mp.has_model = !mp.meshes.empty();
     return true;
 }
@@ -1355,8 +1229,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     ctx->VSSetShader(mp.vs,nullptr,0);
     ctx->PSSetShader(mp.ps,nullptr,0);
     ctx->PSSetSamplers(0,1,&mp.sampler);
-    // Wireframe toggle from the Wireframe overlay — falls back to solid
-    // if rs_wire wasn't created for any reason.
+
     ctx->RSSetState((mp.wireframe && mp.rs_wire) ? mp.rs_wire : mp.rs);
     float cy = cosf(cam.yaw);
     float sy = sinf(cam.yaw);
@@ -1393,23 +1266,13 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     ctx->VSSetConstantBuffers(0,1,&mp.cbuffer);
     ctx->PSSetConstantBuffers(0,1,&mp.cbuffer);
 
-    // ---- Bone matrices (b1) ----
-    // Build skin matrices: SK[i] = inv_bind[i] * world_pose[i]. world_pose
-    // is the rest pose with each bone's user-applied delta quaternion
-    // multiplied into its local rotation, then chain-walked to the root.
-    // The cbuffer is sized for MP_MAX_BONES; bones[bone_count..MAX-1] get
-    // identity so any out-of-range vertex IDs (shouldn't happen — IDs are
-    // capped at MP_MAX_BONES in MP_Build — but harmless if they do) skin
-    // to bone[0] safely.
     std::vector<XMFLOAT4X4> bone_mats(MP_MAX_BONES);
     for (uint32_t i = 0; i < MP_MAX_BONES; ++i){
         XMStoreFloat4x4(&bone_mats[i], XMMatrixIdentity());
     }
     if (mp.bone_count > 0) {
         const uint32_t n = mp.bone_count;
-        // Pose locals — apply delta quaternion if available. Stored as
-        // XMFLOAT4X4 so the underlying allocator doesn't need 16-byte
-        // alignment (see compute_rest_world's note for context).
+
         std::vector<XMFLOAT4X4> local(n);
         bool have_deltas = (S.bone_rot_deltas.size() >= (size_t)n * 4);
         for (uint32_t i = 0; i < n; ++i){
@@ -1418,7 +1281,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             XMMATRIX L = bone_local_matrix(tf, dq);
             XMStoreFloat4x4(&local[i], L);
         }
-        // World matrices via the cached parent chain.
+
         std::vector<XMFLOAT4X4> world(n);
         std::vector<uint8_t> done(n, 0);
         for (uint32_t i = 0; i < n; ++i){
@@ -1439,9 +1302,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 done[*it] = 1;
             }
         }
-        // Build skin matrices = inv_bind * world. The shader declares the
-        // array as row_major float4x4, and HLSL row_major matches our
-        // XMFLOAT4X4 storage — no transpose needed here.
+
         for (uint32_t i = 0; i < n; ++i){
             XMFLOAT4X4 ib_f;
             std::memcpy(&ib_f, &mp.inv_bind[(size_t)i * 16], sizeof(float) * 16);
@@ -1461,15 +1322,9 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         ctx->VSSetConstantBuffers(1, 1, &mp.bone_cb);
     }
 
-    // Materials-overlay state: when any submesh has `isolated=true` we
-    // draw only that one (acts like solo / hide-rest). Highlight is
-    // independent — it just toggles a green tint via params.z below.
     bool any_isolated = false;
     for (const auto& mm : mp.meshes) { if (mm.isolated) { any_isolated = true; break; } }
 
-    // Helper to push the per-mesh CB right before its draw — we copy the
-    // common camera/light values once into `cb` above, and only swap the
-    // per-mesh highlight bit here. Cheaper than rebuilding the whole CB.
     auto upload_per_mesh_cb = [&](bool highlight){
         cb.params = XMFLOAT4(0.4f, 48.0f, highlight ? 1.0f : 0.0f, 0.0f);
         D3D11_MAPPED_SUBRESOURCE pms{};
@@ -1540,18 +1395,12 @@ void MP_ComputeWorldPose(const ModelPreview& mp,
     if (mp.bone_count == 0) return;
 
     const uint32_t n = mp.bone_count;
-    // Defensive bounds check — bone_count and the dependent vectors
-    // are populated together by MP_Build, but the worker thread can
-    // be partway through that population when a main-thread reader
-    // (skeleton/animation overlay) calls in. Bail cleanly instead of
-    // dereferencing a half-built buffer.
+
     if (mp.local_rest.size()   < (size_t)n * 11) return;
     if (mp.bone_parents.size() < (size_t)n)       return;
 
     const bool have_deltas = (deltas.size() >= (size_t)n * 4);
 
-    // Locals (rest, optionally with delta applied). XMFLOAT4X4 storage —
-    // see compute_rest_world for the alignment-trap context.
     std::vector<XMFLOAT4X4> local(n);
     for (uint32_t i = 0; i < n; ++i){
         const float* tf = &mp.local_rest[(size_t)i * 11];
@@ -1559,7 +1408,7 @@ void MP_ComputeWorldPose(const ModelPreview& mp,
         XMMATRIX L = bone_local_matrix(tf, dq);
         XMStoreFloat4x4(&local[i], L);
     }
-    // Worlds via parent chain.
+
     std::vector<XMFLOAT4X4> world(n);
     std::vector<uint8_t> done(n, 0);
     for (uint32_t i = 0; i < n; ++i){
@@ -1580,7 +1429,7 @@ void MP_ComputeWorldPose(const ModelPreview& mp,
             done[*it] = 1;
         }
     }
-    // Output as 16 floats per bone, row-major.
+
     out_world_pose.resize((size_t)n * 16);
     for (uint32_t i = 0; i < n; ++i){
         std::memcpy(&out_world_pose[(size_t)i * 16],
@@ -1762,7 +1611,7 @@ void MP_Resize(ModelPreview& mp, int w, int h) {
 static unsigned int load_tex_from_name(const std::string& name, bool* out_has_alpha) {
     if (name.empty()) return 0;
     std::vector<unsigned char> tex_buf;
-    // Prefer the user's clicked nested BNK family over globals for textures.
+
     std::string preferred_for_tex =
         (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty())
             ? S.selected_nested_temp_path
@@ -1835,9 +1684,7 @@ bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelP
         m.normal_visible    = true;
         m.specular_visible  = true;
         m.tint_visible      = true;
-        // Submesh display name — falls back to mesh_<i>/sub_<j> if the
-        // parsed name is empty so the Materials overlay always has
-        // something to show in the section header.
+
         if (!g.name.empty()) {
             m.name = g.name;
         } else {

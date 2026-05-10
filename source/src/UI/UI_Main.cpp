@@ -34,16 +34,9 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 ModelPreview g_mp;
-// Non-static so RenderPanel.cpp can reference it as extern. Tracks
-// whether MP_Init has run for the current model.
+
 bool g_mp_initialized = false;
 
-// Apply the user's R/G/B/A display toggles in-place to a freshly-decoded
-// RGBA buffer. Disabled colour channels are zeroed, disabled alpha is
-// forced to 255 (opaque) so the image still shows. Fast-paths the
-// common "all on" case so a typical preview pays nothing for the
-// per-pixel walk. Called right before SRV creation in both the
-// initial-load and mip/channel-change handlers below.
 static void apply_tex_channel_mask(std::vector<uint8_t>& rgba) {
     if (S.tex_show_r && S.tex_show_g && S.tex_show_b && S.tex_show_a) return;
     for (size_t i = 0; i + 3 < rgba.size(); i += 4) {
@@ -132,9 +125,7 @@ struct Sparkle {
 };
 static Sparkle g_sparkles[400];
 static bool g_sparkles_initialized = false;
-// All splash assets (logo, panorama, sparkles) are embedded in the exe as
-// RCDATA on Windows; the loaders live in Splashscreen.cpp. Older disk-loading
-// helpers were removed so there are no runtime file dependencies.
+
 static void handle_flycam_input(float dt) {
     ImGuiIO& io = ImGui::GetIO();
     bool w_pressed = ImGui::IsKeyDown(ImGuiKey_W);
@@ -184,10 +175,6 @@ static void handle_flycam_input(float dt) {
     FlyCam_Update(g_flycam, dt, w_pressed, s_pressed, a_pressed, d_pressed, q_pressed, e_pressed, mouse_dx, mouse_dy);
 }
 
-// External entry point so the render panel (in src/UI/Layout/) can drive
-// the camera while the model is embedded in its child window. Same logic
-// as the in-file static — kept as a thin wrapper so we don't have to make
-// the camera state public.
 void render_panel_handle_flycam(float dt) {
     handle_flycam_input(dt);
 }
@@ -200,9 +187,7 @@ void draw_main(GLFWwindow* window) {
     g_glfw_window = window;
 #endif
     ImGuiViewport* viewport = ImGui::GetMainViewport();
-    // The bottom Output Log strip lives only on the main app view (post
-    // splash + post BNK-load). On those screens, shrink the main window
-    // by the strip's height so panels inside don't get clipped by it.
+
     const bool show_output_log =
         !S.root_dir.empty() && !UI::loading_in_progress() && !S.bnk_paths.empty();
     const float bottom_reserve =
@@ -210,12 +195,7 @@ void draw_main(GLFWwindow* window) {
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x,
                                     viewport->WorkSize.y - bottom_reserve));
-    // The MenuBar flag reserves a strip at the top of the window
-    // unconditionally — even if no menu is drawn — so we only set it
-    // when we're actually going to render the menu. We hide the menu
-    // during the splash AND while BNKs are loading; the loading screen
-    // owns the entire viewport in those cases and a stub menu strip
-    // would just steal pixels.
+
     const bool show_menu_bar = show_output_log;
     ImGuiWindowFlags main_flags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -226,20 +206,11 @@ void draw_main(GLFWwindow* window) {
     ImGui::Begin("##main", nullptr, main_flags);
     float dt = ImGui::GetIO().DeltaTime;
 
-    // ---- Top menu bar ------------------------------------------------------
-    // Same gate as the flag above — only on the main app view, never on
-    // the splash or loading screens. File > Quit posts WM_QUIT so the
-    // main loop exits through the same path as clicking the X. Settings
-    // is a dropdown carrying the show-paths / dev-mode toggles + font
-    // slider inline; no separate popup window.
     if (show_menu_bar) {
         extern void settings_save();
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("File")) {
-                // Dump submenu — surfaced only in developer mode. The
-                // BNK dump requires ISO mode (no equivalent set in
-                // folder mode), the MDL dump works in either since it
-                // reuses the in-app reconstruct path.
+
                 if (S.dev_mode) {
                     if (ImGui::BeginMenu("Dump")) {
                         if (ISO::IsoMount::instance().is_mounted()) {
@@ -250,12 +221,7 @@ void draw_main(GLFWwindow* window) {
                             ImGui::MenuItem("BNK's (ISO only)", nullptr,
                                             false, false);
                         }
-                        // Full per-BNK extract — works in both ISO and
-                        // folder modes since it just walks the indexed
-                        // BNK list. Distinct from "BNK's" above which
-                        // dumps the .bnk archives byte-for-byte; this
-                        // one cracks each archive open and writes its
-                        // contents into a per-BNK subdirectory.
+
                         if (!S.bnk_paths.empty() ||
                             !S.nested_bnk_paths.empty()) {
                             if (ImGui::MenuItem("BNK contents (raw)")) {
@@ -290,13 +256,7 @@ void draw_main(GLFWwindow* window) {
                             ImGui::MenuItem(".wav (no WAVs indexed)",
                                             nullptr, false, false);
                         }
-                        // .anim entry is informational for now —
-                        // retail Fable 2 ships zero .anim files (we
-                        // confirmed by walking every BNK in
-                        // streaming.bnk / levels.bnk / globals.*).
-                        // The scanner picks them up if they ever
-                        // appear, e.g. from a debug build, mod, or
-                        // unpacked devkit dump.
+
                         if (!S.all_anim_files.empty()) {
                             ImGui::MenuItem(
                                 (".anim (" +
@@ -350,11 +310,6 @@ void draw_main(GLFWwindow* window) {
                     settings_save();
                 }
 
-                // ---- Export location ---------------------------------
-                // Editable text + Browse button. Each export writes to
-                //   ${export_dir}/${asset_relative_path}.${ext}
-                // Changing this never auto-creates the new directory —
-                // we only mkdir when an actual export call needs it.
                 ImGui::Separator();
                 ImGui::TextUnformatted("Export location");
                 ImGui::SetNextItemWidth(360);
@@ -368,15 +323,10 @@ void draw_main(GLFWwindow* window) {
                     ImGuiFileDialog::Instance()->OpenDialog(
                         "PickExportDir",
                         "Select export folder",
-                        nullptr,                 // nullptr filter ⇒ directory picker
+                        nullptr,
                         cfg);
                 }
 
-                // Texture format used for textures embedded in MDL
-                // (GLB / FBX) exports. DDS keeps the largest mip in
-                // an uncompressed RGBA8 wrapper that every DCC reads
-                // without recompression; PNG and JPG go through
-                // stb_image_write. Persisted to config.ini.
                 ImGui::Separator();
                 ImGui::TextUnformatted("MDL export texture format");
                 ImGui::SetNextItemWidth(160);
@@ -397,10 +347,7 @@ void draw_main(GLFWwindow* window) {
 
                 ImGui::EndMenu();
             }
-            // Help menu — currently just the About window. Lives at
-            // the rightmost end of the bar by convention. Adding more
-            // entries here later (Documentation, Report Issue, etc.)
-            // is just another MenuItem inside this BeginMenu block.
+
             if (ImGui::BeginMenu("Help")) {
                 if (ImGui::MenuItem("About")) {
                     About::open();
@@ -411,11 +358,6 @@ void draw_main(GLFWwindow* window) {
         }
     }
 
-    // ---- Top-level dispatch ------------------------------------------------
-    // 1. No data picked → splash screen.
-    // 2. Data picked + tree still building → loading screen (full-window).
-    // 3. Data picked + tree ready → main 2-column layout. The render
-    //    panel inside the layout owns model preview / texture display.
     if (S.root_dir.empty()) {
 #ifdef _WIN32
         Splash::draw(device);
@@ -423,9 +365,7 @@ void draw_main(GLFWwindow* window) {
         Splash::draw(window);
 #endif
     } else if (UI::loading_in_progress() || S.bnk_paths.empty()) {
-        // Either the tree is still being built, or we don't have any
-        // BNKs scanned yet (e.g. the open thread hasn't finished). Show
-        // the loading screen rather than a half-populated layout.
+
         UI::draw_loading_screen();
     } else {
 #ifdef _WIN32
@@ -436,10 +376,6 @@ void draw_main(GLFWwindow* window) {
     }
     ImGui::End();
 
-    // About window — drawn outside the main fullscreen window so it
-    // floats on top with its own title bar / X. Cheap when closed
-    // (early-returns), draws a fixed-size dialog when open. Triggered
-    // from the Help menu above; closes via the X.
 #ifdef _WIN32
     About::draw(device);
 #else
@@ -466,11 +402,6 @@ void draw_main(GLFWwindow* window) {
         S.pending_texture_rgba.clear();
     }
 
-    // Mip / channel re-decode path — the texture preview's overlay
-    // sets pending_texture_mip_change for both arrow clicks AND R/G/B/A
-    // checkbox flips. Re-decodes from the cached blob (no BNK round
-    // trip), applies the channel mask, and swaps the SRV in-place.
-    // No-op if we don't have a blob (e.g. last load failed).
     if (S.pending_texture_mip_change.exchange(false)) {
         if (!S.texture_blob.empty() && S.tex_info_ok) {
             std::vector<uint8_t> rgba;
@@ -533,43 +464,22 @@ void draw_main(GLFWwindow* window) {
     }
 #endif
 
-    // The floating "Texture Preview" ImGui window is gone — textures
-    // now render into the central RenderPanel via S.texture_window_srv.
-    // The pending_texture_load handler above creates that SRV; the
-    // panel paints it.
-
-    // Drive the MDL/TEX preview-load state machines. They used to live
-    // inside draw_right_panel; that function is no longer called by the
-    // new layout, so we run the handlers from here instead.
 #ifdef _WIN32
     process_pending_loads(device);
 #else
     process_pending_loads();
 #endif
 
-    // Animation playback — advance the clock, then stamp the resulting
-    // pose into S.bone_rot_deltas. ModelPreview's existing skinning
-    // path consumes that on its next render. Only ticks when there's
-    // a model loaded so an idle browser doesn't burn cycles.
     if (g_mp.has_model && g_mp.bone_count > 0) {
         Anim::global_player().tick(dt);
         Anim::global_player().apply_to_skeleton();
     } else if (Anim::global_player().clip()) {
-        // Active clip but no compatible model — drop it so the next
-        // model load doesn't inherit a stale playback.
+
         Anim::global_player().stop();
     }
 
-    // Drive the texture-export pipeline (no dialog any more — exports
-    // auto-save to S.export_dir; this is now a no-op stub kept for
-    // future use). Logs go through OutputLog.
     tex_export_drive();
 
-    // Drive the export-folder picker. Opened from the Settings dropdown
-    // via "Browse" next to the export-location field. We deliberately
-    // do NOT call open_folder_logic here — that would treat the chosen
-    // path as a Fable 2 root and rescan; we just want to update the
-    // export root.
     {
         ImVec2 vp = ImGui::GetMainViewport()->WorkSize;
         ImVec2 minSize(680, 440);
@@ -586,16 +496,8 @@ void draw_main(GLFWwindow* window) {
         }
     }
 
-    // (Settings used to live in a floating window here; it's now a
-    // dropdown directly off the menu bar.)
-
-    // In-app audio player (only renders when a source is loaded).
     UI::draw_audio_player_window();
 
-    // Bottom slide-up output log. Only on the main app view — we hide it
-    // on the splash and during BNK loading so it doesn't clutter those
-    // screens. The strip itself is ~26 px; clicking it slides up a 220 px
-    // panel that overlays the main UI without reserving extra layout space.
     if (show_output_log) {
         OutputLog::draw();
     }

@@ -22,15 +22,6 @@ std::string g_pending_mdl_full_path;
 std::atomic<bool> g_pending_tex_load{false};
 int g_pending_tex_index = -1;
 
-// ---------------------------------------------------------------------------
-// process_pending_loads — same handler block as the tail of draw_right_panel
-// above, lifted into its own function so the new layout (which doesn't
-// draw the right panel any more) can still drive MDL/TEX preview loads.
-//
-// Called once per frame from draw_main(). The handlers self-clear their
-// pending flags, so calling this in addition to draw_right_panel (if both
-// were active) would be a no-op past the first invocation.
-// ---------------------------------------------------------------------------
 #ifdef _WIN32
 void process_pending_loads(ID3D11Device* device) {
 #else
@@ -43,30 +34,12 @@ void process_pending_loads() {
         std::string parse_path = g_pending_mdl_full_path.empty() ? name : g_pending_mdl_full_path;
         g_pending_mdl_full_path.clear();
 
-        // Synchronous main-thread cleanup BEFORE kicking the parse
-        // worker. Anything the render panel might dereference next
-        // frame has to be torn down here, on the same thread that
-        // does the drawing — otherwise the worker can free a D3D
-        // resource (texture SRV, mesh array) right while ImGui is
-        // walking it for AddImage / IsItemHovered. That race was the
-        // source of the "switching from texture preview to model
-        // crashes / shows weird things" bug.
-        //
-        // Order matters: drop the texture-preview SRV first so the
-        // render panel falls through to the placeholder while the
-        // new model parses, then mark the existing model preview as
-        // "no model" so the Materials/Skeleton overlays short-circuit.
-        // The worker still owns the heavy MP_Release / MP_Init /
-        // MP_Build sequence below; flipping has_model = false here
-        // just stops the UI from iterating g_mp.meshes mid-rebuild.
 #ifdef _WIN32
         if (S.texture_window_srv) {
             S.texture_window_srv->Release();
             S.texture_window_srv = nullptr;
         }
-        // Texture popout points into the materials' SRVs of whatever
-        // model is going away — close it so it doesn't repaint with a
-        // dangling pointer.
+
         extern ID3D11ShaderResourceView* g_tex_popout_srv;
         extern std::string                g_tex_popout_name;
         extern bool                       g_tex_popout_open;
@@ -90,9 +63,6 @@ void process_pending_loads() {
         S.show_preview_popup    = false;
         S.preview_mip_index     = -1;
 
-        // Materials/skeleton overlay state — same reasoning. We don't
-        // reach into g_mp here (the worker will MP_Release it); we
-        // just stop the overlays from iterating its data this frame.
         extern ModelPreview g_mp;
         if (g_mp.has_model) g_mp.has_model = false;
         S.mdl_info_ok        = false;
@@ -127,8 +97,7 @@ void process_pending_loads() {
         }
 
         if (!bnk_to_use.empty()) {
-            // Show the loading popup while the MDL parse + MP_Build run in
-            // the background.
+
             progress_open(0, "Loading model...");
 #ifdef _WIN32
             ID3D11Device* device_ptr = device;
@@ -175,16 +144,11 @@ void process_pending_loads() {
                         MP_Release(g_mp);
                         MP_Init(device_ptr, g_mp, 800, 600);
                         MP_Build(device_ptr, S.mdl_meshes, S.mdl_info, g_mp);
-                        // Reset orbit camera to fit the new model.
-                        // Default yaw = PI: Fable 2 character/prop MDLs are
-                        // authored facing -Z, so a yaw-0 orbit camera at +Z
-                        // looks at the back. Spinning 180° drops us in
-                        // front of the mesh on first load.
+
                         S.cam_yaw = 3.14159265f;
                         S.cam_pitch = 0.2f;
                         S.cam_dist = 3.0f;
-                        // Drop the texture preview so the render panel
-                        // doesn't briefly show a stale tex behind the model.
+
                         if (S.texture_window_srv) {
                             S.texture_window_srv->Release();
                             S.texture_window_srv = nullptr;
@@ -224,10 +188,7 @@ void process_pending_loads() {
                 progress_done();
                 return;
             }
-            // Parse + cache the blob's mip layout so the preview's mip
-            // selector knows what to show without round-tripping through
-            // the BNK extract again. Reset to mip 0 (= largest in
-            // well-formed files) for each fresh load.
+
             S.tex_info_ok = parse_tex_info(tex_buf, S.tex_info);
             S.texture_mip_index = 0;
             std::vector<uint8_t> rgba;
@@ -245,8 +206,7 @@ void process_pending_loads() {
                 return;
             }
             S.texture_blob = std::move(tex_buf);
-            // Switching to a texture closes any active model preview so
-            // the render panel paints just the texture, not both.
+
 #ifdef _WIN32
             extern ModelPreview g_mp;
             extern bool g_mp_initialized;

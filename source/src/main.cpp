@@ -58,10 +58,7 @@ static std::string get_config_path() {
     return config_dir + "/config.ini";
 #endif
 }
-// Tiny key=value config store. The file lives in
-// %APPDATA%\Fable2AssetBrowser\config.ini (Windows) or
-// ~/.config/Fable2AssetBrowser/config.ini (other). Order is irrelevant;
-// missing keys fall back to the defaults baked into State.h.
+
 namespace {
 std::map<std::string, std::string> read_config_kv() {
     std::map<std::string, std::string> kv;
@@ -80,7 +77,7 @@ void write_config_kv(const std::map<std::string, std::string>& kv) {
     if (!f.is_open()) return;
     for (auto& [k, v] : kv) f << k << "=" << v << "\n";
 }
-} // namespace
+}
 
 static bool load_audio_muted() {
     auto kv = read_config_kv();
@@ -88,19 +85,12 @@ static bool load_audio_muted() {
     return it != kv.end() && it->second == "1";
 }
 
-// Non-static so Splashscreen can persist the mute state when its FA-icon
-// button is clicked.
 void save_audio_muted(bool muted) {
     auto kv = read_config_kv();
     kv["audio_muted"] = muted ? "1" : "0";
     write_config_kv(kv);
 }
 
-// Default export directory: <exe_dir>/extracted on Windows, <cwd>/extracted
-// on other platforms (matches the legacy "drop next to the exe" behaviour
-// the user is used to). Only used when the user hasn't set their own
-// export path yet — the value is then persisted to config.ini and the
-// per-startup default never runs again.
 static std::string default_export_dir() {
 #ifdef _WIN32
     char buf[MAX_PATH];
@@ -117,8 +107,6 @@ static std::string default_export_dir() {
 #endif
 }
 
-// Read the user-visible settings from disk into S. Called once at startup
-// after the State singleton is alive.
 void settings_load() {
     auto kv = read_config_kv();
     if (auto it = kv.find("show_paths"); it != kv.end()) {
@@ -137,11 +125,7 @@ void settings_load() {
             S.pending_font_size = v;
         } catch (...) {}
     }
-    // Export root — persisted as-is. Falls back to <exe_dir>/extracted on
-    // first launch. We deliberately don't auto-create the directory here:
-    // the actual export call lazily creates it (and any per-asset
-    // subdirs) on demand. That way changing the export path in Settings
-    // never leaves an empty "extracted" folder behind, per the user spec.
+
     if (auto it = kv.find("export_dir"); it != kv.end() && !it->second.empty()) {
         S.export_dir = it->second;
     } else {
@@ -153,8 +137,6 @@ void settings_load() {
     }
 }
 
-// Persist the current S.* settings. Called from the Settings dropdown
-// whenever a value changes. Cheap (small file, infrequent edits).
 void settings_save() {
     auto kv = read_config_kv();
     kv["show_paths"] = S.show_paths ? "1" : "0";
@@ -244,9 +226,7 @@ static void build_theme() {
 }
 #ifdef _WIN32
 int main() {
-    // FFmpeg (libavcodec / libavutil / libswresample) is now linked
-    // statically into the exe — no DLLs to extract or DLL search-path
-    // games at startup. XmaDecoder calls into avcodec directly.
+
     HINSTANCE hInstance = GetModuleHandle(nullptr);
     WNDCLASSEXA wc{};
     wc.cbSize = sizeof(WNDCLASSEX);
@@ -279,9 +259,7 @@ int main() {
     ImGui::StyleColorsDark();
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
-    // Load the FontAwesome icon font BEFORE any frame is rendered. Adding
-    // fonts mid-frame would crash because the DX11 backend has already
-    // built/bound the font atlas texture by then.
+
     Splashscreen_init_icon_font_at_startup();
 #else
 int main() {
@@ -310,22 +288,16 @@ int main() {
     build_theme();
     S.last_dir = load_last_dir();
 
-    // Pull persisted user-visible settings (show_paths, dev_mode,
-    // font_size) from config.ini into S. Has to happen before the
-    // first NewFrame so the font-size value is honored on initial
-    // atlas build.
     settings_load();
     if (S.font_size != 17.0f) {
-        // User had a non-default font size persisted — rebuild the atlas
-        // at that size before the first frame so we never flash at the
-        // default.
+
         IconFont::reload_at_size(S.font_size);
         S.pending_font_size = S.font_size;
     }
 #ifdef _WIN32
     bool audio_muted = load_audio_muted();
     BackgroundAudio::instance().set_muted(audio_muted);
-    // Splash music is embedded as RCDATA — no sidecar file needed.
+
     BackgroundAudio::instance().start_from_resource(IDR_MENU_INTERLUDE_WAV);
 #endif
     bool done = false;
@@ -339,10 +311,6 @@ int main() {
         }
         if (done) break;
 
-        // Apply pending font-size change BEFORE NewFrame. The atlas
-        // bitmap rebuilds on the CPU here, then the DX11 backend's
-        // GPU font texture is invalidated so it gets re-uploaded on
-        // the next call to ImGui_ImplDX11_NewFrame.
         if (S.font_size_dirty) {
             S.font_size_dirty = false;
             S.font_size = S.pending_font_size;
@@ -370,10 +338,7 @@ int main() {
         ImGui::NewFrame();
 #ifdef _WIN32
         draw_main(hwnd, g_pd3dDevice);
-        // (The legacy "S"/"M" mute button used to live here. The splash
-        // module now owns the mute button — see Splashscreen.cpp — using
-        // FontAwesome icons. We still need to stop the audio when the
-        // user has loaded a Fable 2 root.)
+
         if (!S.root_dir.empty()) {
             static bool audio_stopped = false;
             if (!audio_stopped) {
@@ -415,8 +380,7 @@ int main() {
             }
             bool indeterminate = (total <= 0);
             if (indeterminate) {
-                // No counter line — draw a blank line so the popup height
-                // stays stable whether we're determinate or not.
+
                 ImGui::NewLine();
             } else {
                 ImGui::Text("%d/%d", current, total);
@@ -449,12 +413,7 @@ int main() {
             ImGui::TextUnformatted(two.c_str());
             ImGui::EndChild();
             ImGui::PopTextWrapPos();
-            // Custom-drawn progress bar — replaces ImGui::ProgressBar so we
-            // can (a) use the blue accent (120,200,255) consistent with the
-            // post-splash loading screen instead of the default yellow
-            // PlotHistogram colour, and (b) animate an indeterminate
-            // sliding stripe when total<=0 (model loads etc.) instead of
-            // pinning the bar at 100% the whole time.
+
             {
                 ImDrawList *dl = ImGui::GetWindowDrawList();
                 float bar_h = ImGui::GetFrameHeight();
@@ -486,9 +445,7 @@ int main() {
             }
             ImGui::Dummy(ImVec2(0, 6));
             if (ImGui::Button("Cancel", ImVec2(-1, 0))) {
-                // Status surfaces through the OutputLog strip — no
-                // modal popup. Same convention as the BNK dump and
-                // texture export flows.
+
                 S.cancel_requested = true;
                 progress_done();
                 OutputLog::warn("Extraction cancelled.");

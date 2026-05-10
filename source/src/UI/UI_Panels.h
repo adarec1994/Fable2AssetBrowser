@@ -4,10 +4,7 @@
 #include <d3d11.h>
 void draw_left_panel(ID3D11Device* device);
 void draw_right_panel(ID3D11Device* device);
-// Run the pending MDL/TEX/preview load handlers. Called once per frame
-// from draw_main. Used to live inside draw_right_panel; extracted so the
-// new TT-Lab-style layout (which doesn't draw the right panel any more)
-// still drives load processing.
+
 void process_pending_loads(ID3D11Device* device);
 #else
 void draw_left_panel();
@@ -22,19 +19,12 @@ void pick_bnk(const std::string &path);
 void open_folder_logic(const std::string &sel);
 void open_iso_logic(const std::string& iso_path);
 
-// Minimum on-screen width the right-side tabs panel needs so every
-// tab button row is fully visible. Computed each frame from the
-// current ImGui font + FramePadding so it stays correct across
-// font-size changes; MainLayout uses it as the lower bound for the
-// user-resizable splitter.
 float left_panel_min_width();
 
-// Tree-build state introspection — used by the LoadingScreen to draw
-// a real progress bar with the current BNK being processed.
 bool tree_build_in_progress();
 bool tree_build_finished();
 float tree_build_elapsed_seconds();
-float tree_build_progress();          // [0,1] — portion of work done
-int   tree_build_done_units();        // BNKs processed so far
-int   tree_build_total_units();       // total BNKs (incl. nested) to process
+float tree_build_progress();
+int   tree_build_done_units();
+int   tree_build_total_units();
 std::string tree_build_current_label();

@@ -1,29 +1,3 @@
-// MdlFbxExport — binary FBX 7400 writer for parsed MDLs.
-//
-// Format spec sources used: the unofficial "FBX Binary file format
-// specification" (Blender's reverse-engineered notes) and the public
-// header layout from `fbxsdk` documentation. We only emit the
-// subset Blender / Maya / 3ds Max actually consume:
-//
-//   FBXHeaderExtension, GlobalSettings, Documents, References,
-//   Definitions, Objects (Geometry, Model, Material, Texture, Video,
-//   Pose, NodeAttribute=LimbNode, Deformer=Skin, SubDeformer=Cluster),
-//   Connections, Takes (empty).
-//
-// The big piece by line count is the connections graph — every
-// object pair in the scene needs an explicit "C: OO/OP, src, dst"
-// edge. The geometry / material / video / texture pipeline is OO;
-// the texture→material binding to a specific channel is OP with
-// a property name like "DiffuseColor".
-//
-// Embedded PNGs go into a Video node's `Content` property as raw
-// bytes (FBX type-code 'R'). Importers detect that as binary media
-// and load it without touching disk.
-//
-// Bone chain is the same shape glb_full builds: filter "Rig_Asset"
-// pseudo-bones out, walk parent IDs, build local TRS from the per-
-// bone (rot+trans+scale) the runtime stores, accumulate world
-// matrices for inverse-bind binding (Pose / Cluster TransformLink).
 
 #include "MdlFbxExport.h"
 #include "ModelParser.h"
@@ -47,35 +21,16 @@
 #include <string>
 #include <chrono>
 
-// --------------------------------------------------------------------------
-// External texture decode — re-uses the same path the GLB exporter does.
-// Defined in mdl_converter.cpp (file-static there). We forward-declare a
-// public-extern variant here for the FBX writer to call.
-// --------------------------------------------------------------------------
-//
-// Rather than copy the 100-line BC1/BC3/Lionhead decode into this file,
-// we lean on the same helper the GLB exporter already exercises. It's
-// declared `extern` here and re-defined as a non-static wrapper at the
-// bottom of mdl_converter.cpp.
 extern bool mdl_export_decode_texture_to_png(
     const std::vector<unsigned char>& tex_buf,
     std::vector<uint8_t>& png_out);
 
-// Same idea for the texture-bytes lookup — operations.cpp / TexParser.cpp
-// has the BNK-pair reconstruction logic; we expose a minimal shim.
 extern bool build_any_tex_buffer_for_name(const std::string& tex_name,
                                           std::vector<unsigned char>& out,
                                           const std::string& preferred_bnk);
 
-// --------------------------------------------------------------------------
-// Binary FBX writer infrastructure
-// --------------------------------------------------------------------------
-
 namespace {
 
-// Little-endian byte append helpers. FBX is little-endian regardless
-// of the host platform; doing the byteswap manually here avoids a
-// dependency on host endianness assumptions.
 struct Buf {
     std::vector<uint8_t> data;
     void put_u8 (uint8_t  v) { data.push_back(v); }
@@ -98,19 +53,14 @@ struct Buf {
     }
 };
 
-// FBX property — tagged union that knows how to serialize itself into
-// a byte stream. Property type codes follow the FBX 7.x binary spec.
-//
-// We only implement the subset we actually emit. Y/C/L/B etc. aren't
-// used by mdl→fbx so they're absent.
 struct Prop {
     enum Type { I32, I64, F32, F64, STRING, BYTES, ARR_I32, ARR_I64, ARR_F32, ARR_F64 } type;
     int32_t  i32  = 0;
     int64_t  i64  = 0;
     float    f32  = 0;
     double   f64  = 0;
-    std::string str;                 // also used for BYTES (binary strings)
-    bool     str_is_bytes = false;   // 'R' raw bytes vs 'S' string property
+    std::string str;
+    bool     str_is_bytes = false;
     std::vector<int32_t> ai;
     std::vector<int64_t> al;
     std::vector<float>   af;
@@ -146,12 +96,11 @@ struct Prop {
                          out.put_u32((uint32_t)str.size());
                          out.put_bytes(str.data(), str.size());
                          break;
-            // Array properties: type-code, length(u32), encoding(u32, 0=plain),
-            // compressed_length(u32, == length*sizeof(elem) when plain), data.
+
             case ARR_I32: {
                 out.put_u8('i');
                 out.put_u32((uint32_t)ai.size());
-                out.put_u32(0);  // plain
+                out.put_u32(0);
                 out.put_u32((uint32_t)(ai.size() * sizeof(int32_t)));
                 for (auto v : ai) out.put_i32(v);
                 break;
@@ -183,8 +132,6 @@ struct Prop {
         }
     }
 
-    // Bytes the property occupies when emitted (for the prop-list-len
-    // field of its containing node).
     size_t byte_size() const {
         switch (type) {
             case I32: return 1 + 4;
@@ -202,10 +149,6 @@ struct Prop {
     }
 };
 
-// FBX node — a name, a list of properties, and (optionally) child
-// nodes. Lifetime-wise, nodes are built up in memory then serialized
-// in one pass at the end so we can patch end-offset fields after we
-// know their final byte positions.
 struct Node {
     std::string name;
     std::vector<Prop> props;
@@ -214,7 +157,6 @@ struct Node {
     Node() = default;
     Node(std::string n) : name(std::move(n)) {}
 
-    // Convenience builders used heavily in the scene composer below.
     Node& add_prop(Prop p) { props.push_back(std::move(p)); return *this; }
     Node& add_child(Node c) {
         children.push_back(std::move(c));
@@ -222,29 +164,13 @@ struct Node {
     }
 };
 
-// Serialize a node tree into a binary FBX file body. FBX 7400 nodes
-// have the layout:
-//   end_offset    : u32   — file offset of the byte right after the
-//                            node (including any nested children + the
-//                            13-byte null record terminator).
-//   num_props     : u32
-//   prop_list_len : u32   — total bytes of all the props' serialized form
-//   name_len      : u8
-//   name          : chars (no null terminator)
-//   props...
-//   children...
-//   if children non-empty: NULL_RECORD (13 zero bytes)
-//
-// We do a two-pass write: first append the props + children to a
-// buffer, then patch the end_offset header field once we know where
-// the node actually ends.
 void write_node(Buf& out, const Node& n) {
     size_t header_off = out.data.size();
-    out.put_u32(0);  // end_offset placeholder, patched below
+    out.put_u32(0);
     out.put_u32((uint32_t)n.props.size());
 
     size_t prop_list_len_off = out.data.size();
-    out.put_u32(0);  // prop_list_len placeholder
+    out.put_u32(0);
     out.put_u8((uint8_t)n.name.size());
     out.put_bytes(n.name.data(), n.name.size());
 
@@ -252,7 +178,6 @@ void write_node(Buf& out, const Node& n) {
     for (const auto& p : n.props) p.emit(out);
     size_t props_end = out.data.size();
 
-    // Patch prop_list_len.
     uint32_t plen = (uint32_t)(props_end - props_start);
     out.data[prop_list_len_off + 0] = (uint8_t)(plen & 0xFF);
     out.data[prop_list_len_off + 1] = (uint8_t)((plen >> 8) & 0xFF);
@@ -261,11 +186,10 @@ void write_node(Buf& out, const Node& n) {
 
     for (const auto& c : n.children) write_node(out, c);
     if (!n.children.empty()) {
-        // Null record terminating the children list — 13 zero bytes.
+
         for (int i = 0; i < 13; ++i) out.put_u8(0);
     }
 
-    // Patch end_offset.
     uint32_t end_off = (uint32_t)out.data.size();
     out.data[header_off + 0] = (uint8_t)(end_off & 0xFF);
     out.data[header_off + 1] = (uint8_t)((end_off >> 8) & 0xFF);
@@ -273,14 +197,6 @@ void write_node(Buf& out, const Node& n) {
     out.data[header_off + 3] = (uint8_t)((end_off >> 24) & 0xFF);
 }
 
-// --------------------------------------------------------------------------
-// FBX scene composition helpers
-// --------------------------------------------------------------------------
-
-// Property template node. FBX uses a "Properties70" sub-node where each
-// child is a `P` node listing (name, type1, type2, flags, value...).
-// These show up in dozens of places; this helper keeps the call sites
-// readable.
 Node make_p(const char* name, const char* type1, const char* type2,
             const char* flags, std::vector<Prop> values) {
     Node p("P");
@@ -292,20 +208,11 @@ Node make_p(const char* name, const char* type1, const char* type2,
     return p;
 }
 
-// Generate a fresh-ish 64-bit unique ID for an FBX object. FBX
-// importers don't actually demand cryptographic uniqueness — they
-// just need the IDs to round-trip in the Connections section. A
-// monotonically increasing counter starting from a non-trivial base
-// works.
 struct IdGen {
     int64_t next = 1000000000ll;
     int64_t make() { return next++; }
 };
 
-// 4×4 matrix in row-major order. Used for inverse-bind / TransformLink
-// in the skinning section. Mirrors the Matrix4 helper inside
-// mdl_converter.cpp; kept local here so we don't need to expose that
-// internal type.
 struct Mat4 {
     double m[16];
     static Mat4 identity() {
@@ -326,9 +233,7 @@ struct Mat4 {
         }
         return r;
     }
-    // Column-major dump for FBX Properties70 / Pose Matrix entries.
-    // FBX matrices are column-major in the binary stream — we hold
-    // row-major internally and transpose on emit.
+
     std::vector<double> as_column_major() const {
         std::vector<double> out(16);
         for (int i = 0; i < 4; ++i)
@@ -339,7 +244,7 @@ struct Mat4 {
     static Mat4 from_trs_quat(double qx, double qy, double qz, double qw,
                               double tx, double ty, double tz,
                               double sx, double sy, double sz) {
-        // Build R first, then scale columns by S, then load translation.
+
         const double xx = qx*qx, yy = qy*qy, zz = qz*qz;
         const double xy = qx*qy, xz = qx*qz, yz = qy*qz;
         const double wx = qw*qx, wy = qw*qy, wz = qw*qz;
@@ -360,11 +265,7 @@ struct Mat4 {
         return r;
     }
     Mat4 inverse_or_identity() const {
-        // Generic 4x4 inverse via cofactor expansion. Falls back to
-        // identity if the matrix is singular — we never encounter
-        // that for well-formed bone transforms in retail Fable 2 but
-        // a safety net keeps the exporter from spitting NaNs into
-        // the cluster TransformLink.
+
         Mat4 inv{};
         const double* a = m;
         inv.m[0]  =  a[5]*a[10]*a[15] - a[5]*a[11]*a[14] - a[9]*a[6]*a[15] +
@@ -407,11 +308,7 @@ struct Mat4 {
     }
 };
 
-} // anonymous
-
-// --------------------------------------------------------------------------
-// Public entry point
-// --------------------------------------------------------------------------
+}
 
 bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
                      const std::string& fbx_path,
@@ -436,22 +333,18 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
 
     IdGen ids;
 
-    // Filter out the "Rig_Asset" pseudo-bone the same way the GLB
-    // path does. Build node-index maps so child / parent lookups
-    // run on the filtered set without touching the original index
-    // space the MDL stores in geom.bone_ids.
     struct BoneOut {
-        int orig_idx;     // index in info.Bones / info.BoneTransforms
-        int filtered_idx; // index in this `BoneOut` array
-        int parent_filt;  // -1 = root
+        int orig_idx;
+        int filtered_idx;
+        int parent_filt;
         std::string name;
-        // local TRS components, taken straight from BoneTransforms.
+
         double qx, qy, qz, qw, tx, ty, tz, sx, sy, sz;
         Mat4 local;
         Mat4 world;
-        int64_t model_id;       // FBX Model::LimbNode object id
-        int64_t attr_id;        // FBX NodeAttribute::LimbNode id
-        int64_t cluster_id;     // FBX Deformer Cluster id (one per bone, only used if any vertex weights to it)
+        int64_t model_id;
+        int64_t attr_id;
+        int64_t cluster_id;
         bool used_as_cluster;
     };
     std::vector<BoneOut> bones;
@@ -485,7 +378,7 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         orig_to_filt[i] = b.filtered_idx;
         bones.push_back(std::move(b));
     }
-    // Resolve parents on the filtered set + accumulate world.
+
     for (auto& b : bones) {
         int parent_orig = info.Bones[b.orig_idx].ParentID;
         if (parent_orig >= 0 && parent_orig < (int)orig_to_filt.size()) {
@@ -501,55 +394,26 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         }
     }
 
-    // ----------------------------------------------------------------------
-    // Y-up → Z-up rotation, baked into the data.
-    // ----------------------------------------------------------------------
-    // The MDL stores vertices and bones in Y-up (matches glTF), and our
-    // GLB exporter relies on Blender's GLB importer to rotate Y-up →
-    // Z-up at load time. Blender's *FBX* importer wasn't doing the
-    // same auto-rotation for our output ("model lying face up" =
-    // +Y went to +Y in Blender's Z-up world, so the head ended up
-    // along Y instead of Z). Easiest reliable fix: pre-rotate the
-    // data ourselves and declare GlobalSettings as Z-up so no
-    // importer needs to make an axis decision.
-    //
-    // Rotation = +90° around X. (x, y, z) → (x, -z, y).
-    // As a quaternion (qx, qy, qz, qw) = (√½, 0, 0, √½). We apply it
-    // by:
-    //   - rotating root bones' local translation + quaternion (the FK
-    //     chain propagates to children),
-    //   - recomputing every bone's world matrix from the updated
-    //     locals (TransformLink + Pose Matrix entries are written
-    //     from these, so Cluster skinning stays consistent),
-    //   - rotating each mesh's vertex positions and normals at emit
-    //     time (further down in the per-mesh loop).
-    //
-    // The previous declaration was UpAxis = Y; below that's flipped
-    // to UpAxis = Z so Blender / Maya / 3ds Max see a Z-up file
-    // and don't try to auto-rotate either way.
     {
-        constexpr double kS2 = 0.70710678118654752440;  // √½
+        constexpr double kS2 = 0.70710678118654752440;
         for (auto& b : bones) {
-            if (b.parent_filt >= 0) continue;  // root bones only
-            // Translation: (x, y, z) → (x, -z, y)
+            if (b.parent_filt >= 0) continue;
+
             double old_ty = b.ty, old_tz = b.tz;
             b.ty = -old_tz;
             b.tz =  old_ty;
-            // Quaternion: q_new = q_Rx * q_old (Hamilton, left-multiply).
-            // q_Rx = (kS2, 0, 0, kS2).
+
             double q2x = b.qx, q2y = b.qy, q2z = b.qz, q2w = b.qw;
             b.qx = kS2 * (q2x + q2w);
             b.qy = kS2 * (q2y - q2z);
             b.qz = kS2 * (q2z + q2y);
             b.qw = kS2 * (q2w - q2x);
-            // Rebuild local matrix from updated TRS so the FK chain
-            // and the world recompute below pick up the rotation.
+
             b.local = Mat4::from_trs_quat(b.qx, b.qy, b.qz, b.qw,
                                           b.tx, b.ty, b.tz,
                                           b.sx, b.sy, b.sz);
         }
-        // World matrices need to reflect the new root locals — the
-        // existing chain logic handles the recompute.
+
         for (auto& b : bones) {
             if (b.parent_filt < 0) {
                 b.world = b.local;
@@ -559,30 +423,15 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         }
     }
 
-    // ----------------------------------------------------------------------
-    // Build per-mesh FBX data: one Geometry + one Model + one Material
-    // (with optional Texture + Video) per MDLMeshGeom. Skin clusters are
-    // shared with the same bone Model objects so multiple meshes can
-    // skin to a common skeleton.
-    // ----------------------------------------------------------------------
-    // Texture channels we wire per material. Order matters because
-    // the same indices feed both the Video / Texture allocation
-    // pass and the Connections pass below — keep them in sync.
     enum TexChannel { CH_DIFFUSE, CH_NORMAL, CH_SPECULAR, CH_TINT, CH_COUNT };
 
-    // Per-mesh, per-channel embedded texture metadata. video_id == 0
-    // means "no texture for this channel"; the Video / Texture nodes
-    // and Connections entries are skipped when that's the case. The
-    // FBX channel name (DiffuseColor / NormalMap / SpecularColor /
-    // EmissiveColor) is what binds the texture to the material on
-    // the importer side.
     struct EmbeddedTex {
         int64_t  video_id   = 0;
         int64_t  tex_id     = 0;
-        std::string name;          // texture/video name in the FBX
-        std::string filename;      // Filename / RelativeFilename property
-        std::string mime_ext;      // ".png" / ".dds" / ".jpg"
-        std::vector<uint8_t> bytes; // file bytes — moved into the Video.Content emit
+        std::string name;
+        std::string filename;
+        std::string mime_ext;
+        std::vector<uint8_t> bytes;
         const char* fbx_property = "DiffuseColor";
     };
 
@@ -590,12 +439,10 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         int64_t geom_id;
         int64_t model_id;
         int64_t mat_id;
-        int64_t skin_id;      // 0 = no skin
+        int64_t skin_id;
         std::string name;
         EmbeddedTex tex[CH_COUNT];
-        // Cluster bookkeeping: one Cluster per bone the mesh actually
-        // weights to. (clusters_for_bone[b] != 0 means we emitted a
-        // Cluster for filtered bone b on this mesh.)
+
         std::unordered_map<int, int64_t> cluster_for_bone;
         std::unordered_map<int, std::vector<int>> cluster_indexes;
         std::unordered_map<int, std::vector<double>> cluster_weights;
@@ -603,8 +450,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
     std::vector<MeshOut> meshes_out;
     meshes_out.reserve(geoms.size());
 
-    // Pick the embedding format up-front so every texture in this
-    // FBX uses the same one — Settings dropdown in UI_Main.cpp.
     const MdlTexExport::Format tex_fmt =
         MdlTexExport::format_from_string(S.mdl_texture_export_format);
 
@@ -617,12 +462,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         mo.skin_id  = ids.make();
         mo.name     = g.name.empty() ? ("mesh_" + std::to_string(gi)) : g.name;
 
-        // Channel → (source name on the geom, FBX property name on
-        // the material) bindings. NormalMap and SpecularColor are
-        // standard FBX 7.x material props; ambient gets "AmbientColor"
-        // in materials with Phong shading. Tint goes into
-        // EmissiveColor — same workaround the GLB exporter uses
-        // since neither glTF nor FBX has a dedicated "tint" channel.
         struct ChanBinding {
             const std::string& src;
             const char* fbx_prop;
@@ -657,9 +496,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
             et.fbx_property = bind.fbx_prop;
         }
 
-        // Build cluster vertex/weight lists. geoms carry up to 4
-        // bone influences per vertex (16-bit indices, float weights);
-        // we accumulate per filtered-bone for the cluster nodes.
         const size_t vcount = g.positions.size() / 3;
         for (size_t v = 0; v < vcount; ++v) {
             for (int j = 0; j < 4; ++j) {
@@ -685,14 +521,8 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         meshes_out.push_back(std::move(mo));
     }
 
-    // ----------------------------------------------------------------------
-    // Build the FBX node tree (root holds: FBXHeaderExtension,
-    // GlobalSettings, Documents, References, Definitions, Objects,
-    // Connections, Takes).
-    // ----------------------------------------------------------------------
     Node root("");
 
-    // FBXHeaderExtension — version markers + a creation timestamp.
     {
         Node hdr("FBXHeaderExtension");
         hdr.add_child(Node("FBXHeaderVersion")).add_prop(Prop::I(1003));
@@ -721,22 +551,15 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
     root.add_child(Node("CreationTime")).add_prop(Prop::S("1970-01-01 00:00:00:000"));
     root.add_child(Node("Creator")).add_prop(Prop::S("Fable 2 Asset Browser"));
 
-    // GlobalSettings — Z-up declaration. We baked Y-up → Z-up into
-    // the vertex / bone data above (rotation +90° around X), so the
-    // file is now natively Z-up. Declaring it that way here means
-    // Blender / Maya / 3ds Max all read the data as-is without
-    // applying their own axis-correction rotation. FrontAxisSign is
-    // -1 to match Blender's convention (front = -Y in Z-up), which
-    // is what the engine + glTF spec also use as "look forward".
     {
         Node gs("GlobalSettings");
         gs.add_child(Node("Version")).add_prop(Prop::I(1000));
         Node props70("Properties70");
-        props70.add_child(make_p("UpAxis",         "int", "Integer", "", { Prop::I(2)  })); // Z
+        props70.add_child(make_p("UpAxis",         "int", "Integer", "", { Prop::I(2)  }));
         props70.add_child(make_p("UpAxisSign",     "int", "Integer", "", { Prop::I(1)  }));
-        props70.add_child(make_p("FrontAxis",      "int", "Integer", "", { Prop::I(1)  })); // Y
-        props70.add_child(make_p("FrontAxisSign",  "int", "Integer", "", { Prop::I(-1) })); // -Y forward
-        props70.add_child(make_p("CoordAxis",      "int", "Integer", "", { Prop::I(0)  })); // X
+        props70.add_child(make_p("FrontAxis",      "int", "Integer", "", { Prop::I(1)  }));
+        props70.add_child(make_p("FrontAxisSign",  "int", "Integer", "", { Prop::I(-1) }));
+        props70.add_child(make_p("CoordAxis",      "int", "Integer", "", { Prop::I(0)  }));
         props70.add_child(make_p("CoordAxisSign",  "int", "Integer", "", { Prop::I(1)  }));
         props70.add_child(make_p("OriginalUpAxis",     "int", "Integer", "", { Prop::I(2) }));
         props70.add_child(make_p("OriginalUpAxisSign", "int", "Integer", "", { Prop::I(1) }));
@@ -746,7 +569,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         root.add_child(std::move(gs));
     }
 
-    // Documents / References — boilerplate.
     {
         Node docs("Documents");
         docs.add_child(Node("Count")).add_prop(Prop::I(1));
@@ -761,22 +583,18 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
     }
     root.add_child(Node("References"));
 
-    // Definitions — declares object-type counts and template properties.
-    // Importers tolerate slightly inaccurate counts; we approximate.
     {
         Node defs("Definitions");
         defs.add_child(Node("Version")).add_prop(Prop::I(100));
-        // Total = 1 (GlobalSettings) + per-mesh objects (geom +
-        // model + material) + per-mesh embedded textures (1 Video +
-        // 1 Texture per channel) + skin/cluster + per-bone objects.
+
         int total = 1 + (int)meshes_out.size() * 3;
         for (auto& m : meshes_out) {
             for (int ch = 0; ch < CH_COUNT; ++ch) {
-                if (m.tex[ch].video_id) total += 2;  // Video + Texture
+                if (m.tex[ch].video_id) total += 2;
             }
-            total += (int)m.cluster_for_bone.size() + 1; // skin + clusters
+            total += (int)m.cluster_for_bone.size() + 1;
         }
-        total += (int)bones.size() * 2; // model + attr per bone
+        total += (int)bones.size() * 2;
         defs.add_child(Node("Count")).add_prop(Prop::I(total));
         for (const char* t : {"GlobalSettings", "Geometry", "Model", "Material",
                               "Texture", "Video", "Pose", "NodeAttribute",
@@ -789,14 +607,10 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         root.add_child(std::move(defs));
     }
 
-    // ----------------------------------------------------------------------
-    // Objects section — every FBX entity lives here.
-    // ----------------------------------------------------------------------
     Node objects("Objects");
 
-    // Per bone: a Model (LimbNode kind) + a NodeAttribute (LimbNode).
     for (const auto& b : bones) {
-        // Model::LimbNode
+
         Node m("Model");
         m.add_prop(Prop::L(b.model_id));
         m.add_prop(Prop::S("Model::" + b.name));
@@ -805,20 +619,10 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         Node p70("Properties70");
         p70.add_child(make_p("Lcl Translation", "Lcl Translation", "", "A",
                              { Prop::D(b.tx), Prop::D(b.ty), Prop::D(b.tz) }));
-        // FBX stores rotation as Euler degrees in Lcl Rotation; we
-        // could decompose the quaternion, but every importer that
-        // matters reads PreRotation / Lcl Rotation as ZYX Euler. As a
-        // shortcut we serialize the local matrix directly via the
-        // RotationActive=true + GeometricTranslation/etc. dance — but
-        // even simpler is just leaving rotation at zero and relying
-        // on TransformLink in the cluster (which most importers
-        // honour for skinned meshes). For non-skinned bones the bind
-        // pose still drives positioning via the Pose node further
-        // down. This is the same shortcut Blender's binary FBX
-        // exporter takes when no animation tracks are emitted.
+
         p70.add_child(make_p("Lcl Scaling", "Lcl Scaling", "", "A",
                              { Prop::D(b.sx), Prop::D(b.sy), Prop::D(b.sz) }));
-        // Quaternion → Euler XYZ degrees. Standard conversion.
+
         {
             double sinr_cosp = 2.0 * (b.qw * b.qx + b.qy * b.qz);
             double cosr_cosp = 1.0 - 2.0 * (b.qx * b.qx + b.qy * b.qy);
@@ -837,9 +641,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         m.add_child(std::move(p70));
         objects.add_child(std::move(m));
 
-        // NodeAttribute::LimbNode — Blender requires this; without it
-        // bones import as empty Models and the skeleton won't deform
-        // properly. The attribute is what tags the Model as a "Limb".
         Node na("NodeAttribute");
         na.add_prop(Prop::L(b.attr_id));
         na.add_prop(Prop::S("NodeAttribute::"));
@@ -851,22 +652,15 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         objects.add_child(std::move(na));
     }
 
-    // Per mesh: Geometry, Model::Mesh, Material, optional Texture +
-    // Video, Skin Deformer with one Cluster per influencing bone.
     for (size_t gi = 0; gi < geoms.size(); ++gi) {
         const auto& g = geoms[gi];
         const auto& mo = meshes_out[gi];
 
-        // Geometry node — vertices, indices, normals, UVs.
         Node gn("Geometry");
         gn.add_prop(Prop::L(mo.geom_id));
         gn.add_prop(Prop::S("Geometry::" + mo.name));
         gn.add_prop(Prop::S("Mesh"));
 
-        // Vertices: doubles, x y z for each. Y-up → Z-up bake here
-        // so the file declares Z-up and importers don't try to
-        // auto-rotate. (x, y, z) → (x, -z, y) — same +90° X rotation
-        // applied to bones above.
         std::vector<double> verts(g.positions.begin(), g.positions.end());
         for (size_t i = 0; i + 2 < verts.size(); i += 3) {
             double y = verts[i + 1], z = verts[i + 2];
@@ -875,10 +669,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         }
         gn.add_child(Node("Vertices")).add_prop(Prop::AD(std::move(verts)));
 
-        // PolygonVertexIndex: triangle list. FBX marks the last index
-        // of each face by bitwise-NOT (i.e. ~i = -i - 1) so the
-        // importer can detect face boundaries. Triangulated mesh =>
-        // every third index gets the bitwise-not.
         std::vector<int32_t> pvi;
         pvi.reserve(g.indices.size());
         for (size_t i = 0; i < g.indices.size(); i += 3) {
@@ -890,7 +680,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
 
         gn.add_child(Node("GeometryVersion")).add_prop(Prop::I(124));
 
-        // LayerElementNormal — per-vertex (ByVertice / Direct).
         if (g.normals.size() == g.positions.size()) {
             Node n("LayerElementNormal");
             n.add_prop(Prop::I(0));
@@ -899,10 +688,7 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
             n.add_child(Node("MappingInformationType")).add_prop(Prop::S("ByVertice"));
             n.add_child(Node("ReferenceInformationType")).add_prop(Prop::S("Direct"));
             std::vector<double> nv(g.normals.begin(), g.normals.end());
-            // Same Y-up → Z-up rotation as the positions above. Normals
-            // are direction vectors, but the rotation matrix is
-            // orthogonal so the same component swap applies (no
-            // inverse-transpose needed).
+
             for (size_t i = 0; i + 2 < nv.size(); i += 3) {
                 double y = nv[i + 1], z = nv[i + 2];
                 nv[i + 1] = -z;
@@ -912,8 +698,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
             gn.add_child(std::move(n));
         }
 
-        // LayerElementUV — per-vertex (ByVertice / Direct). FBX stores
-        // UVs as (u, v) pairs; our geom has them in the same order.
         if (!g.uvs.empty()) {
             Node uv("LayerElementUV");
             uv.add_prop(Prop::I(0));
@@ -922,14 +706,12 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
             uv.add_child(Node("MappingInformationType")).add_prop(Prop::S("ByVertice"));
             uv.add_child(Node("ReferenceInformationType")).add_prop(Prop::S("Direct"));
             std::vector<double> uvv(g.uvs.begin(), g.uvs.end());
-            // Flip V — most game UVs are (0,0)=top-left, FBX/glTF
-            // (0,0)=bottom-left.
+
             for (size_t i = 1; i < uvv.size(); i += 2) uvv[i] = 1.0 - uvv[i];
             uv.add_child(Node("UV")).add_prop(Prop::AD(std::move(uvv)));
             gn.add_child(std::move(uv));
         }
 
-        // LayerElementMaterial — single material per geometry, "AllSame".
         {
             Node lm("LayerElementMaterial");
             lm.add_prop(Prop::I(0));
@@ -941,7 +723,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
             gn.add_child(std::move(lm));
         }
 
-        // Layer 0 — references the elements above.
         {
             Node l("Layer");
             l.add_prop(Prop::I(0));
@@ -959,7 +740,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         }
         objects.add_child(std::move(gn));
 
-        // Model::Mesh — the scene-graph node that references the geometry.
         Node mn("Model");
         mn.add_prop(Prop::L(mo.model_id));
         mn.add_prop(Prop::S("Model::" + mo.name));
@@ -971,7 +751,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         mn.add_child(std::move(mp));
         objects.add_child(std::move(mn));
 
-        // Material — barebones PBR-ish defaults.
         Node mat("Material");
         mat.add_prop(Prop::L(mo.mat_id));
         mat.add_prop(Prop::S("Material::" + mo.name));
@@ -988,12 +767,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         mat.add_child(std::move(matp));
         objects.add_child(std::move(mat));
 
-        // Video + Texture pair per active channel. Each populated
-        // EmbeddedTex slot in mo.tex[] adds one Video (with embedded
-        // bytes) and one Texture (TextureVideoClip referencing the
-        // Video). The Connections pass below wires each Texture to
-        // the material at the appropriate property name (DiffuseColor
-        // / NormalMap / SpecularColor / EmissiveColor).
         for (int ch = 0; ch < CH_COUNT; ++ch) {
             const EmbeddedTex& et = mo.tex[ch];
             if (et.video_id == 0) continue;
@@ -1010,7 +783,7 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
             vn.add_child(Node("UseMipMap")).add_prop(Prop::I(0));
             vn.add_child(Node("Filename")).add_prop(Prop::S(et.filename));
             vn.add_child(Node("RelativeFilename")).add_prop(Prop::S(et.filename));
-            // The actual encoded image bytes — type-code 'R' (raw).
+
             vn.add_child(Node("Content")).add_prop(Prop::R(et.bytes));
             objects.add_child(std::move(vn));
 
@@ -1029,7 +802,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
             objects.add_child(std::move(tn));
         }
 
-        // Skin deformer + per-bone Cluster.
         if (!mo.cluster_for_bone.empty()) {
             Node skin("Deformer");
             skin.add_prop(Prop::L(mo.skin_id));
@@ -1057,9 +829,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
                 c.add_child(Node("Indexes")).add_prop(Prop::AI(std::move(idxs)));
                 c.add_child(Node("Weights")).add_prop(Prop::AD(std::move(wts)));
 
-                // Transform = bind-pose inverse of the bone's world
-                // matrix; TransformLink = bone's world matrix. FBX
-                // stores them column-major as a flat 16-double array.
                 Mat4 link = b.world;
                 Mat4 inv  = link.inverse_or_identity();
                 c.add_child(Node("Transform")).add_prop(Prop::AD(inv.as_column_major()));
@@ -1070,9 +839,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         }
     }
 
-    // Bind Pose — lists every bone's world matrix at bind time so
-    // skin-aware importers (Blender, Maya) can re-establish the rest
-    // pose without computing it from local TRS.
     if (!bones.empty()) {
         Node pose("Pose");
         pose.add_prop(Prop::L(ids.make()));
@@ -1092,10 +858,6 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
 
     root.add_child(std::move(objects));
 
-    // ----------------------------------------------------------------------
-    // Connections — every parent/child relationship in the scene
-    // graph + every material/texture/video binding goes through C: nodes.
-    // ----------------------------------------------------------------------
     Node conns("Connections");
 
     auto add_oo = [&](int64_t src, int64_t dst) {
@@ -1114,22 +876,17 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         conns.add_child(std::move(c));
     };
 
-    // Bone hierarchy: bone Models parent into each other (root bones
-    // attach to scene root id 0). NodeAttribute → bone Model.
     for (const auto& b : bones) {
         if (b.parent_filt < 0) add_oo(b.model_id, 0);
         else                   add_oo(b.model_id, bones[b.parent_filt].model_id);
         add_oo(b.attr_id, b.model_id);
     }
 
-    // Mesh hookups.
     for (const auto& mo : meshes_out) {
-        add_oo(mo.geom_id, mo.model_id);  // geometry → mesh model
-        add_oo(mo.model_id, 0);            // mesh model → scene root
-        add_oo(mo.mat_id, mo.model_id);    // material → mesh model
-        // Per-channel texture wiring: every populated EmbeddedTex
-        // adds a Video → Texture (OO) edge and a Texture → Material
-        // (OP) edge bound to the channel's FBX property name.
+        add_oo(mo.geom_id, mo.model_id);
+        add_oo(mo.model_id, 0);
+        add_oo(mo.mat_id, mo.model_id);
+
         for (int ch = 0; ch < CH_COUNT; ++ch) {
             const EmbeddedTex& et = mo.tex[ch];
             if (et.video_id == 0) continue;
@@ -1137,68 +894,43 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
             add_op(et.tex_id,   mo.mat_id, et.fbx_property);
         }
         if (!mo.cluster_for_bone.empty()) {
-            add_oo(mo.skin_id, mo.geom_id);  // skin → geometry
+            add_oo(mo.skin_id, mo.geom_id);
             for (auto& kv : mo.cluster_for_bone) {
                 int filt = kv.first;
                 int64_t cid = kv.second;
-                add_oo(cid, mo.skin_id);            // cluster → skin
-                add_oo(bones[filt].model_id, cid);  // bone model → cluster
+                add_oo(cid, mo.skin_id);
+                add_oo(bones[filt].model_id, cid);
             }
         }
     }
 
     root.add_child(std::move(conns));
-    root.add_child(Node("Takes"));   // empty Takes section satisfies
-                                       // strict importers.
+    root.add_child(Node("Takes"));
 
-    // ----------------------------------------------------------------------
-    // Serialize.
-    // ----------------------------------------------------------------------
     Buf out;
-    // Magic header — null-terminated string + 0x1A + 0x00 + version.
+
     static const uint8_t kMagic[] = {
         'K','a','y','d','a','r','a',' ','F','B','X',' ','B','i','n','a',
         'r','y',' ',' ', 0x00, 0x1A, 0x00
     };
     out.put_bytes(kMagic, sizeof(kMagic));
-    out.put_u32(7400);   // version
+    out.put_u32(7400);
 
     for (const auto& c : root.children) write_node(out, c);
-    // Final null record (13 zero bytes) terminates the top-level.
+
     for (int i = 0; i < 13; ++i) out.put_u8(0);
 
-    // ----------------------------------------------------------------
-    // Footer (160 bytes total + alignment padding).
-    //
-    // Layout per Blender's reverse-engineered FBX-7.x spec:
-    //   16 bytes: timestamp-derived hash. Blender / Maya / 3ds Max
-    //             tolerate zeros here; the strict FBX SDK validator
-    //             does not, but no game-asset pipeline runs that.
-    //   N bytes : pad to 16-byte file alignment (0..15)
-    //   4 bytes : zero
-    //   4 bytes : version u32 LE (7400)
-    //   120 bytes: zero
-    //   16 bytes: end-of-file magic
-    //
-    // The previous version of this writer had:
-    //   • 16 zero bytes (4 × u32) where 4 zero bytes were expected
-    //   • only 30 trailing zero bytes where 120 were expected
-    // …leaving the file ~78 bytes shorter than Blender's importer
-    // expects when it reads the trailer from the end of the file
-    // → the "Failed to load" the user reported. Sizes corrected.
-    // ----------------------------------------------------------------
-    for (int i = 0; i < 16; ++i) out.put_u8(0);          // 16-byte hash
-    while (out.data.size() & 0xF) out.put_u8(0);         // 16-byte align
-    out.put_u32(0);                                       // 4 bytes zero
-    out.put_u32(7400);                                    // 4 bytes version
-    for (int i = 0; i < 120; ++i) out.put_u8(0);         // 120 bytes zero
+    for (int i = 0; i < 16; ++i) out.put_u8(0);
+    while (out.data.size() & 0xF) out.put_u8(0);
+    out.put_u32(0);
+    out.put_u32(7400);
+    for (int i = 0; i < 120; ++i) out.put_u8(0);
     static const uint8_t kFooterMagic[] = {
         0xF8, 0x5A, 0x8C, 0x6A, 0xDE, 0xF5, 0xD9, 0x7E,
         0xEC, 0xE9, 0x0C, 0xE3, 0x75, 0x8F, 0x29, 0x0B
     };
-    out.put_bytes(kFooterMagic, 16);                      // 16-byte magic
+    out.put_bytes(kFooterMagic, 16);
 
-    // Write to disk.
     std::ofstream f(fbx_path, std::ios::binary | std::ios::trunc);
     if (!f) {
         err_msg = "cannot open " + fbx_path + " for writing";

@@ -20,8 +20,6 @@ namespace {
 
 bool g_window_visible = false;
 
-// Fixed window size — no resizing. Chosen so all rows (title, metadata,
-// waveform, seek, time, transport+volume) fit without scrolling.
 constexpr float kWindowW = 560.0f;
 constexpr float kWindowH = 340.0f;
 
@@ -34,11 +32,6 @@ void format_time(double sec, char* out, size_t cap) {
     std::snprintf(out, cap, "%02d:%02d.%02d", m, s, cs);
 }
 
-// (icon_button moved to UI/IconButton.{h,cpp} for reuse — the same
-// transport shape now drives both the audio player and the animation
-// preview.)
-
-// Draw the cached waveform envelope into a fixed-size area.
 void draw_waveform(ImVec2 size, float progress) {
     ImGui::InvisibleButton("##waveform", size);
     ImVec2 rmin = ImGui::GetItemRectMin();
@@ -86,8 +79,6 @@ void draw_waveform(ImVec2 size, float progress) {
     }
 }
 
-// Compact horizontal seek bar. Returns >=0 (new fraction) when the user
-// scrubs, or -1 when not interacting.
 float draw_seek_bar(float frac, float width) {
     const float bar_h    = 6.0f;
     const float thumb_r  = 6.0f;
@@ -149,7 +140,7 @@ void draw_volume_control(float total_w) {
     ImGui::PopStyleColor(5);
 }
 
-} // namespace
+}
 
 bool open_audio_player_for(const std::string& display_name,
                            const std::vector<unsigned char>& bytes) {
@@ -171,7 +162,6 @@ void draw_audio_player_window() {
         return;
     }
 
-    // Static window: same size every frame, no resize.
     ImGui::SetNextWindowSize(ImVec2(kWindowW, kWindowH), ImGuiCond_Always);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(16, 14));
@@ -183,19 +173,14 @@ void draw_audio_player_window() {
                      | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse
                      | ImGuiWindowFlags_NoSavedSettings)) {
 
-        // Use the inner content area as our layout reference. content_w is
-        // the full content width regardless of where the cursor currently
-        // sits — we use it for centering.
         const float content_w = ImGui::GetContentRegionAvail().x;
 
-        // ---- Title row -----------------------------------------------------
         std::string name = AudioPlayer::get_display_name();
         if (name.empty()) name = "(audio)";
         ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(235, 240, 250, 255));
         ImGui::TextUnformatted(name.c_str());
         ImGui::PopStyleColor();
 
-        // ---- Metadata ------------------------------------------------------
         int sr = AudioPlayer::get_sample_rate();
         int ch = AudioPlayer::get_channels();
         const char* ch_label = (ch == 1) ? "mono" : (ch == 2 ? "stereo" : "");
@@ -206,7 +191,6 @@ void draw_audio_player_window() {
 
         ImGui::Dummy(ImVec2(0, 6));
 
-        // ---- Waveform ------------------------------------------------------
         double dur = AudioPlayer::get_duration_sec();
         double now = AudioPlayer::get_time_sec();
         float frac = (dur > 0.0) ? (float)(now / dur) : 0.0f;
@@ -216,11 +200,9 @@ void draw_audio_player_window() {
 
         ImGui::Dummy(ImVec2(0, 6));
 
-        // ---- Seek bar ------------------------------------------------------
         float seek_in = draw_seek_bar(frac, content_w);
         if (seek_in >= 0.0f) AudioPlayer::seek_fraction(seek_in);
 
-        // ---- Time labels ---------------------------------------------------
         char t_now[16], t_dur[16];
         format_time(now, t_now, sizeof(t_now));
         format_time(dur, t_dur, sizeof(t_dur));
@@ -233,10 +215,6 @@ void draw_audio_player_window() {
 
         ImGui::Dummy(ImVec2(0, 6));
 
-        // ---- Transport + volume row ---------------------------------------
-        // Layout: transport buttons centered horizontally in the full
-        // content width. Volume sits in the bottom-right corner on the
-        // SAME row as the transport — we set absolute Y for it.
         const float btn_lg   = 44.0f;
         const float btn_sm   = 32.0f;
         const float gap      = 14.0f;
@@ -247,18 +225,11 @@ void draw_audio_player_window() {
         const float sm_y     = row_y + (btn_lg - btn_sm) * 0.5f;
         const float vol_y    = row_y + (btn_lg - 24.0f) * 0.5f;
 
-        // Stop (small, vertically centered against the play button).
-        // Symmetric square glyph — no optical offset needed.
         ImGui::SetCursorPos(ImVec2(group_x, sm_y));
         if (icon_button("##stop", ICON_FA_STOP, btn_sm, false)) {
             AudioPlayer::stop();
         }
 
-        // Play / Pause (big, top of row). The play triangle's centroid
-        // sits at 1/3 from its bbox-left edge (vs 1/2 for the bbox
-        // center), so even with visible-bbox centering the visual mass
-        // is offset left by ~1/6 of the glyph width. Shift right ~17%
-        // to put the optical center on the button center.
         ImGui::SetCursorPos(ImVec2(group_x + btn_sm + gap, row_y));
         bool playing = AudioPlayer::is_playing();
         const char* play_glyph = playing ? ICON_FA_PAUSE : ICON_FA_PLAY;
@@ -267,16 +238,12 @@ void draw_audio_player_window() {
             AudioPlayer::toggle_play();
         }
 
-        // Loop (small, vertically centered). Glyph is roughly symmetric.
         ImGui::SetCursorPos(ImVec2(group_x + btn_sm + gap + btn_lg + gap, sm_y));
         bool loop = AudioPlayer::get_loop();
         if (icon_button("##loop", ICON_FA_REPEAT, btn_sm, false, loop)) {
             AudioPlayer::set_loop(!loop);
         }
 
-        // Volume — right-aligned, vertically centered against the play
-        // button. Drawn with absolute SetCursorPos so it shares the row
-        // with the transport.
         ImGui::SetCursorPos(ImVec2(content_w - vol_w, vol_y));
         draw_volume_control(vol_w);
     }
@@ -291,4 +258,4 @@ void draw_audio_player_window() {
     }
 }
 
-} // namespace UI
+}

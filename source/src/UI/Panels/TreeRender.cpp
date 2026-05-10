@@ -44,7 +44,6 @@ void draw_tree_node(TreeNode& node) {
         std::string label = node.name;
         ImGui::TreeNodeEx(label.c_str(), flags);
 
-        // Right-click → "Hex View" (dev mode only) + "Export to" for .tex.
         file_hex_context_menu(node.bnk_source, node.bnk_index,
                               node.is_nested_source, node.name);
 
@@ -59,7 +58,6 @@ void draw_tree_node(TreeNode& node) {
                 pick_bnk(node.bnk_source);
             }
 
-            // pick_bnk clears selected_nested_temp_path — restore it for nested files
             if (node.is_nested_source) {
                 S.selected_nested_temp_path = node.bnk_source;
                 S.selected_nested_index = 0;
@@ -68,8 +66,7 @@ void draw_tree_node(TreeNode& node) {
             for (size_t i = 0; i < S.files.size(); ++i) {
                 if (S.files[i].index == node.bnk_index) {
                     S.selected_file_index = (int)i;
-                    // Single-click loads .mdl and .tex straight into the
-                    // central render panel — no double-click needed.
+
                     if (is_mdl(node.name)) {
                         g_pending_mdl_full_path = node.full_path;
                         g_pending_mdl_load = true;
@@ -79,8 +76,7 @@ void draw_tree_node(TreeNode& node) {
                         g_pending_tex_load = true;
                         g_pending_tex_index = (int)i;
                     }
-                    // .wav stays double-click → audio player (a separate
-                    // floating window, not the central panel).
+
                     if (is_audio_file(node.name) && ImGui::IsMouseDoubleClicked(0)) {
                         open_audio_player_for_selected((int)i);
                     }
@@ -91,8 +87,7 @@ void draw_tree_node(TreeNode& node) {
 
         if (!S.hide_tooltips && ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
-            // Basic mode: just the filename (last path component) so the
-            // tooltip stays unobtrusive. Developer mode adds the extras.
+
             if (S.dev_mode) {
                 ImGui::Text("%s", node.full_path.c_str());
                 ImGui::Text("Size: %u bytes", node.file_size);

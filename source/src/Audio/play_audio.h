@@ -12,10 +12,6 @@ public:
         return inst;
     }
 
-    // Start looping playback of the WAV bytes embedded in the exe under
-    // the given RCDATA resource id. The resource is loaded once into
-    // an internal buffer and replayed via PlaySoundA(SND_MEMORY|SND_LOOP).
-    // Returns false if the resource couldn't be loaded.
     bool start_from_resource(int resource_id);
 
     void stop();
@@ -29,11 +25,11 @@ private:
 
     std::atomic<bool> running{false};
     std::atomic<bool> muted{false};
-    std::vector<unsigned char> wav_bytes;  // owned, kept alive while playing
+    std::vector<unsigned char> wav_bytes;
 };
 
 #else
-// Stub for Linux - no audio support
+
 class BackgroundAudio {
 public:
     static BackgroundAudio& instance() {

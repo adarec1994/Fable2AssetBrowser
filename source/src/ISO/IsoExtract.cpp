@@ -1,6 +1,3 @@
-// Minimal C++ port of the XDVDFS read path from extract-xiso. Walks the
-// directory tree at the volume descriptor's root sector and writes every
-// file to disk. Handles raw / XGD1 / XGD2 / XGD3 base offsets.
 
 #include "IsoExtract.h"
 #include <cstdio>
@@ -17,17 +14,15 @@ namespace ISO {
 namespace {
 
 constexpr uint32_t kSectorSize         = 2048;
-constexpr uint32_t kHeaderOffset       = 0x10000;        // sector 32
-constexpr uint64_t kGlobalLseekOffset  = 0x0FD90000ull;  // raw .xiso
-constexpr uint64_t kXgd1LseekOffset    = 0x18300000ull;  // XGD1/XGD2 (Fable 2)
-constexpr uint64_t kXgd3LseekOffset    = 0x02080000ull;  // XGD3
-const     char     kMediaMagic[21]     = "MICROSOFT*XBOX*MEDIA";  // 20 chars + NUL
+constexpr uint32_t kHeaderOffset       = 0x10000;
+constexpr uint64_t kGlobalLseekOffset  = 0x0FD90000ull;
+constexpr uint64_t kXgd1LseekOffset    = 0x18300000ull;
+constexpr uint64_t kXgd3LseekOffset    = 0x02080000ull;
+const     char     kMediaMagic[21]     = "MICROSOFT*XBOX*MEDIA";
 
-// Stream wrapper. Caches the disc-base offset so reads can use ISO
-// "sector" units while the underlying file pointer chases the extra base.
 struct Stream {
     std::FILE* fp = nullptr;
-    uint64_t   base = 0;        // disc-image start within the file
+    uint64_t   base = 0;
     uint64_t   total_size = 0;
 
     bool open(const std::string& path) {
@@ -51,7 +46,7 @@ struct Stream {
     bool read(void* dst, size_t n) {
         return fp && std::fread(dst, 1, n, fp) == n;
     }
-    // Seek to sector + offset relative to base.
+
     bool seek_sector(uint32_t sector) {
         return seek(base + (uint64_t)sector * kSectorSize);
     }
@@ -64,8 +59,6 @@ uint32_t read_u32le(const uint8_t* p) {
     return (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
 }
 
-// Probe the four known offsets, return the first one whose volume
-// descriptor magic is "MICROSOFT*XBOX*MEDIA". Sets s.base on success.
 bool detect_base_offset(Stream& s, uint32_t& root_sector, uint32_t& root_size) {
     static const uint64_t candidates[] = {
         kGlobalLseekOffset, kXgd3LseekOffset, kXgd1LseekOffset, 0
@@ -75,7 +68,7 @@ bool detect_base_offset(Stream& s, uint32_t& root_sector, uint32_t& root_size) {
         if (!s.seek(cand + kHeaderOffset)) continue;
         if (!s.read(buf, sizeof(buf))) continue;
         if (std::memcmp(buf, kMediaMagic, 20) == 0) {
-            // The header is: 20-byte magic, 4-byte root sector, 4-byte root size, ...
+
             uint8_t hdr[8];
             if (!s.read(hdr, 8)) continue;
             root_sector = read_u32le(hdr);
@@ -87,8 +80,6 @@ bool detect_base_offset(Stream& s, uint32_t& root_sector, uint32_t& root_size) {
     return false;
 }
 
-// One directory entry in the on-disc B-tree. Variable-length record
-// followed by a name.
 struct DirEntry {
     uint16_t left_off  = 0;
     uint16_t right_off = 0;
@@ -101,8 +92,6 @@ struct DirEntry {
 
 constexpr uint8_t kAttrDirectory = 0x10;
 
-// Read a single dir entry from `data` at offset `off`. Returns parsed record
-// and updates `out_consumed` to record length (multiple of 4 bytes).
 bool parse_dir_entry(const uint8_t* data, size_t data_size, uint32_t off, DirEntry& out) {
     if (off + 14 > data_size) return false;
     out.left_off     = read_u16le(data + off + 0);
@@ -116,8 +105,6 @@ bool parse_dir_entry(const uint8_t* data, size_t data_size, uint32_t off, DirEnt
     return true;
 }
 
-// Walk the tree and collect every leaf into `out_entries`, paired with
-// the absolute relative path-prefix to use during extraction.
 struct Pending {
     uint32_t   sector;
     uint32_t   size;
@@ -130,7 +117,6 @@ bool read_directory_blob(Stream& s, uint32_t sector, uint32_t size, std::vector<
     return s.read(out_blob.data(), size);
 }
 
-// Recurse the dir's own intra-sector b-tree, collecting all entries.
 void walk_btree(const uint8_t* blob, size_t blob_size, uint32_t off, std::vector<DirEntry>& out) {
     if (off * 4u >= blob_size) return;
     DirEntry e;
@@ -138,7 +124,7 @@ void walk_btree(const uint8_t* blob, size_t blob_size, uint32_t off, std::vector
     if (e.name_len == 0 && e.left_off == 0 && e.right_off == 0
         && e.start_sector == 0 && e.file_size == 0)
     {
-        return;  // empty / sentinel
+        return;
     }
     if (e.left_off  != 0 && e.left_off  != 0xFFFF) walk_btree(blob, blob_size, e.left_off,  out);
     out.push_back(std::move(e));
@@ -171,7 +157,7 @@ bool extract_directory(Stream& s,
                 std::filesystem::create_directories(child, ec);
             }
         } else {
-            // Regular file
+
             if (!s.seek_sector(e.start_sector)) {
                 if (err_out) *err_out = "seek failed for file " + e.name;
                 continue;
@@ -194,7 +180,7 @@ bool extract_directory(Stream& s,
     return true;
 }
 
-} // anonymous
+}
 
 bool extract_iso(const std::string& iso_path,
                  const std::string& dest_dir,
@@ -226,7 +212,7 @@ bool extract_iso(const std::string& iso_path,
         Pending cur = queue.back();
         queue.pop_back();
         if (!extract_directory(s, cur.sector, cur.size, cur.rel_path, queue, err_out)) {
-            // soft-fail; continue with siblings
+
         }
         if (progress) {
             uint64_t pos = (uint64_t)
@@ -252,4 +238,4 @@ bool is_xbox_iso(const std::string& iso_path) {
     return ok;
 }
 
-} // namespace ISO
+}

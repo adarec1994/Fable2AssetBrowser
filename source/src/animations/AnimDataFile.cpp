@@ -1,18 +1,3 @@
-// AnimDataFile — slurp + slice fable2_anims.animation_data.
-//
-// File header layout (big-endian, see docs/ANIM_FORMAT.md):
-//   +0x00  u32  magic     0xCEA5EBED
-//   +0x04  u32  version   == 7  (only this version observed in retail)
-//   +0x08  u32  ?         (typically 0xFF)
-//   +0x0C  u32  ?         (clip count proxy — 0x87 in retail)
-//   +0x10  u32  ?
-//   +0x14  u32  ?
-//   +0x18  u32  zero
-//   +0x1C  u32[]  master offset table (we don't use this — clip
-//                 offsets come from the TOC's AnimRecord.data_offset)
-//
-// Decoding the body is Phase E. This file just gives the rest of the
-// app raw byte slices keyed by clip.
 
 #include "AnimDataFile.h"
 
@@ -34,7 +19,7 @@ uint32_t read_u32_be(const uint8_t* p) {
            ((uint32_t)p[2] <<  8) |  (uint32_t)p[3];
 }
 
-} // anonymous
+}
 
 bool AnimDataFile::open(const std::filesystem::path& data_path) {
     blob_.clear();
@@ -63,9 +48,7 @@ bool AnimDataFile::open_from_bytes(std::vector<uint8_t> bytes) {
     }
     blob_ = std::move(bytes);
     if (!header_ok()) {
-        // header_ok already logs the specific mismatch — but only if we
-        // actually have the bytes loaded, which is the case here. Drop
-        // the blob so partial state doesn't leak into clip_bytes().
+
         blob_.clear();
         return false;
     }
@@ -79,11 +62,7 @@ bool AnimDataFile::open_for_root(const std::string& root) {
     constexpr const char* kRel = "data/animation/fable2_anims.animation_data";
 
     if (ISO::IsoMount::instance().is_mounted()) {
-        // Free the LRU cache so a 26 MB read doesn't fight the cached
-        // BNK blobs for contiguous heap (same reasoning as IsoDump).
-        // The single read here goes straight into our own buffer; the
-        // cache wouldn't help us anyway since clip lookups go through
-        // the in-memory blob_, not back through IsoMount.
+
         ISO::IsoMount::instance().clear_cache();
 
         const ISO::MountedFile* mf =
@@ -105,8 +84,6 @@ bool AnimDataFile::open_for_root(const std::string& root) {
         return open_from_bytes(std::move(bytes));
     }
 
-    // Folder mode — canonical path first, then a recursive basename
-    // fallback for extracted-flat layouts.
     std::filesystem::path direct = std::filesystem::path(root) / kRel;
     if (std::filesystem::exists(direct)) {
         return open(direct);
@@ -163,21 +140,12 @@ AnimDataFile::ClipHeader AnimDataFile::parse_clip_header(const AnimClip& clip) c
     h.bone_count    = read_u32_be(sp.data + 0x10);
     h.bone_idx_bits = read_u32_be(sp.data + 0x14);
     if (h.magic != kExpectedMagic || h.version != kExpectedVersion) {
-        // Not a clip we recognise — return the partially-parsed header
-        // with ok=false so callers can still inspect the prefix in
-        // dev mode without us pretending the parse succeeded.
+
         return h;
     }
-    // Per-item offset directory. CORRECTION: the directory has
-    // `field_C` entries (= a1[12] in the runtime), not bone_count.
-    // Each entry is a BIT offset relative to the body section,
-    // which starts at `clip + 24 + 4 * field_C`. The directory
-    // itself starts at clip+24 (one entry can be 0 for the first
-    // item — the runtime's `*(_DWORD *)(4 * v191 + a1 + 24)`
-    // indexing makes a1+24 the first entry, including the
-    // observed `00 00 00 00` we used to call a "zero pad").
+
     if (h.field_C == 0) return h;
-    const size_t dir_off = 24;     // a1+24 in IDA's indexing
+    const size_t dir_off = 24;
     const size_t dir_end = dir_off + (size_t)h.field_C * 4;
     if (dir_end > sp.size) return h;
     h.bone_offsets.reserve(h.field_C);
@@ -190,24 +158,16 @@ AnimDataFile::ClipHeader AnimDataFile::parse_clip_header(const AnimClip& clip) c
 
 AnimDataFile::Span AnimDataFile::clip_bytes(const AnimClip& clip) const {
     if (blob_.empty()) return {nullptr, 0};
-    // The TOC's `data_length` field turned out NOT to be a byte
-    // length — it's actually a count value matching clip blob
-    // u32[4] (bone_count). The actual byte extent of a clip is
-    // bounded only by the data file's total size + the next
-    // clip's offset. Use "remaining bytes from data_offset to
-    // EOF" as the safe upper bound here so parse_clip_header's
-    // dir-bounds check doesn't reject valid clips that happen to
-    // have a tiny `data_length`.
+
     if (clip.data_offset >= blob_.size()) return {nullptr, 0};
     const size_t remaining = blob_.size() - clip.data_offset;
     return {blob_.data() + clip.data_offset, remaining};
 }
 
 AnimDataFile& global_data_file() {
-    // Function-local static — initialised on first use, destroyed at
-    // process teardown. Avoids static-init-order issues with State.
+
     static AnimDataFile inst;
     return inst;
 }
 
-} // namespace Anim
+}

@@ -16,15 +16,9 @@ namespace {
 bool g_loaded = false;
 float g_loaded_size_px = 0.0f;
 
-// ImGui's font atlas keeps a pointer to the TTF byte buffer for the
-// lifetime of the atlas (when FontDataOwnedByAtlas is false), so we
-// keep our copies alive for the whole program.
 std::vector<unsigned char> g_roboto_bytes;
 std::vector<unsigned char> g_fa_bytes;
 
-// Sizes — Roboto sets the body text size; FA is rendered at the same
-// size so icons line up with running text without nudges. 17 px is a
-// touch chunkier than ImGui's default 13 — readable without crowding.
 constexpr float kDefaultFontSizePx = 17.0f;
 
 #ifdef _WIN32
@@ -43,19 +37,14 @@ bool load_rcdata(int resource_id, std::vector<unsigned char>& out) {
 }
 #endif
 
-} // anonymous
+}
 
-// Internal: clear the atlas + re-add Roboto (base) + FA (merged) at
-// the given pixel size. Used by both ensure_loaded() (first call) and
-// reload_at_size() (settings popup). Caller-side renderer-backend
-// invalidation is required after this — the atlas's GPU texture has
-// to be regenerated; we just produce the CPU-side bitmap.
 bool load_atlas_at_size(float size_px) {
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
 
 #ifdef _WIN32
-    // Lazy-load the bytes once; reuse on subsequent reloads.
+
     if (g_roboto_bytes.empty()) {
         load_rcdata(IDR_ROBOTO_FONT, g_roboto_bytes);
     }
@@ -109,9 +98,8 @@ bool reload_at_size(float size_px) {
     return ok;
 }
 
-} // namespace IconFont
+}
 
-// Public entry called from main.cpp at startup, before NewFrame.
 void Splashscreen_init_icon_font_at_startup() {
     IconFont::ensure_loaded();
 }

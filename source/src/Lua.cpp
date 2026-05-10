@@ -169,28 +169,24 @@ public:
         for (size_t i = 0; i < len - 1; i++) {
             s += (char)read_byte();
         }
-        read_byte(); // null terminator
+        read_byte();
         return s;
     }
 
     bool read_header() {
-        // Signature: 0x1B 'L' 'u' 'a'
+
         if (read_byte() != 0x1B) return false;
         if (read_byte() != 'L') return false;
         if (read_byte() != 'u') return false;
         if (read_byte() != 'a') return false;
 
-        // Version (0x51 for Lua 5.1)
         uint8_t version = read_byte();
         if (version != 0x51) return false;
 
-        // Format (0 = official)
         read_byte();
 
-        // Endianness (1 = little endian)
         little_endian = read_byte() == 1;
 
-        // Sizes
         sizeof_int = read_byte();
         sizeof_size_t = read_byte();
         sizeof_instruction = read_byte();
@@ -210,14 +206,12 @@ public:
         f.is_vararg = read_byte();
         f.maxstacksize = read_byte();
 
-        // Code
         int sizecode = read_int();
         f.code.resize(sizecode);
         for (int i = 0; i < sizecode; i++) {
             f.code[i] = read_int();
         }
 
-        // Constants
         int sizek = read_int();
         f.constants.resize(sizek);
         for (int i = 0; i < sizek; i++) {
@@ -238,21 +232,18 @@ public:
             }
         }
 
-        // Protos (nested functions)
         int sizep = read_int();
         f.protos.resize(sizep);
         for (int i = 0; i < sizep; i++) {
             f.protos[i] = read_function();
         }
 
-        // Line info (debug)
         int sizelineinfo = read_int();
         f.lineinfo.resize(sizelineinfo);
         for (int i = 0; i < sizelineinfo; i++) {
             f.lineinfo[i] = read_int();
         }
 
-        // Locals (debug)
         int sizelocvars = read_int();
         f.locals.resize(sizelocvars);
         for (int i = 0; i < sizelocvars; i++) {
@@ -261,7 +252,6 @@ public:
             f.locals[i].endpc = read_int();
         }
 
-        // Upvalues (debug)
         int sizeupvalues = read_int();
         f.upvalues.resize(sizeupvalues);
         for (int i = 0; i < sizeupvalues; i++) {
@@ -887,7 +877,7 @@ std::string decompile(const Function& f) {
     return dec.out.str();
 }
 
-} // namespace lua51
+}
 
 std::string decompile_lua51_bytecode(const uint8_t* data, size_t size) {
     lua51::BytecodeReader reader(data, size);
@@ -973,8 +963,7 @@ static bool copy_file_simple(const std::string& src, const std::string& dst) {
 }
 
 std::string read_lua_file_content(const std::string& path) {
-    // Route through read_all_bytes so iso:// virtual paths read from the
-    // mounted disc image. A raw std::ifstream silently failed in ISO mode.
+
     auto bytes = read_all_bytes(std::filesystem::path(path));
     if (bytes.empty()) {
         return "-- Error: Could not open file";

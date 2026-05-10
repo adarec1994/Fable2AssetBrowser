@@ -11,11 +11,11 @@
 #include "../OutputLog.h"
 #include "../HexView.h"
 #include "../../textures/export/TextureExport.h"
-#include "../../Audio/XmaDecoder.h"      // XMA→PCM for the per-file
-                                          // MP3 / AAC right-click items.
-#include "../../Audio/MfAudioEncoder.h"  // PCM→MP3 / PCM→AAC.
-#include "../../ISO/IsoDump.h"           // mdl_export_begin_named for
-                                           // the .mdl right-click submenu.
+#include "../../Audio/XmaDecoder.h"
+
+#include "../../Audio/MfAudioEncoder.h"
+#include "../../ISO/IsoDump.h"
+
 #include "../../animations/AnimBank.h"
 #include "../../animations/AnimDataFile.h"
 #include "imgui.h"
@@ -27,15 +27,11 @@
 
 void refresh_file_table() { S.selected_file_index = -1; }
 
-// Extract the selected file's raw bytes (going through the user's currently-
-// selected BNK or nested-BNK temp copy) and open the in-app audio player on
-// them. Returns true if the player accepted the data.
 bool open_audio_player_for_selected(int file_index) {
     if (file_index < 0 || file_index >= (int)S.files.size()) return false;
 
     const auto& item = S.files[(size_t)file_index];
 
-    // Pick the BNK we'll extract from. Same logic as the preview/hex paths.
     std::string bnk_to_use;
     if (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty()) {
         bnk_to_use = S.selected_nested_temp_path;
@@ -95,18 +91,13 @@ void pick_bnk(const std::string &path) {
     refresh_file_table();
 }
 
-// Companion to open_folder_logic for the case where the user picked an
-// ISO file. Skips the is_directory check (the path is a regular file)
-// and relies on ISO::IsoMount::is_mounted() being true so the BNK-scan
-// helpers route through the in-memory tree instead of the OS filesystem.
 void open_iso_logic(const std::string& iso_path) {
     if (iso_path.empty()) { show_error_box("No ISO selected"); return; }
     S.root_dir = iso_path;
     S.last_dir = std::filesystem::path(iso_path).parent_path().string();
     save_last_dir(S.last_dir);
     try {
-        // Same set of scans as folder mode — they all short-circuit to
-        // IsoMount::list_recursive() when a disc is mounted.
+
         S.bnk_paths = scan_bnks_recursive(iso_path);
         if (S.bnk_paths.empty()) S.bnk_paths = find_bnks(iso_path);
         S.adb_paths = scan_adbs_recursive(iso_path);
@@ -116,8 +107,7 @@ void open_iso_logic(const std::string& iso_path) {
         S.lua_files.reserve(lua_paths.size());
         for (size_t i = 0; i < lua_paths.size(); ++i) {
             std::filesystem::path p(lua_paths[i]);
-            // For ISO paths, file_size on the std::filesystem::path will
-            // fail — fall back to the IsoMount entry's recorded size.
+
             uint32_t size = 0;
             if (ISO::IsoMount::is_iso_path(lua_paths[i])) {
                 if (auto* mf = ISO::IsoMount::instance().find(
@@ -146,25 +136,13 @@ void open_iso_logic(const std::string& iso_path) {
         show_error_box("No .bnk files found in the ISO.");
         return;
     }
-    // Kick the file-tree build in the background so the tab is ready by
-    // the time the user navigates to it.
+
     start_tree_build_for_root(iso_path, S.bnk_paths);
 
-    // Pull the global animation TOC out of the ISO. Optional — log-only
-    // failure leaves S.anim_clips empty and the Animations tab will
-    // simply show "no clips loaded".
     if (Anim::load_toc_for_root(iso_path, S.anim_clips)) {
-        // Pair the TOC up with the data file. The TOC's clip offsets
-        // are useless without the bytes they point into. Failure
-        // here is non-fatal — the clip list still browses, just
-        // without any path to playback.
+
         Anim::global_data_file().open_for_root(iso_path);
-        // Recover friendly clip names by hashing every quoted
-        // string in every .lua and matching against clip key0.
-        // Replaces the synthesised id_HHHHHHHH placeholders in
-        // place. Cheap (~1-2s on retail data); skipping in non-
-        // dev mode is unnecessary since the result is always
-        // useful.
+
         Anim::resolve_clip_names_from_luas(S.anim_clips);
     }
 }
@@ -219,17 +197,11 @@ void open_folder_logic(const std::string &sel) {
         return;
     }
 
-    // Kick the file-tree build in the background — see equivalent call in
-    // open_iso_logic. Same idea: do the slow work right at root-selection
-    // time so the tab loads instantly.
     start_tree_build_for_root(sel, S.bnk_paths);
 
-    // Pull the global animation TOC out of the data folder. Optional —
-    // log-only failure leaves S.anim_clips empty.
     if (Anim::load_toc_for_root(sel, S.anim_clips)) {
         Anim::global_data_file().open_for_root(sel);
-        // Recover friendly clip names from .lua scripts (see ISO
-        // path for rationale).
+
         Anim::resolve_clip_names_from_luas(S.anim_clips);
     }
 
@@ -337,25 +309,12 @@ bool is_in_audio_folder(const std::string& path) {
            lower_path.find("\\audio\\") != std::string::npos;
 }
 
-// Bulk-extract every file in a single BNK. Mirrors the per-asset
-// "Export" path used by the right-click context menu — same call to
-// `extract_file_one` per file, same XMA→PCM conversion for .wav. The
-// difference is just the loop. Worker thread + progress modal so the
-// UI stays responsive on archives with thousands of files.
-//
-// Output layout: `${S.export_dir}/<asset_path>` for each entry. We
-// don't add a per-BNK subdirectory the way `dump_bnk_contents` does
-// because the user is opting into a single archive — they expect the
-// asset paths to land directly under their export root, same as
-// individual right-click Exports.
 void extract_single_bnk_contents(const std::string& bnk_path) {
     if (bnk_path.empty()) {
         OutputLog::warn("Extract BNK: no archive selected.");
         return;
     }
 
-    // Build the file list on the calling thread (fast — just opens the
-    // BNK and reads its TOC). The actual extraction loop runs async.
     std::vector<BNKItemUI> items;
     try {
         BNKReader reader(bnk_path);
@@ -414,9 +373,7 @@ void extract_single_bnk_contents(const std::string& bnk_path) {
                 if (S.cancel_requested.load() || S.exiting.load()) break;
                 bool ok = false;
                 try {
-                    // convert_audio=true so .wav entries come out as
-                    // playable PCM rather than the original XMA blob —
-                    // matches the per-file right-click Export.
+
                     extract_file_one(bnk_path, it, export_root,
                                      /*convert_audio=*/true);
                     ok = true;
@@ -466,38 +423,8 @@ void extract_single_bnk_contents(const std::string& bnk_path) {
     }).detach();
 }
 
-// ---------------------------------------------------------------------------
-// Per-asset right-click export
-// ---------------------------------------------------------------------------
-// The .tex case has had a multi-format submenu (PNG / JPG / TIFF /
-// DDS / .tex raw) since the texture exporter shipped — that's
-// `tex_export_menu_named`, called below. For every other type we
-// want a single "Export" entry that lands the asset in the user's
-// configured export directory at its original asset path. .mdl needs
-// reconstruction (header + body, the same shape `dump_mdl_files`
-// produces); .wav needs an XMA→PCM pass through `extract_file_one`'s
-// audio path so the output plays in any external tool; everything
-// else is a straight raw extract.
-//
-// Output layout matches the bulk dumpers and the .tex export so the
-// user has a single, predictable destination tree:
-//   `${S.export_dir}/<asset_path>`
-
 namespace {
 
-// Reconstruct an MDL by pulling the body out of `bnk_path` at
-// `file_index` and prefixing the matching header from the paired
-// `*_model_headers.bnk` (or `globals_model_headers.bnk` as a
-// fallback). Mirrors the BNK-pair derivation `reconstruct_one_mdl` in
-// IsoDump.cpp uses for the bulk MDL dump — duplicating it here keeps
-// the right-click path independent of that worker's BNK cache, which
-// only lives for the duration of a `dump_mdl_files` run.
-//
-// Returns true and fills `out` on success. On any failure (source
-// can't open, body extract throws, etc.) returns false and leaves
-// `out` empty. A body-with-no-paired-header is treated as success and
-// emits the body raw — matches `reconstruct_nested_mdl`'s long-
-// standing fallback so unpaired entries still get dumped.
 bool reconstruct_mdl_paired(const std::string& bnk_path,
                             int file_index,
                             std::vector<unsigned char>& out) {
@@ -519,9 +446,6 @@ bool reconstruct_mdl_paired(const std::string& bnk_path,
         std::filesystem::remove(tmp_body, ec);
         if (body.empty()) return false;
 
-        // Substitution rule: <root>_models.bnk → <root>_model_headers.bnk.
-        // Lower-case the basename so the comparison + replacement
-        // doesn't care about disc-side capitalisation differences.
         std::string base = std::filesystem::path(bnk_path)
                                .filename().string();
         std::transform(base.begin(), base.end(), base.begin(), ::tolower);
@@ -538,9 +462,7 @@ bool reconstruct_mdl_paired(const std::string& bnk_path,
             p_headers = find_bnk_by_filename("globals_model_headers.bnk");
         }
         if (!p_headers) {
-            // Body alone — unpaired nested archive. Same fallback
-            // reconstruct_nested_mdl uses; better than failing the
-            // export when at least the body is available.
+
             out = std::move(body);
             return true;
         }
@@ -560,8 +482,7 @@ bool reconstruct_mdl_paired(const std::string& bnk_path,
             if (hn == mdl_leaf) { h_idx = (int)i; break; }
         }
         if (h_idx < 0) {
-            // Header BNK exists but doesn't contain this asset's
-            // header — emit body anyway, same fallback shape.
+
             out = std::move(body);
             return true;
         }
@@ -582,9 +503,6 @@ bool reconstruct_mdl_paired(const std::string& bnk_path,
     }
 }
 
-// Compute the on-disk export destination for an asset. Same path
-// normalisation rule the .tex exporter uses (drop leading separators
-// so the concat doesn't accidentally anchor to a Windows root).
 std::filesystem::path build_export_target(const std::string& asset_path) {
     std::string rel = asset_path;
     while (!rel.empty() && (rel.front() == '/' || rel.front() == '\\'))
@@ -595,8 +513,6 @@ std::filesystem::path build_export_target(const std::string& asset_path) {
     return root / rel;
 }
 
-// Lower-case extension test — "endsWith(".mdl")" with the tolower
-// happening only on the trailing slice, not the whole asset path.
 bool ext_is(const std::string& name, const char* ext) {
     size_t n = std::strlen(ext);
     if (name.size() < n) return false;
@@ -608,27 +524,8 @@ bool ext_is(const std::string& name, const char* ext) {
     return true;
 }
 
-} // anonymous
+}
 
-// Generic right-click export handler. Kicks off a synchronous
-// extract-and-write to `${S.export_dir}/<asset_path>`. .mdl gets
-// reconstructed via `reconstruct_mdl_paired`; .wav goes through
-// `extract_file_one`'s convert_audio path so the output is a
-// playable PCM .wav (the source bytes are XMA-encoded and won't
-// open in any non-game tool); everything else is a raw extract.
-//
-// Synchronous on the UI thread: a single-file extract is fast and
-// the user's right-click is a deliberate single-asset operation, so
-// adding a worker thread + progress modal would just add latency.
-// The existing `dump_*_files()` functions are the path for bulk.
-// Per-file raw .xma extract for the right-click audio submenu's
-// "raw" entry. Reads the bytes verbatim (no XMA→PCM decode) and
-// writes them with a `.xma` extension to keep the file
-// distinguishable on disk from the PCM/MP3/M4A variants.
-//
-// The bytes are still a RIFF/WAVE wrapper with XMA codec inside —
-// same as the BNK stores. We rename the extension only to make
-// "this is the raw archive byte stream" obvious in the export tree.
 static void asset_export_audio_raw_xma(const std::string& bnk_path,
                                        int file_index,
                                        const std::string& file_name)
@@ -664,19 +561,6 @@ static void asset_export_audio_raw_xma(const std::string& bnk_path,
     }
 }
 
-// Per-file MP3 / AAC encoder for the right-click "Extract as ..."
-// audio submenu. Mirrors the encoded-format branch in IsoDump.cpp's
-// `dump_wav_files_as`, just for a single asset:
-//   1. extract the XMA-encoded bytes from the BNK to a scratch file
-//   2. read into a buffer + decode to PCM via XmaDecoder
-//   3. encode to MP3 or AAC via MfAudio (Windows Media Foundation)
-//   4. drop the scratch file regardless of outcome
-//
-// `out_ext` is the destination file extension WITH the leading dot —
-// `.mp3` for MP3, `.m4a` for AAC (the MF SinkWriter picks its muxer
-// from the URL extension, and `.aac` raw isn't recognised — `.m4a`
-// or `.mp4` are). All output goes under `${S.export_dir}` at the
-// asset's relative path with the extension swapped.
 static void asset_export_audio_encoded(const std::string& bnk_path,
                                        int file_index,
                                        const std::string& file_name,
@@ -685,11 +569,6 @@ static void asset_export_audio_encoded(const std::string& bnk_path,
     const char* fmt_label = aac ? "AAC"  : "MP3";
     const char* fmt_ext   = aac ? ".m4a" : ".mp3";
 
-    // Destination path: ${export_dir}/<asset_path with replaced ext>.
-    // Same normalisation `build_export_target` does (strip leading
-    // separators); replace_extension swaps the trailing piece so an
-    // input `audio/foo.wav` lands as `audio/foo.mp3` instead of
-    // `audio/foo.wav.mp3`.
     auto out = build_export_target(file_name);
     out.replace_extension(fmt_ext);
     auto scratch = out;
@@ -708,7 +587,7 @@ static void asset_export_audio_encoded(const std::string& bnk_path,
 
     bool ok = false;
     try {
-        // Step 1 — pull the raw XMA-encoded RIFF/WAVE from the BNK.
+
         extract_one(bnk_path, file_index, scratch.string());
         if (!std::filesystem::exists(scratch, ec) || ec) {
             throw std::runtime_error("extract_one produced no file");
@@ -719,7 +598,6 @@ static void asset_export_audio_encoded(const std::string& bnk_path,
             throw std::runtime_error("extracted .wav is empty");
         }
 
-        // Step 2 — XMA → PCM.
         std::vector<uint8_t> src(raw.begin(), raw.end());
         std::vector<int16_t> pcm;
         int sr = 0, ch = 0;
@@ -730,7 +608,6 @@ static void asset_export_audio_encoded(const std::string& bnk_path,
                 std::string("XMA→PCM decode failed: ") + err);
         }
 
-        // Step 3 — PCM → MP3 / AAC via Media Foundation.
         bool encoded = aac
             ? MfAudio::encode_pcm_to_aac(pcm, sr, ch, out.string(), &err)
             : MfAudio::encode_pcm_to_mp3(pcm, sr, ch, out.string(), &err);
@@ -759,12 +636,6 @@ static void asset_export_audio_encoded(const std::string& bnk_path,
     }
 }
 
-// `convert_audio` only matters for .wav assets: when true, the
-// extract_file_one call below decodes XMA → PCM in-place, leaving a
-// playable .wav at the destination. When false the bytes land
-// verbatim — the original XMA-encoded RIFF/WAVE the BNK stores.
-// Non-audio assets ignore the flag (it just feeds straight through to
-// extract_file_one which only acts on `is_audio_file` matches anyway).
 static void asset_export_to_export_dir(const std::string& bnk_path,
                                        int file_index, bool /*is_nested*/,
                                        const std::string& file_name,
@@ -795,11 +666,7 @@ static void asset_export_to_export_dir(const std::string& bnk_path,
                 }
             }
         } else {
-            // Raw extract path — extract_file_one streams to disk
-            // and (for audio assets, only when convert_audio is true)
-            // follows up with an XMA→PCM decode pass in-place.
-            // Anything that isn't audio just gets written byte-for-
-            // byte regardless of the flag.
+
             BNKItemUI item{};
             item.index = file_index;
             item.name  = file_name;
@@ -807,10 +674,7 @@ static void asset_export_to_export_dir(const std::string& bnk_path,
             extract_file_one(bnk_path, item,
                              out.parent_path().string(),
                              convert_audio);
-            // extract_file_one writes to base_out_dir / item.name —
-            // which equals our `out` so long as `file_name` doesn't
-            // have leading separators. Our build_export_target
-            // already normalised that.
+
             ok = std::filesystem::exists(out, ec) && !ec;
         }
     } catch (const std::exception& ex) {
@@ -832,21 +696,6 @@ static void asset_export_to_export_dir(const std::string& bnk_path,
     }
 }
 
-// Right-click context menu attached to the most-recently-rendered file
-// item. ImGui::BeginPopupContextItem ties the popup's lifecycle to the
-// last item's ID, so the caller just needs to render its Selectable /
-// TreeNodeEx then call this function.
-//
-// Selecting "Hex View" reroutes S.selected_bnk / S.selected_file_index
-// to point at the right-clicked file (mirroring what a normal click
-// does), then calls open_hex_for_selected() which kicks the bytes
-// load on a worker thread.
-//
-// The "Export" entry is always available (every file we surface in
-// the UI is exportable). For .tex it expands into a multi-format
-// submenu (PNG/JPG/TIFF/DDS/.tex raw); for everything else it's a
-// single MenuItem that drops the asset into `${S.export_dir}` —
-// reconstructed for .mdl, PCM-converted for .wav, raw for the rest.
 void file_hex_context_menu(const std::string& bnk_path,
                            int file_index, bool is_nested,
                            const std::string& file_name) {
@@ -856,9 +705,7 @@ void file_hex_context_menu(const std::string& bnk_path,
     if (ImGui::BeginPopupContextItem()) {
         if (show_hex) {
             if (ImGui::MenuItem("Hex View")) {
-                // Switch active BNK if needed — pick_bnk repopulates
-                // S.files for the new BNK, which we need so
-                // open_hex_for_selected can resolve the entry name.
+
                 if (S.selected_bnk != bnk_path) {
                     S.viewing_adb = false;
                     S.viewing_lua = false;
@@ -867,16 +714,12 @@ void file_hex_context_menu(const std::string& bnk_path,
                     S.selected_nested_index = -1;
                     pick_bnk(bnk_path);
                 }
-                // pick_bnk wipes nested state — re-establish it for nested
-                // files so extract paths route through the right archive.
+
                 if (is_nested) {
                     S.selected_nested_temp_path = bnk_path;
                     S.selected_nested_index = 0;
                 }
-                // Find the entry in S.files whose BNK index matches and
-                // mark it selected. open_hex_for_selected reads
-                // S.selected_file_index, not the BNK's intrinsic index,
-                // so this mapping step is required.
+
                 S.selected_file_index = -1;
                 for (size_t i = 0; i < S.files.size(); ++i) {
                     if (S.files[i].index == file_index) {
@@ -890,25 +733,11 @@ void file_hex_context_menu(const std::string& bnk_path,
             }
         }
         if (is_tex) {
-            // The export menu defers the actual decode + write until
-            // after the user picks a path in the save dialog. mip 0 is
-            // the highest-resolution mip per the .tex format convention.
+
             tex_export_menu_named(file_name, file_name, bnk_path,
                                   /*mip_index=*/0);
         } else if (is_mdl_file(file_name)) {
-            // .mdl gets an "Export to" submenu matching the
-            // tex / audio layouts. GLB / FBX both produce single
-            // self-contained files (embedded textures, materials,
-            // skeleton, weights, UVs); raw .mdl is the
-            // reconstructed header+body bytes the runtime would
-            // load. All three land at `${export_dir}/<asset_path>`
-            // with the extension swapped to match.
-            //
-            // Pass `bnk_path + file_index` as the canonical
-            // identifier (file_name is just the leaf in some call
-            // sites — file tree, flat tabs — and the BNK stores
-            // entries by full asset path, so name-based lookup
-            // would fail for those callers).
+
             if (ImGui::BeginMenu("Export to")) {
                 if (ImGui::MenuItem("GLB")) {
                     ISO::mdl_export_begin_named(
@@ -929,20 +758,7 @@ void file_hex_context_menu(const std::string& bnk_path,
                 ImGui::EndMenu();
             }
         } else if (is_audio_file(file_name)) {
-            // "Export to" submenu — same shape the .tex menu has,
-            // matching the user's requested layout:
-            //
-            //   Export to
-            //     ├─ MP3
-            //     ├─ M4A           (AAC in MP4)
-            //     ├─ WAV           (PCM)
-            //     ├─ ─────
-            //     └─ .xma (raw)    (verbatim BNK bytes, .xma extension)
-            //
-            // Each lands at `${export_dir}/<asset_path>` with the
-            // extension swapped to match the format, so MP3 / M4A /
-            // WAV / .xma versions of the same asset coexist on disk
-            // instead of clobbering each other.
+
             if (ImGui::BeginMenu("Export to")) {
                 if (ImGui::MenuItem("MP3")) {
                     asset_export_audio_encoded(bnk_path, file_index,

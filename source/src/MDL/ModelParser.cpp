@@ -14,9 +14,6 @@
 
 using std::uint8_t; using std::uint16_t; using std::uint32_t;
 
-// === Debug logging ===
-// Writes to mdl_parser_debug.log in the current working directory.
-// Set MDL_DEBUG_LOG to 0 to disable.
 #ifndef MDL_DEBUG_LOG
 #define MDL_DEBUG_LOG 0
 #endif
@@ -206,14 +203,6 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
     if(!r.u32be(out.MeshCount)) return false;
     if(!r.skip(2*4)) return false;
 
-    // Tree foliage files have a variable-length named-tag section at offset 0x68
-    // (e.g., "IsTree"+flag, "NewTree"+flag) inside what was originally a fixed
-    // skip(13) + skip(5*4) region. The byte at 0x68 is a tag count: 0 for normal
-    // files (full 33 bytes are zeros), N>0 for trees (N tagged strings follow).
-    // We read the count byte, then conditionally consume the tags before the
-    // skip(5*4). If the bytes after the count don't validate as printable
-    // C-style identifiers, we restore position so non-tree files behave exactly
-    // as before.
     bool has_tree_tag = false;
     if(!r.skip(12)) return false;
     {
@@ -302,13 +291,6 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
                 if(!r.strz(m.UnkName)) return false;
                 if(!r.strz(m.TintName)) return false;
 
-                // Tree files have a variable post-strings layout per material
-                // (sometimes extra texture strings like translucency or detail+detail_norm,
-                // varying internal padding, trailing u8 marker either 0x00 or 0x01).
-                // Rather than parse this strictly, scan forward to the next sentinel:
-                //   - For non-last meshes: u32(=1) followed by an ASCII letter (next mesh's u1=1+meshName)
-                //   - For the last mesh:   u8(=0x01) followed by u32(=0) (foliage section's tree marker)
-                // If neither is found within range, fall back to the original 3 u32s + optional 0x01 peek.
                 bool used_scan = false;
                 if(has_tree_tag && j + 1 == mcount){
                     size_t scan_from = r.i;
@@ -348,12 +330,7 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
     }
 
 if(is_foliage){
-    // Some foliage files (e.g., grass) carry a class-tag string between the
-    // material data and the foliage section: an alphabetic null-terminated
-    // identifier ("ShortGrass" etc.) followed by a 3-byte trailer. The standard
-    // u16 unk2bytes read would otherwise misalign by reading the string bytes.
-    // We detect by sniffing the first byte; if it's an ASCII letter and the
-    // following bytes form a printable identifier, consume it + 3-byte trailer.
+
     bool has_class_tag = false;
     std::string class_tag;
     if(r.i < r.n){
@@ -387,7 +364,6 @@ if(is_foliage){
     if(!r.u16be(unk2bytes)) return false;
     mdl_dbg("  unk2bytes=0x%04x  r.i=0x%zx", unk2bytes, r.i);
 
-    // Detect tree variant: extra u8=0x01 before mesh headers, stride-36 half-float
     bool is_tree_foliage = false;
     {
         size_t save = r.i;
@@ -409,7 +385,7 @@ if(is_foliage){
         mdl_dbg("  tree path: tree_flag=0x%02x", tree_flag);
 
         for(uint32_t mi=0; mi<out.MeshCount; ++mi){
-            // fields[0]=mi, fields[1]=face_ic-2, fields[2]=face_ic, fields[3]=vtx
+
             uint32_t fields[4] = {0,0,0,0};
             for(int k=0;k<4;k++) if(!r.u32be(fields[k])) return false;
 
@@ -437,29 +413,16 @@ if(is_foliage){
             if(face_ic > 0 && face_ic < 100000u)
                 if(!r.skip((size_t)face_ic * 2)) return false;
 
-            // UV/tangent extra block after face buffer
             if(vtx > 0 && vtx < 100000u)
                 if(!r.skip((size_t)vtx * 16)) return false;
 
-            // 2-byte separator between meshes (not after last)
             if(mi + 1 < out.MeshCount)
                 if(!r.skip(2)) return false;
 
             out.MeshBuffers.push_back(mb);
         }
     } else {
-        // Plant variant. Three sub-formats:
-        //  (a) Standard plant: stride-48 float32 verts directly after 4-u32 header.
-        //  (b) BW class-tagged plants ("polymsh","Hedgerow2New","beech_log_V2_RPH",etc):
-        //      4-u32 header, then mesh-level AABB header (40 bytes = 8 floats),
-        //      then u32 sub-mesh count, then N×41-byte sub-mesh entries
-        //      (subIdx + unk + matIdx + faceCount + startIdx + 6 floats AABB),
-        //      then stride-20 vertex data (12 bytes pos + 8 bytes packed normal/UV),
-        //      then face*2 indices.
-        //  (c) Class-tagged but unrecognised (grass etc): stride unknown → skip geom.
-        // Multi-mesh BW files have an extras block + repeated class tag between
-        // meshes that we don't yet decode; mesh[1+] in those will read garbage
-        // 4-u32 values and we bail gracefully with empty geometry.
+
         for(uint32_t mi=0; mi<out.MeshCount; ++mi){
             uint32_t fields[4] = {0,0,0,0};
             for(int k=0;k<4;k++) if(!r.u32be(fields[k])) return false;
@@ -477,9 +440,7 @@ if(is_foliage){
             bool fits_48 = sane && (r.i + (size_t)vtx * 48 + (size_t)face_ic * 2 <= r.n);
 
             if(!sane){
-                // Garbage values — likely past meaningful data (e.g. mesh[1+] of a
-                // multi-mesh BW file where the inter-mesh boundary needs more decoding).
-                // Record empty entry and stop reading further meshes.
+
                 mdl_dbg("    plant-mesh[%u] insane vtx/face values; halting at this mesh", mi);
                 MDLMeshBufferInfo mb;
                 mb.VertexCount = 0; mb.VertexOffset = 0;
@@ -488,7 +449,7 @@ if(is_foliage){
                 mb.IsFoliagePath = true; mb.FoliageVertexStride = 0;
                 mb.MeshIndex = mi;
                 out.MeshBuffers.push_back(mb);
-                // Pad remaining meshes with empty entries
+
                 for(uint32_t mj = mi + 1; mj < out.MeshCount; ++mj){
                     MDLMeshBufferInfo mb2;
                     mb2.VertexCount = 0; mb2.VertexOffset = 0;
@@ -502,7 +463,7 @@ if(is_foliage){
             }
 
             if(fits_48 && !has_class_tag){
-                // Standard plant
+
                 vert_off = r.i;
                 if(!r.skip((size_t)vtx * 48)) return false;
                 face_off = r.i;
@@ -512,19 +473,18 @@ if(is_foliage){
 
             std::vector<MDLSubMeshInfo> bw_subs;
             if(stride_used == 0 && has_class_tag){
-                // Try BW stride-20 format with mesh AABB + sub-mesh entries
+
                 size_t hdr_start = r.i;
                 bool bw_ok = false;
                 if(r.i + 40 + 4 <= r.n){
-                    if(!r.skip(40)) return false;        // mesh AABB (8 floats)
+                    if(!r.skip(40)) return false;
                     uint32_t sub_count = 0;
                     if(r.u32be(sub_count) && sub_count > 0 && sub_count <= 64){
                         size_t need = (size_t)sub_count * 41
                                     + (size_t)vtx * 20
                                     + (size_t)face_ic * 2;
                         if(r.i + need <= r.n){
-                            // Decode each sub-mesh entry: u32 subIdx, u32 unk, u8 matIdx,
-                            // u32 faceCount, u32 startIdx, 6 floats AABB = 41 bytes.
+
                             bw_subs.reserve(sub_count);
                             bool sub_ok = true;
                             for(uint32_t s = 0; s < sub_count && sub_ok; ++s){
@@ -536,7 +496,7 @@ if(is_foliage){
                                 if(!r.u8(sub_mat))      { sub_ok = false; break; }
                                 if(!r.u32be(sub_face))  { sub_ok = false; break; }
                                 if(!r.u32be(sub_start)) { sub_ok = false; break; }
-                                if(!r.skip(24))         { sub_ok = false; break; } // 6 floats AABB
+                                if(!r.skip(24))         { sub_ok = false; break; }
                                 MDLSubMeshInfo si;
                                 si.FaceCount = sub_face;
                                 si.StartIndex = sub_start;
@@ -562,10 +522,10 @@ if(is_foliage){
                     }
                 }
                 if(!bw_ok){
-                    // Fallback: rewind and record empty geometry
+
                     r.i = hdr_start;
                     if(fits_48){
-                        // No class-tag matched but stride 48 fits — try standard path
+
                         vert_off = r.i;
                         if(!r.skip((size_t)vtx * 48)) return false;
                         face_off = r.i;
@@ -576,7 +536,7 @@ if(is_foliage){
                         vert_off = hdr_start;
                         face_off = 0;
                         mdl_dbg("    plant-mesh[%u] no recognised format (class-tagged); empty geom", mi);
-                        // Don't advance r.i further — stop processing further meshes
+
                         MDLMeshBufferInfo mb;
                         mb.VertexCount = vtx; mb.VertexOffset = vert_off;
                         mb.FaceCount = face_ic; mb.FaceOffset = face_off;
@@ -599,9 +559,7 @@ if(is_foliage){
             }
 
             if(stride_used == 0){
-                // Neither stride-48 nor BW stride-20 succeeded. The BW path's own
-                // failure branch already pushed an empty mb and returned, so we
-                // only get here for non-class-tag plants where stride 48 didn't fit.
+
                 return false;
             }
 
@@ -994,8 +952,7 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                 (int)mb.IsFoliagePath, mb.VertexOffset, mb.FaceOffset);
 
         if(mb.IsFoliagePath){
-            // --- BW class-tagged plant: stride 20, half-float positions at offset 0,
-            //     remaining 14 bytes opaque (UV + packed normal + extras) ---
+
             if(mb.FoliageVertexStride == 20){
                 if(mb.VertexCount==0 || mb.FaceCount==0 ||
                    mb.VertexOffset+(size_t)mb.VertexCount*20>r.n ||
@@ -1016,17 +973,14 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                 const uint8_t* vp=r.p+mb.VertexOffset;
                 for(uint32_t v=0;v<mb.VertexCount;++v){
                     const uint8_t* p=vp+v*20;
-                    // Position: 3 half-floats BE at offset 0 (6 bytes)
+
                     g.positions[v*3+0]=half_to_float((uint16_t(p[0])<<8)|p[1]);
                     g.positions[v*3+1]=half_to_float((uint16_t(p[2])<<8)|p[3]);
                     g.positions[v*3+2]=half_to_float((uint16_t(p[4])<<8)|p[5]);
-                    // Bytes 6-11 hold a 2-byte field + a 4-byte packed attribute
-                    // (shared between vertex pairs — likely tangent-space or wind data,
-                    // not a unit normal; magnitudes vary 0.6..1.3). Not decoded here.
-                    // UV: 2 half-floats BE at offset 12 (4 bytes)
+
                     g.uvs[v*2+0]=half_to_float((uint16_t(p[12])<<8)|p[13]);
                     g.uvs[v*2+1]=half_to_float((uint16_t(p[14])<<8)|p[15]);
-                    // Bytes 16-19: another packed/extras field, not decoded
+
                 }
                 std::vector<uint16_t> strip(mb.FaceCount);
                 const uint8_t* fp=r.p+mb.FaceOffset;
@@ -1042,12 +996,9 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                         g.indices[t*3+0]=strip[t*3+0]; g.indices[t*3+1]=strip[t*3+1]; g.indices[t*3+2]=strip[t*3+2];
                     }
                 }
-                // Smooth vertex normals from triangle topology (file's bytes 8-11
-                // are not a usable unit normal).
+
                 compute_smooth_normals(mb.VertexCount, g.indices, g.positions, g.normals);
-                // Pick material by sub-mesh's matIdx (BW files often use Materials[1],
-                // not [0] — e.g. tree stumps have a generic-trunk mat[0] and the
-                // stump-specific texture in mat[1]).
+
                 if(mi < info.Meshes.size() && !info.Meshes[mi].Materials.empty()){
                     uint8_t pick = 0;
                     if(!mb.SubMeshes.empty()) pick = mb.SubMeshes[0].MaterialIndex;
@@ -1065,7 +1016,6 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                 continue;
             }
 
-            // --- Plant foliage: stride 48, big-endian float32 ---
             if(mb.FoliageVertexStride == 48 || mb.FoliageVertexStride == 0){
                 if(mb.VertexCount==0 || mb.FaceCount==0 ||
                    mb.VertexOffset+(size_t)mb.VertexCount*48>r.n ||
@@ -1123,8 +1073,6 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                 continue;
             }
 
-            // --- Tree foliage: stride 36, big-endian half-float ---
-            // pos at offset 0 (u16×3), uv at offset 12 (u16×2), normals computed
             if(mb.FoliageVertexStride == 36){
                 if(mb.VertexCount==0 || mb.FaceCount==0 ||
                    mb.VertexOffset+(size_t)mb.VertexCount*36>r.n ||
@@ -1179,7 +1127,6 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                 continue;
             }
 
-            // Unknown foliage stride — push empty
             {
                 MDLMeshGeom g;
                 if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty())

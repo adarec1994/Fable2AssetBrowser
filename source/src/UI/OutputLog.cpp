@@ -18,18 +18,17 @@ namespace {
 struct Entry {
     Level       lvl;
     std::string msg;
-    char        time_str[12];   // "HH:MM:SS"
+    char        time_str[12];
 };
 
 std::vector<Entry> g_entries;
 std::mutex         g_mutex;
 constexpr size_t   kMaxEntries = 500;
 
-// UI state
 bool   g_open      = false;
-bool   g_locked    = false;    // padlock — when true, clicking outside
-                               // doesn't close the panel
-float  g_anim_h    = 0.0f;     // animated current height
+bool   g_locked    = false;
+
+float  g_anim_h    = 0.0f;
 constexpr float kBarHeight   = 26.0f;
 constexpr float kPanelHeight = 220.0f;
 
@@ -56,7 +55,7 @@ ImVec4 colour_for(Level lvl) {
     }
 }
 
-} // anonymous
+}
 
 void log(Level lvl, std::string msg) {
     Entry e;
@@ -66,8 +65,7 @@ void log(Level lvl, std::string msg) {
 
     std::lock_guard<std::mutex> lk(g_mutex);
     if (g_entries.size() >= kMaxEntries) {
-        // Drop the oldest few in one shot — cheaper than an individual
-        // erase per push when we're sustained at the cap.
+
         const size_t drop = g_entries.size() - kMaxEntries + 1;
         g_entries.erase(g_entries.begin(), g_entries.begin() + (std::ptrdiff_t)drop);
     }
@@ -75,16 +73,12 @@ void log(Level lvl, std::string msg) {
 }
 
 float reserved_bottom_height() {
-    // Returns the strip plus whatever portion of the slide-up panel is
-    // currently visible (mid-animation included), so callers (the main
-    // layout) can shrink themselves smoothly as the panel opens. Clamped
-    // to at least the strip height — that's the minimum we always own.
+
     return g_anim_h > kBarHeight ? g_anim_h : kBarHeight;
 }
 
 void draw() {
-    // Animate height toward the target. Snap to target once we're
-    // close enough so we stop poking the layout every frame.
+
     const float target = g_open ? (kBarHeight + kPanelHeight) : kBarHeight;
     g_anim_h += (target - g_anim_h) * 0.20f;
     if (std::fabs(g_anim_h - target) < 0.5f) g_anim_h = target;
@@ -108,18 +102,7 @@ void draw() {
                         | ImGuiWindowFlags_NoSavedSettings;
 
     if (ImGui::Begin("##output_log", nullptr, fl)) {
-        // ---- Bottom strip --------------------------------------------------
-        // Layout: [chevron][ preview (w/ count) ][lock][right-margin]
-        // The right-margin is there so the lock icon never gets clipped
-        // by a vertical scrollbar belonging to a panel above us — the
-        // scrollbar lives inside ##main, which ends right at our top
-        // edge in y but shares our right edge in x. A few pixels of
-        // breathing room keep the lock visually clear of that gutter.
-        //
-        // All three buttons are InvisibleButton + custom AddText so we
-        // can centre the glyphs precisely; ImGui::Button with a fixed
-        // size left-aligns the label text (FramePadding can't centre an
-        // arbitrary glyph in a non-default-sized button).
+
         const float bar_h          = kBarHeight - 1.0f;
         const float icon_w         = 32.0f;
         const float lock_w         = 32.0f;
@@ -132,8 +115,6 @@ void draw() {
         ImVec2 bar_p1 = ImVec2(bar_p0.x + win_size.x, bar_p0.y + bar_h);
         dl->AddRectFilled(bar_p0, bar_p1, IM_COL32(14, 16, 20, 255));
 
-        // Snapshot the latest entry under the lock so we can render it
-        // outside without holding the mutex.
         std::string preview_msg;
         Level       preview_lvl   = Level::Info;
         const char* preview_time  = nullptr;
@@ -150,8 +131,6 @@ void draw() {
             }
         }
 
-        // Helper: draw a glyph centred inside [x0..x0+w, y0..y0+h]
-        // using the current font.
         auto draw_centred_glyph = [&](float x0, float w,
                                       const char* glyph,
                                       ImU32 colour) {
@@ -161,7 +140,6 @@ void draw() {
             dl->AddText(ImVec2(gx, gy), colour, glyph);
         };
 
-        // Helper: hover/active background fill for a button rect.
         auto draw_btn_bg = [&](float x0, float w, bool hovered, bool active) {
             ImU32 bg = hovered ? (active ? IM_COL32(48, 56, 66, 255)
                                          : IM_COL32(34, 40, 48, 255))
@@ -173,10 +151,6 @@ void draw() {
             }
         };
 
-        // ---- Chevron (left) ------------------------------------------------
-        // Click is a hard no-op while locked — the lock pins the panel
-        // open/closed at whatever state it was in when the user locked.
-        // The icon dims so the user can see why nothing happens.
         const float chevron_x0 = bar_p0.x;
         ImGui::SetCursorScreenPos(ImVec2(chevron_x0, bar_p0.y));
         if (ImGui::InvisibleButton("##ol_chevron", ImVec2(icon_w, bar_h))) {
@@ -191,14 +165,12 @@ void draw() {
                            g_locked ? IM_COL32(110, 120, 135, 255)
                                     : IM_COL32(200, 215, 230, 255));
 
-        // ---- Preview (middle) ---------------------------------------------
         const float prev_x0 = chevron_x0 + icon_w;
         ImGui::SetCursorScreenPos(ImVec2(prev_x0, bar_p0.y));
         if (ImGui::InvisibleButton("##ol_preview", ImVec2(preview_w, bar_h))) {
             if (!g_locked) g_open = !g_open;
         }
-        // Subtle hover wash so users see the whole bar is clickable —
-        // suppressed when locked since the click goes nowhere.
+
         if (!g_locked && ImGui::IsItemHovered()) {
             dl->AddRectFilled(ImVec2(prev_x0, bar_p0.y),
                               ImVec2(prev_x0 + preview_w, bar_p0.y + bar_h),
@@ -207,7 +179,6 @@ void draw() {
                                   : IM_COL32(255, 255, 255, 12));
         }
 
-        // Preview text painted on top of the invisible button.
         const float pad_x  = 10.0f;
         const float text_y = bar_p0.y + (bar_h - ImGui::GetTextLineHeight()) * 0.5f;
         if (g_open) {
@@ -217,7 +188,7 @@ void draw() {
             dl->AddText(ImVec2(prev_x0 + pad_x, text_y),
                         IM_COL32(120, 130, 145, 255), "Output Log");
         } else {
-            // [HH:MM:SS]  message...   (count)
+
             char count_str[32];
             std::snprintf(count_str, sizeof(count_str), "(%zu)", entry_count);
             float right_w = ImGui::CalcTextSize(count_str).x;
@@ -243,7 +214,6 @@ void draw() {
                         IM_COL32(120, 130, 145, 255), count_str);
         }
 
-        // ---- Lock toggle (right, before the right margin) -----------------
         const float lock_x0 = prev_x0 + preview_w;
         ImGui::SetCursorScreenPos(ImVec2(lock_x0, bar_p0.y));
         if (ImGui::InvisibleButton("##ol_lock", ImVec2(lock_w, bar_h))) {
@@ -251,19 +221,15 @@ void draw() {
         }
         bool lock_hovered = ImGui::IsItemHovered();
         draw_btn_bg(lock_x0, lock_w, lock_hovered, ImGui::IsItemActive());
-        // Yellow when locked, neutral when not.
+
         ImU32 lock_colour = g_locked ? IM_COL32(255, 210, 90, 255)
                                      : IM_COL32(200, 215, 230, 255);
         draw_centred_glyph(lock_x0, lock_w,
                            g_locked ? ICON_FA_LOCK : ICON_FA_LOCK_OPEN,
                            lock_colour);
 
-        // Move the cursor below the strip so the panel child starts in
-        // the right place — the InvisibleButton above leaves it on the
-        // strip's row, not below it.
         ImGui::SetCursorScreenPos(ImVec2(bar_p0.x, bar_p0.y + bar_h));
 
-        // ---- Panel content (only when there's room) ----
         if (g_anim_h > kBarHeight + 1.0f) {
             ImGui::PushStyleColor(ImGuiCol_ChildBg,
                                   ImVec4(0.06f, 0.07f, 0.09f, 1.0f));
@@ -281,8 +247,6 @@ void draw() {
             }
             ImGui::PopStyleVar();
 
-            // Auto-scroll to bottom when the user is already near it.
-            // (Don't fight a user who's scrolled up to read history.)
             const bool near_bottom =
                 ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 24.0f;
             if (near_bottom) ImGui::SetScrollHereY(1.0f);
@@ -294,9 +258,6 @@ void draw() {
     ImGui::End();
     ImGui::PopStyleVar(3);
 
-    // Click-outside-to-close. Suppressed when locked — that's the whole
-    // point of the lock. (The chevron button is still functional, so the
-    // user can always close it explicitly.)
     if (g_open && !g_locked && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         const ImVec2 mp = ImGui::GetIO().MousePos;
         const bool inside = mp.x >= win_pos.x && mp.x < win_pos.x + win_size.x &&
@@ -307,4 +268,4 @@ void draw() {
     }
 }
 
-} // namespace OutputLog
+}

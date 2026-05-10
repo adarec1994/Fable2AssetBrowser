@@ -2,10 +2,10 @@
 #include "PanelInternal.h"
 #include "../UI_Main.h"
 #include "../OutputLog.h"
-#include "../ModelPreview.h"        // MP_Release for clearing the render
-                                     // panel when the user picks a Lua.
-#include "../../ISO/IsoDump.h"      // dump_tex_files_as for the Textures
-                                     // tab "Extract All as…" footer button.
+#include "../ModelPreview.h"
+
+#include "../../ISO/IsoDump.h"
+
 #include "../../Lua.h"
 #include "../../Utilities/Progress.h"
 #include "../../Utilities/Utils.h"
@@ -21,22 +21,12 @@
 #include <cstring>
 #include <cmath>
 
-// Defined in UI_Main.cpp / RenderPanel.cpp; declared here so the Lua
-// click handler can clear model state to unmask the render panel for
-// the lua-render path.
 extern ModelPreview g_mp;
 
-// Tab-button label list — single source of truth shared between the
-// draw_left_panel renderer and the left_panel_min_width helper that
-// MainLayout uses to clamp the splitter. Adding a new tab means
-// touching this one list; widths and click handlers update in step.
 static const char* const kLeftPanelTabLabels[] = {
     "BNK List", "File Tree", "Models", "Textures", "Audio", "Animations"
 };
 
-// Compute the per-button width that fits the longest tab label plus
-// the standard FramePadding. Frame-fresh because font-size changes
-// shift CalcTextSize's output.
 static float compute_tab_button_width() {
     float w = 0.0f;
     for (const char* L : kLeftPanelTabLabels) {
@@ -46,11 +36,7 @@ static float compute_tab_button_width() {
 }
 
 float left_panel_min_width() {
-    // Row 2 is the widest — four purple tabs (Models / Textures /
-    // Audio / Animations) with a 2 px gap between each pair. Add
-    // WindowPadding × 2 because the inner BeginChild("left_panel",
-    // …, true) draws a border that eats WindowPadding worth of
-    // space on either side.
+
     const ImGuiStyle& st = ImGui::GetStyle();
     float tab_w = compute_tab_button_width();
     constexpr float kTabGap = 2.0f;
@@ -61,13 +47,6 @@ float left_panel_min_width() {
     return row_w;
 }
 
-// Click-to-load handler shared by the Models / Textures tabs. Mirrors the
-// equivalent block inside draw_tree_node so a click in either tab gets the
-// same end result: switch the active BNK if needed, restore nested-source
-// state, locate the matching entry inside S.files, then arm the pending-load
-// flag the central render panel consumes.
-//
-// kind: 0 = .mdl, 1 = .tex, 2 = .wav (audio player)
 void load_flat_asset_entry(const FlatAssetEntry& e, int kind) {
     if (S.selected_bnk != e.bnk_path) {
         S.viewing_adb = false;
@@ -76,8 +55,7 @@ void load_flat_asset_entry(const FlatAssetEntry& e, int kind) {
         S.selected_nested_index = -1;
         pick_bnk(e.bnk_path);
     }
-    // pick_bnk wipes selected_nested_temp_path — re-establish it for nested
-    // sources so subsequent extract paths know which nested BNK to pull from.
+
     if (e.from_nested) {
         S.selected_nested_temp_path = e.bnk_path;
         S.selected_nested_index = 0;
@@ -93,8 +71,7 @@ void load_flat_asset_entry(const FlatAssetEntry& e, int kind) {
                 g_pending_tex_load = true;
                 g_pending_tex_index = (int)i;
             } else if (kind == 2) {
-                // Audio: open the in-app audio player on the selected
-                // file. Same code path the file-table double-click uses.
+
                 open_audio_player_for_selected((int)i);
             }
             break;
@@ -102,50 +79,26 @@ void load_flat_asset_entry(const FlatAssetEntry& e, int kind) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// BNK-List drill-in state
-// ---------------------------------------------------------------------------
-// The BNK List tab acts like a two-page sliding pane: page A is the
-// list of every BNK + the Audio Database / Lua Scripts entries; page
-// B is whatever the user clicked into (a BNK's file listing, the
-// flattened ADB list, or the flattened Lua list). A FontAwesome
-// arrow at the top of page B slides back.
-//
-// The slide is implemented by laying both pages side-by-side inside
-// a horizontally-scrolling outer child and animating SetScrollX
-// between (0) and (panel_width). target_t flips between 0 and 1 on
-// click; anim_t eases toward target_t every frame so the transition
-// is smooth without needing per-frame easing math.
-//
-// State is single-level — clicking another BNK while already drilled
-// in just replaces the current drill view; we never push a stack of
-// drilled-into archives. That matches the user's spec ("click → list
-// contents" rather than "navigate a tree").
 namespace {
 
 enum class DrillKind { None, Bnk, Adb, Lua };
 
 struct DrillState {
     DrillKind kind = DrillKind::None;
-    std::string title;            // shown in the back-arrow row
-    std::string bnk_path;         // for Bnk; the source archive
-    bool        from_nested = false;   // true for nested-BNK temp paths
-    std::vector<BNKItemUI> items; // listing rendered in the drill view
-    std::string filter;           // local search (separate from the
-                                  // outer BNK-list filter)
-    float anim_t   = 0.0f;        // current visible scroll (0 = main, 1 = drilled)
-    float target_t = 0.0f;        // desired endpoint
+    std::string title;
+    std::string bnk_path;
+    bool        from_nested = false;
+    std::vector<BNKItemUI> items;
+    std::string filter;
+
+    float anim_t   = 0.0f;
+    float target_t = 0.0f;
 };
 
 DrillState g_bnk_drill;
 
-// Step the slide animation toward its target. Speed picked so a full
-// transition takes ~150 ms — fast enough to feel responsive, slow
-// enough to communicate the navigation direction. Snaps to the
-// endpoint when we're within a frame of arrival to avoid lingering
-// sub-pixel scrolling.
 void drill_step_anim(DrillState& d, float dt) {
-    constexpr float kSpeed = 7.0f;        // 1/kSpeed seconds per full slide
+    constexpr float kSpeed = 7.0f;
     if (d.target_t == d.anim_t) return;
     float dir = (d.target_t > d.anim_t) ? +1.0f : -1.0f;
     d.anim_t += dir * dt * kSpeed;
@@ -155,11 +108,6 @@ void drill_step_anim(DrillState& d, float dt) {
     }
 }
 
-// Build the file listing for a Bnk drill — open the BNKReader, copy
-// the entries, sort by filename. Runs synchronously on the UI thread
-// because BNKReader's TOC is small (a few KB) and cached by the OS;
-// the actual file extracts only happen later when the user clicks a
-// row.
 void drill_open_bnk(DrillState& d, const std::string& bnk_path,
                     bool from_nested) {
     d.kind        = DrillKind::Bnk;
@@ -189,8 +137,7 @@ void drill_open_bnk(DrillState& d, const std::string& bnk_path,
                       return la < lb;
                   });
     } catch (...) {
-        // Leave d.items empty — the drill view will just show a
-        // greyed "empty / unreadable" line.
+
     }
     d.target_t = 1.0f;
 }
@@ -227,43 +174,25 @@ void drill_open_lua(DrillState& d) {
 
 void drill_back(DrillState& d) {
     d.target_t = 0.0f;
-    // Don't clear items immediately — keep them populated so the
-    // outgoing slide still has content to display while it animates
-    // back. They'll be overwritten the next time the user drills in.
+
 }
 
-// True while the slide animation hasn't fully settled. The drill
-// view's input handling is gated on this so clicks on the just-
-// off-screen view during a slide don't fire.
 bool drill_settled(const DrillState& d) {
     return std::abs(d.anim_t - d.target_t) < 0.001f;
 }
 
-} // anonymous
+}
 
 #ifdef _WIN32
 void draw_left_panel(ID3D11Device* device) {
 #else
 void draw_left_panel() {
 #endif
-    // Fill the parent container — the column width is now decided by the
-    // outer MainLayout, not hardcoded here.
+
     ImGui::BeginChild("left_panel", ImVec2(0, 0), true);
 
-    // ImGui's TabBar can't render across two rows, so we roll our own
-    // tab strip out of regular Buttons styled with the Tab/TabActive
-    // palette. Selection is exclusive across both rows — clicking a row
-    // 2 button visually deselects row 1's active tab and vice versa.
-    // s_active_tab values: 0 BNK List, 1 File Tree, 2 Models, 3 Textures,
-    // 4 Audio. Default 1 puts the user on File Tree at startup.
     static int s_active_tab = 1;
 
-    // Uniform-width tab buttons. ImGui::Button auto-sizes to its label
-    // by default, which left the row uneven ("Animations" wider than
-    // "Audio" wider than "BNK List"). Use the shared helper so the
-    // width matches what `left_panel_min_width()` reserves on the
-    // splitter side — keeping label list, button width, and minimum
-    // panel width in sync from one place (kLeftPanelTabLabels).
     const ImVec2 tab_size(compute_tab_button_width(), 0.0f);
 
     auto tab_button = [&tab_size](const char* label, bool active,
@@ -282,12 +211,10 @@ void draw_left_panel() {
         return clicked;
     };
 
-    // Row 1 — standard tabs.
     if (tab_button("BNK List", s_active_tab == 0))   s_active_tab = 0;
     ImGui::SameLine(0, 2);
     if (tab_button("File Tree", s_active_tab == 1))  s_active_tab = 1;
 
-    // Row 2 — flat asset views, purple labels to set them apart.
     const ImU32 kPurpleLabel = IM_COL32(200, 130, 255, 255);
     if (tab_button("Models",   s_active_tab == 2, kPurpleLabel)) s_active_tab = 2;
     ImGui::SameLine(0, 2);
@@ -299,15 +226,6 @@ void draw_left_panel() {
 
     ImGui::Separator();
 
-    // Lambda used by the Models / Textures / Audio bodies further down.
-    // Defined up here so all three branches can share it without the
-    // pre-refactor double-tab-bar plumbing.
-    //
-    // `footer_h` reserves vertical space at the bottom of the
-    // scrollable list so the calling tab can render a sticky button
-    // there (e.g. the Textures tab's "Extract All as..." menu).
-    // Default 0 keeps the original full-height behaviour for the
-    // Models / Audio / Animations callers that don't need a footer.
     auto draw_flat_asset_tab = [](const char* /*label*/,
                                   std::vector<FlatAssetEntry>& entries,
                                   std::string& filter,
@@ -337,9 +255,6 @@ void draw_left_panel() {
             ImGui::Separator();
         }
 
-        // Negative height tells BeginChild to fill remaining space
-        // minus that many pixels — the standard ImGui pattern for
-        // pinning content at the bottom of a panel.
         const float child_h = (footer_h > 0.0f) ? -footer_h : 0.0f;
         ImGui::BeginChild(child_id, ImVec2(0, child_h), false);
         ImGuiListClipper clipper;
@@ -356,7 +271,7 @@ void draw_left_panel() {
                                       ImGuiSelectableFlags_SpanAllColumns)) {
                     load_flat_asset_entry(e, kind);
                 }
-                // Right-click → "Hex View" (dev mode only) + "Export to" for .tex.
+
                 file_hex_context_menu(e.bnk_path, e.file_index,
                                       e.from_nested, e.name);
                 if (!S.hide_tooltips && ImGui::IsItemHovered()) {
@@ -380,22 +295,13 @@ void draw_left_panel() {
     };
 
     if (s_active_tab == 0) {
-            // ---- Slide container: page A (BNK list) and page B (drill) ----
-            // Step the animation first so `g_bnk_drill.anim_t` reflects this
-            // frame's slide position before we set the scroll offset below.
+
             drill_step_anim(g_bnk_drill, ImGui::GetIO().DeltaTime);
 
             const ImVec2 avail = ImGui::GetContentRegionAvail();
             const float page_w = avail.x;
             const float page_h = avail.y;
 
-            // Visibility test per page — skip the heavy content render
-            // entirely when the page is fully off-screen. Without this,
-            // both pages re-rendered every frame even at rest, which on
-            // archives with thousands of entries (globals_models.bnk
-            // etc.) made the slide feel laggy AND the steady-state
-            // frame rate drop. With it, each page only pays its render
-            // cost when at least partially visible.
             const float kVisEps = 0.0001f;
             const bool a_visible = g_bnk_drill.anim_t <  1.0f - kVisEps;
             const bool b_visible = g_bnk_drill.anim_t >  0.0f + kVisEps;
@@ -405,18 +311,9 @@ void draw_left_panel() {
                               false,
                               ImGuiWindowFlags_NoScrollbar |
                               ImGuiWindowFlags_NoScrollWithMouse);
-            // Drive the slide via SetScrollX. Inner content total width
-            // is 2 × page_w (two side-by-side child windows).
+
             ImGui::SetScrollX(g_bnk_drill.anim_t * page_w);
 
-            // ============================================================
-            // Page A — BNK list / ADB / Lua entries (the original view).
-            // ============================================================
-            // No NoScrollWithMouse on the inner page — that flag would
-            // eat mouse-wheel events on the BNK list, which is exactly
-            // the "scroll wheel doesn't work" bug the user hit. The
-            // outer container still has NoScrollWithMouse so wheel
-            // events don't fight with the horizontal slide.
             ImGui::BeginChild("##bnk_page_a", ImVec2(page_w, page_h), false);
             if (a_visible) {
 
@@ -427,9 +324,6 @@ void draw_left_panel() {
 
             auto paths = filtered_bnk_paths();
 
-            // Page A is read-only while the slide is mid-animation —
-            // ignore clicks until the page is fully on-screen so the
-            // user can't accidentally drill in twice during a transition.
             const bool a_can_click = (g_bnk_drill.target_t == 0.0f) &&
                                       drill_settled(g_bnk_drill);
 
@@ -473,10 +367,6 @@ void draw_left_panel() {
                 ImGui::PopID();
             }
 
-            // Cache of nested-BNK file-table reads, keyed by parent BNK
-            // path. Without this we'd open the parent and read its file
-            // table every frame an expanded BNK is on screen — fine on
-            // disk, but very expensive on ISO.
             struct NestedChild { int index; std::string name; };
             static std::unordered_map<std::string, std::vector<NestedChild>> s_nested_cache;
             static std::string s_nested_cache_root;
@@ -486,9 +376,9 @@ void draw_left_panel() {
             }
 
             struct Row {
-                int kind;             // 0 = top-level, 1 = nested child
-                int top_idx;          // into `paths`
-                int nested_idx;       // BNKReader index inside parent (kind 1)
+                int kind;
+                int top_idx;
+                int nested_idx;
                 std::string nested_name;
             };
             std::vector<Row> rows;
@@ -556,23 +446,16 @@ void draw_left_panel() {
                                               ImGuiSelectableFlags_SpanAllColumns) &&
                             a_can_click) {
                             if (is_container) {
-                                // Container BNKs (levels.bnk / streaming.bnk)
-                                // keep the inline +/- expansion they always
-                                // had, since their contents are nested BNKs
-                                // the user wants to drill into individually.
+
                                 if (is_expanded) S.expanded_bnks.erase(p);
                                 else             S.expanded_bnks.insert(p);
                             } else {
-                                // Regular BNK — drill into it.
+
                                 drill_open_bnk(g_bnk_drill, p,
                                                /*from_nested=*/false);
                             }
                         }
-                        // Right-click → Extract menu (shared with the
-                        // generic file-tree right-click idea; the action
-                        // delegates to extract_single_bnk_contents which
-                        // is exposed via PanelInternal so any future
-                        // caller picks it up automatically).
+
                         if (ImGui::BeginPopupContextItem()) {
                             if (ImGui::MenuItem("Extract")) {
                                 extract_single_bnk_contents(p);
@@ -586,9 +469,7 @@ void draw_left_panel() {
                         }
                         ImGui::PopID();
                     } else {
-                        // Nested child BNK row inside an expanded
-                        // container. Click → materialise to a temp .bnk
-                        // and drill into it.
+
                         const auto& p = paths[(size_t)row.top_idx];
                         const std::string& nested_name = row.nested_name;
                         int nested_idx = row.nested_idx;
@@ -638,30 +519,19 @@ void draw_left_panel() {
                 }
             }
             clipper.End();
-            }   // a_visible
-            ImGui::EndChild();   // ##bnk_page_a
+            }
+            ImGui::EndChild();
 
-            // Side-by-side layout — page B picks up immediately to the
-            // right of page A inside the outer scrolling container.
             ImGui::SameLine(0.0f, 0.0f);
 
-            // ============================================================
-            // Page B — drill view (one of: BNK contents, ADB, Lua).
-            // ============================================================
-            // Same wheel-scroll comment as page A: no NoScrollWithMouse
-            // here, so the user can wheel-scroll the drilled-in file
-            // list normally.
             ImGui::BeginChild("##bnk_page_b", ImVec2(page_w, page_h), false);
             if (b_visible) {
 
             const bool b_can_click = (g_bnk_drill.target_t == 1.0f) &&
                                       drill_settled(g_bnk_drill);
 
-            // Top row: back arrow + title.
             {
-                // FontAwesome left arrow as a tight button. Tinted
-                // brighter than the default text colour so it reads as
-                // an interactive element rather than a label.
+
                 ImGui::PushStyleColor(ImGuiCol_Button,
                                       ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
@@ -680,8 +550,6 @@ void draw_left_panel() {
             ImGui::InputTextWithHint("##drill_filter", "Filter",
                                      &g_bnk_drill.filter);
 
-            // Filter the drill items by `g_bnk_drill.filter` (case-
-            // insensitive substring on the leaf filename).
             std::string flt = g_bnk_drill.filter;
             std::transform(flt.begin(), flt.end(), flt.begin(), ::tolower);
             std::vector<int> vis;
@@ -721,13 +589,9 @@ void draw_left_panel() {
                     if (ImGui::Selectable(label.c_str(), selected,
                                           ImGuiSelectableFlags_SpanAllColumns) &&
                         b_can_click) {
-                        // Route the click into the existing per-kind
-                        // pipeline so the right panel reacts the same
-                        // way it would for a click in any other view.
+
                         if (g_bnk_drill.kind == DrillKind::Bnk) {
-                            // Mirror pick_bnk + nested-state restore so
-                            // S.files matches the drilled BNK's listing,
-                            // then arm preview-loaders for .mdl / .tex.
+
                             if (S.selected_bnk != g_bnk_drill.bnk_path) {
                                 S.viewing_adb = false;
                                 S.viewing_lua = false;
@@ -740,9 +604,7 @@ void draw_left_panel() {
                                 S.selected_nested_temp_path = g_bnk_drill.bnk_path;
                                 S.selected_nested_index = 0;
                             }
-                            // Find the matching entry inside S.files
-                            // (which pick_bnk just populated); their
-                            // ordering may differ from g_bnk_drill.items.
+
                             for (size_t j = 0; j < S.files.size(); ++j) {
                                 if (S.files[j].index == it.index) {
                                     S.selected_file_index = (int)j;
@@ -760,13 +622,7 @@ void draw_left_panel() {
                                         g_pending_tex_index = (int)j;
                                     } else if (ln.size() >= 4 &&
                                                ln.rfind(".wav") == ln.size() - 4) {
-                                        // Single-click playback —
-                                        // matches Audio tab and the
-                                        // file-table flat list. The
-                                        // earlier IsMouseDoubleClicked
-                                        // gate was the reason
-                                        // playback didn't fire from
-                                        // the BNK drill view.
+
                                         open_audio_player_for_selected((int)j);
                                     }
                                     break;
@@ -787,9 +643,7 @@ void draw_left_panel() {
                             }
                             S.selected_file_index = idx;
                         } else if (g_bnk_drill.kind == DrillKind::Lua) {
-                            // Bookkeeping that mirrors the old right-panel
-                            // path so other consumers of S.lua_files /
-                            // S.viewing_lua keep working.
+
                             S.viewing_lua = true;
                             S.viewing_adb = false;
                             S.selected_bnk.clear();
@@ -803,11 +657,6 @@ void draw_left_panel() {
                             }
                             S.selected_file_index = idx;
 
-                            // Find the matching LuaFileUI by index — the
-                            // drill items were copied straight from
-                            // S.lua_files, so idx maps 1:1 unless the
-                            // tree got rebuilt mid-flight; bail out
-                            // gracefully on mismatch.
                             if (idx >= 0 &&
                                 (size_t)idx < S.lua_files.size())
                             {
@@ -816,11 +665,6 @@ void draw_left_panel() {
                                 const std::string lua_title =
                                     S.lua_files[(size_t)idx].filename;
 
-                                // Clear what was previously showing in
-                                // the central render panel — model
-                                // takes priority over Lua in
-                                // draw_render_panel, so without these
-                                // clears the lua view never paints.
 #ifdef _WIN32
                                 if (g_mp.has_model) MP_Release(g_mp);
                                 g_mp.has_model = false;
@@ -832,14 +676,6 @@ void draw_left_panel() {
                                 S.texture_window_height = 0;
 #endif
 
-                                // Surface the loading indicator
-                                // immediately, kick the actual
-                                // bytecode-decompile pass on a worker.
-                                // Same shape the old right-panel Lua
-                                // view used — file size up to ~10 MB,
-                                // bytecode decompiles via
-                                // `decompile_lua51_bytecode`, plain
-                                // text passes through.
                                 S.lua_preview_selected = idx;
                                 S.lua_preview_title    = lua_title;
                                 S.lua_preview_content.clear();
@@ -859,11 +695,7 @@ void draw_left_panel() {
                             }
                         }
                     }
-                    // Right-click context menu on file rows (BNK drill
-                    // only — ADB/Lua items don't go through the BNK
-                    // extract path). Reuses the same `file_hex_context_menu`
-                    // every other view uses, so adding "Hex View" / "Export"
-                    // updates land here for free.
+
                     if (g_bnk_drill.kind == DrillKind::Bnk) {
                         file_hex_context_menu(g_bnk_drill.bnk_path,
                                               it.index,
@@ -880,34 +712,21 @@ void draw_left_panel() {
             }
             drill_clipper.End();
 
-            ImGui::EndChild();   // ##drill_list
-            }   // b_visible
-            ImGui::EndChild();   // ##bnk_page_b
-            ImGui::EndChild();   // ##bnk_drill_container
+            ImGui::EndChild();
+            }
+            ImGui::EndChild();
+            ImGui::EndChild();
         }
 
         if (s_active_tab == 1) {
             ImGui::BeginChild("file_tree", ImVec2(0, 0), false);
 
-            // Tree build state was hoisted to file scope so we could
-            // start the work right after open_folder_logic. Here we just
-            // observe and render from those globals.
-            //
-            // (The "promote build_complete -> built/!building" step that
-            // used to live here moved into the worker thread — see
-            // start_tree_build_for_root. Doing it here meant the loading
-            // screen could stall at 100% because this tab body wasn't
-            // being drawn while the loading screen was up.)
-
-            // If the user re-opened a folder/iso and a build hasn't been
-            // kicked yet for some reason, kick one now (lazy fallback).
             if (g_tree_last_root_dir != S.root_dir && !S.bnk_paths.empty()
                 && !g_tree_building.load() && !g_tree_built.load())
             {
                 start_tree_build_for_root(S.root_dir, S.bnk_paths);
             }
 
-            // Use the global tree root that the build thread populated.
             TreeNode& tree_render_root = g_tree_root;
 
             if (g_tree_building.load()) {
@@ -949,14 +768,11 @@ void draw_left_panel() {
         }
 
         if (s_active_tab == 2) {
-            // Reserve footer height for the sticky "Extract All
-            // as..." button below the model list. Same pattern as
-            // the Textures and Audio tabs.
+
             const float footer_h = ImGui::GetFrameHeightWithSpacing();
             draw_flat_asset_tab("Models", S.all_mdl_files, S.mdl_filter,
                                 "models_list", /*kind=*/0, footer_h);
 
-            // ---- Footer: "Extract All as..." dropdown ----
             const bool has_any = !S.all_mdl_files.empty();
             if (!has_any) ImGui::BeginDisabled();
             if (ImGui::Button("Extract All as...##mdl_extract_all_as",
@@ -987,20 +803,11 @@ void draw_left_panel() {
             }
         }
         if (s_active_tab == 3) {
-            // Reserve enough vertical space for the sticky "Extract
-            // All as..." button below the texture list. Using
-            // GetFrameHeightWithSpacing rather than a literal pixel
-            // count keeps the reserved area in sync with the user's
-            // current font size.
+
             const float footer_h = ImGui::GetFrameHeightWithSpacing();
             draw_flat_asset_tab("Textures", S.all_tex_files, S.tex_filter,
                                 "textures_list", /*kind=*/1, footer_h);
 
-            // ---- Footer: "Extract All as..." dropdown ----
-            // Always rendered while this tab is active, regardless of
-            // whether any textures are indexed yet. Disabled-state
-            // when the flat list is empty so the user can see the
-            // affordance and get a tooltip explaining why.
             const bool has_any = !S.all_tex_files.empty();
             if (!has_any) ImGui::BeginDisabled();
             if (ImGui::Button("Extract All as...##tex_extract_all_as",
@@ -1031,25 +838,18 @@ void draw_left_panel() {
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem(".tex (raw)")) {
-                    // Raw bytes — same as the File > Dump > .tex menu
-                    // entry. Goes through the BNK-pair reconstruction
-                    // path rather than the decode pipeline.
+
                     ISO::dump_tex_files();
                 }
                 ImGui::EndPopup();
             }
         }
         if (s_active_tab == 4) {
-            // Reserve footer height for the sticky "Extract All as..."
-            // button below the audio list, matching the Textures tab
-            // pattern.
+
             const float footer_h = ImGui::GetFrameHeightWithSpacing();
             draw_flat_asset_tab("Audio", S.all_wav_files, S.wav_filter,
                                 "audio_list", /*kind=*/2, footer_h);
 
-            // ---- Footer: "Extract All as..." dropdown ----
-            // Always rendered while this tab is active. Disabled when
-            // no audio is indexed so the affordance stays visible.
             const bool has_any = !S.all_wav_files.empty();
             if (!has_any) ImGui::BeginDisabled();
             if (ImGui::Button("Extract All as...##wav_extract_all_as",
@@ -1075,12 +875,7 @@ void draw_left_panel() {
                         ISO::AudioExportFormat::WAV_RAW);
                 }
                 ImGui::Separator();
-                // MP3 / AAC go through Windows Media Foundation's
-                // SinkWriter (see MfAudioEncoder). Each file is
-                // XMA→PCM decoded once, then re-encoded into the
-                // chosen format and written under the export root.
-                // AAC lands as `.m4a` (MP4 container) since that's
-                // what MF's URL-based sink picks up.
+
                 if (ImGui::MenuItem("MP3")) {
                     ISO::dump_wav_files_as(
                         ISO::AudioExportFormat::MP3);
@@ -1093,9 +888,7 @@ void draw_left_panel() {
             }
         }
         if (s_active_tab == 5) {
-            // Animations tab — flat list of all clips parsed from the
-            // shared TOC. No "load on click" yet (Phase E adds the
-            // playback wiring); this is a browser + selector only.
+
             ImGui::SetNextItemWidth(-1);
             ImGui::InputTextWithHint("##anim_filter", "Filter",
                                      &S.anim_filter);
@@ -1163,5 +956,5 @@ void draw_left_panel() {
             ImGui::EndChild();
         }
 
-    ImGui::EndChild(); // left_panel
+    ImGui::EndChild();
 }

@@ -13,10 +13,6 @@
 #include <windows.h>
 #endif
 
-// ---------------------------------------------------------------------------
-// File-backed logger — writes "tex_errors.log" next to the running exe.
-// Lazily opens on first call. Thread-safe via a small mutex.
-// ---------------------------------------------------------------------------
 namespace {
 
 std::mutex g_log_mutex;
@@ -58,7 +54,7 @@ std::string current_timestamp() {
     return ts;
 }
 
-} // namespace
+}
 
 void log_line(const std::string& msg) {
     std::lock_guard<std::mutex> lk(g_log_mutex);
@@ -68,8 +64,7 @@ void log_line(const std::string& msg) {
         g_log_file << line;
         g_log_file.flush();
     }
-    // Also still echo to stderr — harmless when running headless on Windows
-    // (no console attached) and useful when launched from a terminal.
+
     std::cerr << line;
 }
 
@@ -81,10 +76,6 @@ void log_tagged(const char* tag, const std::string& msg) {
 
 namespace {
 
-// ---------------------------------------------------------------------------
-// OP_TABLE (62 entries × {op, dx, dy})  —  data @ 0x83316898 in default.xex
-// Generated from verified Python decoder (see tex_decode.py).
-// ---------------------------------------------------------------------------
 struct OpEntry { int32_t op, dx, dy; };
 static const OpEntry kOpTable[62] = {
     { 0, -1,  0}, { 0, -2,  0}, { 0, -3,  0}, { 0, -4,  0}, { 0, -5,  0},
@@ -106,13 +97,9 @@ static const OpEntry kOpTable[62] = {
     { 3, -1,  0}, { 3, -2,  0},
     { 3,  0, -1}, { 3, -1, -1}, { 3, -2, -1},
     { 3,  0, -2}, { 3, -1, -2},
-    { 4,  0,  0},  // 61: literal
+    { 4,  0,  0},
 };
 
-// ---------------------------------------------------------------------------
-// DELTA_TABLE (122 entries × {dr, dg, db})  —  data @ 0x833162E0
-// Generated from verified Python decoder.
-// ---------------------------------------------------------------------------
 struct DeltaEntry { int32_t dr, dg, db; };
 static const DeltaEntry kDeltaTable[122] = {
     { -3, -5, -3}, { -3, -5, -2}, { -3, -5, -1},
@@ -153,9 +140,6 @@ static const DeltaEntry kDeltaTable[122] = {
 static_assert(sizeof(kOpTable)/sizeof(kOpTable[0]) == 62, "OP_TABLE size");
 static_assert(sizeof(kDeltaTable)/sizeof(kDeltaTable[0]) == 122, "DELTA_TABLE size");
 
-// ---------------------------------------------------------------------------
-// Bit reader — BE u32 words, LSB-first within each word.
-// ---------------------------------------------------------------------------
 struct BitReader {
     const uint8_t* data;
     size_t bytes;
@@ -166,7 +150,7 @@ struct BitReader {
     inline uint32_t word(size_t idx) const {
         size_t off = idx * 4;
         if (off + 4 > bytes) {
-            // pad with zeros if reading past end
+
             uint32_t v = 0;
             for (int i = 0; i < 4 && off + i < bytes; ++i) {
                 v |= ((uint32_t)data[off + i]) << (24 - 8*i);
@@ -196,27 +180,17 @@ struct BitReader {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Frequency byte decode: freq = (b & 0xF) << ((b >> 4) & 0xF)
-// ---------------------------------------------------------------------------
 static inline uint32_t decode_freq_byte(uint8_t b) {
     return ((uint32_t)(b & 0x0F)) << ((b >> 4) & 0x0F);
 }
 
-// ---------------------------------------------------------------------------
-// Huffman tree node + builder. Replicates the in-binary heap exactly:
-//  - Push: sift-up swaps when parent_freq >= new_freq (LIFO on ties)
-//  - Pop:  sift-down prefers LEFT child on tie
-// ---------------------------------------------------------------------------
 struct HuffNode {
     uint32_t freq = 0;
-    int      sym  = -1;     // -1 for internal nodes
+    int      sym  = -1;
     HuffNode* left  = nullptr;
     HuffNode* right = nullptr;
 };
 
-// std::deque provides pointer stability across emplace_back, which we need
-// because internal nodes hold pointers to children allocated earlier.
 class HuffArena {
 public:
     HuffNode* alloc() {
@@ -227,7 +201,6 @@ private:
     std::deque<HuffNode> nodes_;
 };
 
-// Custom min-heap that exactly matches the binary's behavior.
 struct LhHeap {
     std::vector<HuffNode*> h;
 
@@ -236,7 +209,7 @@ struct LhHeap {
         size_t i = h.size() - 1;
         while (i > 0) {
             size_t p = (i - 1) >> 1;
-            if (h[p]->freq < h[i]->freq) break;   // strictly smaller, stop
+            if (h[p]->freq < h[i]->freq) break;
             std::swap(h[p], h[i]);
             i = p;
         }
@@ -258,7 +231,7 @@ struct LhHeap {
                 if (rr >= n) {
                     s = l;
                 } else {
-                    // Prefer LEFT on tie: pick left when right_freq >= left_freq
+
                     s = (h[rr]->freq >= h[l]->freq) ? l : rr;
                 }
                 if (h[i]->freq < h[s]->freq) break;
@@ -313,11 +286,8 @@ static inline uint16_t apply_delta(uint16_t c565, const DeltaEntry& d) {
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
-} // anonymous
+}
 
-// ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
 bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
                               int& out_width, int& out_height,
                               std::vector<uint8_t>& out_bc1,
@@ -352,9 +322,6 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
     out_width  = mw;
     out_height = mh;
 
-    // ---------------------------------------------------------------------
-    // Three frequency tables, packed in this order.
-    // ---------------------------------------------------------------------
     uint32_t freq_idx[256];
     uint32_t freq_op [62];
     uint32_t freq_del[122];
@@ -362,9 +329,6 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
     for (int i = 0; i <  62; ++i) freq_op [i] = decode_freq_byte((uint8_t)br.read(8));
     for (int i = 0; i < 122; ++i) freq_del[i] = decode_freq_byte((uint8_t)br.read(8));
 
-    // ---------------------------------------------------------------------
-    // Build three Huffman trees.
-    // ---------------------------------------------------------------------
     HuffArena arena_idx;
     HuffArena arena_op;
     HuffArena arena_del;
@@ -377,18 +341,13 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
         return fail("Huffman tree build failed");
     }
 
-    // ---------------------------------------------------------------------
-    // Per-block decode loop. Output is little-endian BC1.
-    //   block layout: u16 c0, u16 c1, u32 idx32  (8 bytes)
-    // ---------------------------------------------------------------------
     const int bw = mw / 4;
     const int bh = mh / 4;
     const size_t total_blocks = (size_t)bw * (size_t)bh;
-    out_bc1.assign(total_blocks * 8, 0);  // pre-zeroed (matches in-binary alloc behavior)
+    out_bc1.assign(total_blocks * 8, 0);
 
     auto get_block_endpoints = [&](int rx, int ry, uint16_t& c0, uint16_t& c1) {
-        // Out-of-bounds reads return (0, 0) — matches the C decoder reading
-        // from the pre-zeroed output buffer.
+
         if (rx < 0 || ry < 0 || rx >= bw || ry >= bh) {
             c0 = 0; c1 = 0;
             return;
@@ -410,7 +369,7 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
 
             uint16_t c0, c1;
             if (opent.op == 4) {
-                // LITERAL
+
                 c0 = (uint16_t)br.read(16);
                 c1 = (uint16_t)br.read(16);
             } else {
@@ -443,12 +402,6 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
             outb[2] = (uint8_t)(c1 & 0xFF);
             outb[3] = (uint8_t)(c1 >> 8);
 
-            // KEY DIFFERENCE between comp=1 and comp=11:
-            //   comp=1  (sub_82B8C1C8): if c0==c1, indices are skipped (solid block).
-            //   comp=11 (sub_82B8C900): always reads 4 index symbols, regardless
-            //                           of whether c0==c1. The encoder packs 4
-            //                           index symbols every block.
-            // The output index transpose is identical between the two codecs.
             const bool always_read_indices = comp11_layout;
             if (c0 == c1 && !always_read_indices) {
                 outb[4] = outb[5] = outb[6] = outb[7] = 0;
@@ -462,11 +415,7 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
                     os << "idx decode failed at block (" << bx << "," << by << ")";
                     return fail(os.str());
                 }
-                // 4 decoded symbols are 2x2 sub-blocks in Z-order:
-                //   B0 = top-left, B1 = top-right, B2 = bottom-left, B3 = bottom-right
-                // (verified — same in both comp=1 and comp=11)
-                // Each byte holds 4 BC1 indices (2 bits each); low nibble = cols 0-1,
-                // high nibble = cols 2-3. high nibble of Bn = row 0/2, low nibble = row 1/3.
+
                 outb[4] = (uint8_t)(((B1 & 0xF0))        | (((B0 >> 4) & 0x0F)));
                 outb[5] = (uint8_t)((((B1 & 0x0F) << 4)) | ( (B0       & 0x0F)));
                 outb[6] = (uint8_t)(((B3 & 0xF0))        | (((B2 >> 4) & 0x0F)));
@@ -475,8 +424,6 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
         }
     }
 
-    // Tolerance for trailing bit-stream slack — the encoder pads to the
-    // next 32-bit word boundary, so up to 31 unused bits at the end is fine.
     if (br.cur_bit > body_size * 8 + 32) {
         std::ostringstream os;
         os << "ran past end of body during decode: bit=" << br.cur_bit
@@ -487,32 +434,12 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// lh_decode_variant_2_3_4 — port of sub_82B8D010 (CompFlag = 2/3/4).
-//
-// CURRENT STATE: framing (header parse + 4 huffman trees) and ops 0/1/2
-// are implemented. Op-type 3 (the common case for real textures) does
-// CORRECT bit consumption — walks tree A → endpoint a0_raw, tree B →
-// endpoint a1_raw, computes a0/a1, then walks tree C 8 times for index
-// values — but emits a SIMPLIFIED BC4 alpha block (a0, a1, all-zero
-// indices = solid-block per 4x4 tile). This produces a low-frequency
-// approximation of the texture rather than the full detail. The bit
-// stream stays aligned across blocks so the codec doesn't error out;
-// adding the full index packing is a follow-up step (the indices are
-// decoded into a stack buffer but not yet packed into the output).
-// ---------------------------------------------------------------------------
-
 namespace {
 
-// 6-bit → 8-bit dequantize: round((v / 63.0) * 255) for v in 0..63
-// Populated at runtime to match byte_83491F10 in the binary (sub_82B8BEA0).
 static uint8_t g_dq6to8[64];
 
-// 4-bit → 8-bit dequantize (for op_type=2 in mode != 1 path)
-// Populated to match byte_83491F70.
 static uint8_t g_dq4to8[16];
 
-// 8-bit → 4-bit quantize (for op_type=2 in mode == 1 path)
 static uint8_t g_q8to4[256];
 
 static bool g_variant_tables_init = false;
@@ -520,7 +447,7 @@ static bool g_variant_tables_init = false;
 static void init_variant_tables() {
     if (g_variant_tables_init) return;
     for (int v = 0; v < 64; ++v) {
-        g_dq6to8[v] = (uint8_t)((v * 255 + 31) / 63);  // round-half-up
+        g_dq6to8[v] = (uint8_t)((v * 255 + 31) / 63);
     }
     for (int v = 0; v < 16; ++v) {
         g_dq4to8[v] = (uint8_t)((v * 255 + 7) / 15);
@@ -535,7 +462,7 @@ static inline int clamp6(int v) {
     return v < 0 ? 0 : (v > 0x3F ? 0x3F : v);
 }
 
-} // anonymous
+}
 
 bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,
                              int mode, int width, int height,
@@ -556,10 +483,9 @@ bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,
     BitReader br(body, body_size);
     /*int mw =*/ (void)br.read(16);
     /*int mh =*/ (void)br.read(16);
-    int mode_flag = (int)br.read(4);   // v94 in disasm — controls op_type=2 sub-mode
-    (void)br.read(8);                   // 8 reserved bits
+    int mode_flag = (int)br.read(4);
+    (void)br.read(8);
 
-    // Read 4 frequency tables: tree A (64), tree B (32), tree C (64), op tree (32)
     auto read_freqs = [&](uint32_t* freqs, int n) {
         for (int i = 0; i < n; ++i) {
             uint8_t b = (uint8_t)br.read(8);
@@ -585,12 +511,11 @@ bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,
     const int by_count = height / 4;
     const size_t blocks = (size_t)bx_count * (size_t)by_count;
 
-    // Output buffer: 8 bytes per block (BC4 alpha block format)
     out_bytes.assign(blocks * 8, 0);
 
-    int run_remaining = 0;     // v69 in disasm
-    int last_op_type = -1;      // v67 — re-used across blocks during a run
-    uint8_t last_v20 = 0;       // for op_type=2 runs
+    int run_remaining = 0;
+    int last_op_type = -1;
+    uint8_t last_v20 = 0;
 
     for (int by = 0; by < by_count; ++by) {
         for (int bx = 0; bx < bx_count; ++bx) {
@@ -607,15 +532,15 @@ bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,
                 int count = op_sym & 7;
                 op_type   = op_sym >> 3;
                 int extra = (count > 0) ? (int)br.read(count) : 0;
-                run_remaining = (1 << count) + extra - 1;  // (we consume one block right now)
+                run_remaining = (1 << count) + extra - 1;
 
                 if (op_type == 2) {
                     int bits = (mode_flag == 1) ? (int)br.read(4) : (int)br.read(8);
                     if (mode == 1) {
-                        // packed-bits mode: replicate nibble to byte
+
                         v20 = (uint8_t)((bits & 0xF) | ((bits & 0xF) << 4));
                     } else {
-                        // BC4-block mode (mode == 2): expand to byte via lookup
+
                         if (mode_flag == 1) {
                             v20 = g_dq4to8[bits & 0xF];
                         } else {
@@ -630,17 +555,17 @@ bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,
             uint8_t* outb = out_bytes.data() + (size_t)(by * bx_count + bx) * 8;
 
             switch (op_type) {
-                case 0: {  // zero block
+                case 0: {
                     for (int i = 0; i < 8; ++i) outb[i] = 0;
                     break;
                 }
-                case 1: {  // 0xFF block
+                case 1: {
                     for (int i = 0; i < 8; ++i) outb[i] = 0xFF;
                     break;
                 }
-                case 2: {  // constant fill of v20
+                case 2: {
                     if (mode == 2) {
-                        // BC4 alpha block with a0=a1=v20 (all pixels = v20)
+
                         outb[0] = v20; outb[1] = v20;
                         outb[2] = outb[3] = outb[4] = outb[5] = outb[6] = outb[7] = 0;
                     } else {
@@ -648,66 +573,29 @@ bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,
                     }
                     break;
                 }
-                case 3: {  // full BC4 decode — endpoints from trees A & B, indices from tree C
-                    // Tree usage verified against sub_82B8D724 stack
-                    // var_F0/var_EC: walk #1 = tree_A (64), walk #2 =
-                    // tree_B (32, var_F0), walks #3..#10 = tree_C (64,
-                    // var_EC). NOTE: docs/CODEC.md is wrong about this —
-                    // it says walk #2 is tree_C and indices come from
-                    // tree_B; the actual binary stores it the other way.
+                case 3: {
+
                     int sym_A = huff_decode(br, tree_A);
                     int sym_B = huff_decode(br, tree_B);
                     if (sym_A < 0 || sym_B < 0) return fail("variant_2_3_4: A/B tree decode failed");
-                    // Endpoint dequant (matches sub_82B8D820 .. D85C):
-                    //   sum  = sym_A + sym_B → clamp [0, 0x3F] → byte_83491F10[sum]  → out[0]
-                    //   diff = sym_A − sym_B → clamp [0, 0x3F] → byte_83491F10[diff] → out[1]
-                    // Crucially, the binary writes the LARGER (sum) endpoint
-                    // to out[0] = "a0" and the SMALLER (diff) to out[1] = "a1",
-                    // which puts the resulting BC4 alpha block in the 8-level
-                    // interpolation mode — i.e. a0 > a1. Previous code had
-                    // them swapped, dropping into the 6-level mode and giving
-                    // every block the wrong interpolated values.
-                    int a0 = g_dq6to8[clamp6(sym_A + sym_B)];   // sum  → larger  → out[0]
-                    int a1 = g_dq6to8[clamp6(sym_A - sym_B)];   // diff → smaller → out[1]
 
-                    // 8 walks of tree C, packed into 16 indices in raster
-                    // order. Storage in the binary's stack buffer is
-                    // component-grouped:
-                    //   var_B0[0..3]   = sym_C1 & 7    for iter 0..3
-                    //   var_AC[0..3]   = sym_C1 >> 3   for iter 0..3
-                    //   var_AC[4..7]   = sym_C2 & 7    for iter 0..3
-                    //   var_AC[8..11]  = sym_C2 >> 3   for iter 0..3
-                    //
-                    // BUT — and this is the subtle bit — the packer at
-                    // loc_82B8DB3C reads them in INTERLEAVED order: per
-                    // outer step it loads var_B0[r9], var_AC[r9],
-                    // var_AC[r9+4], var_AC[r9+8] (one byte from each
-                    // component group), packs all four 3-bit values into
-                    // bits, then increments r9 and repeats. So the BC4
-                    // bit-stream is iter-major:
-                    //
-                    //   pixel(row,col) at bit (row*4 + col)*3
-                    //   row r = iter r;  col 0..3 = (C1_LOW, C1_HIGH,
-                    //                                C2_LOW, C2_HIGH)
-                    //
-                    // We can skip the stack-shuffle dance and write
-                    // straight into raster order: indices[r*4 + c].
+                    int a0 = g_dq6to8[clamp6(sym_A + sym_B)];
+                    int a1 = g_dq6to8[clamp6(sym_A - sym_B)];
+
                     uint8_t indices[16] = {0};
                     for (int iter = 0; iter < 4; ++iter) {
                         int sC1 = huff_decode(br, tree_C);
                         int sC2 = huff_decode(br, tree_C);
                         if (sC1 < 0 || sC2 < 0)
                             return fail("variant_2_3_4: C tree decode failed");
-                        indices[iter * 4 + 0] = (uint8_t)(sC1 & 7);         // col 0
-                        indices[iter * 4 + 1] = (uint8_t)((sC1 >> 3) & 7);  // col 1
-                        indices[iter * 4 + 2] = (uint8_t)(sC2 & 7);         // col 2
-                        indices[iter * 4 + 3] = (uint8_t)((sC2 >> 3) & 7);  // col 3
+                        indices[iter * 4 + 0] = (uint8_t)(sC1 & 7);
+                        indices[iter * 4 + 1] = (uint8_t)((sC1 >> 3) & 7);
+                        indices[iter * 4 + 2] = (uint8_t)(sC2 & 7);
+                        indices[iter * 4 + 3] = (uint8_t)((sC2 >> 3) & 7);
                     }
 
                     if (mode == 2) {
-                        // BC4 alpha block: out[0..1] = endpoints, out[2..7]
-                        // = 16 × 3-bit indices packed LSB-first in raster
-                        // order (no transpose — see comment above).
+
                         outb[0] = (uint8_t)a0;
                         outb[1] = (uint8_t)a1;
                         uint64_t packed = 0;
@@ -721,7 +609,7 @@ bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,
                         outb[6] = (uint8_t)((packed >> 32) & 0xFF);
                         outb[7] = (uint8_t)((packed >> 40) & 0xFF);
                     } else {
-                        // Other modes — emit BC4-shape data anyway; callers map as needed.
+
                         outb[0] = (uint8_t)a0;
                         outb[1] = (uint8_t)a1;
                         for (int i = 2; i < 8; ++i) outb[i] = 0;

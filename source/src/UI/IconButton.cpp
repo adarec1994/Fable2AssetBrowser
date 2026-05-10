@@ -38,9 +38,6 @@ bool icon_button(const char* id, const char* icon_glyph, float diameter,
 
     dl->AddCircleFilled(c, diameter * 0.5f, bg, 36);
 
-    // Render the icon at a size proportional to the button. Use the
-    // glyph's *visible* bounding box (not its advance width) so glyphs
-    // with asymmetric whitespace land their actual ink at the centre.
     ImFont* font = ImGui::GetFont();
     float icon_size = diameter * 0.46f;
     ImVec2 advance_sz = font->CalcTextSizeA(icon_size, FLT_MAX, 0.0f, icon_glyph);
@@ -75,4 +72,4 @@ bool icon_button(const char* id, const char* icon_glyph, float diameter,
     return clicked;
 }
 
-} // namespace UI
+}

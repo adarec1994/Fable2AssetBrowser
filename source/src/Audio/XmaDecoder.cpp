@@ -15,10 +15,8 @@ uint32_t rd_u32_le(const uint8_t* p) {
 uint16_t rd_u16_le(const uint8_t* p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
-} // namespace
+}
 
-// Always-available helper: writes a PCM s16 RIFF/WAVE file at `out_path`.
-// Tiny standard WAV header. Returns true on success.
 namespace {
 bool write_pcm_wav_file(const std::string& out_path,
                         const std::vector<int16_t>& pcm,
@@ -46,18 +44,18 @@ bool write_pcm_wav_file(const std::string& out_path,
     f.write("WAVE", 4);
     f.write("fmt ", 4);
     put_u32(16);
-    put_u16(1);                       // PCM
+    put_u16(1);
     put_u16((uint16_t)channels);
     put_u32((uint32_t)sample_rate);
     put_u32(byterate);
     put_u16(blockalign);
-    put_u16(16);                      // bits per sample
+    put_u16(16);
     f.write("data", 4);
     put_u32(data_bytes);
     f.write((const char*)pcm.data(), (std::streamsize)data_bytes);
     return f.good();
 }
-} // namespace
+}
 
 bool decode_xma_wav_file_to_pcm_wav(const std::vector<uint8_t>& src_bytes,
                                     const std::string& out_path,
@@ -75,10 +73,7 @@ bool decode_xma_wav_file_to_pcm_wav(const std::vector<uint8_t>& src_bytes,
 #if F2_HAVE_FFMPEG
 
 extern "C" {
-// libavformat is intentionally NOT included — we parse RIFF/WAVE chunks
-// ourselves before feeding the decoder, so we link only avcodec/avutil/
-// swresample. Keeping libavformat out also drops the need for its
-// network/protocol system libs in the link.
+
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
 #include <libavutil/channel_layout.h>
@@ -89,8 +84,6 @@ extern "C" {
 
 namespace {
 
-// Locate the RIFF/WAVE start within `buf`. Returns offset, or -1 if absent.
-// Tolerates a leading "xma\0" prefix.
 int locate_riff(const std::vector<uint8_t>& buf) {
     if (buf.size() < 12) return -1;
     if (std::memcmp(&buf[0], "RIFF", 4) == 0 && std::memcmp(&buf[8], "WAVE", 4) == 0) return 0;
@@ -128,7 +121,7 @@ std::vector<Chunk> parse_chunks(const std::vector<uint8_t>& buf, size_t start) {
     return out;
 }
 
-} // namespace
+}
 
 bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
                       std::vector<int16_t>& pcm_out,
@@ -151,9 +144,9 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     const Chunk* data = nullptr;
     const Chunk* xma2 = nullptr;
     for (auto& c : chunks) {
-        if (c.id == 0x20746d66) fmt = &c;       // 'fmt '
-        else if (c.id == 0x61746164) data = &c; // 'data'
-        else if (c.id == 0x32414d58) xma2 = &c; // 'XMA2'
+        if (c.id == 0x20746d66) fmt = &c;
+        else if (c.id == 0x61746164) data = &c;
+        else if (c.id == 0x32414d58) xma2 = &c;
     }
     if (!fmt || !data) {
         if (err_out) *err_out = "missing fmt or data chunk";
@@ -172,13 +165,7 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     };
 
     const uint8_t* fmt_p = &wav_bytes[fmt->data_off];
-    // Fable 2 (and other Xbox 360 games) store the WAVEFORMATEX with mixed
-    // endianness: u16 fields stay LE (so format_tag remains a valid magic),
-    // but multi-byte u32 values like sample rate are stored BE because the
-    // console's CPU is PowerPC. block_align is also BE in observed files.
-    //
-    // Detect this by reading rate two ways and picking the one that's a
-    // sensible audio rate (8 kHz – 200 kHz).
+
     uint32_t fmt_rate_le   = rd_u32_le(fmt_p + 4);
     uint32_t fmt_rate_be   = rd_u32_be(fmt_p + 4);
     bool xbox_endian = (fmt_rate_le < 8000u || fmt_rate_le > 200000u)
@@ -193,14 +180,11 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     (void)bits;
     (void)fmt_byterate;
 
-    // 0x0166 = WAVE_FORMAT_XMA2, 0x0165 = XMA1, 0xFFFE = WAVEFORMATEXTENSIBLE
-    // (which can carry the XMA2 SubFormat GUID).
     AVCodecID codec_id = AV_CODEC_ID_NONE;
     if (format_tag == 0x0166) codec_id = AV_CODEC_ID_XMA2;
     else if (format_tag == 0x0165) codec_id = AV_CODEC_ID_XMA1;
     else if (format_tag == 0xFFFE && fmt->data_size >= 40) {
-        // WAVEFORMATEXTENSIBLE: the SubFormat GUID is at offset 24 (16 bytes).
-        // KSDATAFORMAT_SUBTYPE_XMA2 starts with 0x0166.
+
         uint16_t sub = rd_u16_le(fmt_p + 24);
         if (sub == 0x0166) codec_id = AV_CODEC_ID_XMA2;
         else if (sub == 0x0165) codec_id = AV_CODEC_ID_XMA1;
@@ -229,15 +213,9 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     ctx->ch_layout.order = AV_CHANNEL_ORDER_UNSPEC;
     ctx->ch_layout.nb_channels = (int)fmt_channels;
     av_channel_layout_default(&ctx->ch_layout, (int)fmt_channels);
-    // FFmpeg's XMA2 decoder expects packets of exactly 2048 bytes (one
-    // XMA2 packet). The block_align in Xbox 360 wavs is something else
-    // (per-frame size) — ignore it here and feed in 2 KB packets below.
+
     ctx->block_align = 2048;
 
-    // FFmpeg's XMA2 init insists on extradata size being EXACTLY 34
-    // (XMA2WAVEFORMATEX) or 28 (older XMA2WAVEFORMAT). We try the chunk
-    // tail first, then synthesize a 34-byte XMA2WAVEFORMATEX from the
-    // known fields if the tail size doesn't match.
     auto setup_extradata = [&](const uint8_t* src, int n) {
         if (ctx->extradata) { av_freep(&ctx->extradata); ctx->extradata_size = 0; }
         ctx->extradata = (uint8_t*)av_mallocz((size_t)n + AV_INPUT_BUFFER_PADDING_SIZE);
@@ -251,16 +229,6 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
         setup_extradata(fmt_p + 18, tail_size);
     }
 
-    // Always synthesize a fresh 34-byte XMA2WAVEFORMATEX. FFmpeg's XMA2
-    // init insists on extradata size being EXACTLY 34 (XMA2WAVEFORMATEX)
-    // or 28 (older XMA2WAVEFORMAT), and Fable 2's fmt chunks don't carry
-    // that tail at all (the data lives in a separate 'XMA2' RIFF chunk
-    // with BE values).
-    //
-    // When the file does have an 'XMA2' chunk, pull NumStreams, channel
-    // mask, SamplesEncoded, BytesPerBlock, BlockCount from it — those
-    // values matter to FFmpeg for correct output. Otherwise fall back
-    // to reasonable defaults.
     uint16_t synth_num_streams = (uint16_t)((fmt_channels + 1) / 2);
     if (synth_num_streams == 0) synth_num_streams = 1;
     uint32_t synth_channel_mask = 0;
@@ -277,32 +245,14 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     uint32_t synth_block_count = 0;
 
     if (xma2 && xma2->data_size >= 36) {
-        // XMA2WAVEFORMAT (44 bytes, all multi-byte fields BIG-ENDIAN):
-        //   +0  BYTE  Version
-        //   +1  BYTE  NumStreams
-        //   +2  BYTE  Reserved
-        //   +3  BYTE  LoopCount
-        //   +4  DWORD LoopBegin
-        //   +8  DWORD LoopEnd
-        //   +12 BYTE  SubframeData
-        //   +13 BYTE  Padding
-        //   +14 BYTE  Channels
-        //   +15 BYTE  ChannelMask
-        //   +16 DWORD SamplesEncoded
-        //   +20 DWORD BytesPerBlock (sample-rate field in some refs;
-        //         Fable 2 stores rate at +20 and BytesPerBlock at +24)
-        //   ...
+
         const uint8_t* xp = &wav_bytes[xma2->data_off];
         uint8_t  num_streams_ch = xp[1];
         if (num_streams_ch >= 1 && num_streams_ch <= 8) {
             synth_num_streams = (uint16_t)num_streams_ch;
         }
         synth_samples_encoded = rd_u32_be(xp + 16);
-        // The DWORD at +20 in observed Fable 2 files is the sample rate,
-        // not BytesPerBlock — confirm by comparing against fmt_rate.
-        // BytesPerBlock is the value that matches the XMA2 packet layout.
-        // Use 0x10000 (64 KB blocks) as a safe default; FFmpeg uses it
-        // for output framing.
+
         if (xma2->data_size >= 28) {
             uint32_t maybe_bpb = rd_u32_be(xp + 24);
             if (maybe_bpb >= 0x800 && maybe_bpb <= 0x100000) {
@@ -316,7 +266,7 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
         if (synth_block_count == 0) synth_block_count = 1;
     }
     if (synth_samples_encoded == 0) {
-        // Fallback estimate: ~512 samples per XMA2 frame, ~32 frames per packet.
+
         synth_samples_encoded = (uint32_t)((uint64_t)synth_block_count * 512u * 32u);
         if (synth_samples_encoded == 0) synth_samples_encoded = 0x7FFFFFFF;
     }
@@ -325,17 +275,17 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
         uint8_t synth[34] = {0};
         auto wrU16 = [&](int o, uint16_t v) { synth[o] = (uint8_t)v; synth[o+1] = (uint8_t)(v>>8); };
         auto wrU32 = [&](int o, uint32_t v) { synth[o]=(uint8_t)v; synth[o+1]=(uint8_t)(v>>8); synth[o+2]=(uint8_t)(v>>16); synth[o+3]=(uint8_t)(v>>24); };
-        wrU16(0,  synth_num_streams);                 // NumStreams
-        wrU32(2,  synth_channel_mask);                // ChannelMask
-        wrU32(6,  synth_samples_encoded);             // SamplesEncoded
-        wrU32(10, synth_bytes_per_block);             // BytesPerBlock
-        wrU32(14, 0);                                 // PlayBegin
-        wrU32(18, synth_samples_encoded);             // PlayLength
-        wrU32(22, 0);                                 // LoopBegin
-        wrU32(26, 0);                                 // LoopLength
-        synth[30] = 0;                                // LoopCount
-        synth[31] = 4;                                // EncoderVersion
-        wrU16(32, (uint16_t)synth_block_count);       // BlockCount
+        wrU16(0,  synth_num_streams);
+        wrU32(2,  synth_channel_mask);
+        wrU32(6,  synth_samples_encoded);
+        wrU32(10, synth_bytes_per_block);
+        wrU32(14, 0);
+        wrU32(18, synth_samples_encoded);
+        wrU32(22, 0);
+        wrU32(26, 0);
+        synth[30] = 0;
+        synth[31] = 4;
+        wrU16(32, (uint16_t)synth_block_count);
         setup_extradata(synth, 34);
     }
 
@@ -343,7 +293,7 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     int open_attempts = 1;
 
     if (open_rc < 0) {
-        // Dump everything we know so the user can share it.
+
         try {
             std::ofstream log("xma_debug.log", std::ios::app);
             char hdr[160];
@@ -417,8 +367,6 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
         }
     };
 
-    // XMA2 'data' chunks are packetized as fixed 2048-byte blocks. Submit
-    // them one block at a time so the decoder's bit-reader stays aligned.
     const size_t pkt_sz = 2048;
     for (size_t pos = 0; pos < data_size; pos += pkt_sz) {
         size_t this_sz = std::min(pkt_sz, data_size - pos);
@@ -430,7 +378,6 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
         av_packet_unref(pkt);
     }
 
-    // Flush.
     avcodec_send_packet(ctx, nullptr);
     feed_frame();
 
@@ -448,7 +395,7 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     return true;
 }
 
-#else // F2_HAVE_FFMPEG
+#else
 
 bool decode_xma_to_pcm(const std::vector<uint8_t>& /*wav_bytes*/,
                       std::vector<int16_t>& /*pcm_out*/,
@@ -464,4 +411,4 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& /*wav_bytes*/,
 
 #endif
 
-} // namespace XmaDecoder
+}

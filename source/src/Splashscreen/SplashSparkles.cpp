@@ -35,8 +35,7 @@ void reset_sparkles(float logo_x, float logo_y, float scaled_w, float scaled_h) 
     if (positions.empty()) return;
     for (int i = 0; i < kNumSparkles; ++i) {
         seed_one(g_sparkles[i], logo_x, logo_y, scaled_w, scaled_h);
-        // Spread initial life_time across the full range so they don't all
-        // pulse together on the first frame.
+
         g_sparkles[i].life_time = ((float)std::rand() / RAND_MAX) * g_sparkles[i].max_life;
     }
     g_initialized = true;
@@ -73,7 +72,6 @@ void update_and_draw_sparkles(ImDrawList* draw_list, unsigned int* sparkle_textu
         const int tex_idx = s.texture_index;
         if (!sparkle_textures[tex_idx]) continue;
 
-        // Fade in for the first half of life, then fade out.
         float alpha = (phase < 0.5f) ? (phase * 2.0f) : ((1.0f - phase) * 2.0f);
         alpha *= 0.7f;
         const ImU32 col      = IM_COL32(255, 255, 255, (int)(alpha * 255));
@@ -96,4 +94,4 @@ void update_and_draw_sparkles(ImDrawList* draw_list, unsigned int* sparkle_textu
     }
 }
 
-} // namespace Splash
+}

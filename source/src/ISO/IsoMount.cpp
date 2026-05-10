@@ -1,7 +1,3 @@
-// In-memory ISO mount. Reuses the XDVDFS layout-detection + dir-tree
-// walking code from IsoExtract.cpp; the difference is we don't write
-// any files to disk — file bytes are streamed on-demand from the .iso
-// when the application asks for them.
 
 #include "IsoMount.h"
 #include <algorithm>
@@ -110,7 +106,7 @@ bool ends_with_lower(const std::string& s, const std::string& tail_lower) {
     return true;
 }
 
-} // anonymous
+}
 
 IsoMount& IsoMount::instance() {
     static IsoMount inst;
@@ -150,9 +146,6 @@ bool IsoMount::mount(const std::string& iso_path, std::string* err_out) {
 
     iso_path_ = iso_path;
 
-    // BFS through directories. We unlock for each fread call by reusing
-    // the read_mutex_ as a guard for raw fp_ access; here we already
-    // hold it for the whole duration of mount().
     struct Pending { uint32_t sector, size; std::string prefix; };
     std::vector<Pending> queue;
     queue.push_back({root_sector, root_size, ""});
@@ -221,12 +214,12 @@ void IsoMount::cache_evict_to_fit(uint64_t incoming_size) {
 const std::vector<uint8_t>* IsoMount::cache_get(const std::string& key_lower) {
     auto it = cache_index_.find(key_lower);
     if (it == cache_index_.end()) return nullptr;
-    cache_.splice(cache_.begin(), cache_, it->second);  // mark as MRU
+    cache_.splice(cache_.begin(), cache_, it->second);
     return &it->second->bytes;
 }
 
 void IsoMount::cache_put(const std::string& key_lower, std::vector<uint8_t> bytes) {
-    if (bytes.size() > kCacheCap) return;  // never cache something bigger than the whole budget
+    if (bytes.size() > kCacheCap) return;
     cache_evict_to_fit(bytes.size());
     cache_.push_front({key_lower, std::move(bytes)});
     cache_index_[key_lower] = cache_.begin();
@@ -259,7 +252,6 @@ std::vector<uint8_t> IsoMount::read_file(const std::string& virtual_path) {
     size_t got = std::fread(out.data(), 1, mf->size, fp_);
     if (got != mf->size) out.resize(got);
 
-    // Cache only on full successful read.
     if (got == mf->size) cache_put(key, out);
     return out;
 }
@@ -290,4 +282,4 @@ std::string IsoMount::strip_iso_prefix(const std::string& path) {
     return is_iso_path(path) ? path.substr(6) : path;
 }
 
-} // namespace ISO
+}

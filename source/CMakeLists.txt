@@ -27,6 +27,7 @@ set(APP_SOURCES
         src/textures/export/TiffExport.cpp
         src/textures/export/DdsExport.cpp
         src/MDL/ModelParser.cpp
+        src/MDL/MdlFbxExport.cpp
         src/Utilities/Progress.cpp
         src/Utilities/operations.cpp
         src/UI/HexView.cpp

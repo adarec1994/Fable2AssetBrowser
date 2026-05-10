@@ -8,6 +8,8 @@
 #include "../UI/OutputLog.h"
 #include "../UI/Panels/PanelInternal.h"
 #include "../MDL/ModelParser.h"
+#include "../MDL/mdl_converter.h"    // mdl_to_glb_full
+#include "../MDL/MdlFbxExport.h"     // mdl_to_fbx_full
 #include "../Audio/XmaDecoder.h"     // decode_xma_wav_file_to_pcm_wav
 #include "../Audio/MfAudioEncoder.h" // PCM→MP3/AAC via Media Foundation
 #include "../BNKCore.cpp"
@@ -739,6 +741,293 @@ void dump_mdl_files() {
                             std::to_string(n_failed) + " failed.");
         } else {
             OutputLog::success("MDL dump complete: " +
+                               std::to_string(total) + " files written.");
+        }
+    }).detach();
+}
+
+// ---------------------------------------------------------------------------
+// MDL — decoded variants (GLB / FBX) and the per-file entry point.
+// ---------------------------------------------------------------------------
+// Reuses reconstruct_one_mdl (paired header+body BNK lookup) to get
+// the raw MDL bytes the parsers + exporters consume. Each entry runs
+// through `mdl_to_glb_full` or `mdl_to_fbx_full` — both already pull
+// in textures via `build_any_tex_buffer_for_name`, decode them via
+// `mdl_export_decode_texture_to_png`, and embed the PNG bytes in the
+// output file (GLB.images or FBX.Video.Content). Skin / weights /
+// UVs are populated by the same parsers the in-app preview uses.
+
+namespace {
+
+// Per-file rebuild (raw bytes from BNK pair) using the same one-shot
+// helpers Selection.cpp's right-click menu uses. Mirrors the inner
+// loop in dump_mdl_files but for one entry. Returns the
+// reconstructed MDL bytes; on failure logs and returns empty.
+std::vector<unsigned char> reconstruct_one_mdl_for_export(
+    const std::string& bnk_path, int file_index)
+{
+    std::vector<unsigned char> body, header_bytes;
+    std::error_code ec;
+    auto tmpdir = std::filesystem::temp_directory_path() / "f2_mdl_export_oneoff";
+    std::filesystem::create_directories(tmpdir, ec);
+
+    try {
+        BNKReader src(bnk_path);
+        const auto& src_files = src.list_files();
+        if (file_index < 0 || (size_t)file_index >= src_files.size())
+            return {};
+        std::string mdl_name = src_files[file_index].name;
+
+        auto tmp_body = tmpdir / "body.bin";
+        extract_one(bnk_path, file_index, tmp_body.string());
+        body = read_all_bytes(tmp_body);
+        std::filesystem::remove(tmp_body, ec);
+        if (body.empty()) return {};
+
+        // Locate paired _model_headers.bnk via name swap; fall back
+        // to globals_model_headers; final fallback is body-only.
+        std::string base = std::filesystem::path(bnk_path)
+                               .filename().string();
+        std::transform(base.begin(), base.end(), base.begin(), ::tolower);
+        std::optional<std::string> p_headers;
+        const std::string suffix = "_models.bnk";
+        if (base.size() >= suffix.size() &&
+            base.compare(base.size() - suffix.size(),
+                         suffix.size(), suffix) == 0) {
+            std::string paired = base.substr(0, base.size() - suffix.size())
+                               + "_model_headers.bnk";
+            p_headers = find_bnk_by_filename(paired);
+        }
+        if (!p_headers) {
+            p_headers = find_bnk_by_filename("globals_model_headers.bnk");
+        }
+        if (!p_headers) return body;   // body alone
+
+        BNKReader hr(*p_headers);
+        const auto& h_files = hr.list_files();
+        std::string mdl_leaf = std::filesystem::path(mdl_name)
+                                   .filename().string();
+        std::transform(mdl_leaf.begin(), mdl_leaf.end(),
+                       mdl_leaf.begin(), ::tolower);
+        int h_idx = -1;
+        for (size_t i = 0; i < h_files.size(); ++i) {
+            std::string hn = std::filesystem::path(h_files[i].name)
+                                 .filename().string();
+            std::transform(hn.begin(), hn.end(), hn.begin(), ::tolower);
+            if (hn == mdl_leaf) { h_idx = (int)i; break; }
+        }
+        if (h_idx < 0) return body;
+
+        auto tmp_h = tmpdir / "header.bin";
+        extract_one(*p_headers, h_idx, tmp_h.string());
+        header_bytes = read_all_bytes(tmp_h);
+        std::filesystem::remove(tmp_h, ec);
+        if (header_bytes.empty()) return body;
+    } catch (...) {
+        return body;
+    }
+
+    std::vector<unsigned char> out;
+    out.reserve(header_bytes.size() + body.size());
+    out.insert(out.end(), header_bytes.begin(), header_bytes.end());
+    out.insert(out.end(), body.begin(), body.end());
+    return out;
+}
+
+const char* mdl_fmt_label(MdlExportFormat fmt) {
+    switch (fmt) {
+        case MdlExportFormat::GLB: return "GLB";
+        case MdlExportFormat::FBX: return "FBX";
+        case MdlExportFormat::RAW: return "MDL";
+    }
+    return "?";
+}
+
+const char* mdl_fmt_ext(MdlExportFormat fmt) {
+    switch (fmt) {
+        case MdlExportFormat::GLB: return ".glb";
+        case MdlExportFormat::FBX: return ".fbx";
+        case MdlExportFormat::RAW: return ".mdl";
+    }
+    return ".bin";
+}
+
+} // anonymous
+
+void mdl_export_begin_named(MdlExportFormat fmt,
+                            const std::string& bnk_path,
+                            int file_index,
+                            const std::string& display_path,
+                            bool /*from_nested*/)
+{
+    if (bnk_path.empty() || file_index < 0) {
+        OutputLog::error("MDL export: missing bnk / index arg.");
+        return;
+    }
+
+    // Resolve the BNK entry's stored asset path — that's what we use
+    // for the output destination so the file tree mirrors the source
+    // archive layout (`art/characters/.../foo.mdl`). Caller can
+    // override via `display_path` (the file tree / flat tabs pass
+    // their indexed full_path here when they have it; the right-
+    // click drill view passes the same string the BNK has).
+    std::string entry_name;
+    try {
+        BNKReader r(bnk_path);
+        const auto& files = r.list_files();
+        if ((size_t)file_index < files.size()) {
+            entry_name = files[file_index].name;
+        }
+    } catch (...) { /* fall through — entry_name stays empty */ }
+
+    // Pick the most specific path we have for the output filename:
+    // caller-supplied display_path > BNK's stored name > generic
+    // "model_<idx>.mdl". The display string in log lines uses the
+    // same fall-back chain.
+    std::string out_rel;
+    if (!display_path.empty() && display_path.find('/') != std::string::npos) {
+        out_rel = display_path;
+    } else if (!entry_name.empty()) {
+        out_rel = entry_name;
+    } else if (!display_path.empty()) {
+        out_rel = display_path;
+    } else {
+        out_rel = std::string("model_") + std::to_string(file_index) + ".mdl";
+    }
+    std::string log_label = display_path.empty()
+        ? std::filesystem::path(out_rel).filename().string()
+        : std::filesystem::path(display_path).filename().string();
+
+    auto buf = reconstruct_one_mdl_for_export(bnk_path, file_index);
+    if (buf.empty()) {
+        OutputLog::error(std::string("MDL export: rebuild failed for ")
+                         + log_label);
+        return;
+    }
+
+    // Output path mirrors the convention all the other exporters use
+    // — replace_extension instead of += so .mdl source paths come
+    // out as `.glb` / `.fbx` rather than `.mdl.glb` / `.mdl.fbx`.
+    std::string rel = out_rel;
+    while (!rel.empty() && (rel.front() == '/' || rel.front() == '\\'))
+        rel.erase(rel.begin());
+    std::filesystem::path root =
+        S.export_dir.empty() ? std::filesystem::path("extracted")
+                             : std::filesystem::path(S.export_dir);
+    auto out = root / std::filesystem::path(rel);
+    out.replace_extension(mdl_fmt_ext(fmt));
+
+    std::error_code ec;
+    if (auto parent = out.parent_path(); !parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            OutputLog::error(std::string("MDL export: cannot create ") +
+                             parent.string() + " — " + ec.message());
+            return;
+        }
+    }
+
+    bool ok = false;
+    std::string err;
+    try {
+        switch (fmt) {
+            case MdlExportFormat::GLB:
+                ok = mdl_to_glb_full(buf, out.string(), out_rel, err);
+                break;
+            case MdlExportFormat::FBX:
+                ok = mdl_to_fbx_full(buf, out.string(), out_rel, err);
+                break;
+            case MdlExportFormat::RAW: {
+                std::ofstream f(out, std::ios::binary | std::ios::trunc);
+                if (f) {
+                    f.write((const char*)buf.data(),
+                            (std::streamsize)buf.size());
+                    ok = f.good();
+                } else err = "cannot open output for writing";
+                break;
+            }
+        }
+    } catch (const std::exception& ex) {
+        err = ex.what();
+    } catch (...) {
+        err = "unknown exception";
+    }
+
+    if (ok) {
+        OutputLog::success(std::string("Exported ") + log_label +
+                           " as " + mdl_fmt_label(fmt) + " → " +
+                           out.string());
+    } else {
+        OutputLog::error(std::string("MDL export failed (") +
+                         mdl_fmt_label(fmt) + "): " + log_label +
+                         (err.empty() ? "" : " — " + err));
+    }
+}
+
+void dump_mdl_files_as(MdlExportFormat fmt) {
+    if (fmt == MdlExportFormat::RAW) {
+        // Raw bytes path is exactly what dump_mdl_files() does.
+        dump_mdl_files();
+        return;
+    }
+    if (S.all_mdl_files.empty()) {
+        OutputLog::warn("Dump MDL: no .mdl files indexed (open a "
+                        "Fable 2 root first).");
+        return;
+    }
+
+    std::vector<FlatAssetEntry> targets = S.all_mdl_files;
+    const int total = (int)targets.size();
+    const std::string export_root =
+        S.export_dir.empty() ? std::filesystem::absolute("extracted").string()
+                             : S.export_dir;
+
+    OutputLog::info(std::string("Exporting ") + std::to_string(total) +
+                    " .mdl file(s) as " + mdl_fmt_label(fmt) + " → " +
+                    export_root);
+    progress_open(total,
+                  std::string("Exporting MDLs as ") + mdl_fmt_label(fmt) +
+                  " → " + export_root);
+    progress_update(0, total, "Starting...");
+
+    std::thread([targets = std::move(targets), total, fmt]() {
+        struct PG { ~PG() { progress_done(); } } pg;
+        std::atomic<int> done{0};
+        std::vector<std::string> failed;
+        std::mutex fail_m;
+
+        for (const auto& e : targets) {
+            if (S.cancel_requested.load() || S.exiting.load()) break;
+            try {
+                mdl_export_begin_named(fmt, e.bnk_path, e.file_index,
+                                       e.full_path, e.from_nested);
+            } catch (...) {
+                std::lock_guard<std::mutex> lk(fail_m);
+                failed.push_back(e.full_path);
+            }
+            int cur = ++done;
+            progress_update(cur, total,
+                            std::filesystem::path(e.name)
+                                .filename().string());
+        }
+
+        if (S.cancel_requested.load()) {
+            OutputLog::warn(std::string("MDL export cancelled (") +
+                            std::to_string(done.load()) + "/" +
+                            std::to_string(total) + ").");
+            S.cancel_requested = false;
+            return;
+        }
+        const int n_failed = (int)failed.size();
+        if (n_failed > 0) {
+            OutputLog::warn(std::string("MDL export finished as ") +
+                            mdl_fmt_label(fmt) + ": " +
+                            std::to_string(done.load() - n_failed) +
+                            "/" + std::to_string(total) + " written, " +
+                            std::to_string(n_failed) + " failed.");
+        } else {
+            OutputLog::success(std::string("MDL export complete as ") +
+                               mdl_fmt_label(fmt) + ": " +
                                std::to_string(total) + " files written.");
         }
     }).detach();

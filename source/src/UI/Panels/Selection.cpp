@@ -14,6 +14,8 @@
 #include "../../Audio/XmaDecoder.h"      // XMA→PCM for the per-file
                                           // MP3 / AAC right-click items.
 #include "../../Audio/MfAudioEncoder.h"  // PCM→MP3 / PCM→AAC.
+#include "../../ISO/IsoDump.h"           // mdl_export_begin_named for
+                                           // the .mdl right-click submenu.
 #include "../../animations/AnimBank.h"
 #include "../../animations/AnimDataFile.h"
 #include "imgui.h"
@@ -893,6 +895,39 @@ void file_hex_context_menu(const std::string& bnk_path,
             // the highest-resolution mip per the .tex format convention.
             tex_export_menu_named(file_name, file_name, bnk_path,
                                   /*mip_index=*/0);
+        } else if (is_mdl_file(file_name)) {
+            // .mdl gets an "Export to" submenu matching the
+            // tex / audio layouts. GLB / FBX both produce single
+            // self-contained files (embedded textures, materials,
+            // skeleton, weights, UVs); raw .mdl is the
+            // reconstructed header+body bytes the runtime would
+            // load. All three land at `${export_dir}/<asset_path>`
+            // with the extension swapped to match.
+            //
+            // Pass `bnk_path + file_index` as the canonical
+            // identifier (file_name is just the leaf in some call
+            // sites — file tree, flat tabs — and the BNK stores
+            // entries by full asset path, so name-based lookup
+            // would fail for those callers).
+            if (ImGui::BeginMenu("Export to")) {
+                if (ImGui::MenuItem("GLB")) {
+                    ISO::mdl_export_begin_named(
+                        ISO::MdlExportFormat::GLB,
+                        bnk_path, file_index, file_name, is_nested);
+                }
+                if (ImGui::MenuItem("FBX")) {
+                    ISO::mdl_export_begin_named(
+                        ISO::MdlExportFormat::FBX,
+                        bnk_path, file_index, file_name, is_nested);
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem(".mdl (raw)")) {
+                    ISO::mdl_export_begin_named(
+                        ISO::MdlExportFormat::RAW,
+                        bnk_path, file_index, file_name, is_nested);
+                }
+                ImGui::EndMenu();
+            }
         } else if (is_audio_file(file_name)) {
             // "Export to" submenu — same shape the .tex menu has,
             // matching the user's requested layout:

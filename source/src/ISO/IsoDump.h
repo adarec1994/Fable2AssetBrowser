@@ -34,6 +34,50 @@ void dump_iso_contents();
 // care which backend the bytes come from.
 void dump_mdl_files();
 
+// Format selector for `dump_mdl_files_as` and the per-file
+// `mdl_export_begin_named`. GLB / FBX both produce a single self-
+// contained file with embedded textures, materials, skin, weights,
+// UVs. RAW dumps the reconstructed `.mdl` bytes (header+body
+// concat — same output as `dump_mdl_files()`).
+enum class MdlExportFormat {
+    GLB,
+    FBX,
+    RAW,
+};
+
+// Per-file MDL export — used by the right-click "Export to" menu
+// items. Synchronous on the calling thread because a single MDL is
+// fast (<200 ms typical). For batches use `dump_mdl_files_as`.
+//
+// Takes the BNK and the entry's index inside that BNK directly —
+// the earlier `mdl_full_path` lookup was unreliable because the
+// file tree / flat tabs only carry the leaf name (e.g.
+// "Balverine_DLC_poison.mdl") while the BNK stores full asset
+// paths (e.g. "art/characters/balverine/Balverine_DLC_poison.mdl").
+// Right-click callers all already have the index in hand, so we
+// just pass it through.
+//
+// `display_path` is used to compose the output filename and log
+// line; if empty the function falls back to the BNK entry's stored
+// name. The reconstructed-MDL helper inside the function still does
+// the `_models.bnk` ↔ `_model_headers.bnk` pair lookup the same way
+// the MDL preview path does.
+//
+// Output path: `${S.export_dir}/<asset_path>.<ext>` with the
+// extension swapped to match `fmt` (.glb / .fbx / .mdl).
+void mdl_export_begin_named(MdlExportFormat fmt,
+                            const std::string& bnk_path,
+                            int file_index,
+                            const std::string& display_path,
+                            bool from_nested);
+
+// Decoded variant of dump_mdl_files. Walks S.all_mdl_files and
+// writes every MDL as `fmt` to `${S.export_dir}/<asset_path>.<ext>`.
+// `RAW` short-circuits to dump_mdl_files() (raw bytes — same path).
+// Worker thread + progress modal so the UI stays responsive on a
+// multi-thousand-MDL batch.
+void dump_mdl_files_as(MdlExportFormat fmt);
+
 // Dump every .tex file the asset browser has scanned (S.all_tex_files).
 // Same shape as dump_mdl_files, but with the third-component twist that
 // textures need a global `1024mip0_textures.bnk` lookup in addition to

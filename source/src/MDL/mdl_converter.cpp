@@ -953,3 +953,13 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
     }
     return true;
 }
+
+// Public wrapper around the file-static decode_texture_to_png so the
+// FBX exporter can re-use the BC1/BC3/Lionhead decode + PNG-encode
+// path without duplicating the code. Same input/output contract.
+bool mdl_export_decode_texture_to_png(
+    const std::vector<unsigned char>& tex_buf,
+    std::vector<uint8_t>& png_out)
+{
+    return decode_texture_to_png(tex_buf, png_out);
+}

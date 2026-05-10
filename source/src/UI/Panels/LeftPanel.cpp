@@ -949,8 +949,42 @@ void draw_left_panel() {
         }
 
         if (s_active_tab == 2) {
+            // Reserve footer height for the sticky "Extract All
+            // as..." button below the model list. Same pattern as
+            // the Textures and Audio tabs.
+            const float footer_h = ImGui::GetFrameHeightWithSpacing();
             draw_flat_asset_tab("Models", S.all_mdl_files, S.mdl_filter,
-                                "models_list", /*kind=*/0);
+                                "models_list", /*kind=*/0, footer_h);
+
+            // ---- Footer: "Extract All as..." dropdown ----
+            const bool has_any = !S.all_mdl_files.empty();
+            if (!has_any) ImGui::BeginDisabled();
+            if (ImGui::Button("Extract All as...##mdl_extract_all_as",
+                              ImVec2(-1, 0))) {
+                ImGui::OpenPopup("##mdl_extract_all_as_popup");
+            }
+            if (!has_any) ImGui::EndDisabled();
+            if (!has_any && !S.hide_tooltips &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(
+                    "No MDLs indexed yet — open a Fable 2 root "
+                    "(folder or ISO) to populate this list.");
+                ImGui::EndTooltip();
+            }
+            if (ImGui::BeginPopup("##mdl_extract_all_as_popup")) {
+                if (ImGui::MenuItem("GLB")) {
+                    ISO::dump_mdl_files_as(ISO::MdlExportFormat::GLB);
+                }
+                if (ImGui::MenuItem("FBX")) {
+                    ISO::dump_mdl_files_as(ISO::MdlExportFormat::FBX);
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem(".mdl (raw)")) {
+                    ISO::dump_mdl_files_as(ISO::MdlExportFormat::RAW);
+                }
+                ImGui::EndPopup();
+            }
         }
         if (s_active_tab == 3) {
             // Reserve enough vertical space for the sticky "Extract

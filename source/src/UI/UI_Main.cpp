@@ -8,6 +8,7 @@
 #include "AudioPlayerWindow.h"
 #include "Layout/LoadingScreen.h"
 #include "Layout/MainLayout.h"
+#include "About/AboutWindow.h"
 #include "../Splashscreen/Splashscreen.h"
 #include "imgui.h"
 #include "imgui_stdlib.h"
@@ -373,6 +374,16 @@ void draw_main(GLFWwindow* window) {
 
                 ImGui::EndMenu();
             }
+            // Help menu — currently just the About window. Lives at
+            // the rightmost end of the bar by convention. Adding more
+            // entries here later (Documentation, Report Issue, etc.)
+            // is just another MenuItem inside this BeginMenu block.
+            if (ImGui::BeginMenu("Help")) {
+                if (ImGui::MenuItem("About")) {
+                    About::open();
+                }
+                ImGui::EndMenu();
+            }
             ImGui::EndMenuBar();
         }
     }
@@ -401,6 +412,16 @@ void draw_main(GLFWwindow* window) {
 #endif
     }
     ImGui::End();
+
+    // About window — drawn outside the main fullscreen window so it
+    // floats on top with its own title bar / X. Cheap when closed
+    // (early-returns), draws a fixed-size dialog when open. Triggered
+    // from the Help menu above; closes via the X.
+#ifdef _WIN32
+    About::draw(device);
+#else
+    About::draw();
+#endif
 
 #ifdef _WIN32
     if (S.pending_texture_load) {

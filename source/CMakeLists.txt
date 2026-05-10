@@ -45,6 +45,7 @@ set(APP_SOURCES
         src/UI/Layout/LoadingScreen.cpp
         src/UI/Layout/MainLayout.cpp
         src/UI/Layout/RenderPanel.cpp
+        src/UI/About/AboutWindow.cpp
         src/Splashscreen/Splashscreen.cpp
         src/Splashscreen/SplashSparkles.cpp
         src/Splashscreen/LogoMap.cpp

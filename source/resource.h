@@ -30,3 +30,10 @@
 // fully self-contained — main() loads it from RCDATA into a memory
 // buffer and hands that to PlaySoundA(SND_MEMORY).
 #define IDR_MENU_INTERLUDE_WAV 240
+
+// About window image (.png). Drop a replacement at
+// include/image/about_image.png and rebuild — the rc compiler picks
+// up the new bytes, no code changes needed. The About dialog loads
+// this lazily on first show via FindResource + stb_image, exactly the
+// same path the splash uses for its embedded images.
+#define IDR_ABOUT_IMAGE 250

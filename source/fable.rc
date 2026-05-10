@@ -30,6 +30,12 @@ IDR_ROBOTO_FONT RCDATA    "include/font/Roboto-Regular.ttf"
 // at startup instead of loading from disk.
 IDR_MENU_INTERLUDE_WAV RCDATA "include/audio/menu_interlude.wav"
 
+// About window image. Currently points at ob_tarotcards.png — to
+// swap, change the path below (or overwrite the file in place). The
+// About dialog loads this from RCDATA on first open via FindResource
+// + stb_image, the same way the splash images are loaded.
+IDR_ABOUT_IMAGE RCDATA "include/image/ob_tarotcards.png"
+
 // FFmpeg used to be bundled here as ~24 MB of DLLs and extracted at
 // startup; now we link libavcodec / libavutil / libswresample statically
 // (the linker drops every codec we don't reference, see CMakeLists.txt).

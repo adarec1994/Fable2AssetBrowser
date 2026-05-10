@@ -96,6 +96,8 @@ void draw_left_panel() {
     if (tab_button("Textures", s_active_tab == 3, kPurpleLabel)) s_active_tab = 3;
     ImGui::SameLine(0, 2);
     if (tab_button("Audio",    s_active_tab == 4, kPurpleLabel)) s_active_tab = 4;
+    ImGui::SameLine(0, 2);
+    if (tab_button("Animations", s_active_tab == 5, kPurpleLabel)) s_active_tab = 5;
 
     ImGui::Separator();
 
@@ -458,6 +460,76 @@ void draw_left_panel() {
         if (s_active_tab == 4) {
             draw_flat_asset_tab("Audio", S.all_wav_files, S.wav_filter,
                                 "audio_list", /*kind=*/2);
+        }
+        if (s_active_tab == 5) {
+            // Animations tab — flat list of all clips parsed from the
+            // shared TOC. No "load on click" yet (Phase E adds the
+            // playback wiring); this is a browser + selector only.
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##anim_filter", "Filter",
+                                     &S.anim_filter);
+
+            std::vector<int> vis;
+            vis.reserve(S.anim_clips.size());
+            std::string flow = S.anim_filter;
+            std::transform(flow.begin(), flow.end(), flow.begin(), ::tolower);
+            for (size_t i = 0; i < S.anim_clips.size(); ++i) {
+                if (flow.empty()) {
+                    vis.push_back((int)i);
+                } else {
+                    std::string nlow = S.anim_clips[i].name;
+                    std::transform(nlow.begin(), nlow.end(), nlow.begin(), ::tolower);
+                    if (nlow.find(flow) != std::string::npos) {
+                        vis.push_back((int)i);
+                    }
+                }
+            }
+            if (S.dev_mode) {
+                ImGui::TextDisabled("%d / %zu", (int)vis.size(),
+                                    S.anim_clips.size());
+                ImGui::Separator();
+            }
+            ImGui::BeginChild("anim_list", ImVec2(0, 0), false);
+            if (S.anim_clips.empty()) {
+                ImGui::TextDisabled("No animation TOC loaded.");
+            } else {
+                ImGuiListClipper clipper;
+                clipper.Begin((int)vis.size());
+                while (clipper.Step()) {
+                    for (int row = clipper.DisplayStart;
+                         row < clipper.DisplayEnd; ++row) {
+                        const auto& c = S.anim_clips[(size_t)vis[(size_t)row]];
+                        ImGui::PushID(row);
+                        bool selected =
+                            (S.anim_selected_clip == vis[(size_t)row]);
+                        char label[64];
+                        float dur_s = Anim::clip_duration_seconds(c);
+                        std::snprintf(label, sizeof(label), "%s  (%.2fs)",
+                                      c.name.c_str(), dur_s);
+                        if (ImGui::Selectable(label, selected,
+                                              ImGuiSelectableFlags_SpanAllColumns)) {
+                            S.anim_selected_clip = vis[(size_t)row];
+                        }
+                        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                            ImGui::BeginTooltip();
+                            ImGui::TextUnformatted(c.name.c_str());
+                            ImGui::Text("Duration: %.3f s  (%.0f fps)",
+                                        dur_s, c.fps);
+                            ImGui::Text("Events: %zu", c.events.size());
+                            if (S.dev_mode) {
+                                ImGui::Text("offset=0x%08X len=%u",
+                                            c.data_offset, c.data_length);
+                                ImGui::Text("key0=0x%08X key1=0x%08X",
+                                            c.key0, c.key1);
+                            }
+                            ImGui::EndTooltip();
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                clipper.End();
+            }
+            ImGui::EndChild();
         }
 
     ImGui::EndChild(); // left_panel

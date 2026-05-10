@@ -9,6 +9,8 @@
 #include "../AudioPlayerWindow.h"
 #include "../HexView.h"
 #include "../../textures/export/TextureExport.h"
+#include "../../animations/AnimBank.h"
+#include "../../animations/AnimDataFile.h"
 #include "imgui.h"
 #include <filesystem>
 #include <algorithm>
@@ -139,6 +141,24 @@ void open_iso_logic(const std::string& iso_path) {
     // Kick the file-tree build in the background so the tab is ready by
     // the time the user navigates to it.
     start_tree_build_for_root(iso_path, S.bnk_paths);
+
+    // Pull the global animation TOC out of the ISO. Optional — log-only
+    // failure leaves S.anim_clips empty and the Animations tab will
+    // simply show "no clips loaded".
+    if (Anim::load_toc_for_root(iso_path, S.anim_clips)) {
+        // Pair the TOC up with the data file. The TOC's clip offsets
+        // are useless without the bytes they point into. Failure
+        // here is non-fatal — the clip list still browses, just
+        // without any path to playback.
+        Anim::global_data_file().open_for_root(iso_path);
+        // Recover friendly clip names by hashing every quoted
+        // string in every .lua and matching against clip key0.
+        // Replaces the synthesised id_HHHHHHHH placeholders in
+        // place. Cheap (~1-2s on retail data); skipping in non-
+        // dev mode is unnecessary since the result is always
+        // useful.
+        Anim::resolve_clip_names_from_luas(S.anim_clips);
+    }
 }
 
 void open_folder_logic(const std::string &sel) {
@@ -195,6 +215,15 @@ void open_folder_logic(const std::string &sel) {
     // open_iso_logic. Same idea: do the slow work right at root-selection
     // time so the tab loads instantly.
     start_tree_build_for_root(sel, S.bnk_paths);
+
+    // Pull the global animation TOC out of the data folder. Optional —
+    // log-only failure leaves S.anim_clips empty.
+    if (Anim::load_toc_for_root(sel, S.anim_clips)) {
+        Anim::global_data_file().open_for_root(sel);
+        // Recover friendly clip names from .lua scripts (see ISO
+        // path for rationale).
+        Anim::resolve_clip_names_from_luas(S.anim_clips);
+    }
 
     auto get_filename = [](const std::string& p) -> std::string {
         size_t pos = p.find_last_of("/\\");

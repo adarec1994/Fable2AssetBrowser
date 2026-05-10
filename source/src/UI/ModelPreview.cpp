@@ -1274,7 +1274,14 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         m.has_alpha = hasA;
         mp.meshes.push_back(m);
     }
-    mp.has_model = !mp.meshes.empty();
+    // NOTE: `mp.has_model = true` is deferred to the END of this
+    // function so the bone cache is fully populated before any
+    // main-thread reader (skeleton overlay, animation overlay)
+    // sees has_model and dereferences `mp.local_rest`. This used
+    // to live here, which created a window where bone_count was
+    // already n but local_rest was still empty — clicking the
+    // skeleton "Show" checkbox during that window was UB and
+    // crashed the process.
 
     // ---- Cache the rest skeleton ----
     // Used per-frame in MP_Render to compute the pose, and by
@@ -1328,6 +1335,11 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     }
     S.selected_bone     = -1;
     S.bone_rotate_mode  = false;
+
+    // Bone cache is now consistent with bone_count — safe to flip the
+    // public-facing flag. Anything reading mp.has_model from another
+    // thread now sees a fully-populated state.
+    mp.has_model = !mp.meshes.empty();
     return true;
 }
 void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
@@ -1528,6 +1540,14 @@ void MP_ComputeWorldPose(const ModelPreview& mp,
     if (mp.bone_count == 0) return;
 
     const uint32_t n = mp.bone_count;
+    // Defensive bounds check — bone_count and the dependent vectors
+    // are populated together by MP_Build, but the worker thread can
+    // be partway through that population when a main-thread reader
+    // (skeleton/animation overlay) calls in. Bail cleanly instead of
+    // dereferencing a half-built buffer.
+    if (mp.local_rest.size()   < (size_t)n * 11) return;
+    if (mp.bone_parents.size() < (size_t)n)       return;
+
     const bool have_deltas = (deltas.size() >= (size_t)n * 4);
 
     // Locals (rest, optionally with delta applied). XMFLOAT4X4 storage —

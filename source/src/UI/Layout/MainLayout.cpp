@@ -84,7 +84,7 @@ void draw_main_layout() {
     draw_splitter(region.y);
     ImGui::SameLine(0.0f, 0.0f);
 
-    // ---- Right: tabs [Tree | Banks] ---------------------------------------
+    // ---- Right: tabs [Tree | Banks | …] ------------------------------------
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(28, 30, 36, 255));
     ImGui::BeginChild("##layout_tree", ImVec2(0, region.y),
                       false,

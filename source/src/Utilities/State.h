@@ -8,6 +8,7 @@
 #include <cstdint>
 #include "imgui_hex.h"
 #include "../MDL/ModelParser.h"
+#include "../animations/AnimBank.h"
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -109,9 +110,16 @@ struct State {
     std::vector<FlatAssetEntry> all_mdl_files;
     std::vector<FlatAssetEntry> all_tex_files;
     std::vector<FlatAssetEntry> all_wav_files;
+    // Per-character animation config files (.anim). Each .anim
+    // contains a hash → clip-name table that, once parsed, lets us
+    // override the global TOC's id_HHHHHHHH names with friendly
+    // strings. Indexed at file-tree-build time alongside the other
+    // flat-list extensions.
+    std::vector<FlatAssetEntry> all_anim_files;
     std::string mdl_filter;
     std::string tex_filter;
     std::string wav_filter;
+    std::string anim_filter_files;
 
     // ---- User-facing settings (persisted to config.ini) ----
     // show_paths controls whether the tree/file-table tooltips show the
@@ -244,6 +252,19 @@ struct State {
     std::string lua_preview_title;
     int lua_preview_selected = -1;
     std::atomic<bool> lua_preview_loading{false};
+
+    // ---- Animations -----------------------------------------------------
+    // Single global TOC parsed at root-load time from
+    //   <root>/data/animation/fable2_anims.animation_toc
+    // (or the equivalent virtual path inside a mounted ISO). Each clip
+    // points into the .animation_data blob via byte offset/length —
+    // we don't read the data file itself yet (Phase C).
+    //
+    // anim_filter is the search box value used by the UI panels. Lives
+    // here so it persists across tab switches like the other filters.
+    std::vector<Anim::AnimClip> anim_clips;
+    std::string                 anim_filter;
+    int                         anim_selected_clip = -1;
 };
 
 extern State S;

@@ -144,6 +144,7 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
     S.all_mdl_files.clear();
     S.all_tex_files.clear();
     S.all_wav_files.clear();
+    S.all_anim_files.clear();
 
     auto is_header_bnk = [](const std::string& bnk_path) -> bool {
         std::string lower_path = bnk_path;
@@ -208,6 +209,15 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
             e.size = file_size;
             e.from_nested = is_nested;
             S.all_wav_files.push_back(std::move(e));
+        } else if (ends_with_ci(leaf, ".anim")) {
+            FlatAssetEntry e;
+            e.name = leaf;
+            e.full_path = path;
+            e.bnk_path = bnk_source;
+            e.file_index = bnk_index;
+            e.size = file_size;
+            e.from_nested = is_nested;
+            S.all_anim_files.push_back(std::move(e));
         }
 
         std::string normalized_path = path;
@@ -391,6 +401,7 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
     std::sort(S.all_mdl_files.begin(), S.all_mdl_files.end(), cmp_ci);
     std::sort(S.all_tex_files.begin(), S.all_tex_files.end(), cmp_ci);
     std::sort(S.all_wav_files.begin(), S.all_wav_files.end(), cmp_ci);
+    std::sort(S.all_anim_files.begin(), S.all_anim_files.end(), cmp_ci);
 
     set_tree_label("");
 }

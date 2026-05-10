@@ -12,6 +12,7 @@
 #include "imgui.h"
 #include "imgui_stdlib.h"
 #include "ImGuiFileDialog.h"
+#include <cmath>
 #include <filesystem>
 #include <algorithm>
 #include <vector>
@@ -21,6 +22,7 @@
 #endif
 #include "ModelPreview.h"
 #include "../textures/export/TextureExport.h"
+#include "../animations/AnimPlayer.h"
 #include "../ISO/IsoMount.h"
 #include "../ISO/IsoDump.h"
 #include "OutputLog.h"
@@ -233,15 +235,46 @@ void draw_main(GLFWwindow* window) {
         extern void settings_save();
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("File")) {
-                // Dump shortcut — only meaningful in ISO mode AND only
-                // surfaced in developer mode. Outside ISO mode there's
-                // no equivalent "loaded files" set (the extracted-folder
-                // case already has the BNKs on disk); outside dev mode
-                // the action is too footgunny to expose to a casual
-                // user (multi-GB write, no undo).
-                if (S.dev_mode && ISO::IsoMount::instance().is_mounted()) {
-                    if (ImGui::MenuItem("Dump BNK's")) {
-                        ISO::dump_iso_contents();
+                // Dump submenu — surfaced only in developer mode. The
+                // BNK dump requires ISO mode (no equivalent set in
+                // folder mode), the MDL dump works in either since it
+                // reuses the in-app reconstruct path.
+                if (S.dev_mode) {
+                    if (ImGui::BeginMenu("Dump")) {
+                        if (ISO::IsoMount::instance().is_mounted()) {
+                            if (ImGui::MenuItem("BNK's")) {
+                                ISO::dump_iso_contents();
+                            }
+                        } else {
+                            ImGui::MenuItem("BNK's (ISO only)", nullptr,
+                                            false, false);
+                        }
+                        if (!S.all_mdl_files.empty()) {
+                            if (ImGui::MenuItem(".mdl")) {
+                                ISO::dump_mdl_files();
+                            }
+                        } else {
+                            ImGui::MenuItem(".mdl (no MDLs indexed)",
+                                            nullptr, false, false);
+                        }
+                        // .anim entry is informational for now —
+                        // retail Fable 2 ships zero .anim files (we
+                        // confirmed by walking every BNK in
+                        // streaming.bnk / levels.bnk / globals.*).
+                        // The scanner picks them up if they ever
+                        // appear, e.g. from a debug build, mod, or
+                        // unpacked devkit dump.
+                        if (!S.all_anim_files.empty()) {
+                            ImGui::MenuItem(
+                                (".anim (" +
+                                 std::to_string(S.all_anim_files.size()) +
+                                 " indexed — dump TBD)").c_str(),
+                                nullptr, false, false);
+                        } else {
+                            ImGui::MenuItem(".anim (none indexed)",
+                                            nullptr, false, false);
+                        }
+                        ImGui::EndMenu();
                     }
                     ImGui::Separator();
                 }
@@ -437,6 +470,19 @@ void draw_main(GLFWwindow* window) {
 #else
     process_pending_loads();
 #endif
+
+    // Animation playback — advance the clock, then stamp the resulting
+    // pose into S.bone_rot_deltas. ModelPreview's existing skinning
+    // path consumes that on its next render. Only ticks when there's
+    // a model loaded so an idle browser doesn't burn cycles.
+    if (g_mp.has_model && g_mp.bone_count > 0) {
+        Anim::global_player().tick(dt);
+        Anim::global_player().apply_to_skeleton();
+    } else if (Anim::global_player().clip()) {
+        // Active clip but no compatible model — drop it so the next
+        // model load doesn't inherit a stale playback.
+        Anim::global_player().stop();
+    }
 
     // Drive the texture-export pipeline (no dialog any more — exports
     // auto-save to S.export_dir; this is now a no-op stub kept for

@@ -17,6 +17,10 @@ set(APP_SOURCES
         src/Utilities/Files.cpp
         src/textures/TexParser.cpp
         src/textures/LhTexCodec.cpp
+        src/animations/AnimBank.cpp
+        src/animations/AnimDataFile.cpp
+        src/animations/AnimDecoder.cpp
+        src/animations/AnimPlayer.cpp
         src/textures/export/TextureExport.cpp
         src/textures/export/PngExport.cpp
         src/textures/export/JpgExport.cpp
@@ -27,6 +31,7 @@ set(APP_SOURCES
         src/Utilities/operations.cpp
         src/UI/HexView.cpp
         src/UI/OutputLog.cpp
+        src/UI/IconButton.cpp
         src/UI/UI_Main.cpp
         src/UI/Panels/Selection.cpp
         src/UI/Panels/TreeBuilder.cpp

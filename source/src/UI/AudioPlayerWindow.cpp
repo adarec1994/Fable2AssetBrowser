@@ -1,6 +1,7 @@
 #include "AudioPlayerWindow.h"
 #include "../Audio/AudioPlayer.h"
 #include "../Splashscreen/IconFont.h"
+#include "IconButton.h"
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -33,90 +34,9 @@ void format_time(double sec, char* out, size_t cap) {
     std::snprintf(out, cap, "%02d:%02d.%02d", m, s, cs);
 }
 
-// ---------------------------------------------------------------------------
-// Icon button: a solid circle with a FontAwesome glyph centered inside.
-//
-// `optical_dx_pct` lets the caller nudge an asymmetric glyph horizontally
-// to compensate for FontAwesome's bbox-vs-centroid mismatch. The play
-// triangle has its centroid at ~1/3 from the left of its bbox, so without
-// a positive nudge the bbox-centered glyph appears shifted left.
-// ---------------------------------------------------------------------------
-
-bool icon_button(const char* id, const char* icon_glyph, float diameter,
-                 bool primary, bool active = false,
-                 float optical_dx_pct = 0.0f) {
-    ImVec2 sz(diameter, diameter);
-    ImGui::InvisibleButton(id, sz);
-    ImVec2 rmin = ImGui::GetItemRectMin();
-    ImVec2 rmax = ImGui::GetItemRectMax();
-    bool hovered = ImGui::IsItemHovered();
-    bool down    = ImGui::IsItemActive();
-    bool clicked = ImGui::IsItemClicked();
-
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 c((rmin.x + rmax.x) * 0.5f, (rmin.y + rmax.y) * 0.5f);
-
-    ImU32 bg;
-    ImU32 fg;
-    if (primary) {
-        bg = down    ? IM_COL32( 90, 170, 230, 255)
-           : hovered ? IM_COL32(140, 210, 255, 255)
-                     : IM_COL32(120, 200, 255, 255);
-        fg = IM_COL32(15, 20, 25, 255);
-    } else {
-        bg = down    ? IM_COL32( 60,  64,  74, 255)
-           : hovered ? IM_COL32( 80,  84,  94, 255)
-                     : IM_COL32( 50,  54,  62, 255);
-        fg = active ? IM_COL32(120, 200, 255, 255) : IM_COL32(220, 225, 235, 255);
-    }
-
-    dl->AddCircleFilled(c, diameter * 0.5f, bg, 36);
-
-    // Render the icon at a size proportional to the button so a 44 px
-    // play button doesn't show a tiny 14 px glyph. Use the glyph's
-    // *visible* bounding box (not the advance width) so glyphs with
-    // asymmetric whitespace land their actual ink at the button center.
-    ImFont* font = ImGui::GetFont();
-    float icon_size = diameter * 0.46f;
-    ImVec2 advance_sz = font->CalcTextSizeA(icon_size, FLT_MAX, 0.0f, icon_glyph);
-
-    // Decode the (single-glyph) UTF-8 string so we can look up its visible
-    // bbox. ImTextCharFromUtf8 returns the codepoint into `cp`.
-    unsigned int cp = 0;
-    ImTextCharFromUtf8(&cp, icon_glyph, icon_glyph + std::strlen(icon_glyph));
-    const ImFontGlyph* g = font->FindGlyph((ImWchar)cp);
-
-    // pos.x is where ImGui will start drawing the glyph (top-left of the
-    // advance box). The visible glyph appears from pos.x + g->X0*scale to
-    // pos.x + g->X1*scale; we want the midpoint of THAT to land on c.x.
-    float pos_x;
-    if (g) {
-        float scale = icon_size / font->FontSize;
-        float vx0 = g->X0 * scale;
-        float vx1 = g->X1 * scale;
-        float visible_center = 0.5f * (vx0 + vx1);
-        pos_x = c.x - visible_center;
-    } else {
-        pos_x = c.x - advance_sz.x * 0.5f;
-    }
-
-    // Apply per-icon optical nudge (used to compensate triangles whose
-    // visual centroid sits left of the bbox center).
-    pos_x += advance_sz.x * optical_dx_pct;
-
-    float pos_y;
-    if (g) {
-        float scale = icon_size / font->FontSize;
-        float vy0 = g->Y0 * scale;
-        float vy1 = g->Y1 * scale;
-        pos_y = c.y - 0.5f * (vy0 + vy1);
-    } else {
-        pos_y = c.y - advance_sz.y * 0.5f;
-    }
-
-    dl->AddText(font, icon_size, ImVec2(pos_x, pos_y), fg, icon_glyph);
-    return clicked;
-}
+// (icon_button moved to UI/IconButton.{h,cpp} for reuse — the same
+// transport shape now drives both the audio player and the animation
+// preview.)
 
 // Draw the cached waveform envelope into a fixed-size area.
 void draw_waveform(ImVec2 size, float progress) {

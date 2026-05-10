@@ -2,8 +2,14 @@
 #include "../../Utilities/State.h"
 #include "../ModelPreview.h"
 #include "../../textures/export/TextureExport.h"
+#include "../../animations/AnimBank.h"
+#include "../../animations/AnimDataFile.h"
+#include "../../animations/AnimPlayer.h"
+#include "../IconButton.h"
+#include "IconsFontAwesome6.h"
 
 #include "imgui.h"
+#include "imgui_stdlib.h"
 
 #include <algorithm>
 #include <cmath>
@@ -603,10 +609,13 @@ void draw_model_in_panel(ID3D11Device* device) {
     // directly below the Controls hint, same width. Faded to ~30% alpha
     // when not hovered so it doesn't fight with the model behind it; full
     // alpha while the user is mousing over it.
-    bool has_skeleton = S.mdl_info_ok &&
-                        S.mdl_info.HasBoneTransforms &&
-                        S.mdl_info.BoneCount > 0 &&
-                        S.mdl_info.Bones.size() == S.mdl_info.BoneTransforms.size();
+    //
+    // Gate on g_mp.has_model + g_mp.bone_count rather than S.mdl_info_ok.
+    // S.mdl_info_ok flips to true on the worker thread BEFORE MP_Build
+    // finishes populating the bone cache; gating on g_mp.has_model
+    // (which is now flipped at the very end of MP_Build) guarantees
+    // anything we read from g_mp downstream is consistent.
+    bool has_skeleton = g_mp.has_model && g_mp.bone_count > 0;
     if (has_skeleton) {
         // Visible state lives in the file-scope g_skel_overlay_show so
         // the input handlers above can read it without an extra round
@@ -907,6 +916,379 @@ void draw_model_in_panel(ID3D11Device* device) {
         ::g_tex_popout_srv      = nullptr;
         ::g_tex_popout_name.clear();
         ::g_tex_popout_mesh_idx = -1;
+    }
+
+    // ---- Animations overlay (RIGHT side) --------------------------------
+    // Mirrors the Materials overlay shape (floating ImGui window inside
+    // the render panel, hover-fade alpha) but lives along the right
+    // edge instead of the left. Lists every clip in the global TOC;
+    // click selects, playback hookup lands in Phase E.
+    //
+    // Only renders when:
+    //   - an .mdl is fully loaded (g_mp.has_model — flipped at the end
+    //     of MP_Build, see the comment in MP_Build)
+    //   - it has a skeleton (animation needs bones to bind to — props
+    //     and other rigid meshes can't play clips)
+    //   - we have any clips parsed from the TOC
+    if (g_mp.has_model && g_mp.bone_count > 0 && !S.anim_clips.empty()) {
+        static float s_anim_alpha = 0.30f;
+        const float kIdleAlpha   = 0.30f;
+        const float kHoverAlpha  = 1.00f;
+
+        const float kAnimW   = 280.0f;
+        const float kAnimPad = 6.0f;
+        // Anchor to the right edge of the render panel. The window's
+        // height tracks the panel's height (with a small inset top/
+        // bottom) so it visually mirrors the Materials column's reach
+        // on the left.
+        const float anim_h = std::max(160.0f, region.y - 2 * kAnimPad);
+        const ImVec2 anim_pos(origin.x + region.x - kAnimW - kAnimPad,
+                              origin.y + kAnimPad);
+        const ImVec2 anim_size(kAnimW, anim_h);
+
+        ImGui::SetNextWindowPos(anim_pos);
+        ImGui::SetNextWindowSize(anim_size, ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(s_anim_alpha * 0.78f);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, s_anim_alpha);
+
+        ImGuiWindowFlags fl = ImGuiWindowFlags_NoTitleBar
+                            | ImGuiWindowFlags_NoResize
+                            | ImGuiWindowFlags_NoMove
+                            | ImGuiWindowFlags_NoCollapse
+                            | ImGuiWindowFlags_NoSavedSettings;
+        if (ImGui::Begin("##anims_overlay", nullptr, fl)) {
+            // Hover test by raw mouse-vs-rect (NOT ImGui::IsWindowHovered
+            // — that fights with Selectable's active-item state, see
+            // earlier notes). Plus a "sticky" carry-over while the
+            // left mouse button is held: dragging the scrollbar can
+            // pull the mouse outside the window rect, and we don't
+            // want the panel to fade mid-drag.
+            ImVec2 wp = ImGui::GetWindowPos();
+            ImVec2 ws = ImGui::GetWindowSize();
+            ImVec2 mp = ImGui::GetIO().MousePos;
+            bool in_rect = mp.x >= wp.x && mp.x < wp.x + ws.x &&
+                           mp.y >= wp.y && mp.y < wp.y + ws.y;
+            static bool s_was_hovering = false;
+            bool hovering = in_rect;
+            // Sticky-hover during drag — if we were over the panel
+            // and the user is still holding the mouse button, treat
+            // it as still-hovered even if the cursor escaped the rect.
+            if (!hovering && s_was_hovering &&
+                ImGui::GetIO().MouseDown[0]) {
+                hovering = true;
+            }
+            s_was_hovering = hovering;
+            float target = hovering ? kHoverAlpha : kIdleAlpha;
+            s_anim_alpha += (target - s_anim_alpha) * 0.18f;
+            if (std::fabs(s_anim_alpha - target) < 0.005f) s_anim_alpha = target;
+
+            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Animations");
+            ImGui::Separator();
+
+            // Transport bar — same shape as the audio player: round
+            // FA icon buttons (Stop / Play|Pause / Loop) above a
+            // scrubber that shows playhead + event markers. The
+            // decode side is still a no-op (Phase E scaffold) so the
+            // model holds rest pose while the clock advances; once
+            // the bit-packed body decoder lands, motion shows up
+            // automatically with no UI change needed.
+            {
+                auto& pl = Anim::global_player();
+                const auto* cur = pl.clip();
+                if (cur) {
+                    const float dur_s = Anim::clip_duration_seconds(*cur);
+                    const bool playing =
+                        (pl.state() == Anim::AnimPlayer::State::Playing);
+                    const bool paused  =
+                        (pl.state() == Anim::AnimPlayer::State::Paused);
+
+                    // ---- Transport row (Stop  Play/Pause  Loop) -----------
+                    const float btn_lg = 36.0f;
+                    const float btn_sm = 26.0f;
+                    const float gap    = 10.0f;
+                    const float row_w  = ImGui::GetContentRegionAvail().x;
+                    const float group_w = btn_sm + gap + btn_lg + gap + btn_sm;
+                    const float group_x = (row_w - group_w) * 0.5f;
+                    const float row_y   = ImGui::GetCursorPosY();
+                    const float sm_y    = row_y + (btn_lg - btn_sm) * 0.5f;
+
+                    ImGui::SetCursorPos(ImVec2(group_x, sm_y));
+                    if (UI::icon_button("##anim_stop", ICON_FA_STOP,
+                                        btn_sm, false)) {
+                        pl.stop();
+                    }
+
+                    ImGui::SetCursorPos(ImVec2(group_x + btn_sm + gap, row_y));
+                    const char* play_glyph = playing ? ICON_FA_PAUSE : ICON_FA_PLAY;
+                    // Play triangle's optical centre is left of its
+                    // bbox centre — same nudge the audio player uses.
+                    float play_dx = playing ? 0.0f : 0.17f;
+                    if (UI::icon_button("##anim_playpause", play_glyph,
+                                        btn_lg, true, false, play_dx)) {
+                        if (playing) pl.pause();
+                        else if (paused) pl.resume();
+                        else pl.play(cur, pl.is_loop());
+                    }
+
+                    ImGui::SetCursorPos(ImVec2(
+                        group_x + btn_sm + gap + btn_lg + gap, sm_y));
+                    bool loop = pl.is_loop();
+                    if (UI::icon_button("##anim_loop", ICON_FA_REPEAT,
+                                        btn_sm, false, loop)) {
+                        pl.set_loop(!loop);
+                    }
+
+                    // Move past the transport row.
+                    ImGui::Dummy(ImVec2(0, btn_lg + 4.0f));
+
+                    // ---- Time readout ------------------------------------
+                    ImGui::Text("%.2fs / %.2fs", pl.time(), dur_s);
+
+                    // ---- Scrubber + event markers ------------------------
+                    {
+                        const float scrub_h = 18.0f;
+                        ImGui::InvisibleButton("##anim_scrub",
+                                               ImVec2(-1, scrub_h));
+                        ImVec2 r0 = ImGui::GetItemRectMin();
+                        ImVec2 r1 = ImGui::GetItemRectMax();
+                        bool active = ImGui::IsItemActive();
+                        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+                        // Bar background.
+                        dl->AddRectFilled(r0, r1,
+                                          IM_COL32(20, 22, 28, 255), 4.0f);
+
+                        const float w = r1.x - r0.x;
+                        const float cy = (r0.y + r1.y) * 0.5f;
+                        const float prog = (dur_s > 0.0f)
+                            ? (pl.time() / dur_s) : 0.0f;
+                        const float playhead_x = r0.x + w * prog;
+
+                        // Filled "played" portion in blue accent.
+                        dl->AddRectFilled(r0,
+                                          ImVec2(playhead_x, r1.y),
+                                          IM_COL32(120, 200, 255, 200),
+                                          4.0f);
+
+                        // Event markers — vertical ticks at each event
+                        // time. Tooltip on hover (only if the user is
+                        // actually mousing the scrubber).
+                        bool hovered_event = false;
+                        std::string ev_tip;
+                        const ImVec2 mp = ImGui::GetIO().MousePos;
+                        for (const auto& ev : cur->events) {
+                            if (dur_s <= 0.0f) break;
+                            float t = ev.time / dur_s;
+                            if (t < 0.0f || t > 1.0f) continue;
+                            float ex = r0.x + w * t;
+                            dl->AddLine(ImVec2(ex, r0.y + 2),
+                                        ImVec2(ex, r1.y - 2),
+                                        IM_COL32(255, 200, 90, 230),
+                                        1.5f);
+                            // Detect cursor near this tick.
+                            if (ImGui::IsItemHovered() &&
+                                std::fabs(mp.x - ex) <= 4.0f &&
+                                !hovered_event) {
+                                hovered_event = true;
+                                ev_tip = ev.name;
+                                if (!ev.param.empty())
+                                    ev_tip += " — " + ev.param;
+                                char tbuf[16];
+                                std::snprintf(tbuf, sizeof(tbuf),
+                                              "  @ %.2fs", ev.time);
+                                ev_tip += tbuf;
+                            }
+                        }
+
+                        // Playhead — white vertical line, 2 px thick.
+                        dl->AddLine(ImVec2(playhead_x, r0.y + 1),
+                                    ImVec2(playhead_x, r1.y - 1),
+                                    IM_COL32(240, 245, 250, 255),
+                                    2.0f);
+
+                        // Drag-to-seek. Click anywhere on the bar
+                        // jumps the playhead; dragging works because
+                        // InvisibleButton stays Active while the
+                        // mouse is held.
+                        if (active && dur_s > 0.0f) {
+                            float t = (mp.x - r0.x) / w;
+                            if (t < 0.0f) t = 0.0f;
+                            if (t > 1.0f) t = 1.0f;
+                            pl.seek(t * dur_s);
+                        }
+
+                        if (hovered_event) {
+                            ImGui::SetTooltip("%s", ev_tip.c_str());
+                        }
+                    }
+                    // Only emit the trailing separator when a clip
+                    // is selected — otherwise the header separator
+                    // and this one would stack with no content
+                    // between, which looked like a duplicated line.
+                    ImGui::Separator();
+                }
+            }
+
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##anims_overlay_filter", "Filter",
+                                     &S.anim_filter);
+
+            // Per-model filter: only show clips whose bone count
+            // matches the loaded skeleton. Clip header carries the
+            // bone count; mismatched clips were authored for a
+            // different rig and would skin into nonsense (or get
+            // refused by AnimPlayer::apply_to_skeleton anyway).
+            //
+            // The filter is opt-out via a "Show all" toggle in dev
+            // mode so we can still browse the full bank when needed.
+            static bool s_show_all_clips = false;
+            if (S.dev_mode) {
+                ImGui::Checkbox("Show all (ignore skeleton)",
+                                &s_show_all_clips);
+            }
+            const uint32_t want_bones = g_mp.bone_count;
+            const bool filter_by_bones = !s_show_all_clips;
+
+            std::vector<int> vis;
+            vis.reserve(S.anim_clips.size());
+            std::string flow = S.anim_filter;
+            std::transform(flow.begin(), flow.end(), flow.begin(), ::tolower);
+            for (size_t i = 0; i < S.anim_clips.size(); ++i) {
+                if (filter_by_bones) {
+                    auto h = Anim::global_data_file().parse_clip_header(
+                        S.anim_clips[i]);
+                    if (!h.ok || h.bone_count != want_bones) continue;
+                }
+                if (flow.empty()) {
+                    vis.push_back((int)i);
+                } else {
+                    std::string nlow = S.anim_clips[i].name;
+                    std::transform(nlow.begin(), nlow.end(),
+                                   nlow.begin(), ::tolower);
+                    if (nlow.find(flow) != std::string::npos) {
+                        vis.push_back((int)i);
+                    }
+                }
+            }
+            if (S.dev_mode) {
+                ImGui::TextDisabled("%d / %zu  (skel=%u bones)",
+                                    (int)vis.size(),
+                                    S.anim_clips.size(),
+                                    g_mp.bone_count);
+            }
+
+            // Dev-only peek at the selected clip's parsed header.
+            // Header summary plus a collapsible per-bone byte view —
+            // useful while the bit-packed body decoder (Phase F) is
+            // being reverse-engineered. No-op outside dev mode.
+            if (S.dev_mode &&
+                S.anim_selected_clip >= 0 &&
+                S.anim_selected_clip < (int)S.anim_clips.size())
+            {
+                const auto& c = S.anim_clips[(size_t)S.anim_selected_clip];
+                ImGui::Separator();
+                if (Anim::global_data_file().is_open()) {
+                    auto h = Anim::global_data_file().parse_clip_header(c);
+                    if (h.ok) {
+                        ImGui::TextDisabled(
+                            "bones=%u idx_bits=%u frames=%u",
+                            h.bone_count, h.bone_idx_bits, h.field_C);
+
+                        // Per-bone byte stats. Each entry: bone index,
+                        // body byte length (between consecutive
+                        // offsets in the directory), and the first 4
+                        // bytes of the body in hex. Helps eyeball
+                        // whether sibling bones use the same encoding
+                        // (similar prefixes) or wildly different
+                        // ones.
+                        if (ImGui::TreeNodeEx("##anim_bone_view",
+                                              ImGuiTreeNodeFlags_None,
+                                              "Per-bone bodies")) {
+                            auto sp = Anim::global_data_file().clip_bytes(c);
+                            const size_t total = sp.size;
+                            ImGui::BeginChild("##anim_bone_list",
+                                              ImVec2(0, 120), false,
+                                              ImGuiWindowFlags_HorizontalScrollbar);
+                            for (uint32_t bi = 0; bi < h.bone_count; ++bi) {
+                                uint32_t bo = h.bone_offsets[bi];
+                                uint32_t be = (bi + 1 < h.bone_count)
+                                    ? h.bone_offsets[bi + 1]
+                                    : (uint32_t)total;
+                                if (be < bo || be > total) continue;
+                                uint32_t blen = be - bo;
+                                char hexbuf[3 * 4 + 1] = "??";
+                                if (bo + 4 <= total) {
+                                    std::snprintf(hexbuf, sizeof(hexbuf),
+                                                  "%02X %02X %02X %02X",
+                                                  sp.data[bo + 0],
+                                                  sp.data[bo + 1],
+                                                  sp.data[bo + 2],
+                                                  sp.data[bo + 3]);
+                                }
+                                ImGui::TextDisabled(
+                                    "bone %3u  len=%5u  first4: %s",
+                                    bi, blen, hexbuf);
+                            }
+                            ImGui::EndChild();
+                            ImGui::TreePop();
+                        }
+                    } else {
+                        ImGui::TextDisabled(
+                            "(unrecognised clip header: m=0x%08X v=%u)",
+                            h.magic, h.version);
+                    }
+                } else {
+                    ImGui::TextDisabled("(data file not loaded)");
+                }
+                ImGui::Separator();
+            }
+
+            ImGui::BeginChild("##anims_overlay_list", ImVec2(0, 0), false);
+            ImGuiListClipper clipper;
+            clipper.Begin((int)vis.size());
+            while (clipper.Step()) {
+                for (int row = clipper.DisplayStart;
+                     row < clipper.DisplayEnd; ++row) {
+                    const auto& c =
+                        S.anim_clips[(size_t)vis[(size_t)row]];
+                    ImGui::PushID(row);
+                    bool selected =
+                        (S.anim_selected_clip == vis[(size_t)row]);
+                    char label[80];
+                    float dur_s = Anim::clip_duration_seconds(c);
+                    std::snprintf(label, sizeof(label), "%s  (%.2fs)",
+                                  c.name.c_str(), dur_s);
+                    if (ImGui::Selectable(label, selected,
+                                          ImGuiSelectableFlags_SpanAllColumns)) {
+                        S.anim_selected_clip = vis[(size_t)row];
+                        // Click → play. Holds the pointer into
+                        // S.anim_clips (lifetime is the session, so
+                        // the player's reference stays valid until
+                        // the user opens a different root).
+                        Anim::global_player().play(
+                            &S.anim_clips[(size_t)vis[(size_t)row]],
+                            /*loop=*/Anim::global_player().is_loop());
+                    }
+                    if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                        ImGui::BeginTooltip();
+                        ImGui::TextUnformatted(c.name.c_str());
+                        ImGui::Text("Duration: %.3f s  (%.0f fps)",
+                                    dur_s, c.fps);
+                        ImGui::Text("Events: %zu", c.events.size());
+                        if (S.dev_mode) {
+                            ImGui::Text("offset=0x%08X len=%u",
+                                        c.data_offset, c.data_length);
+                        }
+                        ImGui::EndTooltip();
+                    }
+                    ImGui::PopID();
+                }
+            }
+            clipper.End();
+            ImGui::EndChild();
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
     }
 
     // ---- Texture popout window ------------------------------------------

@@ -43,6 +43,65 @@ void process_pending_loads() {
         std::string parse_path = g_pending_mdl_full_path.empty() ? name : g_pending_mdl_full_path;
         g_pending_mdl_full_path.clear();
 
+        // Synchronous main-thread cleanup BEFORE kicking the parse
+        // worker. Anything the render panel might dereference next
+        // frame has to be torn down here, on the same thread that
+        // does the drawing — otherwise the worker can free a D3D
+        // resource (texture SRV, mesh array) right while ImGui is
+        // walking it for AddImage / IsItemHovered. That race was the
+        // source of the "switching from texture preview to model
+        // crashes / shows weird things" bug.
+        //
+        // Order matters: drop the texture-preview SRV first so the
+        // render panel falls through to the placeholder while the
+        // new model parses, then mark the existing model preview as
+        // "no model" so the Materials/Skeleton overlays short-circuit.
+        // The worker still owns the heavy MP_Release / MP_Init /
+        // MP_Build sequence below; flipping has_model = false here
+        // just stops the UI from iterating g_mp.meshes mid-rebuild.
+#ifdef _WIN32
+        if (S.texture_window_srv) {
+            S.texture_window_srv->Release();
+            S.texture_window_srv = nullptr;
+        }
+        // Texture popout points into the materials' SRVs of whatever
+        // model is going away — close it so it doesn't repaint with a
+        // dangling pointer.
+        extern ID3D11ShaderResourceView* g_tex_popout_srv;
+        extern std::string                g_tex_popout_name;
+        extern bool                       g_tex_popout_open;
+        extern int                        g_tex_popout_mesh_idx;
+        g_tex_popout_srv      = nullptr;
+        g_tex_popout_name.clear();
+        g_tex_popout_open     = false;
+        g_tex_popout_mesh_idx = -1;
+#else
+        if (S.texture_window_gl) {
+            glDeleteTextures(1, &S.texture_window_gl);
+            S.texture_window_gl = 0;
+        }
+#endif
+        S.texture_window_name.clear();
+        S.texture_window_width  = 0;
+        S.texture_window_height = 0;
+        S.texture_blob.clear();
+        S.tex_info_ok           = false;
+        S.show_texture_window   = false;
+        S.show_preview_popup    = false;
+        S.preview_mip_index     = -1;
+
+        // Materials/skeleton overlay state — same reasoning. We don't
+        // reach into g_mp here (the worker will MP_Release it); we
+        // just stop the overlays from iterating its data this frame.
+        extern ModelPreview g_mp;
+        if (g_mp.has_model) g_mp.has_model = false;
+        S.mdl_info_ok        = false;
+        S.show_model_preview = false;
+        S.model_preview_open = false;
+        S.model_materials_open = false;
+        S.selected_bone      = -1;
+        S.bone_rotate_mode   = false;
+
         std::string bnk_to_use;
         std::string nested_temp_copy;
         bool is_nested = false;

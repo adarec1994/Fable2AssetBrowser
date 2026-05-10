@@ -6,7 +6,7 @@ Browse the Fable 2 BNK files. Included features:
 - Export textures.
 - Export audio files.
 - More coming soon.
-
+- Animations are currently a WIP - there are lots of references, but they do not currently work!
 
 ## How to use
 - Acquire a legitimate copy of Fable 2.
@@ -33,6 +33,7 @@ And here is an example of some textures:
 ![TextureSample2.png](images/TextureSample2.png)
 
 Audio playback controls:
+
 ![AudioControls.png](images/AudioControls.png)
 
 ## How to Contribute

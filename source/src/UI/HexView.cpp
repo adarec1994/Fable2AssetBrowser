@@ -631,7 +631,6 @@ void draw_hex_window() {
                             os << "CompFlag=" << m.CompFlag
                                << " with PixelFormat=" << S.tex_info.PixelFormat
                                << " — only BC1 (35) compressed mips are supported by the codec port";
-                            log_tagged("mip preview", os.str());
                             ImGui::TextUnformatted("Compressed non-BC1 preview not supported yet.");
                             if(ImGui::Button("Close", ImVec2(-1,0))) ImGui::CloseCurrentPopup();
                             ImGui::EndPopup();
@@ -641,12 +640,7 @@ void draw_hex_window() {
                         const size_t body_start = m.DefOffset + 48;
                         const size_t body_size  = m.DataSize;
                         if (body_start + body_size > S.hex_data.size()) {
-                            std::ostringstream os;
-                            os << "compressed mip body OOB (start=" << body_start
-                               << " size=" << body_size
-                               << " hex_data=" << S.hex_data.size() << ")";
-                            log_tagged("mip preview", os.str());
-                            ImGui::TextUnformatted("Compressed mip body OOB (see tex_errors.log).");
+                            ImGui::TextUnformatted("Compressed mip body out of bounds.");
                             if(ImGui::Button("Close", ImVec2(-1,0))) ImGui::CloseCurrentPopup();
                             ImGui::EndPopup();
                             return;
@@ -656,8 +650,8 @@ void draw_hex_window() {
                         int dec_w = 0, dec_h = 0;
                         std::string err;
                         if (!lh_decode_compressed_mip(body_ptr, body_size, dec_w, dec_h, payload, &err)) {
-                            log_tagged("mip preview", "lh_decode_compressed_mip failed: " + err);
-                            ImGui::TextUnformatted("Compressed mip decode failed (see tex_errors.log).");
+                            ImGui::TextUnformatted(
+                                ("Compressed mip decode failed: " + err).c_str());
                             if(ImGui::Button("Close", ImVec2(-1,0))) ImGui::CloseCurrentPopup();
                             ImGui::EndPopup();
                             return;
@@ -689,7 +683,6 @@ void draw_hex_window() {
                            << ", fmt=" << (int)fmt
                            << ", payload=" << payload.size()
                            << ", pitch=" << pitch << ")";
-                        log_tagged("mip preview", os.str());
                     }
                 }
             }

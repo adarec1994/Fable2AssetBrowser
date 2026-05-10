@@ -1,78 +1,8 @@
 #include "LhTexCodec.h"
-#include <iostream>
-#include <fstream>
 #include <sstream>
 #include <deque>
-#include <mutex>
-#include <ctime>
 #include <cstring>
 #include <cstdint>
-#include <filesystem>
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
-namespace {
-
-std::mutex g_log_mutex;
-std::ofstream g_log_file;
-bool g_log_open_attempted = false;
-
-std::filesystem::path exe_directory() {
-#ifdef _WIN32
-    char buf[MAX_PATH * 2] = {0};
-    DWORD n = GetModuleFileNameA(nullptr, buf, sizeof(buf));
-    if (n == 0 || n >= sizeof(buf)) return std::filesystem::current_path();
-    return std::filesystem::path(buf).parent_path();
-#else
-    return std::filesystem::current_path();
-#endif
-}
-
-void ensure_log_open() {
-    if (g_log_open_attempted) return;
-    g_log_open_attempted = true;
-    auto path = exe_directory() / "tex_errors.log";
-    g_log_file.open(path, std::ios::out | std::ios::app);
-    if (g_log_file.is_open()) {
-        std::time_t t = std::time(nullptr);
-        char ts[32] = {0};
-        std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", std::localtime(&t));
-        g_log_file << "\n--- session started " << ts << " ---\n";
-        g_log_file.flush();
-    } else {
-        std::cerr << "[Logger] failed to open log at " << path.string()
-                  << " — falling back to stderr only\n";
-    }
-}
-
-std::string current_timestamp() {
-    std::time_t t = std::time(nullptr);
-    char ts[32] = {0};
-    std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", std::localtime(&t));
-    return ts;
-}
-
-}
-
-void log_line(const std::string& msg) {
-    std::lock_guard<std::mutex> lk(g_log_mutex);
-    ensure_log_open();
-    std::string line = current_timestamp() + " " + msg + "\n";
-    if (g_log_file.is_open()) {
-        g_log_file << line;
-        g_log_file.flush();
-    }
-
-    std::cerr << line;
-}
-
-void log_tagged(const char* tag, const std::string& msg) {
-    std::ostringstream os;
-    os << "[" << (tag ? tag : "?") << "] " << msg;
-    log_line(os.str());
-}
 
 namespace {
 
@@ -295,7 +225,6 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
                               bool comp11_layout)
 {
     auto fail = [&](const std::string& msg) -> bool {
-        log_tagged("LhTexCodec", msg);
         if (err) *err = msg;
         return false;
     };
@@ -469,7 +398,6 @@ bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,
                              std::vector<uint8_t>& out_bytes,
                              std::string* err) {
     auto fail = [&](const std::string& msg) -> bool {
-        log_tagged("LhTexCodec", msg);
         if (err) *err = msg;
         return false;
     };

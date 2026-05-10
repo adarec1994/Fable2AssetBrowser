@@ -608,10 +608,8 @@ if (!can_preview) {
                             S.preview_mip_index = best_mip;
                             S.show_preview_popup = true;
                         } else {
-                            log_tagged("preview", "no mip found for " + name);
                         }
                     } else if (!S.tex_info_ok) {
-                        log_tagged("preview", "parse_tex_info failed for " + name);
                     }
                 } else if (can_mdl) {
                     S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info, name);
@@ -1115,9 +1113,7 @@ if (!can_preview) {
         std::thread([name, preferred_for_tex]() {
             std::vector<unsigned char> tex_buf;
             if (!build_any_tex_buffer_for_name(name, tex_buf, preferred_for_tex)) {
-                log_tagged("texture window",
-                           "build_any_tex_buffer_for_name failed for " + name);
-                S.texture_window_name = "ERROR: Could not load texture file (see tex_errors.log)";
+                S.texture_window_name = "ERROR: Could not load texture file";
                 S.pending_texture_load = true;
                 S.pending_texture_w = 0;
                 S.pending_texture_h = 0;
@@ -1129,9 +1125,7 @@ if (!can_preview) {
             int w = 0, h = 0;
             bool has_alpha = false;
             if (!decode_tex_to_rgba(tex_buf, rgba, w, h, &has_alpha)) {
-                log_tagged("texture window",
-                           "decode_tex_to_rgba failed for " + name);
-                S.texture_window_name = "ERROR: Could not decode texture (see tex_errors.log)";
+                S.texture_window_name = "ERROR: Could not decode texture";
                 S.pending_texture_load = true;
                 S.pending_texture_w = 0;
                 S.pending_texture_h = 0;

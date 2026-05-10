@@ -290,42 +290,13 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     }
 
     int open_rc = avcodec_open2(ctx, codec, nullptr);
-    int open_attempts = 1;
 
     if (open_rc < 0) {
-
-        try {
-            std::ofstream log("xma_debug.log", std::ios::app);
-            char hdr[160];
-            std::snprintf(hdr, sizeof(hdr),
-                "avcodec_open2 failed rc=%d fmt=0x%04X ch=%u rate=%u blkalign=%u extra=%d attempts=%d fmtsz=%zu riff_off=%d filesz=%zu\n",
-                open_rc, format_tag, fmt_channels, fmt_rate, block_align,
-                ctx->extradata_size, open_attempts, fmt->data_size, riff_off, wav_bytes.size());
-            log << hdr;
-            log << "first 128 bytes:";
-            for (size_t i = 0; i < wav_bytes.size() && i < 128; ++i) {
-                char hx[8]; std::snprintf(hx, sizeof(hx), " %02X", wav_bytes[i]);
-                log << hx;
-            }
-            log << "\n";
-            log << "fmt chunk @ off=" << fmt->data_off << " size=" << fmt->data_size << ":";
-            for (size_t i = 0; i < fmt->data_size && i < 128; ++i) {
-                char hx[8]; std::snprintf(hx, sizeof(hx), " %02X", fmt_p[i]);
-                log << hx;
-            }
-            log << "\n";
-            log << "data chunk @ off=" << data->data_off << " size=" << data->data_size << " (first 32):";
-            for (size_t i = 0; i < data->data_size && i < 32; ++i) {
-                char hx[8]; std::snprintf(hx, sizeof(hx), " %02X", wav_bytes[data->data_off + i]);
-                log << hx;
-            }
-            log << "\n\n";
-        } catch (...) {}
-
-        char b[200];
+        char b[160];
         std::snprintf(b, sizeof(b),
-            "avcodec_open2 rc=%d (fmt=0x%04X ch=%u rate=%u blkalign=%u extra=%d). See xma_debug.log.",
-            open_rc, format_tag, fmt_channels, fmt_rate, block_align, ctx->extradata_size);
+            "avcodec_open2 rc=%d (fmt=0x%04X ch=%u rate=%u blkalign=%u extra=%d).",
+            open_rc, format_tag, fmt_channels, fmt_rate, block_align,
+            ctx->extradata_size);
         avcodec_free_context(&ctx);
         if (err_out) *err_out = b;
         return false;

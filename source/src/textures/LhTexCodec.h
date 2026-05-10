@@ -4,9 +4,6 @@
 #include <vector>
 #include <string>
 
-void log_line(const std::string& msg);
-void log_tagged(const char* tag, const std::string& msg);
-
 bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
                               int& out_width, int& out_height,
                               std::vector<uint8_t>& out_bc1,

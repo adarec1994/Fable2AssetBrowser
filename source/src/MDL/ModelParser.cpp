@@ -14,26 +14,6 @@
 
 using std::uint8_t; using std::uint16_t; using std::uint32_t;
 
-#ifndef MDL_DEBUG_LOG
-#define MDL_DEBUG_LOG 0
-#endif
-
-#if MDL_DEBUG_LOG
-static void mdl_dbg(const char* fmt, ...){
-    static const char* path = "mdl_parser_debug.log";
-    FILE* f = std::fopen(path, "a");
-    if(!f) return;
-    va_list ap;
-    va_start(ap, fmt);
-    std::vfprintf(f, fmt, ap);
-    va_end(ap);
-    std::fputc('\n', f);
-    std::fclose(f);
-}
-#else
-static inline void mdl_dbg(const char*, ...) {}
-#endif
-
 bool build_mdl_buffer_for_name(const std::string &mdl_name, std::vector<unsigned char> &out){
     auto p_headers = find_bnk_by_filename("globals_model_headers.bnk");
     auto p_rest    = find_bnk_by_filename("globals_models.bnk");
@@ -150,14 +130,8 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
                       (path_lower.find("/foliage\\") != std::string::npos) ||
                       (path_lower.find("\\foliage/") != std::string::npos);
 
-    mdl_dbg("=== parse_mdl_info ===");
-    mdl_dbg("  file_path=%s", file_path.c_str());
-    mdl_dbg("  data.size=%zu  is_foliage=%d", data.size(), (int)is_foliage);
-
     std::string magic((const char*)r.p, 8);
     bool has_magic = (magic == "MeshFile");
-    mdl_dbg("  has_magic=%d  magic_first8=%02x %02x %02x %02x %02x %02x %02x %02x",
-            (int)has_magic, r.p[0], r.p[1], r.p[2], r.p[3], r.p[4], r.p[5], r.p[6], r.p[7]);
 
     if(has_magic){
         out.Magic = magic;
@@ -234,22 +208,16 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
             }
             if(!ok){
                 r.i = save;
-                mdl_dbg("  tag validation FAILED, position restored");
             } else {
-                mdl_dbg("  tag_count=%u  read %zu tags:", (unsigned)tag_count, tags.size());
                 for(const auto& t : tags){
-                    mdl_dbg("    tag: '%s'", t.c_str());
                     if(t == "IsTree" || t == "NewTree"){ has_tree_tag = true; }
                 }
             }
         } else if(tag_count != 0){
             r.i = save;
-            mdl_dbg("  tag_count=%u out of range, restored", (unsigned)tag_count);
         } else {
-            mdl_dbg("  tag_count=0 (no tags)");
         }
     }
-    mdl_dbg("  has_tree_tag=%d  r.i after tags=0x%zx", (int)has_tree_tag, r.i);
     if(!r.skip(5*4)) return false;
 
     if(!r.u32be(out.Unk6Count)) return false;
@@ -268,9 +236,6 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
     out.Meshes.clear(); out.Meshes.reserve(out.MeshCount);
     out.MeshBuffers.clear(); out.MeshBuffers.reserve(out.MeshCount);
 
-    mdl_dbg("  MeshCount=%u  Unk6Count=%u  StringBlockCount=%u  r.i before mesh loop=0x%zx",
-            out.MeshCount, out.Unk6Count, StringBlockCount, r.i);
-
     for(uint32_t mi=0; mi<out.MeshCount; ++mi){
         uint32_t u1=0; if(!r.u32be(u1)) return false;
         std::string meshName; if(!r.strz(meshName)) return false;
@@ -279,7 +244,6 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
         float f4; if(!r.f32be(f4)) return false;
         uint32_t u5[3]; for(int k=0;k<3;k++) if(!r.u32be(u5[k])) return false;
         uint32_t mcount=0; if(!r.u32be(mcount)) return false;
-        mdl_dbg("  mesh[%u] name='%s'  mcount=%u  r.i=0x%zx", mi, meshName.c_str(), mcount, r.i);
         MDLMeshInfo mesh; mesh.MeshName=meshName; mesh.MaterialCount=mcount;
         if(mcount>0 && mcount<65535u){
             mesh.Materials.reserve(mcount);
@@ -304,16 +268,12 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
                                 }
                             }
                         }
-                        mdl_dbg("    [tree] mi=%u inter-mesh scan from 0x%zx %s, r.i=0x%zx",
-                                mi, scan_from, used_scan?"FOUND":"FAILED", r.i);
                     } else {
                         for(size_t p = r.i; p + 7 <= end_search; ++p){
                             if(r.p[p+2]==0x01 && r.p[p+3]==0 && r.p[p+4]==0 && r.p[p+5]==0 && r.p[p+6]==0){
                                 r.i = p; used_scan = true; break;
                             }
                         }
-                        mdl_dbg("    [tree] mi=%u (LAST) foliage-section scan from 0x%zx %s, r.i=0x%zx",
-                                mi, scan_from, used_scan?"FOUND":"FAILED", r.i);
                     }
                 }
                 if(!used_scan){
@@ -356,13 +316,9 @@ if(is_foliage){
             }
         }
     }
-    mdl_dbg("  class-tag detection: has_class_tag=%d tag='%s'  r.i=0x%zx",
-            (int)has_class_tag, class_tag.c_str(), r.i);
 
-    mdl_dbg("  >> foliage branch entered, r.i=0x%zx", r.i);
     uint16_t unk2bytes = 0;
     if(!r.u16be(unk2bytes)) return false;
-    mdl_dbg("  unk2bytes=0x%04x  r.i=0x%zx", unk2bytes, r.i);
 
     bool is_tree_foliage = false;
     {
@@ -371,10 +327,7 @@ if(is_foliage){
         if(r.u8(peek) && peek == 0x01){
             uint32_t check_f0 = 0;
             if(r.u32be(check_f0) && check_f0 == 0) is_tree_foliage = true;
-            mdl_dbg("    tree-detect: peek=0x%02x  check_f0=0x%08x  → is_tree_foliage=%d",
-                    peek, check_f0, (int)is_tree_foliage);
         } else {
-            mdl_dbg("    tree-detect: peek=0x%02x (not 0x01) → plant path", peek);
         }
         r.i = save;
     }
@@ -382,7 +335,6 @@ if(is_foliage){
     if(is_tree_foliage){
         uint8_t tree_flag = 0;
         if(!r.u8(tree_flag)) return false;
-        mdl_dbg("  tree path: tree_flag=0x%02x", tree_flag);
 
         for(uint32_t mi=0; mi<out.MeshCount; ++mi){
 
@@ -391,9 +343,6 @@ if(is_foliage){
 
             uint32_t vtx     = fields[3];
             uint32_t face_ic = fields[2];
-
-            mdl_dbg("    tree-mesh[%u] vtx=%u face_ic=%u r.i=0x%zx (header 4 u32: %u %u %u %u)",
-                    mi, vtx, face_ic, r.i, fields[0], fields[1], fields[2], fields[3]);
 
             MDLMeshBufferInfo mb;
             mb.VertexCount       = vtx;
@@ -430,9 +379,6 @@ if(is_foliage){
             uint32_t vtx     = fields[3];
             uint32_t face_ic = fields[2];
 
-            mdl_dbg("    plant-mesh[%u] vtx=%u face_ic=%u r.i=0x%zx (header 4 u32: %u %u %u %u)  has_class_tag=%d",
-                    mi, vtx, face_ic, r.i, fields[0], fields[1], fields[2], fields[3], (int)has_class_tag);
-
             uint32_t stride_used = 0;
             size_t vert_off = 0, face_off = 0;
 
@@ -441,7 +387,6 @@ if(is_foliage){
 
             if(!sane){
 
-                mdl_dbg("    plant-mesh[%u] insane vtx/face values; halting at this mesh", mi);
                 MDLMeshBufferInfo mb;
                 mb.VertexCount = 0; mb.VertexOffset = 0;
                 mb.FaceCount = 0; mb.FaceOffset = 0;
@@ -502,8 +447,6 @@ if(is_foliage){
                                 si.StartIndex = sub_start;
                                 si.MaterialIndex = sub_mat;
                                 bw_subs.push_back(si);
-                                mdl_dbg("    plant-mesh[%u] sub[%u] matIdx=%u faceCount=%u startIdx=%u",
-                                        mi, s, (unsigned)sub_mat, sub_face, sub_start);
                             }
                             if(sub_ok){
                                 vert_off = r.i;
@@ -512,12 +455,8 @@ if(is_foliage){
                                 if(!r.skip((size_t)face_ic * 2)) return false;
                                 stride_used = 20;
                                 bw_ok = true;
-                                mdl_dbg("    plant-mesh[%u] BW stride-20 OK (sub_count=%u, vert_off=0x%zx, face_off=0x%zx)",
-                                        mi, sub_count, vert_off, face_off);
                             }
                         } else {
-                            mdl_dbg("    plant-mesh[%u] BW stride-20 size mismatch (need=%zu rem=%zu)",
-                                    mi, need, r.n - r.i);
                         }
                     }
                 }
@@ -535,7 +474,6 @@ if(is_foliage){
                         stride_used = 0;
                         vert_off = hdr_start;
                         face_off = 0;
-                        mdl_dbg("    plant-mesh[%u] no recognised format (class-tagged); empty geom", mi);
 
                         MDLMeshBufferInfo mb;
                         mb.VertexCount = vtx; mb.VertexOffset = vert_off;
@@ -936,20 +874,12 @@ if(is_foliage){
 
 bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& info, std::vector<MDLMeshGeom>& out){
     out.clear();
-    mdl_dbg("=== parse_mdl_geometry === MeshBuffers=%zu Meshes=%zu",
-            info.MeshBuffers.size(), info.Meshes.size());
     if(info.MeshBuffers.size()!=info.Meshes.size()){
-        mdl_dbg("  MISMATCH MeshBuffers vs Meshes — returning empty");
         return true;
     }
     R r{data.data(), data.size(), 0};
     for(size_t mi=0; mi<info.MeshBuffers.size(); ++mi){
         const auto& mb=info.MeshBuffers[mi];
-        mdl_dbg("  geom[%zu] name='%s' vtx=%u face=%u stride=%u IsFoliage=%d voff=0x%zx foff=0x%zx",
-                mi,
-                mi<info.Meshes.size()?info.Meshes[mi].MeshName.c_str():"",
-                mb.VertexCount, mb.FaceCount, mb.FoliageVertexStride,
-                (int)mb.IsFoliagePath, mb.VertexOffset, mb.FaceOffset);
 
         if(mb.IsFoliagePath){
 
@@ -963,7 +893,6 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                     if(mi<info.Meshes.size() && !info.Meshes[mi].MeshName.empty())
                         g.name=info.Meshes[mi].MeshName;
                     g.MeshIndex=(uint32_t)mi;
-                    mdl_dbg("    [bw20-geom] BAILED bounds for mesh '%s'", g.name.c_str());
                     out.push_back(std::move(g));
                     continue;
                 }
@@ -1010,8 +939,6 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                     g.name=info.Meshes[mi].MeshName;
                 else
                     g.name="mesh_"+std::to_string(mi);
-                mdl_dbg("    [bw20-geom] OK name='%s' positions=%u indices=%zu normals=%zu uvs=%zu hasFFFF=%d tex='%s'",
-                        g.name.c_str(), mb.VertexCount, g.indices.size(), g.normals.size()/3, g.uvs.size()/2, (int)hasFFFF, g.diffuse_tex_name.c_str());
                 out.push_back(std::move(g));
                 continue;
             }
@@ -1026,7 +953,6 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                     if(mi<info.Meshes.size() && !info.Meshes[mi].MeshName.empty())
                         g.name=info.Meshes[mi].MeshName;
                     g.MeshIndex=(uint32_t)mi;
-                    mdl_dbg("    [plant-geom] empty geom (bounds fail or stride unknown) for mesh '%s'", g.name.c_str());
                     out.push_back(std::move(g));
                     continue;
                 }
@@ -1077,8 +1003,6 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                 if(mb.VertexCount==0 || mb.FaceCount==0 ||
                    mb.VertexOffset+(size_t)mb.VertexCount*36>r.n ||
                    mb.FaceOffset+(size_t)mb.FaceCount*2>r.n){
-                    mdl_dbg("    [tree-geom] BAILED: vtx=%u face=%u voff=0x%zx foff=0x%zx data=%zu",
-                            mb.VertexCount, mb.FaceCount, mb.VertexOffset, mb.FaceOffset, r.n);
                     MDLMeshGeom g;
                     if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty())
                         { g.diffuse_tex_name=info.Meshes[mi].Materials[0].TextureName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalMapName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularMapName; g.tint_tex_name=info.Meshes[mi].Materials[0].TintName; }
@@ -1120,9 +1044,6 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                     g.name=info.Meshes[mi].MeshName;
                 else
                     g.name="mesh_"+std::to_string(mi);
-                mdl_dbg("    [tree-geom] OK name='%s' positions=%zu uvs=%zu indices=%zu hasFFFF=%d tex='%s'",
-                        g.name.c_str(), g.positions.size()/3, g.uvs.size()/2, g.indices.size(),
-                        (int)hasFFFF, g.diffuse_tex_name.c_str());
                 out.push_back(std::move(g));
                 continue;
             }

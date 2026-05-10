@@ -248,7 +248,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
     if (out_has_alpha) *out_has_alpha = false;
     TexInfo ti{};
     if (!parse_tex_info(blob, ti) || ti.Mips.empty()) {
-        log_tagged("decode_tex_to_rgba", "parse_tex_info failed or no mips");
         return false;
     }
 
@@ -286,7 +285,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         std::ostringstream os;
         os << "mip[" << best << "] data out of bounds (offset=" << m.MipDataOffset
            << " size=" << m.MipDataSizeParsed << " blob=" << blob.size() << ")";
-        log_tagged("decode_tex_to_rgba", os.str());
         return false;
     }
 
@@ -299,9 +297,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
     if (m.CompFlag == 7) {
         if (ti.PixelFormat == 35) {
             if (m.MipDataSizeParsed < sz_bc1) {
-                std::ostringstream os;
-                os << "BC1 raw mip too small (" << m.MipDataSizeParsed << " < " << sz_bc1 << ")";
-                log_tagged("decode_tex_to_rgba", os.str());
                 return false;
             }
             std::vector<uint8_t> swapped(src, src + sz_bc1);
@@ -313,9 +308,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         }
         if (ti.PixelFormat == 39) {
             if (m.MipDataSizeParsed < sz_bc3) {
-                std::ostringstream os;
-                os << "BC3 raw mip too small (" << m.MipDataSizeParsed << " < " << sz_bc3 << ")";
-                log_tagged("decode_tex_to_rgba", os.str());
                 return false;
             }
             std::vector<uint8_t> swapped(src, src + sz_bc3);
@@ -328,9 +320,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         if (ti.PixelFormat == 40) {
 
             if (m.MipDataSizeParsed < sz_bc3) {
-                std::ostringstream os;
-                os << "BC5 raw mip too small (" << m.MipDataSizeParsed << " < " << sz_bc3 << ")";
-                log_tagged("decode_tex_to_rgba", os.str());
                 return false;
             }
             std::vector<uint8_t> swapped(src, src + sz_bc3);
@@ -347,7 +336,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             os << "unknown raw format and data too small for RGBA ("
                << m.MipDataSizeParsed << " < " << sz_raw
                << ", PixelFormat=" << ti.PixelFormat << ")";
-            log_tagged("decode_tex_to_rgba", os.str());
             return false;
         }
         rgba.assign(sz_raw, 0xFF);
@@ -403,7 +391,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 std::ostringstream os;
                 os << "variant_2_3_4 BC5 X-channel (" << w << "x" << h
                    << ") failed: " << err_x << " — falling back to comp=7";
-                log_tagged("decode_tex_to_rgba", os.str());
 
             }
         }
@@ -431,7 +418,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 os << "PixelFormat " << ti.PixelFormat
                    << " is compressed and no comp=7 fallback exists; "
                       "Lionhead codec port currently handles BC1 (35) only";
-                log_tagged("decode_tex_to_rgba", os.str());
                 return false;
             }
             const auto& fm = ti.Mips[fallback_idx];
@@ -439,14 +425,12 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             const size_t fbx = (size_t)((fw + 3) / 4);
             const size_t fby = (size_t)((fh + 3) / 4);
             if (fm.MipDataOffset + fm.MipDataSizeParsed > blob.size()) {
-                log_tagged("decode_tex_to_rgba", "fallback mip OOB");
                 return false;
             }
             const uint8_t* fsrc = blob.data() + fm.MipDataOffset;
             if (ti.PixelFormat == 39 || ti.PixelFormat == 1 ||
                 ti.PixelFormat == 2  || ti.PixelFormat == 3) {
                 if (fm.MipDataSizeParsed < fbx * fby * 16) {
-                    log_tagged("decode_tex_to_rgba", "BC3 fallback mip too small");
                     return false;
                 }
                 std::vector<uint8_t> swapped(fsrc, fsrc + fbx * fby * 16);
@@ -459,7 +443,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             if (ti.PixelFormat == 40) {
 
                 if (fm.MipDataSizeParsed < fbx * fby * 16) {
-                    log_tagged("decode_tex_to_rgba", "BC5 fallback mip too small");
                     return false;
                 }
                 std::vector<uint8_t> swapped(fsrc, fsrc + fbx * fby * 16);
@@ -468,11 +451,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 out_w = fw; out_h = fh;
                 if (out_has_alpha) *out_has_alpha = false;
                 return true;
-            }
-            {
-                std::ostringstream os;
-                os << "unhandled PixelFormat " << ti.PixelFormat << " for fallback path";
-                log_tagged("decode_tex_to_rgba", os.str());
             }
             return false;
         }
@@ -483,7 +461,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             std::ostringstream os;
             os << "compressed mip body OOB (start=" << body_start
                << " size=" << body_size << " blob=" << blob.size() << ")";
-            log_tagged("decode_tex_to_rgba", os.str());
             return false;
         }
         const uint8_t* body_ptr = blob.data() + body_start;
@@ -499,7 +476,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             std::ostringstream os;
             os << "lh_decode_compressed_mip failed for mip[" << best << "] "
                << w << "x" << h << " (comp=" << m.CompFlag << "): " << err;
-            log_tagged("decode_tex_to_rgba", os.str());
             return false;
         }
 
@@ -507,7 +483,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             std::ostringstream os;
             os << "WARNING: codec reported " << dec_w << "x" << dec_h
                << " but TexInfo says " << w << "x" << h << "; trusting codec";
-            log_tagged("decode_tex_to_rgba", os.str());
             w = dec_w; h = dec_h;
         }
         blit_bc1_to_rgba(bc1.data(), w, h, rgba);
@@ -517,14 +492,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             const size_t a_body_start = m.DefOffset + (size_t)m.Unknown_4;
             const size_t a_body_size  = (size_t)m.Unknown_5;
             const uint32_t a_cf = m.Unknown_3;
-            {
-                std::ostringstream os;
-                os << "BC3 mip[" << best << "] color comp=" << m.CompFlag
-                   << " alpha comp=" << a_cf
-                   << " alpha_off=" << a_body_start
-                   << " alpha_size=" << a_body_size;
-                log_tagged("decode_tex_to_rgba", os.str());
-            }
 
             if (a_body_start + a_body_size <= blob.size()) {
                 std::vector<uint8_t> alpha_blocks;
@@ -596,9 +563,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                         }
                     }
                 } else if (!aok) {
-                    std::ostringstream os;
-                    os << "BC3 alpha decode failed (cf=" << a_cf << "): " << aerr;
-                    log_tagged("decode_tex_to_rgba", os.str());
 
                 }
             }

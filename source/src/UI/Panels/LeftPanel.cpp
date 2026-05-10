@@ -11,6 +11,41 @@
 #include <unordered_map>
 #include <cstring>
 
+// Tab-button label list — single source of truth shared between the
+// draw_left_panel renderer and the left_panel_min_width helper that
+// MainLayout uses to clamp the splitter. Adding a new tab means
+// touching this one list; widths and click handlers update in step.
+static const char* const kLeftPanelTabLabels[] = {
+    "BNK List", "File Tree", "Models", "Textures", "Audio", "Animations"
+};
+
+// Compute the per-button width that fits the longest tab label plus
+// the standard FramePadding. Frame-fresh because font-size changes
+// shift CalcTextSize's output.
+static float compute_tab_button_width() {
+    float w = 0.0f;
+    for (const char* L : kLeftPanelTabLabels) {
+        w = (std::max)(w, ImGui::CalcTextSize(L).x);
+    }
+    return w + ImGui::GetStyle().FramePadding.x * 2.0f;
+}
+
+float left_panel_min_width() {
+    // Row 2 is the widest — four purple tabs (Models / Textures /
+    // Audio / Animations) with a 2 px gap between each pair. Add
+    // WindowPadding × 2 because the inner BeginChild("left_panel",
+    // …, true) draws a border that eats WindowPadding worth of
+    // space on either side.
+    const ImGuiStyle& st = ImGui::GetStyle();
+    float tab_w = compute_tab_button_width();
+    constexpr float kTabGap = 2.0f;
+    constexpr int kRow2Count = 4;
+    float row_w = (float)kRow2Count * tab_w +
+                  (float)(kRow2Count - 1) * kTabGap;
+    row_w += st.WindowPadding.x * 2.0f;
+    return row_w;
+}
+
 // Click-to-load handler shared by the Models / Textures tabs. Mirrors the
 // equivalent block inside draw_tree_node so a click in either tab gets the
 // same end result: switch the active BNK if needed, restore nested-source
@@ -69,7 +104,16 @@ void draw_left_panel() {
     // 4 Audio. Default 1 puts the user on File Tree at startup.
     static int s_active_tab = 1;
 
-    auto tab_button = [](const char* label, bool active, ImU32 text_col = 0) -> bool {
+    // Uniform-width tab buttons. ImGui::Button auto-sizes to its label
+    // by default, which left the row uneven ("Animations" wider than
+    // "Audio" wider than "BNK List"). Use the shared helper so the
+    // width matches what `left_panel_min_width()` reserves on the
+    // splitter side — keeping label list, button width, and minimum
+    // panel width in sync from one place (kLeftPanelTabLabels).
+    const ImVec2 tab_size(compute_tab_button_width(), 0.0f);
+
+    auto tab_button = [&tab_size](const char* label, bool active,
+                                  ImU32 text_col = 0) -> bool {
         const ImGuiStyle& st = ImGui::GetStyle();
         const ImVec4 bg     = st.Colors[active ? ImGuiCol_TabActive : ImGuiCol_Tab];
         const ImVec4 hov    = st.Colors[ImGuiCol_TabHovered];
@@ -78,7 +122,7 @@ void draw_left_panel() {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hov);
         ImGui::PushStyleColor(ImGuiCol_ButtonActive,  act);
         if (text_col) ImGui::PushStyleColor(ImGuiCol_Text, text_col);
-        bool clicked = ImGui::Button(label);
+        bool clicked = ImGui::Button(label, tab_size);
         if (text_col) ImGui::PopStyleColor();
         ImGui::PopStyleColor(3);
         return clicked;

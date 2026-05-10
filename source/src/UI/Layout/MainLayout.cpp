@@ -17,9 +17,18 @@ namespace {
 // session — if you want it remembered across runs, push the value into
 // the settings file like font_size / show_paths.
 float g_right_panel_width = 300.0f;
-constexpr float kMinRightPanelWidth = 180.0f;
 constexpr float kMaxRightPanelWidth = 800.0f;
 constexpr float kSplitterWidth      = 4.0f;
+
+// Lower bound on the right tabs panel — derived from the live
+// tab-button widths so the user can never drag the splitter so far
+// that "Models / Textures / Audio / Animations" wraps or clips.
+// Re-measured each frame because font-size changes shift the text
+// metrics. We take the max with 60 px so an absurdly tiny font
+// doesn't let the panel collapse to nothing.
+float min_right_panel_width() {
+    return std::max(60.0f, left_panel_min_width());
+}
 
 // Draggable vertical splitter handle. Eats horizontal mouse drag and
 // updates `g_right_panel_width` (the tree column shrinks as the splitter
@@ -41,7 +50,8 @@ void draw_splitter(float region_y) {
         // Mouse moved right by dx → tree column shrinks by dx.
         g_right_panel_width -= ImGui::GetIO().MouseDelta.x;
         g_right_panel_width = std::clamp(g_right_panel_width,
-                                         kMinRightPanelWidth, kMaxRightPanelWidth);
+                                         min_right_panel_width(),
+                                         kMaxRightPanelWidth);
     }
 
     ImGui::PopStyleVar(2);
@@ -57,12 +67,20 @@ void draw_main_layout() {
 #endif
     ImVec2 region = ImGui::GetContentRegionAvail();
 
+    // Clamp the persisted width so a previous session's value (or a
+    // resize that shrank the window since the user last dragged) can't
+    // leave the panel narrower than the tab row needs. Re-runs every
+    // frame because the lower bound is font-size-dependent.
+    const float min_w = min_right_panel_width();
+    g_right_panel_width = std::clamp(g_right_panel_width,
+                                     min_w, kMaxRightPanelWidth);
+
     // Tree on the right is fixed-width (user-draggable); content takes
     // the rest minus the splitter handle.
     float content_w = region.x - g_right_panel_width - kSplitterWidth;
     if (content_w < 200.0f) {
         content_w = 200.0f;
-        g_right_panel_width = std::max(kMinRightPanelWidth,
+        g_right_panel_width = std::max(min_w,
                                        region.x - content_w - kSplitterWidth);
     }
 

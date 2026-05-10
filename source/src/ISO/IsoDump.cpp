@@ -653,7 +653,7 @@ void dump_mdl_files() {
                 // dumps for everything in this BNK.
                 std::string header_path;
                 BnkCacheEntry* header_ce = nullptr;
-                if (auto p = derive_paired_headers_bnk(bnk_path)) {
+                if (auto p = derive_paired_model_headers_bnk(bnk_path)) {
                     header_path = *p;
                     header_ce = get_or_open_bnk(bnk_cache, header_path);
                     // If the paired BNK exists in the index but fails
@@ -731,6 +731,582 @@ void dump_mdl_files() {
         } else {
             OutputLog::success("MDL dump complete: " +
                                std::to_string(total) + " files written.");
+        }
+    }).detach();
+}
+
+// ---------------------------------------------------------------------------
+// TEX dump
+// ---------------------------------------------------------------------------
+// Same shape as the MDL dump (group by source BNK, open paired
+// _texture_headers BNK once, walk every tex inside) but textures
+// have a third optional component: a globally-shared
+// `1024mip0_textures.bnk` carrying just the largest mip for textures
+// that need it. Concatenation order — header + mip0 + body — matches
+// `build_tex_buffer_for_name` in TexParser.cpp, so the dumped bytes
+// are byte-for-byte the buffer the in-app preview decodes.
+//
+// Pairing rule: source basename `*_textures.bnk` → header
+// `*_texture_headers.bnk` (suffix substitution), with a fallback to
+// `globals_texture_headers.bnk` for unpaired nested archives. The
+// `gui_*` pair is handled by the same suffix rule because both
+// names already end in `_textures.bnk` / `_texture_headers.bnk`.
+
+static bool reconstruct_one_tex(
+    BnkCacheEntry* body_ce,
+    const std::string& body_bnk_path,
+    int file_index,
+    BnkCacheEntry* header_ce,
+    const std::string& header_bnk_path,
+    BnkCacheEntry* mip0_ce,
+    const std::string& mip0_bnk_path,
+    std::vector<unsigned char>& out)
+{
+    if (!body_ce || !body_ce->reader) return false;
+    const auto& body_files = body_ce->reader->list_files();
+    if (file_index < 0 || (size_t)file_index >= body_files.size())
+        return false;
+
+    auto tmpdir = std::filesystem::temp_directory_path() / "f2_tex_dump";
+    std::error_code ec;
+    std::filesystem::create_directories(tmpdir, ec);
+
+    auto tmp_body = tmpdir /
+        ("body_" + std::to_string(file_index) + ".bin");
+    std::vector<unsigned char> body;
+    try {
+        extract_one(body_bnk_path, file_index, tmp_body.string());
+        body = read_all_bytes(tmp_body);
+        std::filesystem::remove(tmp_body, ec);
+    } catch (...) {
+        std::filesystem::remove(tmp_body, ec);
+        return false;
+    }
+    if (body.empty()) return false;
+
+    // Look up the matching header by leaf filename (sibling BNKs
+    // sometimes use slightly different folder hierarchies for the
+    // same logical asset — match build_tex_buffer_for_name's rule).
+    std::string leaf = std::filesystem::path(body_files[file_index].name)
+                           .filename().string();
+    std::transform(leaf.begin(), leaf.end(), leaf.begin(), ::tolower);
+
+    std::vector<unsigned char> header_bytes;
+    if (header_ce && header_ce->reader) {
+        auto h_it = header_ce->by_leaf.find(leaf);
+        if (h_it != header_ce->by_leaf.end()) {
+            auto tmp_h = tmpdir /
+                ("hdr_" + std::to_string(h_it->second) + ".bin");
+            try {
+                extract_one(header_bnk_path, h_it->second, tmp_h.string());
+                header_bytes = read_all_bytes(tmp_h);
+                std::filesystem::remove(tmp_h, ec);
+            } catch (...) {
+                std::filesystem::remove(tmp_h, ec);
+                // Header extraction failed — keep going with body alone
+                // rather than failing the whole entry.
+            }
+        }
+    }
+
+    // Optional mip0 — the global `1024mip0_textures.bnk` only carries
+    // the largest mip for high-res textures. Most textures don't have
+    // an entry there; absence is normal, not an error.
+    std::vector<unsigned char> mip0_bytes;
+    if (mip0_ce && mip0_ce->reader) {
+        auto m_it = mip0_ce->by_leaf.find(leaf);
+        if (m_it != mip0_ce->by_leaf.end()) {
+            auto tmp_m = tmpdir /
+                ("mip_" + std::to_string(m_it->second) + ".bin");
+            try {
+                extract_one(mip0_bnk_path, m_it->second, tmp_m.string());
+                mip0_bytes = read_all_bytes(tmp_m);
+                std::filesystem::remove(tmp_m, ec);
+            } catch (...) {
+                std::filesystem::remove(tmp_m, ec);
+            }
+        }
+    }
+
+    // Concat header + mip0 + body in the same order
+    // build_tex_buffer_for_name uses. If header is missing we still
+    // emit body alone — better an unpaired body than a failed entry.
+    out.clear();
+    out.reserve(header_bytes.size() + mip0_bytes.size() + body.size());
+    out.insert(out.end(), header_bytes.begin(), header_bytes.end());
+    out.insert(out.end(), mip0_bytes.begin(), mip0_bytes.end());
+    out.insert(out.end(), body.begin(), body.end());
+    return !out.empty();
+}
+
+void dump_tex_files() {
+    if (S.all_tex_files.empty()) {
+        OutputLog::warn("Dump TEX: no .tex files indexed (open a "
+                        "Fable 2 root first).");
+        return;
+    }
+
+    std::vector<FlatAssetEntry> targets = S.all_tex_files;
+
+    std::unordered_map<std::string, std::vector<int>> by_bnk;
+    by_bnk.reserve(64);
+    for (size_t i = 0; i < targets.size(); ++i) {
+        by_bnk[targets[i].bnk_path].push_back((int)i);
+    }
+    const int total = (int)targets.size();
+
+    const std::string export_root =
+        S.export_dir.empty() ? std::filesystem::absolute("extracted").string()
+                             : S.export_dir;
+
+    OutputLog::info(std::string("Dumping ") + std::to_string(total) +
+                    " .tex file(s) from " +
+                    std::to_string(by_bnk.size()) + " BNK(s) → " +
+                    export_root);
+    progress_open(total, std::string("Dumping TEXs → ") + export_root);
+    progress_update(0, total, "Starting...");
+
+    std::thread([targets = std::move(targets),
+                 by_bnk = std::move(by_bnk),
+                 total]() {
+        struct DumpGuard {
+            ~DumpGuard() { progress_done(); }
+        } pg;
+
+        std::atomic<int> done{0};
+        std::vector<std::string> failed;
+        std::mutex fail_m;
+
+        std::unordered_map<std::string, BnkCacheEntry> bnk_cache;
+
+        // Resolve the global mip0 BNK once — it's shared across every
+        // body BNK we visit. Empty path means "no mip0 BNK on disc"
+        // which is normal for some asset roots / GUI-only mounts.
+        std::string mip0_path;
+        BnkCacheEntry* mip0_ce = nullptr;
+        if (auto p = find_bnk_by_filename("1024mip0_textures.bnk")) {
+            mip0_path = *p;
+            mip0_ce = get_or_open_bnk(bnk_cache, mip0_path);
+        }
+
+        try {
+            for (const auto& [bnk_path, indices] : by_bnk) {
+                if (S.cancel_requested.load() || S.exiting.load()) break;
+
+                BnkCacheEntry* body_ce = get_or_open_bnk(bnk_cache, bnk_path);
+                if (!body_ce) {
+                    OutputLog::error(std::string("TEX dump: cannot open ")
+                                     + bnk_path);
+                    for (int ti : indices) {
+                        std::lock_guard<std::mutex> lk(fail_m);
+                        failed.push_back(targets[(size_t)ti].full_path);
+                        ++done;
+                    }
+                    progress_update(done.load(), total,
+                                    std::filesystem::path(bnk_path)
+                                        .filename().string());
+                    continue;
+                }
+
+                std::string header_path;
+                BnkCacheEntry* header_ce = nullptr;
+                if (auto p = derive_paired_texture_headers_bnk(bnk_path)) {
+                    header_path = *p;
+                    header_ce = get_or_open_bnk(bnk_cache, header_path);
+                }
+
+                for (int ti : indices) {
+                    if (S.cancel_requested.load() || S.exiting.load()) break;
+                    const auto& e = targets[(size_t)ti];
+
+                    std::vector<unsigned char> buf;
+                    bool ok = false;
+                    try {
+                        ok = reconstruct_one_tex(body_ce, bnk_path,
+                                                 e.file_index,
+                                                 header_ce, header_path,
+                                                 mip0_ce, mip0_path,
+                                                 buf);
+                    } catch (const std::exception& ex) {
+                        OutputLog::error(std::string("TEX exception on ") +
+                                         e.full_path + ": " + ex.what());
+                        ok = false;
+                    } catch (...) {
+                        OutputLog::error(std::string("TEX exception on ") +
+                                         e.full_path);
+                        ok = false;
+                    }
+
+                    if (ok && !buf.empty()) {
+                        auto out = build_asset_out_path(e, ".tex");
+                        ok = write_buf_to_disk(out, buf);
+                        if (!ok) {
+                            OutputLog::error(std::string("TEX write failed: ")
+                                             + out.string());
+                        }
+                    } else {
+                        OutputLog::error(std::string("TEX rebuild failed: ") +
+                                         e.full_path);
+                    }
+
+                    if (!ok) {
+                        std::lock_guard<std::mutex> lk(fail_m);
+                        failed.push_back(e.full_path);
+                    }
+
+                    int cur = ++done;
+                    progress_update(cur, total,
+                                    std::filesystem::path(e.name)
+                                        .filename().string());
+                }
+            }
+        } catch (const std::exception& ex) {
+            OutputLog::error(std::string("TEX dump worker aborted: ") +
+                             ex.what());
+            return;
+        } catch (...) {
+            OutputLog::error("TEX dump worker aborted (unknown exception).");
+            return;
+        }
+
+        if (S.cancel_requested.load()) {
+            OutputLog::warn(std::string("TEX dump cancelled (")
+                          + std::to_string(done.load()) + "/"
+                          + std::to_string(total) + " written).");
+            S.cancel_requested = false;
+            return;
+        }
+
+        const int n_failed = (int)failed.size();
+        if (n_failed > 0) {
+            OutputLog::warn("TEX dump finished: " +
+                            std::to_string(done.load() - n_failed) + "/" +
+                            std::to_string(total) + " written, " +
+                            std::to_string(n_failed) + " failed.");
+        } else {
+            OutputLog::success("TEX dump complete: " +
+                               std::to_string(total) + " files written.");
+        }
+    }).detach();
+}
+
+// ---------------------------------------------------------------------------
+// WAV dump
+// ---------------------------------------------------------------------------
+// Wavs aren't split across BNKs — each .wav is a complete file
+// inside its source BNK. So this is the trivial case: open each BNK
+// once, extract every indexed .wav, write it to the export tree. No
+// reconstruction, no pairing, no mip0.
+
+void dump_wav_files() {
+    if (S.all_wav_files.empty()) {
+        OutputLog::warn("Dump WAV: no .wav files indexed (open a "
+                        "Fable 2 root first).");
+        return;
+    }
+
+    std::vector<FlatAssetEntry> targets = S.all_wav_files;
+
+    std::unordered_map<std::string, std::vector<int>> by_bnk;
+    by_bnk.reserve(64);
+    for (size_t i = 0; i < targets.size(); ++i) {
+        by_bnk[targets[i].bnk_path].push_back((int)i);
+    }
+    const int total = (int)targets.size();
+
+    const std::string export_root =
+        S.export_dir.empty() ? std::filesystem::absolute("extracted").string()
+                             : S.export_dir;
+
+    OutputLog::info(std::string("Dumping ") + std::to_string(total) +
+                    " .wav file(s) from " +
+                    std::to_string(by_bnk.size()) + " BNK(s) → " +
+                    export_root);
+    progress_open(total, std::string("Dumping WAVs → ") + export_root);
+    progress_update(0, total, "Starting...");
+
+    std::thread([targets = std::move(targets),
+                 by_bnk = std::move(by_bnk),
+                 total]() {
+        struct DumpGuard {
+            ~DumpGuard() { progress_done(); }
+        } pg;
+
+        std::atomic<int> done{0};
+        std::vector<std::string> failed;
+        std::mutex fail_m;
+
+        // We don't need the leaf-index map for wavs (no pair lookup),
+        // but reusing get_or_open_bnk keeps a single open per source
+        // BNK and avoids any per-asset re-init cost.
+        std::unordered_map<std::string, BnkCacheEntry> bnk_cache;
+
+        try {
+            for (const auto& [bnk_path, indices] : by_bnk) {
+                if (S.cancel_requested.load() || S.exiting.load()) break;
+
+                BnkCacheEntry* body_ce = get_or_open_bnk(bnk_cache, bnk_path);
+                if (!body_ce) {
+                    OutputLog::error(std::string("WAV dump: cannot open ")
+                                     + bnk_path);
+                    for (int ti : indices) {
+                        std::lock_guard<std::mutex> lk(fail_m);
+                        failed.push_back(targets[(size_t)ti].full_path);
+                        ++done;
+                    }
+                    progress_update(done.load(), total,
+                                    std::filesystem::path(bnk_path)
+                                        .filename().string());
+                    continue;
+                }
+
+                for (int ti : indices) {
+                    if (S.cancel_requested.load() || S.exiting.load()) break;
+                    const auto& e = targets[(size_t)ti];
+
+                    auto out = build_asset_out_path(e, ".wav");
+                    bool ok = false;
+                    try {
+                        std::error_code ec;
+                        if (auto parent = out.parent_path(); !parent.empty()) {
+                            std::filesystem::create_directories(parent, ec);
+                        }
+                        // extract_one streams the file directly to disk,
+                        // no intermediate buffer needed (wavs in retail
+                        // can be tens of MB — going through a vector
+                        // would double the working-set for nothing).
+                        extract_one(bnk_path, e.file_index, out.string());
+                        ok = std::filesystem::exists(out, ec) && !ec;
+                    } catch (const std::exception& ex) {
+                        OutputLog::error(std::string("WAV exception on ") +
+                                         e.full_path + ": " + ex.what());
+                    } catch (...) {
+                        OutputLog::error(std::string("WAV exception on ") +
+                                         e.full_path);
+                    }
+
+                    if (!ok) {
+                        OutputLog::error(std::string("WAV write failed: ") +
+                                         e.full_path);
+                        std::lock_guard<std::mutex> lk(fail_m);
+                        failed.push_back(e.full_path);
+                    }
+
+                    int cur = ++done;
+                    progress_update(cur, total,
+                                    std::filesystem::path(e.name)
+                                        .filename().string());
+                }
+            }
+        } catch (const std::exception& ex) {
+            OutputLog::error(std::string("WAV dump worker aborted: ") +
+                             ex.what());
+            return;
+        } catch (...) {
+            OutputLog::error("WAV dump worker aborted (unknown exception).");
+            return;
+        }
+
+        if (S.cancel_requested.load()) {
+            OutputLog::warn(std::string("WAV dump cancelled (")
+                          + std::to_string(done.load()) + "/"
+                          + std::to_string(total) + " written).");
+            S.cancel_requested = false;
+            return;
+        }
+
+        const int n_failed = (int)failed.size();
+        if (n_failed > 0) {
+            OutputLog::warn("WAV dump finished: " +
+                            std::to_string(done.load() - n_failed) + "/" +
+                            std::to_string(total) + " written, " +
+                            std::to_string(n_failed) + " failed.");
+        } else {
+            OutputLog::success("WAV dump complete: " +
+                               std::to_string(total) + " files written.");
+        }
+    }).detach();
+}
+
+// ---------------------------------------------------------------------------
+// Full per-BNK dump
+// ---------------------------------------------------------------------------
+// Extracts every file from every BNK the asset browser has indexed
+// (top-level + nested). No reconstruction — paired bodies and headers
+// land in separate per-BNK subdirectories so they don't overwrite
+// each other on the way out. Useful for dev / inspection workflows
+// where the user wants the raw archive contents, not a reassembled
+// MDL/TEX. The MDL/TEX/WAV dumpers above are still the right call
+// when the goal is decoder-ready files.
+//
+// Output layout: `${export_dir}/<bnk_stem>/<asset_path>`. The BNK
+// stem is the source BNK's filename without the `.bnk` extension —
+// `globals_models.bnk` → `globals_models/`,
+// `globals_model_headers.bnk` → `globals_model_headers/`. That gives
+// the user a clean side-by-side view of paired archives without
+// having to unpack each one manually in another tool.
+
+void dump_bnk_contents() {
+    // Collect every BNK path the file-tree builder discovered. Includes
+    // nested-archive temp paths so the contents inside region archives
+    // get extracted too — the parent BNK's listing also dumps the
+    // nested .bnk wrapper as a raw file, which is the right thing in
+    // case the user wants to feed it to another tool.
+    std::vector<std::string> all_bnks;
+    all_bnks.reserve(S.bnk_paths.size() + S.nested_bnk_paths.size());
+    all_bnks.insert(all_bnks.end(),
+                    S.bnk_paths.begin(), S.bnk_paths.end());
+    all_bnks.insert(all_bnks.end(),
+                    S.nested_bnk_paths.begin(), S.nested_bnk_paths.end());
+
+    if (all_bnks.empty()) {
+        OutputLog::warn("Dump BNK contents: no BNKs indexed (open a "
+                        "Fable 2 root first).");
+        return;
+    }
+
+    const std::string export_root =
+        S.export_dir.empty() ? std::filesystem::absolute("extracted").string()
+                             : S.export_dir;
+
+    OutputLog::info(std::string("Dumping every file in ") +
+                    std::to_string(all_bnks.size()) + " BNK(s) → " +
+                    export_root);
+    // We don't know the total file count yet — opening every BNK on
+    // the UI thread to count would stall the click for a couple
+    // seconds. Open the progress modal with an estimate and bump
+    // the total inside the worker once we've indexed.
+    progress_open(0, std::string("Dumping BNK contents → ") + export_root);
+    progress_update(0, 0, "Indexing...");
+
+    std::thread([all_bnks = std::move(all_bnks), export_root]() {
+        struct DumpGuard {
+            ~DumpGuard() { progress_done(); }
+        } pg;
+
+        // First pass — open each BNK, materialise nested temps, count
+        // its files. We keep the readers cached afterward so the
+        // second-pass extract loop doesn't re-open and re-parse each
+        // archive.
+        std::unordered_map<std::string, BnkCacheEntry> bnk_cache;
+        int total = 0;
+        for (const auto& bp : all_bnks) {
+            if (S.cancel_requested.load() || S.exiting.load()) break;
+            auto* ce = get_or_open_bnk(bnk_cache, bp);
+            if (!ce) {
+                OutputLog::error(std::string(
+                    "BNK contents dump: cannot open ") + bp);
+                continue;
+            }
+            total += (int)ce->reader->list_files().size();
+        }
+        if (total <= 0) {
+            OutputLog::warn("BNK contents dump: every BNK was empty / "
+                            "unreadable.");
+            return;
+        }
+
+        // Resize the progress modal's bounds to match what we found.
+        // progress_update calls below all carry the same `total` so
+        // the bar fills correctly.
+        progress_update(0, total, "Starting...");
+
+        std::atomic<int> done{0};
+        std::vector<std::string> failed;
+        std::mutex fail_m;
+
+        try {
+            for (const auto& bp : all_bnks) {
+                if (S.cancel_requested.load() || S.exiting.load()) break;
+                auto it = bnk_cache.find(bp);
+                if (it == bnk_cache.end() || !it->second.reader) continue;
+                auto& ce = it->second;
+                const auto& files = ce.reader->list_files();
+
+                // Per-BNK output subdirectory: drop the `.bnk` extension
+                // and use the stem so paired bodies / headers don't
+                // collide. Some nested temp paths have an additional
+                // hash-tag prefix the materialiser appended; the stem
+                // of those is still distinct enough to keep contents
+                // separate.
+                std::string stem = std::filesystem::path(bp)
+                                       .stem().string();
+                std::filesystem::path bnk_root =
+                    std::filesystem::path(export_root) / stem;
+
+                for (size_t i = 0; i < files.size(); ++i) {
+                    if (S.cancel_requested.load() || S.exiting.load()) break;
+                    const auto& fe = files[i];
+
+                    // Sanitise leading slashes the same way build_out_path
+                    // does — without this the `/` joins below would
+                    // root-anchor the path on Windows.
+                    std::string rel = fe.name;
+                    while (!rel.empty() &&
+                           (rel.front() == '/' || rel.front() == '\\'))
+                        rel.erase(rel.begin());
+                    auto out = bnk_root / rel;
+
+                    bool ok = false;
+                    try {
+                        std::error_code ec;
+                        if (auto parent = out.parent_path(); !parent.empty()) {
+                            std::filesystem::create_directories(parent, ec);
+                        }
+                        // extract_one streams straight to disk; for big
+                        // wavs / textures this avoids a multi-MB
+                        // intermediate buffer.
+                        extract_one(bp, (int)i, out.string());
+                        ok = std::filesystem::exists(out, ec) && !ec;
+                    } catch (const std::exception& ex) {
+                        OutputLog::error(std::string(
+                            "BNK contents exception on ") + bp + " :: " +
+                            fe.name + ": " + ex.what());
+                    } catch (...) {
+                        OutputLog::error(std::string(
+                            "BNK contents exception on ") + bp + " :: " +
+                            fe.name);
+                    }
+
+                    if (!ok) {
+                        std::lock_guard<std::mutex> lk(fail_m);
+                        failed.push_back(bp + " :: " + fe.name);
+                    }
+
+                    int cur = ++done;
+                    progress_update(cur, total,
+                                    std::filesystem::path(fe.name)
+                                        .filename().string());
+                }
+            }
+        } catch (const std::exception& ex) {
+            OutputLog::error(std::string(
+                "BNK contents dump worker aborted: ") + ex.what());
+            return;
+        } catch (...) {
+            OutputLog::error(
+                "BNK contents dump worker aborted (unknown exception).");
+            return;
+        }
+
+        if (S.cancel_requested.load()) {
+            OutputLog::warn(std::string("BNK contents dump cancelled (")
+                          + std::to_string(done.load()) + "/"
+                          + std::to_string(total) + " written).");
+            S.cancel_requested = false;
+            return;
+        }
+
+        const int n_failed = (int)failed.size();
+        if (n_failed > 0) {
+            OutputLog::warn("BNK contents dump finished: " +
+                            std::to_string(done.load() - n_failed) + "/" +
+                            std::to_string(total) + " written, " +
+                            std::to_string(n_failed) + " failed.");
+        } else {
+            OutputLog::success("BNK contents dump complete: " +
+                               std::to_string(total) +
+                               " file(s) written.");
         }
     }).detach();
 }

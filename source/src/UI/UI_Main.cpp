@@ -249,12 +249,44 @@ void draw_main(GLFWwindow* window) {
                             ImGui::MenuItem("BNK's (ISO only)", nullptr,
                                             false, false);
                         }
+                        // Full per-BNK extract — works in both ISO and
+                        // folder modes since it just walks the indexed
+                        // BNK list. Distinct from "BNK's" above which
+                        // dumps the .bnk archives byte-for-byte; this
+                        // one cracks each archive open and writes its
+                        // contents into a per-BNK subdirectory.
+                        if (!S.bnk_paths.empty() ||
+                            !S.nested_bnk_paths.empty()) {
+                            if (ImGui::MenuItem("BNK contents (raw)")) {
+                                ISO::dump_bnk_contents();
+                            }
+                        } else {
+                            ImGui::MenuItem(
+                                "BNK contents (no BNKs indexed)",
+                                nullptr, false, false);
+                        }
                         if (!S.all_mdl_files.empty()) {
                             if (ImGui::MenuItem(".mdl")) {
                                 ISO::dump_mdl_files();
                             }
                         } else {
                             ImGui::MenuItem(".mdl (no MDLs indexed)",
+                                            nullptr, false, false);
+                        }
+                        if (!S.all_tex_files.empty()) {
+                            if (ImGui::MenuItem(".tex")) {
+                                ISO::dump_tex_files();
+                            }
+                        } else {
+                            ImGui::MenuItem(".tex (no TEXs indexed)",
+                                            nullptr, false, false);
+                        }
+                        if (!S.all_wav_files.empty()) {
+                            if (ImGui::MenuItem(".wav")) {
+                                ISO::dump_wav_files();
+                            }
+                        } else {
+                            ImGui::MenuItem(".wav (no WAVs indexed)",
                                             nullptr, false, false);
                         }
                         // .anim entry is informational for now —

@@ -21,7 +21,7 @@
 #include <DirectXMath.h>
 using namespace DirectX;
 #else
-#include <GL/glew.h>
+#include <GL/glew.h>    
 #endif
 FlyCam g_flycam;
 static inline std::string tolower_copy(std::string s){ std::transform(s.begin(), s.end(), s.begin(), ::tolower); return s; }

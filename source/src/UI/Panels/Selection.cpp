@@ -3,10 +3,12 @@
 #include "../../Utilities/Utils.h"
 #include "../../Utilities/Files.h"
 #include "../../Utilities/Progress.h"
+#include "../../Utilities/operations.h"
 #include "../../ISO/IsoMount.h"
 #include "../../BNKCore.cpp"
 #include "../UI_Main.h"
 #include "../AudioPlayerWindow.h"
+#include "../OutputLog.h"
 #include "../HexView.h"
 #include "../../textures/export/TextureExport.h"
 #include "../../animations/AnimBank.h"
@@ -16,6 +18,7 @@
 #include <algorithm>
 #include <ctime>
 #include <cstring>
+#include <optional>
 
 void refresh_file_table() { S.selected_file_index = -1; }
 
@@ -329,23 +332,246 @@ bool is_in_audio_folder(const std::string& path) {
            lower_path.find("\\audio\\") != std::string::npos;
 }
 
+// ---------------------------------------------------------------------------
+// Per-asset right-click export
+// ---------------------------------------------------------------------------
+// The .tex case has had a multi-format submenu (PNG / JPG / TIFF /
+// DDS / .tex raw) since the texture exporter shipped — that's
+// `tex_export_menu_named`, called below. For every other type we
+// want a single "Export" entry that lands the asset in the user's
+// configured export directory at its original asset path. .mdl needs
+// reconstruction (header + body, the same shape `dump_mdl_files`
+// produces); .wav needs an XMA→PCM pass through `extract_file_one`'s
+// audio path so the output plays in any external tool; everything
+// else is a straight raw extract.
+//
+// Output layout matches the bulk dumpers and the .tex export so the
+// user has a single, predictable destination tree:
+//   `${S.export_dir}/<asset_path>`
+
+namespace {
+
+// Reconstruct an MDL by pulling the body out of `bnk_path` at
+// `file_index` and prefixing the matching header from the paired
+// `*_model_headers.bnk` (or `globals_model_headers.bnk` as a
+// fallback). Mirrors the BNK-pair derivation `reconstruct_one_mdl` in
+// IsoDump.cpp uses for the bulk MDL dump — duplicating it here keeps
+// the right-click path independent of that worker's BNK cache, which
+// only lives for the duration of a `dump_mdl_files` run.
+//
+// Returns true and fills `out` on success. On any failure (source
+// can't open, body extract throws, etc.) returns false and leaves
+// `out` empty. A body-with-no-paired-header is treated as success and
+// emits the body raw — matches `reconstruct_nested_mdl`'s long-
+// standing fallback so unpaired entries still get dumped.
+bool reconstruct_mdl_paired(const std::string& bnk_path,
+                            int file_index,
+                            std::vector<unsigned char>& out) {
+    out.clear();
+    try {
+        BNKReader src(bnk_path);
+        const auto& src_files = src.list_files();
+        if (file_index < 0 || (size_t)file_index >= src_files.size())
+            return false;
+        std::string mdl_name = src_files[file_index].name;
+
+        auto tmpdir = std::filesystem::temp_directory_path() / "f2_mdl_export";
+        std::error_code ec;
+        std::filesystem::create_directories(tmpdir, ec);
+
+        auto tmp_body = tmpdir / "body.bin";
+        extract_one(bnk_path, file_index, tmp_body.string());
+        auto body = read_all_bytes(tmp_body);
+        std::filesystem::remove(tmp_body, ec);
+        if (body.empty()) return false;
+
+        // Substitution rule: <root>_models.bnk → <root>_model_headers.bnk.
+        // Lower-case the basename so the comparison + replacement
+        // doesn't care about disc-side capitalisation differences.
+        std::string base = std::filesystem::path(bnk_path)
+                               .filename().string();
+        std::transform(base.begin(), base.end(), base.begin(), ::tolower);
+        std::optional<std::string> p_headers;
+        const std::string suffix = "_models.bnk";
+        if (base.size() >= suffix.size() &&
+            base.compare(base.size() - suffix.size(),
+                         suffix.size(), suffix) == 0) {
+            std::string paired = base.substr(0, base.size() - suffix.size())
+                               + "_model_headers.bnk";
+            p_headers = find_bnk_by_filename(paired);
+        }
+        if (!p_headers) {
+            p_headers = find_bnk_by_filename("globals_model_headers.bnk");
+        }
+        if (!p_headers) {
+            // Body alone — unpaired nested archive. Same fallback
+            // reconstruct_nested_mdl uses; better than failing the
+            // export when at least the body is available.
+            out = std::move(body);
+            return true;
+        }
+
+        BNKReader hr(*p_headers);
+        const auto& h_files = hr.list_files();
+        std::string mdl_leaf = std::filesystem::path(mdl_name)
+                                   .filename().string();
+        std::transform(mdl_leaf.begin(), mdl_leaf.end(),
+                       mdl_leaf.begin(), ::tolower);
+
+        int h_idx = -1;
+        for (size_t i = 0; i < h_files.size(); ++i) {
+            std::string hn = std::filesystem::path(h_files[i].name)
+                                 .filename().string();
+            std::transform(hn.begin(), hn.end(), hn.begin(), ::tolower);
+            if (hn == mdl_leaf) { h_idx = (int)i; break; }
+        }
+        if (h_idx < 0) {
+            // Header BNK exists but doesn't contain this asset's
+            // header — emit body anyway, same fallback shape.
+            out = std::move(body);
+            return true;
+        }
+
+        auto tmp_h = tmpdir / "header.bin";
+        extract_one(*p_headers, h_idx, tmp_h.string());
+        auto hbuf = read_all_bytes(tmp_h);
+        std::filesystem::remove(tmp_h, ec);
+        if (hbuf.empty()) { out = std::move(body); return true; }
+
+        out.reserve(hbuf.size() + body.size());
+        out.insert(out.end(), hbuf.begin(), hbuf.end());
+        out.insert(out.end(), body.begin(), body.end());
+        return true;
+    } catch (...) {
+        out.clear();
+        return false;
+    }
+}
+
+// Compute the on-disk export destination for an asset. Same path
+// normalisation rule the .tex exporter uses (drop leading separators
+// so the concat doesn't accidentally anchor to a Windows root).
+std::filesystem::path build_export_target(const std::string& asset_path) {
+    std::string rel = asset_path;
+    while (!rel.empty() && (rel.front() == '/' || rel.front() == '\\'))
+        rel.erase(rel.begin());
+    std::filesystem::path root =
+        S.export_dir.empty() ? std::filesystem::path("extracted")
+                             : std::filesystem::path(S.export_dir);
+    return root / rel;
+}
+
+// Lower-case extension test — "endsWith(".mdl")" with the tolower
+// happening only on the trailing slice, not the whole asset path.
+bool ext_is(const std::string& name, const char* ext) {
+    size_t n = std::strlen(ext);
+    if (name.size() < n) return false;
+    for (size_t i = 0; i < n; ++i) {
+        char a = name[name.size() - n + i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (a != ext[i]) return false;
+    }
+    return true;
+}
+
+} // anonymous
+
+// Generic right-click export handler. Kicks off a synchronous
+// extract-and-write to `${S.export_dir}/<asset_path>`. .mdl gets
+// reconstructed via `reconstruct_mdl_paired`; .wav goes through
+// `extract_file_one`'s convert_audio path so the output is a
+// playable PCM .wav (the source bytes are XMA-encoded and won't
+// open in any non-game tool); everything else is a raw extract.
+//
+// Synchronous on the UI thread: a single-file extract is fast and
+// the user's right-click is a deliberate single-asset operation, so
+// adding a worker thread + progress modal would just add latency.
+// The existing `dump_*_files()` functions are the path for bulk.
+static void asset_export_to_export_dir(const std::string& bnk_path,
+                                       int file_index, bool /*is_nested*/,
+                                       const std::string& file_name)
+{
+    auto out = build_export_target(file_name);
+    std::error_code ec;
+    if (auto parent = out.parent_path(); !parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            OutputLog::error(std::string("Export: cannot create ") +
+                             parent.string() + " — " + ec.message());
+            return;
+        }
+    }
+
+    bool ok = false;
+    try {
+        if (ext_is(file_name, ".mdl")) {
+            std::vector<unsigned char> buf;
+            if (reconstruct_mdl_paired(bnk_path, file_index, buf) &&
+                !buf.empty()) {
+                std::ofstream f(out, std::ios::binary | std::ios::trunc);
+                if (f) {
+                    f.write(reinterpret_cast<const char*>(buf.data()),
+                            (std::streamsize)buf.size());
+                    ok = f.good();
+                }
+            }
+        } else {
+            // Raw extract path — extract_file_one streams to disk
+            // and (for audio assets) follows up with an XMA→PCM
+            // decode pass in-place. Anything that isn't audio just
+            // gets written byte-for-byte.
+            BNKItemUI item{};
+            item.index = file_index;
+            item.name  = file_name;
+            item.size  = 0;
+            extract_file_one(bnk_path, item,
+                             out.parent_path().string(),
+                             /*convert_audio=*/true);
+            // extract_file_one writes to base_out_dir / item.name —
+            // which equals our `out` so long as `file_name` doesn't
+            // have leading separators. Our build_export_target
+            // already normalised that.
+            ok = std::filesystem::exists(out, ec) && !ec;
+        }
+    } catch (const std::exception& ex) {
+        OutputLog::error(std::string("Export exception on ") + file_name +
+                         ": " + ex.what());
+        ok = false;
+    } catch (...) {
+        OutputLog::error(std::string("Export exception on ") + file_name);
+        ok = false;
+    }
+
+    if (ok) {
+        OutputLog::success(std::string("Exported ") +
+                           std::filesystem::path(file_name).filename().string() +
+                           " → " + out.string());
+    } else {
+        OutputLog::error(std::string("Export failed: ") + file_name +
+                         " (target: " + out.string() + ")");
+    }
+}
+
 // Right-click context menu attached to the most-recently-rendered file
 // item. ImGui::BeginPopupContextItem ties the popup's lifecycle to the
 // last item's ID, so the caller just needs to render its Selectable /
-// TreeNodeEx then call this function. The menu only renders in dev
-// mode — outside dev mode this is a no-op so non-dev users don't even
-// see a hint of the hex view.
+// TreeNodeEx then call this function.
 //
 // Selecting "Hex View" reroutes S.selected_bnk / S.selected_file_index
 // to point at the right-clicked file (mirroring what a normal click
 // does), then calls open_hex_for_selected() which kicks the bytes
 // load on a worker thread.
+//
+// The "Export" entry is always available (every file we surface in
+// the UI is exportable). For .tex it expands into a multi-format
+// submenu (PNG/JPG/TIFF/DDS/.tex raw); for everything else it's a
+// single MenuItem that drops the asset into `${S.export_dir}` —
+// reconstructed for .mdl, PCM-converted for .wav, raw for the rest.
 void file_hex_context_menu(const std::string& bnk_path,
                            int file_index, bool is_nested,
                            const std::string& file_name) {
-    const bool show_hex    = S.dev_mode;
-    const bool show_export = is_tex_file(file_name);
-    if (!show_hex && !show_export) return;
+    const bool show_hex = S.dev_mode;
+    const bool is_tex   = is_tex_file(file_name);
 
     if (ImGui::BeginPopupContextItem()) {
         if (show_hex) {
@@ -383,12 +609,17 @@ void file_hex_context_menu(const std::string& bnk_path,
                 }
             }
         }
-        if (show_export) {
+        if (is_tex) {
             // The export menu defers the actual decode + write until
             // after the user picks a path in the save dialog. mip 0 is
             // the highest-resolution mip per the .tex format convention.
             tex_export_menu_named(file_name, file_name, bnk_path,
                                   /*mip_index=*/0);
+        } else {
+            if (ImGui::MenuItem("Export")) {
+                asset_export_to_export_dir(bnk_path, file_index,
+                                           is_nested, file_name);
+            }
         }
         ImGui::EndPopup();
     }

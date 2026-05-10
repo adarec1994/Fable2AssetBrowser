@@ -22,6 +22,13 @@ void pick_bnk(const std::string &path);
 void open_folder_logic(const std::string &sel);
 void open_iso_logic(const std::string& iso_path);
 
+// Minimum on-screen width the right-side tabs panel needs so every
+// tab button row is fully visible. Computed each frame from the
+// current ImGui font + FramePadding so it stays correct across
+// font-size changes; MainLayout uses it as the lower bound for the
+// user-resizable splitter.
+float left_panel_min_width();
+
 // Tree-build state introspection — used by the LoadingScreen to draw
 // a real progress bar with the current BNK being processed.
 bool tree_build_in_progress();

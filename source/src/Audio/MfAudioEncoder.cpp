@@ -34,6 +34,19 @@
 #include <wmcodecdsp.h>
 #include <wrl/client.h>
 
+extern "C" {
+// libswresample is already linked (XmaDecoder uses it for the
+// XMA→PCM channel/rate normalisation) — reuse it here for the
+// PCM→encoder rate adaptation. The MF MP3 encoder only accepts
+// 32 / 44.1 / 48 kHz input; the AAC encoder only accepts 44.1 /
+// 48 kHz. Fable 2 audio decodes at a wider variety of native
+// rates (16k, 22.05k, 24k, …) so we resample before handing the
+// buffer to SinkWriter.
+#include <libswresample/swresample.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/mathematics.h>
+}
+
 #include <cstring>
 #include <cstdio>
 
@@ -133,6 +146,80 @@ UINT32 mp3_avg_bps(int channels) {
     return (channels >= 2) ? 24000u : 16000u;
 }
 
+// Pick a target sample rate that's actually accepted by the encoder
+// MFT we're about to feed. Anything outside the lists below yields
+// MF_E_INVALIDMEDIATYPE on SetInputMediaType — which is the bug the
+// user hit on every Fable 2 .wav at 22050 / 24000 / 16000 Hz.
+//
+// Strategy: pick the smallest accepted rate that's ≥ `source_rate`,
+// so we never lose detail. If even the highest accepted rate is
+// below the source we fall back to that (extremely unlikely — Fable 2
+// caps out at 48 kHz). For aac we omit 32 kHz; the MF AAC encoder's
+// PCM input list is 44.1 / 48 kHz only.
+int pick_target_rate(int source_rate, bool aac) {
+    static constexpr int mp3_rates[] = { 32000, 44100, 48000 };
+    static constexpr int aac_rates[] = { 44100, 48000 };
+    const int* rates  = aac ? aac_rates : mp3_rates;
+    const int  count  = aac ? 2 : 3;
+    for (int i = 0; i < count; ++i) {
+        if (rates[i] >= source_rate) return rates[i];
+    }
+    return rates[count - 1];
+}
+
+// Resample interleaved s16 PCM `pcm` from `in_rate` to `target_rate`
+// via libswresample. No-op fast-path when the rates already match
+// (just copies the buffer reference). Channel count is preserved —
+// the encoder accepts whatever the source had so we don't downmix.
+bool resample_pcm_s16(const std::vector<int16_t>& pcm,
+                      int in_rate, int channels, int target_rate,
+                      std::vector<int16_t>& out,
+                      std::string* err) {
+    if (in_rate == target_rate) {
+        out = pcm;
+        return true;
+    }
+    AVChannelLayout layout;
+    av_channel_layout_default(&layout, channels);
+
+    SwrContext* swr = nullptr;
+    if (swr_alloc_set_opts2(
+            &swr,
+            &layout, AV_SAMPLE_FMT_S16, target_rate,
+            &layout, AV_SAMPLE_FMT_S16, in_rate,
+            0, nullptr) < 0 || swr_init(swr) < 0) {
+        if (swr) swr_free(&swr);
+        if (err) *err = "swresample setup failed";
+        return false;
+    }
+
+    const int64_t in_samples = (int64_t)pcm.size() / channels;
+    // Conservative output size — av_rescale_rnd with AV_ROUND_UP
+    // gives us a couple of frames of headroom over the strict ratio
+    // so swr_convert never returns AVERROR_INVALIDDATA from a short
+    // destination buffer.
+    const int64_t out_samples_max = av_rescale_rnd(
+        swr_get_delay(swr, in_rate) + in_samples,
+        target_rate, in_rate, AV_ROUND_UP);
+    out.assign((size_t)(out_samples_max * channels), 0);
+
+    const uint8_t* in_data[1]  = { (const uint8_t*)pcm.data() };
+    uint8_t*       out_data[1] = { (uint8_t*)out.data() };
+    const int got = swr_convert(
+        swr,
+        out_data, (int)out_samples_max,
+        in_data,  (int)in_samples);
+
+    swr_free(&swr);
+    if (got < 0) {
+        out.clear();
+        if (err) *err = "swr_convert failed";
+        return false;
+    }
+    out.resize((size_t)got * (size_t)channels);
+    return true;
+}
+
 // Common encode loop body — given a configured output media type,
 // run the SinkWriter pipeline. Pulled out so the MP3 and AAC
 // front-ends share the bulk of the COM dance.
@@ -194,6 +281,22 @@ bool encode_pcm_to_mp3(const std::vector<int16_t>& pcm,
                        int sample_rate, int channels,
                        const std::string& out_path_utf8,
                        std::string* err) {
+    // Step 1 — adapt the input rate to one the MF MP3 encoder
+    // accepts. Source-rate-passthrough is the fast path; anything
+    // else gets bumped up via swresample. Without this step rates
+    // like 22050 (common in Fable 2 dialogue) yield
+    // MF_E_INVALIDMEDIATYPE from SetInputMediaType.
+    const int target_rate = pick_target_rate(sample_rate, /*aac=*/false);
+    const std::vector<int16_t>* effective = &pcm;
+    std::vector<int16_t> resampled;
+    if (target_rate != sample_rate) {
+        if (!resample_pcm_s16(pcm, sample_rate, channels, target_rate,
+                              resampled, err)) {
+            return false;
+        }
+        effective = &resampled;
+    }
+
     // MF's MP3 encoder expects MFAudioFormat_MP3 with an explicit
     // bitrate. The decoder side uses the same subtype GUID.
     ComPtr<IMFMediaType> out_type;
@@ -205,10 +308,10 @@ bool encode_pcm_to_mp3(const std::vector<int16_t>& pcm,
     out_type->SetGUID  (MF_MT_MAJOR_TYPE,           MFMediaType_Audio);
     out_type->SetGUID  (MF_MT_SUBTYPE,              MFAudioFormat_MP3);
     out_type->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS,           (UINT32)channels);
-    out_type->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND,     (UINT32)sample_rate);
+    out_type->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND,     (UINT32)target_rate);
     out_type->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
                         mp3_avg_bps(channels));
-    return encode_with_output_type(pcm, sample_rate, channels,
+    return encode_with_output_type(*effective, target_rate, channels,
                                    out_path_utf8, out_type, err);
 }
 
@@ -216,6 +319,20 @@ bool encode_pcm_to_aac(const std::vector<int16_t>& pcm,
                        int sample_rate, int channels,
                        const std::string& out_path_utf8,
                        std::string* err) {
+    // Same input-rate adaptation as the MP3 path. AAC's accepted
+    // list is even narrower (44.1 / 48 only — no 32) so most non-
+    // standard sources end up resampled.
+    const int target_rate = pick_target_rate(sample_rate, /*aac=*/true);
+    const std::vector<int16_t>* effective = &pcm;
+    std::vector<int16_t> resampled;
+    if (target_rate != sample_rate) {
+        if (!resample_pcm_s16(pcm, sample_rate, channels, target_rate,
+                              resampled, err)) {
+            return false;
+        }
+        effective = &resampled;
+    }
+
     // AAC output type per the MS docs:
     //   - subtype = MFAudioFormat_AAC
     //   - bits-per-sample = 16  (input bit depth, not output)
@@ -230,13 +347,13 @@ bool encode_pcm_to_aac(const std::vector<int16_t>& pcm,
     out_type->SetGUID  (MF_MT_MAJOR_TYPE,           MFMediaType_Audio);
     out_type->SetGUID  (MF_MT_SUBTYPE,              MFAudioFormat_AAC);
     out_type->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE,        16);
-    out_type->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND,     (UINT32)sample_rate);
+    out_type->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND,     (UINT32)target_rate);
     out_type->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS,           (UINT32)channels);
     out_type->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
                         aac_avg_bps(channels));
     out_type->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE,             0);
     out_type->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
-    return encode_with_output_type(pcm, sample_rate, channels,
+    return encode_with_output_type(*effective, target_rate, channels,
                                    out_path_utf8, out_type, err);
 }
 

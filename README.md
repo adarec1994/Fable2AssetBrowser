@@ -26,6 +26,9 @@ And here is an example of some textures:
 ![TextureSample1.png](images/TextureSample1.png)
 ![TextureSample2.png](images/TextureSample2.png)
 
+Audio playback controls:
+![AudioControls.png](images/AudioControls.png)
+
 ## How to Contribute
 
 There are several key areas where your contributions would be most impactful:

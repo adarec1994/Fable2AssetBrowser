@@ -118,6 +118,15 @@ static void swap_bc3_endian(uint8_t* data, size_t size) {
 // Decode one BC4 sub-block (8 bytes) → 16 bytes of single-channel output.
 // Used as the building block for BC5 (= 2 BC4 blocks per BC5 block, one
 // for X, one for Y).
+//
+// Interpolation uses round-to-nearest (the +3 / +2 numerator add). The
+// game's hardware-decoded BC4 path (and Fable's CPU codec at
+// 0x82B8D9E0..D9FC) uses `addi r11, r11, 3; divw r11, r11, r23` for the
+// 8-level mode and the equivalent +2 round for the 5-way mode — i.e.
+// rounded division, not truncation. Plain integer-truncation
+// `((7-i)*a0 + i*a1)/7` produces a slightly biased ramp which shows up
+// as low-frequency banding when the result is fed to a Z-reconstruction
+// step (BC5 normal maps).
 static void decode_bc4_block(const uint8_t* b, uint8_t* out16) {
     uint8_t a0 = b[0], a1 = b[1];
     uint64_t abits = 0;
@@ -125,9 +134,13 @@ static void decode_bc4_block(const uint8_t* b, uint8_t* out16) {
     uint8_t atab[8];
     atab[0] = a0; atab[1] = a1;
     if (a0 > a1) {
-        for (int i = 1; i <= 6; i++) atab[i+1] = (uint8_t)(((7-i)*a0 + i*a1)/7);
+        // 8-level mode: 6 interpolated values, rounded /7.
+        for (int i = 1; i <= 6; i++)
+            atab[i+1] = (uint8_t)(((7-i)*a0 + i*a1 + 3) / 7);
     } else {
-        for (int i = 1; i <= 4; i++) atab[i+1] = (uint8_t)(((5-i)*a0 + i*a1)/5);
+        // 6-level mode: 4 interpolated values rounded /5, plus 0 and 255.
+        for (int i = 1; i <= 4; i++)
+            atab[i+1] = (uint8_t)(((5-i)*a0 + i*a1 + 2) / 5);
         atab[6] = 0; atab[7] = 255;
     }
     for (int i = 0; i < 16; ++i) {

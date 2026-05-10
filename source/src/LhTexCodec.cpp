@@ -649,51 +649,70 @@ bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,
                     break;
                 }
                 case 3: {  // full BC4 decode — endpoints from trees A & B, indices from tree C
+                    // Tree usage verified against sub_82B8D724 stack
+                    // var_F0/var_EC: walk #1 = tree_A (64), walk #2 =
+                    // tree_B (32, var_F0), walks #3..#10 = tree_C (64,
+                    // var_EC). NOTE: docs/CODEC.md is wrong about this —
+                    // it says walk #2 is tree_C and indices come from
+                    // tree_B; the actual binary stores it the other way.
                     int sym_A = huff_decode(br, tree_A);
                     int sym_B = huff_decode(br, tree_B);
                     if (sym_A < 0 || sym_B < 0) return fail("variant_2_3_4: A/B tree decode failed");
-                    // Endpoint computation (matches asm):
-                    //   a0_pre = sym_A - sym_B  (signed, clamp [0, 0x3F])
-                    //   a1_pre = sym_A + sym_B  (clamp [0, 0x3F])
-                    int a0 = g_dq6to8[clamp6(sym_A - sym_B)];
-                    int a1 = g_dq6to8[clamp6(sym_A + sym_B)];
+                    // Endpoint dequant (matches sub_82B8D820 .. D85C):
+                    //   sum  = sym_A + sym_B → clamp [0, 0x3F] → byte_83491F10[sum]  → out[0]
+                    //   diff = sym_A − sym_B → clamp [0, 0x3F] → byte_83491F10[diff] → out[1]
+                    // Crucially, the binary writes the LARGER (sum) endpoint
+                    // to out[0] = "a0" and the SMALLER (diff) to out[1] = "a1",
+                    // which puts the resulting BC4 alpha block in the 8-level
+                    // interpolation mode — i.e. a0 > a1. Previous code had
+                    // them swapped, dropping into the 6-level mode and giving
+                    // every block the wrong interpolated values.
+                    int a0 = g_dq6to8[clamp6(sym_A + sym_B)];   // sum  → larger  → out[0]
+                    int a1 = g_dq6to8[clamp6(sym_A - sym_B)];   // diff → smaller → out[1]
 
-                    // 8 walks of tree C for indices — must consume bits even
-                    // if we don't fully use them, so the bit stream stays aligned.
+                    // 8 walks of tree C, packed into 16 indices in raster
+                    // order. Storage in the binary's stack buffer is
+                    // component-grouped:
+                    //   var_B0[0..3]   = sym_C1 & 7    for iter 0..3
+                    //   var_AC[0..3]   = sym_C1 >> 3   for iter 0..3
+                    //   var_AC[4..7]   = sym_C2 & 7    for iter 0..3
+                    //   var_AC[8..11]  = sym_C2 >> 3   for iter 0..3
+                    //
+                    // BUT — and this is the subtle bit — the packer at
+                    // loc_82B8DB3C reads them in INTERLEAVED order: per
+                    // outer step it loads var_B0[r9], var_AC[r9],
+                    // var_AC[r9+4], var_AC[r9+8] (one byte from each
+                    // component group), packs all four 3-bit values into
+                    // bits, then increments r9 and repeats. So the BC4
+                    // bit-stream is iter-major:
+                    //
+                    //   pixel(row,col) at bit (row*4 + col)*3
+                    //   row r = iter r;  col 0..3 = (C1_LOW, C1_HIGH,
+                    //                                C2_LOW, C2_HIGH)
+                    //
+                    // We can skip the stack-shuffle dance and write
+                    // straight into raster order: indices[r*4 + c].
                     uint8_t indices[16] = {0};
                     for (int iter = 0; iter < 4; ++iter) {
                         int sC1 = huff_decode(br, tree_C);
                         int sC2 = huff_decode(br, tree_C);
                         if (sC1 < 0 || sC2 < 0)
                             return fail("variant_2_3_4: C tree decode failed");
-                        // Per asm: low_3 of sC1 → indices[iter+0], high of sC1 → indices[iter+4]
-                        //         low_3 of sC2 → indices[iter+8], high of sC2 → indices[iter+12]
-                        indices[iter +  0] = (uint8_t)(sC1 & 7);
-                        indices[iter +  4] = (uint8_t)((sC1 >> 3) & 7);
-                        indices[iter +  8] = (uint8_t)(sC2 & 7);
-                        indices[iter + 12] = (uint8_t)((sC2 >> 3) & 7);
+                        indices[iter * 4 + 0] = (uint8_t)(sC1 & 7);         // col 0
+                        indices[iter * 4 + 1] = (uint8_t)((sC1 >> 3) & 7);  // col 1
+                        indices[iter * 4 + 2] = (uint8_t)(sC2 & 7);         // col 2
+                        indices[iter * 4 + 3] = (uint8_t)((sC2 >> 3) & 7);  // col 3
                     }
 
                     if (mode == 2) {
-                        // BC4 alpha block: a0, a1, then 16 indices × 3 bits packed into 6 bytes
+                        // BC4 alpha block: out[0..1] = endpoints, out[2..7]
+                        // = 16 × 3-bit indices packed LSB-first in raster
+                        // order (no transpose — see comment above).
                         outb[0] = (uint8_t)a0;
                         outb[1] = (uint8_t)a1;
-                        // The Lionhead encoder stores indices column-major in
-                        // a 16-byte stack buffer:
-                        //   indices[col*4 + row] = pixel value at (row, col)
-                        // Then it packs them into the BC4 bit-stream in the
-                        // order indices[0], indices[4], indices[8], indices[12],
-                        // indices[1], indices[5], ... — which is exactly the
-                        // BC4 standard row-major layout (pixel(row, col) at
-                        // bit position (row*4 + col)*3).
                         uint64_t packed = 0;
-                        int bit_pos = 0;
-                        for (int row = 0; row < 4; ++row) {
-                            for (int col = 0; col < 4; ++col) {
-                                int src = col * 4 + row;
-                                packed |= ((uint64_t)(indices[src] & 7)) << bit_pos;
-                                bit_pos += 3;
-                            }
+                        for (int i = 0; i < 16; ++i) {
+                            packed |= ((uint64_t)(indices[i] & 7)) << (i * 3);
                         }
                         outb[2] = (uint8_t)(packed       & 0xFF);
                         outb[3] = (uint8_t)((packed >> 8)  & 0xFF);

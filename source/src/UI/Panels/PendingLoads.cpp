@@ -117,7 +117,11 @@ void process_pending_loads() {
                         MP_Init(device_ptr, g_mp, 800, 600);
                         MP_Build(device_ptr, S.mdl_meshes, S.mdl_info, g_mp);
                         // Reset orbit camera to fit the new model.
-                        S.cam_yaw = 0.0f;
+                        // Default yaw = PI: Fable 2 character/prop MDLs are
+                        // authored facing -Z, so a yaw-0 orbit camera at +Z
+                        // looks at the back. Spinning 180° drops us in
+                        // front of the mesh on first load.
+                        S.cam_yaw = 3.14159265f;
                         S.cam_pitch = 0.2f;
                         S.cam_dist = 3.0f;
                         // Drop the texture preview so the render panel

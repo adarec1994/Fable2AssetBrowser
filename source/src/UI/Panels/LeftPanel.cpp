@@ -1000,8 +1000,57 @@ void draw_left_panel() {
             }
         }
         if (s_active_tab == 4) {
+            // Reserve footer height for the sticky "Extract All as..."
+            // button below the audio list, matching the Textures tab
+            // pattern.
+            const float footer_h = ImGui::GetFrameHeightWithSpacing();
             draw_flat_asset_tab("Audio", S.all_wav_files, S.wav_filter,
-                                "audio_list", /*kind=*/2);
+                                "audio_list", /*kind=*/2, footer_h);
+
+            // ---- Footer: "Extract All as..." dropdown ----
+            // Always rendered while this tab is active. Disabled when
+            // no audio is indexed so the affordance stays visible.
+            const bool has_any = !S.all_wav_files.empty();
+            if (!has_any) ImGui::BeginDisabled();
+            if (ImGui::Button("Extract All as...##wav_extract_all_as",
+                              ImVec2(-1, 0))) {
+                ImGui::OpenPopup("##wav_extract_all_as_popup");
+            }
+            if (!has_any) ImGui::EndDisabled();
+            if (!has_any && !S.hide_tooltips &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(
+                    "No audio indexed yet — open a Fable 2 root "
+                    "(folder or ISO) to populate this list.");
+                ImGui::EndTooltip();
+            }
+            if (ImGui::BeginPopup("##wav_extract_all_as_popup")) {
+                if (ImGui::MenuItem("WAV (PCM)")) {
+                    ISO::dump_wav_files_as(
+                        ISO::AudioExportFormat::WAV_PCM);
+                }
+                if (ImGui::MenuItem(".wav (raw XMA)")) {
+                    ISO::dump_wav_files_as(
+                        ISO::AudioExportFormat::WAV_RAW);
+                }
+                ImGui::Separator();
+                // MP3 / AAC go through Windows Media Foundation's
+                // SinkWriter (see MfAudioEncoder). Each file is
+                // XMA→PCM decoded once, then re-encoded into the
+                // chosen format and written under the export root.
+                // AAC lands as `.m4a` (MP4 container) since that's
+                // what MF's URL-based sink picks up.
+                if (ImGui::MenuItem("MP3")) {
+                    ISO::dump_wav_files_as(
+                        ISO::AudioExportFormat::MP3);
+                }
+                if (ImGui::MenuItem("AAC (.m4a)")) {
+                    ISO::dump_wav_files_as(
+                        ISO::AudioExportFormat::AAC);
+                }
+                ImGui::EndPopup();
+            }
         }
         if (s_active_tab == 5) {
             // Animations tab — flat list of all clips parsed from the

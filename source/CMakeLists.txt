@@ -57,6 +57,7 @@ set(APP_SOURCES
         src/BNKCore.cpp
         src/Audio/AudioPlayer.cpp
         src/Audio/XmaDecoder.cpp
+        src/Audio/MfAudioEncoder.cpp
         # Minimal override of libavcodec/allcodecs.obj — defines codec_list
         # with only XMA1/XMA2/WMAPro so the linker drops every other codec
         # via /OPT:REF instead of dragging the full FFmpeg surface (~25MB)
@@ -253,7 +254,13 @@ if(WIN32)
         configure_file("${FA_TTF_SOURCE}" "${FA_TTF_STAGED}" COPYONLY)
     endif()
 
-    target_link_libraries(Fable_2_Asset_Browser PRIVATE d3d11 dxgi d3dcompiler dwmapi winmm)
+    # mfreadwrite gives us MFCreateSinkWriterFromURL, the entry point for
+    # the PCM→MP3/AAC encode pipeline in MfAudioEncoder. mfplat / mfuuid
+    # were already linked further down via the FFmpeg dependency block;
+    # mfreadwrite is the missing piece to make the SinkWriter API
+    # resolve at link time.
+    target_link_libraries(Fable_2_Asset_Browser PRIVATE
+            d3d11 dxgi d3dcompiler dwmapi winmm mfreadwrite)
 
     if(FFMPEG_AVAILABLE)
         target_compile_definitions(Fable_2_Asset_Browser PRIVATE F2_HAVE_FFMPEG=1)

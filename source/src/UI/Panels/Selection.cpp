@@ -11,6 +11,9 @@
 #include "../OutputLog.h"
 #include "../HexView.h"
 #include "../../textures/export/TextureExport.h"
+#include "../../Audio/XmaDecoder.h"      // XMA→PCM for the per-file
+                                          // MP3 / AAC right-click items.
+#include "../../Audio/MfAudioEncoder.h"  // PCM→MP3 / PCM→AAC.
 #include "../../animations/AnimBank.h"
 #include "../../animations/AnimDataFile.h"
 #include "imgui.h"
@@ -616,9 +619,111 @@ bool ext_is(const std::string& name, const char* ext) {
 // the user's right-click is a deliberate single-asset operation, so
 // adding a worker thread + progress modal would just add latency.
 // The existing `dump_*_files()` functions are the path for bulk.
+// Per-file MP3 / AAC encoder for the right-click "Extract as ..."
+// audio submenu. Mirrors the encoded-format branch in IsoDump.cpp's
+// `dump_wav_files_as`, just for a single asset:
+//   1. extract the XMA-encoded bytes from the BNK to a scratch file
+//   2. read into a buffer + decode to PCM via XmaDecoder
+//   3. encode to MP3 or AAC via MfAudio (Windows Media Foundation)
+//   4. drop the scratch file regardless of outcome
+//
+// `out_ext` is the destination file extension WITH the leading dot —
+// `.mp3` for MP3, `.m4a` for AAC (the MF SinkWriter picks its muxer
+// from the URL extension, and `.aac` raw isn't recognised — `.m4a`
+// or `.mp4` are). All output goes under `${S.export_dir}` at the
+// asset's relative path with the extension swapped.
+static void asset_export_audio_encoded(const std::string& bnk_path,
+                                       int file_index,
+                                       const std::string& file_name,
+                                       bool aac /*false = mp3*/)
+{
+    const char* fmt_label = aac ? "AAC"  : "MP3";
+    const char* fmt_ext   = aac ? ".m4a" : ".mp3";
+
+    // Destination path: ${export_dir}/<asset_path with replaced ext>.
+    // Same normalisation `build_export_target` does (strip leading
+    // separators); replace_extension swaps the trailing piece so an
+    // input `audio/foo.wav` lands as `audio/foo.mp3` instead of
+    // `audio/foo.wav.mp3`.
+    auto out = build_export_target(file_name);
+    out.replace_extension(fmt_ext);
+    auto scratch = out;
+    scratch += ".xma.tmp";
+
+    std::error_code ec;
+    if (auto parent = out.parent_path(); !parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            OutputLog::error(std::string(fmt_label) +
+                             " export: cannot create " +
+                             parent.string() + " — " + ec.message());
+            return;
+        }
+    }
+
+    bool ok = false;
+    try {
+        // Step 1 — pull the raw XMA-encoded RIFF/WAVE from the BNK.
+        extract_one(bnk_path, file_index, scratch.string());
+        if (!std::filesystem::exists(scratch, ec) || ec) {
+            throw std::runtime_error("extract_one produced no file");
+        }
+        auto raw = read_all_bytes(scratch);
+        std::filesystem::remove(scratch, ec);
+        if (raw.empty()) {
+            throw std::runtime_error("extracted .wav is empty");
+        }
+
+        // Step 2 — XMA → PCM.
+        std::vector<uint8_t> src(raw.begin(), raw.end());
+        std::vector<int16_t> pcm;
+        int sr = 0, ch = 0;
+        std::string err;
+        if (!XmaDecoder::decode_xma_to_pcm(src, pcm, sr, ch, &err) ||
+            pcm.empty()) {
+            throw std::runtime_error(
+                std::string("XMA→PCM decode failed: ") + err);
+        }
+
+        // Step 3 — PCM → MP3 / AAC via Media Foundation.
+        bool encoded = aac
+            ? MfAudio::encode_pcm_to_aac(pcm, sr, ch, out.string(), &err)
+            : MfAudio::encode_pcm_to_mp3(pcm, sr, ch, out.string(), &err);
+        if (!encoded) {
+            throw std::runtime_error(
+                std::string(fmt_label) + " encode failed: " + err);
+        }
+        ok = true;
+    } catch (const std::exception& ex) {
+        std::filesystem::remove(scratch, ec);
+        OutputLog::error(std::string(fmt_label) + " export exception on "
+                         + file_name + ": " + ex.what());
+    } catch (...) {
+        std::filesystem::remove(scratch, ec);
+        OutputLog::error(std::string(fmt_label) + " export exception on "
+                         + file_name);
+    }
+
+    if (ok) {
+        OutputLog::success(std::string("Exported ") +
+                           std::filesystem::path(file_name).filename().string()
+                           + " as " + fmt_label + " → " + out.string());
+    } else {
+        OutputLog::error(std::string(fmt_label) + " export failed: " +
+                         file_name);
+    }
+}
+
+// `convert_audio` only matters for .wav assets: when true, the
+// extract_file_one call below decodes XMA → PCM in-place, leaving a
+// playable .wav at the destination. When false the bytes land
+// verbatim — the original XMA-encoded RIFF/WAVE the BNK stores.
+// Non-audio assets ignore the flag (it just feeds straight through to
+// extract_file_one which only acts on `is_audio_file` matches anyway).
 static void asset_export_to_export_dir(const std::string& bnk_path,
                                        int file_index, bool /*is_nested*/,
-                                       const std::string& file_name)
+                                       const std::string& file_name,
+                                       bool convert_audio = true)
 {
     auto out = build_export_target(file_name);
     std::error_code ec;
@@ -646,16 +751,17 @@ static void asset_export_to_export_dir(const std::string& bnk_path,
             }
         } else {
             // Raw extract path — extract_file_one streams to disk
-            // and (for audio assets) follows up with an XMA→PCM
-            // decode pass in-place. Anything that isn't audio just
-            // gets written byte-for-byte.
+            // and (for audio assets, only when convert_audio is true)
+            // follows up with an XMA→PCM decode pass in-place.
+            // Anything that isn't audio just gets written byte-for-
+            // byte regardless of the flag.
             BNKItemUI item{};
             item.index = file_index;
             item.name  = file_name;
             item.size  = 0;
             extract_file_one(bnk_path, item,
                              out.parent_path().string(),
-                             /*convert_audio=*/true);
+                             convert_audio);
             // extract_file_one writes to base_out_dir / item.name —
             // which equals our `out` so long as `file_name` doesn't
             // have leading separators. Our build_export_target
@@ -744,6 +850,34 @@ void file_hex_context_menu(const std::string& bnk_path,
             // the highest-resolution mip per the .tex format convention.
             tex_export_menu_named(file_name, file_name, bnk_path,
                                   /*mip_index=*/0);
+        } else if (is_audio_file(file_name)) {
+            // Audio gets the same set of formats the Audio tab's
+            // "Extract All as..." footer offers, just for one file.
+            // PCM and Raw write `.wav`; MP3 writes `.mp3`; AAC writes
+            // `.m4a` (MP4 container — required by Media Foundation's
+            // SinkWriter, which selects the muxer from the URL
+            // extension). Each lands at `${export_dir}/<asset_path>`
+            // with the extension swapped, overwriting any previous
+            // export of the same asset in that format.
+            if (ImGui::MenuItem("Extract (.wav PCM)")) {
+                asset_export_to_export_dir(bnk_path, file_index,
+                                           is_nested, file_name,
+                                           /*convert_audio=*/true);
+            }
+            if (ImGui::MenuItem("Extract Raw")) {
+                asset_export_to_export_dir(bnk_path, file_index,
+                                           is_nested, file_name,
+                                           /*convert_audio=*/false);
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Extract MP3")) {
+                asset_export_audio_encoded(bnk_path, file_index,
+                                           file_name, /*aac=*/false);
+            }
+            if (ImGui::MenuItem("Extract AAC (.m4a)")) {
+                asset_export_audio_encoded(bnk_path, file_index,
+                                           file_name, /*aac=*/true);
+            }
         } else {
             if (ImGui::MenuItem("Export")) {
                 asset_export_to_export_dir(bnk_path, file_index,

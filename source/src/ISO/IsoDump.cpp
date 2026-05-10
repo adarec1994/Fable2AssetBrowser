@@ -8,6 +8,8 @@
 #include "../UI/OutputLog.h"
 #include "../UI/Panels/PanelInternal.h"
 #include "../MDL/ModelParser.h"
+#include "../Audio/XmaDecoder.h"     // decode_xma_wav_file_to_pcm_wav
+#include "../Audio/MfAudioEncoder.h" // PCM→MP3/AAC via Media Foundation
 #include "../BNKCore.cpp"
 
 #include <algorithm>
@@ -374,8 +376,15 @@ static bool write_buf_to_disk(const std::filesystem::path& out,
 // Build the on-disk destination for a flat asset entry. Same path
 // normalisation pattern as the BNK dump — strip leading slashes so
 // the concat doesn't accidentally root the result, and force the
-// expected extension on if `full_path` somehow lost it (defensive
-// only — every flat-list entry already has the right extension).
+// destination extension to `expected_ext` REPLACING any existing
+// extension on the asset path. The earlier `if (p.extension() !=
+// expected_ext) p += expected_ext;` shape was a bug: for cross-
+// format outputs (audio .wav → .mp3 / .m4a) the source's `.wav`
+// would still be in the path and the new extension was tacked on,
+// producing `foo.wav.mp3` files that some players refuse. Using
+// replace_extension keeps the original behaviour for same-extension
+// dumps (.mdl/.tex/.wav-raw — no-op since old == new) and produces
+// the right `.mp3` / `.m4a` for cross-format ones.
 static std::filesystem::path build_asset_out_path(const FlatAssetEntry& e,
                                                   const char* expected_ext) {
     std::string rel = e.full_path;
@@ -385,7 +394,7 @@ static std::filesystem::path build_asset_out_path(const FlatAssetEntry& e,
         S.export_dir.empty() ? std::filesystem::path("extracted")
                              : std::filesystem::path(S.export_dir);
     std::filesystem::path p(rel);
-    if (p.extension() != expected_ext) p += expected_ext;
+    p.replace_extension(expected_ext);
     return root / p;
 }
 
@@ -1230,6 +1239,244 @@ void dump_wav_files() {
                             std::to_string(n_failed) + " failed.");
         } else {
             OutputLog::success("WAV dump complete: " +
+                               std::to_string(total) + " files written.");
+        }
+    }).detach();
+}
+
+// ---------------------------------------------------------------------------
+// WAV dump — decoded variant
+// ---------------------------------------------------------------------------
+// Same shape as dump_wav_files() but with a per-asset XMA decode
+// step. WAV_RAW short-circuits to dump_wav_files (raw bytes, no
+// decode round-trip). WAV_PCM extracts the XMA bytes, runs them
+// through XmaDecoder::decode_xma_wav_file_to_pcm_wav, and overwrites
+// the .wav with the PCM result — the same in-place trick
+// `extract_file_one(..., convert_audio=true)` uses for single-file
+// right-click exports.
+//
+// MP3 / AAC are scaffolded but stubbed: our libavcodec build
+// (xma_codec_list.cpp) only links the XMA1/XMA2/WMAPro decoders.
+// Wiring up the libavcodec aac/mp3 encoders means extending that
+// codec list and bringing in the encoder symbols. Until that's
+// done, those branches log a clear "not implemented" line so the
+// user gets feedback rather than silent failures.
+
+void dump_wav_files_as(AudioExportFormat fmt) {
+    if (fmt == AudioExportFormat::WAV_RAW) {
+        // Raw bytes path is exactly what dump_wav_files() already
+        // does. Re-running the loop here would just duplicate code
+        // and risk drifting behaviour.
+        dump_wav_files();
+        return;
+    }
+    // WAV_PCM, MP3, AAC all share the same outer loop: extract the
+    // XMA bytes, decode to PCM, then dispatch to the format-specific
+    // writer. Inline branches below pick between the WAV writer
+    // (XmaDecoder built-in) and the MF-based MP3 / AAC encoders.
+
+    if (S.all_wav_files.empty()) {
+        OutputLog::warn("Dump WAV (PCM/MP3/AAC): no .wav files indexed "
+                        "(open a Fable 2 root first).");
+        return;
+    }
+
+    std::vector<FlatAssetEntry> targets = S.all_wav_files;
+
+    std::unordered_map<std::string, std::vector<int>> by_bnk;
+    by_bnk.reserve(64);
+    for (size_t i = 0; i < targets.size(); ++i) {
+        by_bnk[targets[i].bnk_path].push_back((int)i);
+    }
+    const int total = (int)targets.size();
+
+    const std::string export_root =
+        S.export_dir.empty() ? std::filesystem::absolute("extracted").string()
+                             : S.export_dir;
+
+    // Per-format display label and output extension. Drives the log
+    // lines, the progress modal title, and the destination filename
+    // suffix. AAC uses .m4a (MP4 container) — that's what
+    // MFCreateSinkWriterFromURL recognises; raw `.aac` would yield
+    // E_FAIL on writer creation.
+    const char* fmt_label =
+        (fmt == AudioExportFormat::WAV_PCM) ? "PCM"  :
+        (fmt == AudioExportFormat::MP3)     ? "MP3"  :
+        (fmt == AudioExportFormat::AAC)     ? "AAC"  : "?";
+    const char* fmt_ext =
+        (fmt == AudioExportFormat::WAV_PCM) ? ".wav" :
+        (fmt == AudioExportFormat::MP3)     ? ".mp3" :
+        (fmt == AudioExportFormat::AAC)     ? ".m4a" : ".bin";
+
+    OutputLog::info(std::string("Exporting ") + std::to_string(total) +
+                    " .wav file(s) as " + fmt_label + " → " + export_root);
+    progress_open(total,
+                  std::string("Exporting WAVs as ") + fmt_label +
+                  " → " + export_root);
+    progress_update(0, total, "Starting...");
+
+    std::thread([targets = std::move(targets),
+                 by_bnk = std::move(by_bnk),
+                 total, fmt, fmt_label, fmt_ext]() {
+        struct PG {
+            ~PG() { progress_done(); }
+        } pg;
+
+        std::atomic<int> done{0};
+        std::vector<std::string> failed;
+        std::mutex fail_m;
+
+        try {
+            for (const auto& [bnk_path, indices] : by_bnk) {
+                if (S.cancel_requested.load() || S.exiting.load()) break;
+
+                for (int ti : indices) {
+                    if (S.cancel_requested.load() || S.exiting.load()) break;
+                    const auto& e = targets[(size_t)ti];
+
+                    // Output path for the encoded result.
+                    auto out_final = build_asset_out_path(e, fmt_ext);
+                    // Scratch path for the raw XMA extract — we always
+                    // need a temp file because XmaDecoder reads from
+                    // disk. Use a sibling .raw.wav next to the final
+                    // output so it lives on the same drive (matters
+                    // for atomic-rename semantics on the WAV path).
+                    auto out_scratch = out_final;
+                    out_scratch += ".xma.tmp";
+
+                    bool ok = false;
+                    try {
+                        std::error_code ec;
+                        if (auto parent = out_final.parent_path();
+                            !parent.empty()) {
+                            std::filesystem::create_directories(parent, ec);
+                        }
+
+                        // Step 1 — extract the XMA-encoded bytes.
+                        extract_one(bnk_path, e.file_index,
+                                    out_scratch.string());
+                        if (!std::filesystem::exists(out_scratch, ec) || ec) {
+                            throw std::runtime_error(
+                                "extract_one produced no file");
+                        }
+
+                        // Step 2 — format-specific encode/conversion.
+                        if (fmt == AudioExportFormat::WAV_PCM) {
+                            // PCM .wav: XmaDecoder handles file→file in
+                            // one call. Decode-failure mode keeps the
+                            // raw .wav on disk so the user still gets
+                            // something usable.
+                            auto raw = read_all_bytes(out_scratch);
+                            std::filesystem::remove(out_scratch, ec);
+                            if (raw.empty()) {
+                                throw std::runtime_error(
+                                    "extracted .wav is empty");
+                            }
+                            std::vector<uint8_t> src(raw.begin(), raw.end());
+                            std::string err;
+                            if (!XmaDecoder::decode_xma_wav_file_to_pcm_wav(
+                                    src, out_final.string(), &err)) {
+                                // Soft failure — write the raw bytes
+                                // to the final path so we don't end
+                                // up empty-handed.
+                                std::ofstream f(out_final, std::ios::binary |
+                                                          std::ios::trunc);
+                                if (f) {
+                                    f.write((const char*)raw.data(),
+                                            (std::streamsize)raw.size());
+                                }
+                                OutputLog::warn(std::string(
+                                    "PCM decode failed for ") + e.full_path +
+                                    ": " + err + " — kept raw bytes.");
+                            }
+                            ok = true;
+                        } else {
+                            // MP3 / AAC: XMA → PCM (in-memory) → MF
+                            // encode at out_final. Drops the scratch
+                            // file regardless of outcome so we don't
+                            // leave .xma.tmp turds around.
+                            auto raw = read_all_bytes(out_scratch);
+                            std::filesystem::remove(out_scratch, ec);
+                            if (raw.empty()) {
+                                throw std::runtime_error(
+                                    "extracted .wav is empty");
+                            }
+                            std::vector<uint8_t> src(raw.begin(), raw.end());
+                            std::vector<int16_t> pcm;
+                            int sr = 0, ch = 0;
+                            std::string err;
+                            if (!XmaDecoder::decode_xma_to_pcm(
+                                    src, pcm, sr, ch, &err) || pcm.empty()) {
+                                throw std::runtime_error(
+                                    std::string("XMA→PCM decode failed: ")
+                                    + err);
+                            }
+                            bool encoded = false;
+                            if (fmt == AudioExportFormat::MP3) {
+                                encoded = MfAudio::encode_pcm_to_mp3(
+                                    pcm, sr, ch, out_final.string(), &err);
+                            } else {
+                                encoded = MfAudio::encode_pcm_to_aac(
+                                    pcm, sr, ch, out_final.string(), &err);
+                            }
+                            if (!encoded) {
+                                throw std::runtime_error(
+                                    std::string(fmt_label) +
+                                    " encode failed: " + err);
+                            }
+                            ok = true;
+                        }
+                    } catch (const std::exception& ex) {
+                        std::error_code rmec;
+                        std::filesystem::remove(out_scratch, rmec);
+                        OutputLog::error(std::string("WAV ") + fmt_label +
+                                         " exception on " + e.full_path +
+                                         ": " + ex.what());
+                    } catch (...) {
+                        std::error_code rmec;
+                        std::filesystem::remove(out_scratch, rmec);
+                        OutputLog::error(std::string("WAV ") + fmt_label +
+                                         " exception on " + e.full_path);
+                    }
+
+                    if (!ok) {
+                        std::lock_guard<std::mutex> lk(fail_m);
+                        failed.push_back(e.full_path);
+                    }
+                    int cur = ++done;
+                    progress_update(cur, total,
+                                    std::filesystem::path(e.name)
+                                        .filename().string());
+                }
+            }
+        } catch (const std::exception& ex) {
+            OutputLog::error(std::string("WAV ") + fmt_label +
+                             " dump worker aborted: " + ex.what());
+            return;
+        } catch (...) {
+            OutputLog::error(std::string("WAV ") + fmt_label +
+                             " dump worker aborted (unknown).");
+            return;
+        }
+
+        if (S.cancel_requested.load()) {
+            OutputLog::warn(std::string("WAV ") + fmt_label +
+                            " dump cancelled (" +
+                            std::to_string(done.load()) + "/" +
+                            std::to_string(total) + ").");
+            S.cancel_requested = false;
+            return;
+        }
+        const int n_failed = (int)failed.size();
+        if (n_failed > 0) {
+            OutputLog::warn(std::string("WAV ") + fmt_label +
+                            " dump finished: " +
+                            std::to_string(done.load() - n_failed) + "/" +
+                            std::to_string(total) + " written, " +
+                            std::to_string(n_failed) + " failed.");
+        } else {
+            OutputLog::success(std::string("WAV ") + fmt_label +
+                               " dump complete: " +
                                std::to_string(total) + " files written.");
         }
     }).detach();

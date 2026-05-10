@@ -16,7 +16,15 @@ Browse the Fable 2 BNK files. Included features:
 
 ## Preview
 
-Coming soon!
+Here is a preview of a Balverine in Fable 2 Asset Browser:
+![Balverine.png](images/Balverine.png)
+
+Here is a preview of an Oak Tree:
+![OakTree.png](images/OakTree.png)
+
+And here is an example of some textures:
+![TextureSample1.png](images/TextureSample1.png)
+![TextureSample2.png](images/TextureSample2.png)
 
 ## How to Contribute
 

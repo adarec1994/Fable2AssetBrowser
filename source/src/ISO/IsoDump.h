@@ -61,7 +61,38 @@ void dump_tex_files_as(TexExportFormat fmt);
 // reconstruction. Faster than the model/texture dumps because there's
 // no pair lookup or memory concat: the extract streams straight to
 // disk under the export root, preserving the source path.
+//
+// The bytes that come out are the raw XMA2-encoded WAV the BNK
+// stores. To get a playable PCM .wav (or MP3 / AAC), use
+// `dump_wav_files_as(AudioExportFormat::…)` instead.
 void dump_wav_files();
+
+// Format selector for `dump_wav_files_as`. Audio in retail Fable 2
+// BNKs is XMA2-encoded, wrapped in a RIFF/WAVE header — playable
+// only on the original Xbox 360 hardware decoder. The variants here
+// run that source through XmaDecoder + (for MP3/AAC) a follow-up
+// encoder before writing to disk.
+enum class AudioExportFormat {
+    WAV_RAW,   // XMA2-encoded bytes verbatim — same as dump_wav_files()
+    WAV_PCM,   // XMA2 → 16-bit PCM RIFF/WAVE (plays in any external tool)
+    MP3,       // XMA2 → PCM → MP3 (encoder not yet wired — stub)
+    AAC,       // XMA2 → PCM → AAC (encoder not yet wired — stub)
+};
+
+// Decoded variant of dump_wav_files. Walks S.all_wav_files and writes
+// every audio file as `fmt` to
+//   `${S.export_dir}/<asset_path>.<ext>`
+// preserving the BNK's internal directory layout (which already has
+// `audio/...` for game audio, so each format's files land naturally
+// under the audio tree). Worker thread + progress modal so the UI
+// stays responsive on a multi-thousand-file batch.
+//
+// `WAV_RAW` short-circuits to dump_wav_files() — same bytes, same
+// output path, no decode round-trip. The other variants run each
+// entry through `XmaDecoder::decode_xma_to_pcm` and then write
+// either a PCM RIFF/WAVE (`WAV_PCM`) or, when an encoder is wired
+// up later, an MP3/AAC stream.
+void dump_wav_files_as(AudioExportFormat fmt);
 
 // Dump every file from every BNK indexed by the asset browser
 // (top-level + nested). No reconstruction — paired bodies / headers

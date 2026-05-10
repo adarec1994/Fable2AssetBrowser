@@ -132,6 +132,13 @@ struct State {
     float pending_font_size   = 17.0f;
     bool  font_size_dirty     = false;
     bool  show_settings       = false;
+    // Texture / asset export root. Default initialised to
+    // <exe_dir>/extracted on first startup; user-changeable via the
+    // Settings dropdown. Each export writes to
+    //   `${export_dir}/${asset_relative_path}.${ext}`
+    // creating any intermediate dirs as it goes. Persisted to
+    // config.ini ("export_dir" key).
+    std::string export_dir;
     std::atomic<bool> cancel_requested{false};
     std::atomic<bool> exiting{false};
     std::mutex progress_mutex;

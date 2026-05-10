@@ -21,6 +21,7 @@
 #endif
 #include "ModelPreview.h"
 #include "../textures/export/TextureExport.h"
+#include "OutputLog.h"
 #ifndef _WIN32
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
@@ -194,28 +195,39 @@ void draw_main(GLFWwindow* window) {
     g_glfw_window = window;
 #endif
     ImGuiViewport* viewport = ImGui::GetMainViewport();
+    // The bottom Output Log strip lives only on the main app view (post
+    // splash + post BNK-load). On those screens, shrink the main window
+    // by the strip's height so panels inside don't get clipped by it.
+    const bool show_output_log =
+        !S.root_dir.empty() && !UI::loading_in_progress() && !S.bnk_paths.empty();
+    const float bottom_reserve =
+        show_output_log ? OutputLog::reserved_bottom_height() : 0.0f;
     ImGui::SetNextWindowPos(viewport->WorkPos);
-    ImGui::SetNextWindowSize(viewport->WorkSize);
-    // Only carry the MenuBar flag when we're past the splash. The flag
-    // unconditionally reserves a strip at the top of the window even
-    // when no menu is drawn — that strip would steal pixels from the
-    // splash artwork.
+    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x,
+                                    viewport->WorkSize.y - bottom_reserve));
+    // The MenuBar flag reserves a strip at the top of the window
+    // unconditionally — even if no menu is drawn — so we only set it
+    // when we're actually going to render the menu. We hide the menu
+    // during the splash AND while BNKs are loading; the loading screen
+    // owns the entire viewport in those cases and a stub menu strip
+    // would just steal pixels.
+    const bool show_menu_bar = show_output_log;
     ImGuiWindowFlags main_flags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
         ImGuiWindowFlags_NoBringToFrontOnFocus |
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
-    if (!S.root_dir.empty()) main_flags |= ImGuiWindowFlags_MenuBar;
+    if (show_menu_bar) main_flags |= ImGuiWindowFlags_MenuBar;
     ImGui::Begin("##main", nullptr, main_flags);
     float dt = ImGui::GetIO().DeltaTime;
 
     // ---- Top menu bar ------------------------------------------------------
-    // Only shown after splash — otherwise it sits awkwardly above the
-    // "click anywhere" splash. File > Quit posts WM_QUIT so the main loop
-    // exits through the same path as clicking the X. Settings is a
-    // dropdown carrying the show-paths / dev-mode toggles + font slider
-    // inline; no separate popup window.
-    if (!S.root_dir.empty()) {
+    // Same gate as the flag above — only on the main app view, never on
+    // the splash or loading screens. File > Quit posts WM_QUIT so the
+    // main loop exits through the same path as clicking the X. Settings
+    // is a dropdown carrying the show-paths / dev-mode toggles + font
+    // slider inline; no separate popup window.
+    if (show_menu_bar) {
         extern void settings_save();
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("File")) {
@@ -236,10 +248,6 @@ void draw_main(GLFWwindow* window) {
                 if (ImGui::Checkbox("Developer mode", &S.dev_mode)) {
                     settings_save();
                 }
-                ImGui::TextDisabled(
-                    S.dev_mode
-                        ? "Tooltips/overlays show file size, BNK source, and full paths."
-                        : "Only the filename and basic info are shown.");
 
                 ImGui::Separator();
                 ImGui::TextUnformatted("Font size");
@@ -261,6 +269,29 @@ void draw_main(GLFWwindow* window) {
                     S.font_size_dirty = true;
                     settings_save();
                 }
+
+                // ---- Export location ---------------------------------
+                // Editable text + Browse button. Each export writes to
+                //   ${export_dir}/${asset_relative_path}.${ext}
+                // Changing this never auto-creates the new directory —
+                // we only mkdir when an actual export call needs it.
+                ImGui::Separator();
+                ImGui::TextUnformatted("Export location");
+                ImGui::SetNextItemWidth(360);
+                if (ImGui::InputText("##export_dir_input", &S.export_dir)) {
+                    settings_save();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Browse##export_dir")) {
+                    IGFD::FileDialogConfig cfg;
+                    cfg.path = S.export_dir.empty() ? "." : S.export_dir;
+                    ImGuiFileDialog::Instance()->OpenDialog(
+                        "PickExportDir",
+                        "Select export folder",
+                        nullptr,                 // nullptr filter ⇒ directory picker
+                        cfg);
+                }
+
                 ImGui::EndMenu();
             }
             ImGui::EndMenuBar();
@@ -393,14 +424,43 @@ void draw_main(GLFWwindow* window) {
     process_pending_loads();
 #endif
 
-    // Drive the texture-export ImGuiFileDialog. No-op when no export
-    // is pending. Runs after the rest of the UI so the dialog renders
-    // on top of everything.
+    // Drive the texture-export pipeline (no dialog any more — exports
+    // auto-save to S.export_dir; this is now a no-op stub kept for
+    // future use). Logs go through OutputLog.
     tex_export_drive();
+
+    // Drive the export-folder picker. Opened from the Settings dropdown
+    // via "Browse" next to the export-location field. We deliberately
+    // do NOT call open_folder_logic here — that would treat the chosen
+    // path as a Fable 2 root and rescan; we just want to update the
+    // export root.
+    {
+        ImVec2 vp = ImGui::GetMainViewport()->WorkSize;
+        ImVec2 minSize(680, 440);
+        ImVec2 maxSize(vp.x * 0.9f, vp.y * 0.9f);
+        if (ImGuiFileDialog::Instance()->Display(
+                "PickExportDir", ImGuiWindowFlags_NoCollapse, minSize, maxSize)) {
+            if (ImGuiFileDialog::Instance()->IsOk()) {
+                S.export_dir = ImGuiFileDialog::Instance()->GetCurrentPath();
+                extern void settings_save();
+                settings_save();
+                OutputLog::info("Export location changed to " + S.export_dir);
+            }
+            ImGuiFileDialog::Instance()->Close();
+        }
+    }
 
     // (Settings used to live in a floating window here; it's now a
     // dropdown directly off the menu bar.)
 
     // In-app audio player (only renders when a source is loaded).
     UI::draw_audio_player_window();
+
+    // Bottom slide-up output log. Only on the main app view — we hide it
+    // on the splash and during BNK loading so it doesn't clutter those
+    // screens. The strip itself is ~26 px; clicking it slides up a 220 px
+    // panel that overlays the main UI without reserving extra layout space.
+    if (show_output_log) {
+        OutputLog::draw();
+    }
 }

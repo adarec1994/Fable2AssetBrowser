@@ -95,6 +95,27 @@ void save_audio_muted(bool muted) {
     write_config_kv(kv);
 }
 
+// Default export directory: <exe_dir>/extracted on Windows, <cwd>/extracted
+// on other platforms (matches the legacy "drop next to the exe" behaviour
+// the user is used to). Only used when the user hasn't set their own
+// export path yet — the value is then persisted to config.ini and the
+// per-startup default never runs again.
+static std::string default_export_dir() {
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        std::string p(buf, buf + n);
+        size_t slash = p.find_last_of("\\/");
+        if (slash != std::string::npos) p.resize(slash);
+        return p + "\\extracted";
+    }
+    return "extracted";
+#else
+    return "extracted";
+#endif
+}
+
 // Read the user-visible settings from disk into S. Called once at startup
 // after the State singleton is alive.
 void settings_load() {
@@ -115,6 +136,16 @@ void settings_load() {
             S.pending_font_size = v;
         } catch (...) {}
     }
+    // Export root — persisted as-is. Falls back to <exe_dir>/extracted on
+    // first launch. We deliberately don't auto-create the directory here:
+    // the actual export call lazily creates it (and any per-asset
+    // subdirs) on demand. That way changing the export path in Settings
+    // never leaves an empty "extracted" folder behind, per the user spec.
+    if (auto it = kv.find("export_dir"); it != kv.end() && !it->second.empty()) {
+        S.export_dir = it->second;
+    } else {
+        S.export_dir = default_export_dir();
+    }
 }
 
 // Persist the current S.* settings. Called from the Settings dropdown
@@ -126,6 +157,7 @@ void settings_save() {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.0f", S.font_size_dirty ? S.pending_font_size : S.font_size);
     kv["font_size"] = buf;
+    kv["export_dir"] = S.export_dir;
     write_config_kv(kv);
 }
 #ifdef _WIN32

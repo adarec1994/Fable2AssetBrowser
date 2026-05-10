@@ -2,26 +2,25 @@
 //
 // Two responsibilities:
 //   1. Dispatch tex_export_rgba() to the right format-specific writer.
-//   2. Drive the user-facing menu workflow: stash a request, open an
-//      ImGuiFileDialog, decode lazily on confirm, write the file.
+//   2. Provide the user-facing menu workflow: "Export to" submenu items
+//      that immediately write the result to disk under S.export_dir,
+//      preserving the asset's relative path. Status is reported through
+//      OutputLog (success / error toasts in the bottom slide-up panel).
 //
-// Menu helpers live here too — tex_export_menu_rgba/blob/named() each
-// render the four "PNG / JPG / TIFF / DDS" items inside an existing
-// context-menu popup. They write through to tex_export_begin_*().
-//
-// Only one export request is alive at a time. A second begin_*() call
-// while a dialog is already open replaces the request — by design, so
-// the user can re-pick a different format from a different menu without
-// having to close the dialog first.
+// File-dialog UX is intentionally gone — every export goes to
+//   ${S.export_dir}/${asset_relative_path}.${ext}
+// with parent directories created on demand. The user changes the
+// export root from the Settings dropdown.
 
 #include "TextureExport.h"
 
 #include "../TexParser.h"
 #include "../../UI/ModelPreview.h"   // decode_tex_to_rgba
+#include "../../UI/OutputLog.h"
+#include "../../Utilities/State.h"
 #include "../../BNKCore.cpp"          // build_any_tex_buffer_for_name
 
 #include "imgui.h"
-#include "ImGuiFileDialog.h"
 
 #include <filesystem>
 #include <fstream>
@@ -38,18 +37,6 @@ const char* tex_export_extension(TexExportFormat fmt) {
         case TexExportFormat::TEX:  return ".tex";
     }
     return ".bin";
-}
-
-// ImGuiFileDialog filter strings — single-extension save dialogs.
-static const char* tex_export_filter(TexExportFormat fmt) {
-    switch (fmt) {
-        case TexExportFormat::PNG:  return "PNG (*.png){.png}";
-        case TexExportFormat::JPG:  return "JPEG (*.jpg){.jpg,.jpeg}";
-        case TexExportFormat::TIFF: return "TIFF (*.tif){.tif,.tiff}";
-        case TexExportFormat::DDS:  return "DDS (*.dds){.dds}";
-        case TexExportFormat::TEX:  return "Raw .tex (*.tex){.tex}";
-    }
-    return "All Files (*.*){.*}";
 }
 
 // Write a raw blob verbatim — no decoding, no header munging. Used by
@@ -80,184 +67,160 @@ bool tex_export_rgba(const std::string& path, TexExportFormat fmt,
 }
 
 // ---------------------------------------------------------------------------
-// Pending-request state. Three "modes" describe how to source the
-// bytes when the user confirms the dialog:
-//   RGBA   — bytes are already in `rgba`, just write
-//   BLOB   — bytes need decoding from `blob` at `mip_index`
-//   NAMED  — bytes need fetching by `tex_name` (BNK pipeline) THEN
-//            decoding at `mip_index`
+// Path helpers
 // ---------------------------------------------------------------------------
 
 namespace {
 
-enum class SourceMode { None, Rgba, Blob, Named };
+// Build the on-disk export path for an asset.
+//   asset_path       — relative asset path (e.g. "props/foo/bar.tex").
+//                      May or may not include the original extension.
+//   fmt              — output format; its extension replaces any
+//                      existing one on `asset_path`.
+// Returns ${S.export_dir} / sanitized(asset_path with replaced ext).
+std::filesystem::path build_export_path(const std::string& asset_path,
+                                        TexExportFormat fmt) {
+    std::filesystem::path root = S.export_dir.empty() ? "." : S.export_dir;
 
-struct PendingExport {
-    SourceMode      mode = SourceMode::None;
-    TexExportFormat fmt  = TexExportFormat::PNG;
-    std::string     base_name;          // suggested filename (no extension)
-    // Decoded bytes (mode = Rgba)
-    std::vector<uint8_t>      rgba;
-    int                       w = 0, h = 0;
-    // Raw blob (mode = Blob / Named)
-    std::vector<unsigned char> blob;
-    std::string                tex_name;
-    std::string                preferred_bnk;
-    int                        mip_index = 0;
-};
+    // Normalise: drop leading slashes, swap backslashes so we don't
+    // accidentally root the path on Windows ("/foo" → "foo").
+    std::string rel = asset_path;
+    while (!rel.empty() && (rel.front() == '/' || rel.front() == '\\'))
+        rel.erase(rel.begin());
 
-PendingExport g_pending;
+    std::filesystem::path p(rel);
+    // If the asset already has any extension, drop it — we're writing
+    // a different format. replace_extension("") on a directoryless stem
+    // works the same way.
+    p.replace_extension();
 
-// ImGuiFileDialog needs a key to identify the dialog instance — we use
-// one shared key, since only one export can be in flight at a time.
-constexpr const char* kDialogKey = "##tex_export_dialog";
-
-// Small helper — set up the dialog from the current g_pending state.
-void open_dialog_from_pending() {
-    if (g_pending.mode == SourceMode::None) return;
-    const std::string default_name =
-        g_pending.base_name + tex_export_extension(g_pending.fmt);
-
-    IGFD::FileDialogConfig cfg;
-    cfg.path     = ".";
-    cfg.fileName = default_name;
-    cfg.flags    = ImGuiFileDialogFlags_ConfirmOverwrite;
-
-    ImGuiFileDialog::Instance()->OpenDialog(
-        kDialogKey,
-        std::string("Export texture (") + tex_export_extension(g_pending.fmt) + ")",
-        tex_export_filter(g_pending.fmt),
-        cfg);
+    std::filesystem::path out = root / p;
+    out += tex_export_extension(fmt);
+    return out;
 }
 
-// Resolve the pending request to an RGBA buffer. Returns true on success.
-bool resolve_pending_to_rgba(std::vector<uint8_t>& out_rgba,
-                             int& out_w, int& out_h) {
-    switch (g_pending.mode) {
-        case SourceMode::Rgba:
-            out_rgba = g_pending.rgba;
-            out_w = g_pending.w;
-            out_h = g_pending.h;
-            return !out_rgba.empty() && out_w > 0 && out_h > 0;
-        case SourceMode::Blob: {
-            int w = 0, h = 0;
-            bool has_alpha = false;
-            if (!decode_tex_to_rgba(g_pending.blob, out_rgba, w, h,
-                                    &has_alpha, g_pending.mip_index))
-                return false;
-            out_w = w;
-            out_h = h;
-            return true;
-        }
-        case SourceMode::Named: {
-            std::vector<unsigned char> buf;
-            if (!build_any_tex_buffer_for_name(
-                    g_pending.tex_name, buf, g_pending.preferred_bnk))
-                return false;
-            int w = 0, h = 0;
-            bool has_alpha = false;
-            if (!decode_tex_to_rgba(buf, out_rgba, w, h, &has_alpha,
-                                    g_pending.mip_index))
-                return false;
-            out_w = w;
-            out_h = h;
-            return true;
-        }
-        case SourceMode::None: return false;
+// Make sure the parent directory of `p` exists. Creates the whole
+// chain if necessary. Errors here become export errors at the call
+// site (the subsequent ofstream open will fail).
+bool ensure_parent_dir(const std::filesystem::path& p) {
+    auto parent = p.parent_path();
+    if (parent.empty()) return true;
+    std::error_code ec;
+    std::filesystem::create_directories(parent, ec);
+    return !ec;
+}
+
+// Fire the right OutputLog level + a single human-readable line. We
+// keep the asset name in the message (rather than the full path) so the
+// log stays scannable; the full path is appended in dev mode for
+// debugging.
+void log_export_result(bool ok, const std::string& asset_label,
+                       const std::filesystem::path& out_path,
+                       TexExportFormat fmt) {
+    const char* fmt_name =
+        fmt == TexExportFormat::PNG  ? "PNG"  :
+        fmt == TexExportFormat::JPG  ? "JPG"  :
+        fmt == TexExportFormat::TIFF ? "TIFF" :
+        fmt == TexExportFormat::DDS  ? "DDS"  :
+        fmt == TexExportFormat::TEX  ? "TEX (raw)" : "?";
+    if (ok) {
+        OutputLog::success(std::string("Exported ") + asset_label +
+                           " as " + fmt_name + " → " + out_path.string());
+    } else {
+        OutputLog::error(std::string("Failed to export ") + asset_label +
+                         " as " + fmt_name +
+                         " (target: " + out_path.string() + ")");
     }
-    return false;
-}
-
-// Pull a "base name" out of a path / asset name — strip any directory
-// prefix and the extension. Used as the default filename in the dialog.
-std::string make_base_name(const std::string& any_name) {
-    std::filesystem::path p(any_name);
-    std::string stem = p.stem().string();
-    return stem.empty() ? any_name : stem;
 }
 
 } // anonymous
 
 // ---------------------------------------------------------------------------
+// Begin-* entry points: synchronous now. They resolve bytes, build the
+// path, mkdir, write, and emit a log line. No deferred state.
+// ---------------------------------------------------------------------------
 
 void tex_export_begin_rgba(TexExportFormat fmt,
                            const std::string& base_name,
                            std::vector<uint8_t> rgba, int w, int h) {
-    g_pending = {};
-    g_pending.mode      = SourceMode::Rgba;
-    g_pending.fmt       = fmt;
-    g_pending.base_name = make_base_name(base_name);
-    g_pending.rgba      = std::move(rgba);
-    g_pending.w         = w;
-    g_pending.h         = h;
-    open_dialog_from_pending();
+    std::filesystem::path out = build_export_path(base_name, fmt);
+    bool ok = false;
+    if (fmt == TexExportFormat::TEX) {
+        // No original blob to dump — RGBA path can't satisfy a raw .tex
+        // request. Caller shouldn't have offered it; bail loudly.
+        ok = false;
+    } else if (!rgba.empty() && w > 0 && h > 0 && ensure_parent_dir(out)) {
+        ok = tex_export_rgba(out.string(), fmt, rgba.data(), w, h);
+    }
+    log_export_result(ok, std::filesystem::path(base_name).filename().string(),
+                      out, fmt);
 }
 
 void tex_export_begin_blob(TexExportFormat fmt,
                            const std::string& base_name,
                            std::vector<unsigned char> blob,
                            int mip_index) {
-    g_pending = {};
-    g_pending.mode      = SourceMode::Blob;
-    g_pending.fmt       = fmt;
-    g_pending.base_name = make_base_name(base_name);
-    g_pending.blob      = std::move(blob);
-    g_pending.mip_index = mip_index;
-    open_dialog_from_pending();
+    std::filesystem::path out = build_export_path(base_name, fmt);
+    bool ok = false;
+    if (!ensure_parent_dir(out)) {
+        log_export_result(false,
+                          std::filesystem::path(base_name).filename().string(),
+                          out, fmt);
+        return;
+    }
+    if (fmt == TexExportFormat::TEX) {
+        ok = write_raw_blob(out.string(), blob.data(), blob.size());
+    } else {
+        std::vector<uint8_t> rgba;
+        int w = 0, h = 0;
+        bool has_alpha = false;
+        if (decode_tex_to_rgba(blob, rgba, w, h, &has_alpha, mip_index) &&
+            !rgba.empty() && w > 0 && h > 0) {
+            ok = tex_export_rgba(out.string(), fmt, rgba.data(), w, h);
+        }
+    }
+    log_export_result(ok, std::filesystem::path(base_name).filename().string(),
+                      out, fmt);
 }
 
 void tex_export_begin_named(TexExportFormat fmt,
                             const std::string& tex_name,
                             const std::string& preferred_bnk,
                             int mip_index) {
-    g_pending = {};
-    g_pending.mode          = SourceMode::Named;
-    g_pending.fmt           = fmt;
-    g_pending.base_name     = make_base_name(tex_name);
-    g_pending.tex_name      = tex_name;
-    g_pending.preferred_bnk = preferred_bnk;
-    g_pending.mip_index     = mip_index;
-    open_dialog_from_pending();
-}
-
-void tex_export_drive() {
-    if (g_pending.mode == SourceMode::None) return;
-
-    // Wide minimum size so the file picker is usable. Same scaling the
-    // folder picker uses elsewhere.
-    ImVec2 min_size(720.0f, 420.0f);
-    ImVec2 max_size(FLT_MAX, FLT_MAX);
-
-    if (ImGuiFileDialog::Instance()->Display(kDialogKey,
-                                             ImGuiWindowFlags_NoCollapse,
-                                             min_size, max_size)) {
-        if (ImGuiFileDialog::Instance()->IsOk()) {
-            std::string path = ImGuiFileDialog::Instance()->GetFilePathName();
-            // The TEX format short-circuits the RGBA decode pipeline —
-            // it just dumps the source blob bytes. Pull them straight
-            // out of the request based on its source mode.
-            if (g_pending.fmt == TexExportFormat::TEX) {
-                std::vector<unsigned char> blob;
-                if (g_pending.mode == SourceMode::Blob) {
-                    blob = std::move(g_pending.blob);
-                } else if (g_pending.mode == SourceMode::Named) {
-                    build_any_tex_buffer_for_name(
-                        g_pending.tex_name, blob, g_pending.preferred_bnk);
-                }
-                if (!blob.empty()) {
-                    write_raw_blob(path, blob.data(), blob.size());
-                }
-            } else {
-                std::vector<uint8_t> rgba;
-                int w = 0, h = 0;
-                if (resolve_pending_to_rgba(rgba, w, h)) {
-                    tex_export_rgba(path, g_pending.fmt, rgba.data(), w, h);
-                }
+    std::filesystem::path out = build_export_path(tex_name, fmt);
+    bool ok = false;
+    if (!ensure_parent_dir(out)) {
+        log_export_result(false,
+                          std::filesystem::path(tex_name).filename().string(),
+                          out, fmt);
+        return;
+    }
+    std::vector<unsigned char> blob;
+    if (build_any_tex_buffer_for_name(tex_name, blob, preferred_bnk) &&
+        !blob.empty()) {
+        if (fmt == TexExportFormat::TEX) {
+            ok = write_raw_blob(out.string(), blob.data(), blob.size());
+        } else {
+            std::vector<uint8_t> rgba;
+            int w = 0, h = 0;
+            bool has_alpha = false;
+            if (decode_tex_to_rgba(blob, rgba, w, h, &has_alpha, mip_index) &&
+                !rgba.empty() && w > 0 && h > 0) {
+                ok = tex_export_rgba(out.string(), fmt, rgba.data(), w, h);
             }
         }
-        ImGuiFileDialog::Instance()->Close();
-        g_pending = {};
     }
+    log_export_result(ok, std::filesystem::path(tex_name).filename().string(),
+                      out, fmt);
+}
+
+// Stub kept so the main loop's "drive once per frame" call still
+// compiles. Exports are synchronous now — there's nothing to drive.
+// Left in place because removing it would ripple into UI_Main.cpp; if
+// we ever want to revive deferred / threaded export this is where it
+// would resume from.
+void tex_export_drive() {
+    // intentionally empty
 }
 
 // ---------------------------------------------------------------------------
@@ -267,9 +230,6 @@ void tex_export_drive() {
 
 namespace {
 
-// Render the image-format items (PNG / JPG / TIFF / DDS). The TEX
-// (raw) item is rendered separately by callers that have access to the
-// source blob — see render_raw_tex_item().
 template <typename Begin>
 void render_export_items(const Begin& begin) {
     if (ImGui::MenuItem("PNG"))  begin(TexExportFormat::PNG);
@@ -278,10 +238,6 @@ void render_export_items(const Begin& begin) {
     if (ImGui::MenuItem("DDS"))  begin(TexExportFormat::DDS);
 }
 
-// Renders a single ".tex (raw)" entry — for use only when the source
-// has the original blob bytes available (blob/named flavours). Adds a
-// separator above so it visually splits "decoded image formats" from
-// "raw extract".
 template <typename BeginRaw>
 void render_raw_tex_item(const BeginRaw& begin_raw) {
     ImGui::Separator();

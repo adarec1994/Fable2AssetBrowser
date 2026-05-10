@@ -46,37 +46,40 @@ bool tex_export_rgba(const std::string& path, TexExportFormat fmt,
                      const uint8_t* rgba, int w, int h);
 
 // ---- High-level menu workflow ---------------------------------------------
-// Both flavours stash the request and open an ImGuiFileDialog on the
-// next call to tex_export_drive(). The dialog's default filename is
-// `<base_name><.ext>`. Only one export can be in flight at a time —
-// calling either while a dialog is already open replaces the request.
+// Each begin_*() runs synchronously: it resolves the bytes (decode or
+// BNK lookup as needed), composes the destination path under
+// S.export_dir using the asset's relative path, mkdirs the parent
+// chain, writes the file, and emits a single OutputLog line on the
+// way out. No file dialog — the user changes the export root from the
+// Settings dropdown.
 
 // "Already decoded" path — the caller has the RGBA buffer in hand
-// (texture preview, popout window).
+// (texture preview, popout window). `base_name` should be the asset's
+// relative path (e.g. "props/foo/bar.tex"); the original extension is
+// stripped and replaced with the format extension.
 void tex_export_begin_rgba(TexExportFormat fmt,
                            const std::string& base_name,
                            std::vector<uint8_t> rgba, int w, int h);
 
-// "Decode-on-confirm" path — the caller has the raw .tex blob and a
-// mip index. The export decodes that mip only after the user picks a
-// path, so we don't pay for a decode the user never confirms.
+// Raw-blob path — the caller has the raw .tex blob and the mip to
+// decode. PNG/JPG/TIFF/DDS run through decode_tex_to_rgba; TEX dumps
+// the blob verbatim.
 void tex_export_begin_blob(TexExportFormat fmt,
                            const std::string& base_name,
                            std::vector<unsigned char> blob,
                            int mip_index);
 
-// "Lookup-on-confirm" path — the caller knows the texture's asset name
-// (e.g. material thumbnails) but not the blob. After the user picks a
-// path, build_any_tex_buffer_for_name() is called to fetch the blob
-// and the chosen mip is decoded. Same idea as begin_blob, just resolves
-// the bytes lazily through the BNK pipeline.
+// Named-asset path — caller knows only the asset name (e.g. material
+// thumbnails). build_any_tex_buffer_for_name() fetches the blob,
+// then decode/raw-write proceeds as in begin_blob.
 void tex_export_begin_named(TexExportFormat fmt,
                             const std::string& tex_name,
                             const std::string& preferred_bnk,
                             int mip_index);
 
-// Drive the file dialog once per frame. Writes the file on user
-// confirmation, no-ops when no export is pending.
+// Per-frame export driver. Synchronous exports leave nothing to drive
+// — this is a no-op stub kept for the main loop wiring and as the
+// re-entry point for any future deferred / threaded export work.
 void tex_export_drive();
 
 // "Export to" submenu — call inside an existing context-menu popup.

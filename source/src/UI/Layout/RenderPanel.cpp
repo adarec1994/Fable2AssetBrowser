@@ -59,17 +59,15 @@ namespace UI {
 namespace {
 
 void draw_placeholder() {
+    // No hint text — leave the empty render panel as a flat dark
+    // background that blends into the surrounding UI when nothing is
+    // loaded. The tree itself signals where the user should click.
     ImVec2 region = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(origin,
                       ImVec2(origin.x + region.x, origin.y + region.y),
                       IM_COL32(20, 22, 28, 255));
-    const char* msg = "Click a .mdl or .tex file in the tree";
-    ImVec2 sz = ImGui::CalcTextSize(msg);
-    ImVec2 pos(origin.x + (region.x - sz.x) * 0.5f,
-               origin.y + (region.y - sz.y) * 0.5f);
-    dl->AddText(pos, IM_COL32(110, 120, 135, 255), msg);
     ImGui::Dummy(region);
 }
 

@@ -26,6 +26,7 @@ set(APP_SOURCES
         src/Utilities/Progress.cpp
         src/Utilities/operations.cpp
         src/UI/HexView.cpp
+        src/UI/OutputLog.cpp
         src/UI/UI_Main.cpp
         src/UI/Panels/Selection.cpp
         src/UI/Panels/TreeBuilder.cpp

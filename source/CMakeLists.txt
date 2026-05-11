@@ -27,6 +27,7 @@ set(APP_SOURCES
         src/textures/export/TiffExport.cpp
         src/textures/export/DdsExport.cpp
         src/MDL/ModelParser.cpp
+        src/MDL/ModelParserV2.cpp
         src/MDL/MdlFbxExport.cpp
         src/MDL/MdlTexExport.cpp
         src/Utilities/Progress.cpp

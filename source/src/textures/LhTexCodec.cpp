@@ -345,10 +345,31 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
                     return fail(os.str());
                 }
 
-                outb[4] = (uint8_t)(((B1 & 0xF0))        | (((B0 >> 4) & 0x0F)));
-                outb[5] = (uint8_t)((((B1 & 0x0F) << 4)) | ( (B0       & 0x0F)));
-                outb[6] = (uint8_t)(((B3 & 0xF0))        | (((B2 >> 4) & 0x0F)));
-                outb[7] = (uint8_t)((((B3 & 0x0F) << 4)) | ( (B2       & 0x0F)));
+                /* B0..B3 each encode one 2x2 quadrant of the 4x4 BC1
+                   index grid as:
+                     bits 0-3 (low nibble)  = top  row of the 2x2 quadrant
+                     bits 4-7 (high nibble) = bottom row of the 2x2 quadrant
+
+                   For PC BC1 the index dword is in LE byte order, where:
+                     outb[4] = row 0 indices  (4 texels × 2 bits)
+                     outb[5] = row 1 indices
+                     outb[6] = row 2 indices
+                     outb[7] = row 3 indices
+
+                   With B0 = left quadrants (cols 0-1), B1 = right
+                   quadrants (cols 2-3), row 0 is the LOW nibbles of
+                   B0 (left) and B1 (right), and row 1 is the HIGH
+                   nibbles.  Same for rows 2-3 via B2/B3.
+
+                   The previous packing had outb[4] ↔ outb[5] and
+                   outb[6] ↔ outb[7] swapped, which produced a
+                   pair-wise row swap in every 4x4 block — the
+                   "rows look flipped" artifact in the texture
+                   preview. */
+                outb[4] = (uint8_t)(( B0       & 0x0F)        | ((B1 & 0x0F) << 4));
+                outb[5] = (uint8_t)(((B0 >> 4) & 0x0F)        |  (B1 & 0xF0));
+                outb[6] = (uint8_t)(( B2       & 0x0F)        | ((B3 & 0x0F) << 4));
+                outb[7] = (uint8_t)(((B2 >> 4) & 0x0F)        |  (B3 & 0xF0));
             }
         }
     }

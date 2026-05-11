@@ -504,30 +504,48 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
     std::string body_bnk_path;
     int body_idx = -1;
 
+    auto scan_bnk_for_body = [&](const std::string& bnk_path) -> bool {
+        try {
+            BNKReader reader(bnk_path);
+            for (size_t i = 0; i < reader.list_files().size(); ++i) {
+                std::string file_lower = reader.list_files()[i].name;
+                std::transform(file_lower.begin(), file_lower.end(), file_lower.begin(), ::tolower);
+                std::string file_base = std::filesystem::path(file_lower).filename().string();
+
+                if (file_base == key) {
+                    body_bnk_path = bnk_path;
+                    body_idx = (int)i;
+                    return true;
+                }
+            }
+        } catch (...) {}
+        return false;
+    };
+
     for (const auto& bnk_path : search_paths) {
-        std::string fname = std::filesystem::path(bnk_path).filename().string();
-        std::string fname_lower = fname;
+        std::string fname_lower = std::filesystem::path(bnk_path).filename().string();
         std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
 
         if (fname_lower.find("texture") != std::string::npos &&
             fname_lower.find("header") == std::string::npos &&
             fname_lower.find("1024mip0") == std::string::npos) {
-            try {
-                BNKReader reader(bnk_path);
-                for (size_t i = 0; i < reader.list_files().size(); ++i) {
-                    std::string file_lower = reader.list_files()[i].name;
-                    std::transform(file_lower.begin(), file_lower.end(), file_lower.begin(), ::tolower);
-                    std::string file_base = std::filesystem::path(file_lower).filename().string();
+            if (scan_bnk_for_body(bnk_path)) break;
+        }
+    }
 
-                    if (file_base == key) {
-                        body_bnk_path = bnk_path;
-                        body_idx = (int)i;
-                        break;
-                    }
-                }
-            } catch (...) {}
+    if (body_idx == -1) {
+        for (const auto& bnk_path : search_paths) {
+            std::string fname_lower = std::filesystem::path(bnk_path).filename().string();
+            std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
 
-            if (body_idx != -1) break;
+            if (fname_lower.find("header")    != std::string::npos) continue;
+            if (fname_lower.find("1024mip0")  != std::string::npos) continue;
+            if (fname_lower.find("texture")   != std::string::npos) continue;
+            if (fname_lower.find(".manifest") != std::string::npos) continue;
+            if (fname_lower.size() < 4 ||
+                fname_lower.compare(fname_lower.size() - 4, 4, ".bnk") != 0) continue;
+
+            if (scan_bnk_for_body(bnk_path)) break;
         }
     }
 

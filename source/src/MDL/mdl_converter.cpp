@@ -757,10 +757,11 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
             }
         }
 
-        const int diff_tex   = embed_one_tex(geom.diffuse_tex_name);
-        const int normal_tex = embed_one_tex(geom.normal_tex_name);
-        const int spec_tex   = embed_one_tex(geom.specular_tex_name);
-        const int tint_tex   = embed_one_tex(geom.tint_tex_name);
+        const int diff_tex     = embed_one_tex(geom.diffuse_tex_name);
+        const int normal_tex   = embed_one_tex(geom.normal_tex_name);
+        const int spec_tex     = embed_one_tex(geom.specular_tex_name);
+        const int metallic_tex = embed_one_tex(geom.metallic_tex_name);
+        const int extra_tex    = embed_one_tex(geom.extra_tex_name);
 
         if (mat_count > 0) materials << ",";
         materials << "{\"name\":\"" << json_escape(material_name) << "\"";
@@ -771,7 +772,12 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
         if (diff_tex >= 0) {
             materials << "\"baseColorTexture\":{\"index\":" << diff_tex << "},";
         }
-        materials << "\"metallicFactor\":0.0,\"roughnessFactor\":0.9}";
+        if (metallic_tex >= 0) {
+            materials << "\"metallicRoughnessTexture\":{\"index\":" << metallic_tex << "},";
+            materials << "\"metallicFactor\":1.0,\"roughnessFactor\":1.0}";
+        } else {
+            materials << "\"metallicFactor\":0.0,\"roughnessFactor\":0.9}";
+        }
         if (normal_tex >= 0) {
             materials << ",\"normalTexture\":{\"index\":" << normal_tex << "}";
         }
@@ -779,8 +785,8 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
 
             materials << ",\"occlusionTexture\":{\"index\":" << spec_tex << "}";
         }
-        if (tint_tex >= 0) {
-            materials << ",\"emissiveTexture\":{\"index\":" << tint_tex << "}";
+        if (extra_tex >= 0) {
+            materials << ",\"emissiveTexture\":{\"index\":" << extra_tex << "}";
             materials << ",\"emissiveFactor\":[1.0,1.0,1.0]";
         }
         materials << "}";

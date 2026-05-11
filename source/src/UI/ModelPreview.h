@@ -31,8 +31,8 @@ struct MPPerMesh {
     ID3D11ShaderResourceView* srv_diffuse = nullptr;
     ID3D11ShaderResourceView* srv_normal = nullptr;
     ID3D11ShaderResourceView* srv_specular = nullptr;
-    ID3D11ShaderResourceView* srv_unk = nullptr;
-    ID3D11ShaderResourceView* srv_tint = nullptr;
+    ID3D11ShaderResourceView* srv_metallic = nullptr;
+    ID3D11ShaderResourceView* srv_extra = nullptr;
 #else
     unsigned int vao = 0;
     unsigned int vbo = 0;
@@ -40,8 +40,8 @@ struct MPPerMesh {
     unsigned int tex_diffuse = 0;
     unsigned int tex_normal = 0;
     unsigned int tex_specular = 0;
-    unsigned int tex_unk = 0;
-    unsigned int tex_tint = 0;
+    unsigned int tex_metallic = 0;
+    unsigned int tex_extra = 0;
 #endif
     unsigned int index_count = 0;
     bool has_alpha = false;
@@ -51,11 +51,13 @@ struct MPPerMesh {
     std::string diffuse_tex_name;
     std::string normal_tex_name;
     std::string specular_tex_name;
-    std::string tint_tex_name;
+    std::string metallic_tex_name;
+    std::string extra_tex_name;
     bool diffuse_visible  = true;
     bool normal_visible   = true;
     bool specular_visible = true;
-    bool tint_visible     = true;
+    bool metallic_visible = true;
+    bool extra_visible    = true;
 
     std::string name;
 
@@ -63,6 +65,10 @@ struct MPPerMesh {
     bool isolated  = false;
 
     uint32_t source_mesh_idx = 0;
+
+    /* LOD index extracted from the mesh-name suffix "|lod<N>".
+       0 when no suffix was present (single-LOD or untagged). */
+    uint32_t lod_index = 0;
 };
 struct ModelPreview {
 #ifdef _WIN32
@@ -96,8 +102,8 @@ struct ModelPreview {
     int tex_diffuse_loc = -1;
     int tex_normal_loc = -1;
     int tex_specular_loc = -1;
-    int tex_unk_loc = -1;
-    int tex_tint_loc = -1;
+    int tex_metallic_loc = -1;
+    int tex_extra_loc = -1;
 #endif
     int width = 1024;
     int height = 768;
@@ -107,6 +113,13 @@ struct ModelPreview {
     bool has_model = false;
 
     bool wireframe = false;
+
+    /* LOD selection.  `lod_count` is the number of distinct LODs in
+       the loaded model (computed at build time from per-mesh
+       lod_index).  `selected_lod` is the index currently displayed;
+       -1 means "show all LODs" (no filter). */
+    uint32_t lod_count    = 1;
+    int32_t  selected_lod = -1;
 
 #ifdef _WIN32
     ID3D11Buffer* bone_cb = nullptr;

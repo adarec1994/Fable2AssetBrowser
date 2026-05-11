@@ -423,7 +423,7 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         }
     }
 
-    enum TexChannel { CH_DIFFUSE, CH_NORMAL, CH_SPECULAR, CH_TINT, CH_COUNT };
+    enum TexChannel { CH_DIFFUSE, CH_NORMAL, CH_SPECULAR, CH_METALLIC, CH_EXTRA, CH_COUNT };
 
     struct EmbeddedTex {
         int64_t  video_id   = 0;
@@ -467,10 +467,11 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
             const char* fbx_prop;
         };
         const ChanBinding bindings[CH_COUNT] = {
-            { g.diffuse_tex_name,  "DiffuseColor"  },
-            { g.normal_tex_name,   "NormalMap"     },
-            { g.specular_tex_name, "SpecularColor" },
-            { g.tint_tex_name,     "EmissiveColor" },
+            { g.diffuse_tex_name,  "DiffuseColor"    },
+            { g.normal_tex_name,   "NormalMap"       },
+            { g.specular_tex_name, "SpecularColor"   },
+            { g.metallic_tex_name, "ReflectionColor" },
+            { g.extra_tex_name,    "EmissiveColor"   },
         };
 
         for (int ch = 0; ch < CH_COUNT; ++ch) {

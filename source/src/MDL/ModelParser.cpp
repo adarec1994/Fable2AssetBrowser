@@ -1,6 +1,8 @@
 #include "ModelParser.h"
+#include "ModelParserV2.h"
 #include "../Utilities/Files.h"
 #include "../Utilities/Utils.h"
+#include "../Utilities/State.h"
 #include "../BNKCore.cpp"
 #include <algorithm>
 #include <unordered_map>
@@ -13,6 +15,19 @@
 #include <cstdio>
 
 using std::uint8_t; using std::uint16_t; using std::uint32_t;
+
+/* Recursion guard for the v1 ↔ v2 dispatch. When S.dev_mode is on, the
+   public parse_mdl_info / parse_mdl_geometry route to the v2 reader
+   first. v2 may fall back to v1 for parts it doesn't yet handle, and
+   this guard prevents the v1 entry from bouncing back into v2. */
+namespace {
+thread_local int g_v2_dispatch_depth = 0;
+
+struct V2DispatchGuard {
+    V2DispatchGuard()  { ++g_v2_dispatch_depth; }
+    ~V2DispatchGuard() { --g_v2_dispatch_depth; }
+};
+}
 
 bool build_mdl_buffer_for_name(const std::string &mdl_name, std::vector<unsigned char> &out){
     auto p_headers = find_bnk_by_filename("globals_model_headers.bnk");
@@ -119,7 +134,10 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
 }
 
 bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const std::string& file_path){
-    out = MDLInfo{};
+    if(S.dev_mode && g_v2_dispatch_depth == 0){
+        V2DispatchGuard guard;
+        return parse_mdl_info_v2(data, out, file_path);
+    }
     if(data.size() < 8) return false;
     R r{data.data(), data.size(), 0};
 
@@ -249,11 +267,11 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
             mesh.Materials.reserve(mcount);
             for(uint32_t j=0;j<mcount;j++){
                 MDLMaterialInfo m;
-                if(!r.strz(m.TextureName)) return false;
-                if(!r.strz(m.SpecularMapName)) return false;
-                if(!r.strz(m.NormalMapName)) return false;
-                if(!r.strz(m.UnkName)) return false;
-                if(!r.strz(m.TintName)) return false;
+                if(!r.strz(m.DiffuseTexName)) return false;
+                if(!r.strz(m.SpecularTexName)) return false;
+                if(!r.strz(m.NormalTexName)) return false;
+                if(!r.strz(m.MetallicTexName)) return false;
+                if(!r.strz(m.ExtraTexName)) return false;
 
                 bool used_scan = false;
                 if(has_tree_tag && j + 1 == mcount){
@@ -873,6 +891,10 @@ if(is_foliage){
 }
 
 bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& info, std::vector<MDLMeshGeom>& out){
+    if(S.dev_mode && g_v2_dispatch_depth == 0){
+        V2DispatchGuard guard;
+        return parse_mdl_geometry_v2(data, info, out);
+    }
     out.clear();
     if(info.MeshBuffers.size()!=info.Meshes.size()){
         return true;
@@ -889,7 +911,7 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                    mb.FaceOffset+(size_t)mb.FaceCount*2>r.n){
                     MDLMeshGeom g;
                     if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty())
-                        { g.diffuse_tex_name=info.Meshes[mi].Materials[0].TextureName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalMapName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularMapName; g.tint_tex_name=info.Meshes[mi].Materials[0].TintName; }
+                        { g.diffuse_tex_name=info.Meshes[mi].Materials[0].DiffuseTexName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalTexName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularTexName; g.metallic_tex_name=info.Meshes[mi].Materials[0].MetallicTexName; g.extra_tex_name=info.Meshes[mi].Materials[0].ExtraTexName; }
                     if(mi<info.Meshes.size() && !info.Meshes[mi].MeshName.empty())
                         g.name=info.Meshes[mi].MeshName;
                     g.MeshIndex=(uint32_t)mi;
@@ -932,7 +954,7 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                     uint8_t pick = 0;
                     if(!mb.SubMeshes.empty()) pick = mb.SubMeshes[0].MaterialIndex;
                     if(pick >= info.Meshes[mi].Materials.size()) pick = 0;
-                    g.diffuse_tex_name = info.Meshes[mi].Materials[pick].TextureName;
+                    g.diffuse_tex_name = info.Meshes[mi].Materials[pick].DiffuseTexName;
                 }
                 g.MeshIndex=(uint32_t)mi; g.SubMeshIndex=0;
                 if(mi<info.Meshes.size() && !info.Meshes[mi].MeshName.empty())
@@ -949,7 +971,7 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                    mb.FaceOffset+(size_t)mb.FaceCount*2>r.n){
                     MDLMeshGeom g;
                     if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty())
-                        { g.diffuse_tex_name=info.Meshes[mi].Materials[0].TextureName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalMapName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularMapName; g.tint_tex_name=info.Meshes[mi].Materials[0].TintName; }
+                        { g.diffuse_tex_name=info.Meshes[mi].Materials[0].DiffuseTexName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalTexName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularTexName; g.metallic_tex_name=info.Meshes[mi].Materials[0].MetallicTexName; g.extra_tex_name=info.Meshes[mi].Materials[0].ExtraTexName; }
                     if(mi<info.Meshes.size() && !info.Meshes[mi].MeshName.empty())
                         g.name=info.Meshes[mi].MeshName;
                     g.MeshIndex=(uint32_t)mi;
@@ -989,7 +1011,7 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                     }
                 }
                 if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty())
-                    { g.diffuse_tex_name=info.Meshes[mi].Materials[0].TextureName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalMapName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularMapName; g.tint_tex_name=info.Meshes[mi].Materials[0].TintName; }
+                    { g.diffuse_tex_name=info.Meshes[mi].Materials[0].DiffuseTexName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalTexName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularTexName; g.metallic_tex_name=info.Meshes[mi].Materials[0].MetallicTexName; g.extra_tex_name=info.Meshes[mi].Materials[0].ExtraTexName; }
                 g.MeshIndex=(uint32_t)mi; g.SubMeshIndex=0;
                 if(mi<info.Meshes.size() && !info.Meshes[mi].MeshName.empty())
                     g.name=info.Meshes[mi].MeshName;
@@ -1005,7 +1027,7 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                    mb.FaceOffset+(size_t)mb.FaceCount*2>r.n){
                     MDLMeshGeom g;
                     if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty())
-                        { g.diffuse_tex_name=info.Meshes[mi].Materials[0].TextureName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalMapName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularMapName; g.tint_tex_name=info.Meshes[mi].Materials[0].TintName; }
+                        { g.diffuse_tex_name=info.Meshes[mi].Materials[0].DiffuseTexName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalTexName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularTexName; g.metallic_tex_name=info.Meshes[mi].Materials[0].MetallicTexName; g.extra_tex_name=info.Meshes[mi].Materials[0].ExtraTexName; }
                     out.push_back(std::move(g));
                     continue;
                 }
@@ -1038,7 +1060,7 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                 g.normals.resize((size_t)mb.VertexCount*3);
                 compute_smooth_normals(mb.VertexCount, g.indices, g.positions, g.normals);
                 if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty())
-                    { g.diffuse_tex_name=info.Meshes[mi].Materials[0].TextureName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalMapName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularMapName; g.tint_tex_name=info.Meshes[mi].Materials[0].TintName; }
+                    { g.diffuse_tex_name=info.Meshes[mi].Materials[0].DiffuseTexName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalTexName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularTexName; g.metallic_tex_name=info.Meshes[mi].Materials[0].MetallicTexName; g.extra_tex_name=info.Meshes[mi].Materials[0].ExtraTexName; }
                 g.MeshIndex=(uint32_t)mi; g.SubMeshIndex=0;
                 if(mi<info.Meshes.size() && !info.Meshes[mi].MeshName.empty())
                     g.name=info.Meshes[mi].MeshName;
@@ -1051,7 +1073,7 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
             {
                 MDLMeshGeom g;
                 if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty())
-                    { g.diffuse_tex_name=info.Meshes[mi].Materials[0].TextureName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalMapName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularMapName; g.tint_tex_name=info.Meshes[mi].Materials[0].TintName; }
+                    { g.diffuse_tex_name=info.Meshes[mi].Materials[0].DiffuseTexName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalTexName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularTexName; g.metallic_tex_name=info.Meshes[mi].Materials[0].MetallicTexName; g.extra_tex_name=info.Meshes[mi].Materials[0].ExtraTexName; }
                 out.push_back(std::move(g));
                 continue;
             }
@@ -1062,7 +1084,7 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
         if(mb.VertexCount==0 || mb.FaceCount==0 || mb.VertexOffset+(size_t)mb.VertexCount*vertex_stride>r.n || mb.FaceOffset+(size_t)mb.FaceCount*2>r.n){
             MDLMeshGeom g;
             if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty())
-                { g.diffuse_tex_name=info.Meshes[mi].Materials[0].TextureName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalMapName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularMapName; g.tint_tex_name=info.Meshes[mi].Materials[0].TintName; }
+                { g.diffuse_tex_name=info.Meshes[mi].Materials[0].DiffuseTexName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalTexName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularTexName; g.metallic_tex_name=info.Meshes[mi].Materials[0].MetallicTexName; g.extra_tex_name=info.Meshes[mi].Materials[0].ExtraTexName; }
             out.push_back(std::move(g));
             continue;
         }
@@ -1154,7 +1176,7 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
             compute_smooth_normals(mb.VertexCount, g.indices, g.positions, g.normals);
 
             if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty())
-                { g.diffuse_tex_name=info.Meshes[mi].Materials[0].TextureName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalMapName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularMapName; g.tint_tex_name=info.Meshes[mi].Materials[0].TintName; }
+                { g.diffuse_tex_name=info.Meshes[mi].Materials[0].DiffuseTexName; g.normal_tex_name=info.Meshes[mi].Materials[0].NormalTexName; g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularTexName; g.metallic_tex_name=info.Meshes[mi].Materials[0].MetallicTexName; g.extra_tex_name=info.Meshes[mi].Materials[0].ExtraTexName; }
 
             g.MeshIndex = (uint32_t)mi;
             g.SubMeshIndex = 0;
@@ -1170,18 +1192,8 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
 
                 MDLMeshGeom g;
 
-                if(mi<info.Meshes.size() && si<info.Meshes[mi].Materials.size()) {
-                    g.diffuse_tex_name=info.Meshes[mi].Materials[si].TextureName;
-                    g.normal_tex_name=info.Meshes[mi].Materials[si].NormalMapName;
-                    g.specular_tex_name=info.Meshes[mi].Materials[si].SpecularMapName;
-                    g.tint_tex_name=info.Meshes[mi].Materials[si].TintName;
-                }
-                else if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty()) {
-                    g.diffuse_tex_name=info.Meshes[mi].Materials[0].TextureName;
-                    g.normal_tex_name=info.Meshes[mi].Materials[0].NormalMapName;
-                    g.specular_tex_name=info.Meshes[mi].Materials[0].SpecularMapName;
-                    g.tint_tex_name=info.Meshes[mi].Materials[0].TintName;
-                }
+                if(mi<info.Meshes.size() && sub.MaterialIndex < info.Meshes[mi].Materials.size()) { const auto& mat = info.Meshes[mi].Materials[sub.MaterialIndex]; g.diffuse_tex_name=mat.DiffuseTexName; g.normal_tex_name=mat.NormalTexName; g.specular_tex_name=mat.SpecularTexName; g.metallic_tex_name=mat.MetallicTexName; g.extra_tex_name=mat.ExtraTexName; }
+                else if(mi<info.Meshes.size() && !info.Meshes[mi].Materials.empty()) { const auto& mat = info.Meshes[mi].Materials[0]; g.diffuse_tex_name=mat.DiffuseTexName; g.normal_tex_name=mat.NormalTexName; g.specular_tex_name=mat.SpecularTexName; g.metallic_tex_name=mat.MetallicTexName; g.extra_tex_name=mat.ExtraTexName; }
 
                 uint32_t start_idx = sub.StartIndex;
                 uint32_t end_idx;

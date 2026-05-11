@@ -190,12 +190,21 @@ void process_pending_loads() {
             }
 
             S.tex_info_ok = parse_tex_info(tex_buf, S.tex_info);
-            S.texture_mip_index = 0;
+            /* Pick the LARGEST mip by area for the initial display.
+               Fable 2's assembled blob has the small mips (1..N) inline
+               in the header BNK first, with the full-resolution mip 0
+               appended afterwards from `1024mip0_textures.bnk`.  That
+               means `Mips[0]` is the smallest, not the largest — using
+               mip_index=0 here was effectively forcing the lowest LOD
+               and producing the "pixelated" preview the user was seeing.
+               mip_index=-1 lets decode_tex_to_rgba scan all mips and
+               pick the one with the largest area. */
+            S.texture_mip_index = -1;
             std::vector<uint8_t> rgba;
             int w = 0, h = 0;
             bool has_alpha = false;
             if (!decode_tex_to_rgba(tex_buf, rgba, w, h, &has_alpha,
-                                    /*mip_index=*/0)) {
+                                    /*mip_index=*/-1)) {
                 S.texture_window_name = "ERROR: Could not decode texture";
                 S.pending_texture_load = true;
                 S.pending_texture_w = 0;

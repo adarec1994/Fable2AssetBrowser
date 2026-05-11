@@ -9,11 +9,11 @@ struct MDLBoneInfo {
 };
 
 struct MDLMaterialInfo {
-    std::string TextureName;
-    std::string SpecularMapName;
-    std::string NormalMapName;
-    std::string UnkName;
-    std::string TintName;
+    std::string DiffuseTexName;
+    std::string NormalTexName;
+    std::string SpecularTexName;
+    std::string MetallicTexName;
+    std::string ExtraTexName;
     uint32_t Unk1 = 0;
     uint32_t Unk2[2] = {0, 0};
 };
@@ -67,7 +67,8 @@ struct MDLMeshGeom {
     std::string diffuse_tex_name;
     std::string normal_tex_name;
     std::string specular_tex_name;
-    std::string tint_tex_name;
+    std::string metallic_tex_name;
+    std::string extra_tex_name;
     std::string name;
     uint32_t MeshIndex = 0;
     uint32_t SubMeshIndex = 0;

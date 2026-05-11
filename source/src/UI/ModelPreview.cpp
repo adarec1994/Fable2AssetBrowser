@@ -241,6 +241,73 @@ static void blit_bc5_to_rgba(const uint8_t* src, int w, int h,
     }
 }
 
+/* ----------------------------------------------------------------- */
+/* Xbox 360 BC texture untiling.                                      */
+/*                                                                    */
+/* The 360 stores BC1/BC3/BC5 blocks in a swizzled tile layout — not  */
+/* in linear scanline-of-blocks order.  Decoding the raw bytes as if  */
+/* they were linear produces the blocky / "pixelated" look the user   */
+/* sees in the texture preview because each 4x4 BC block lands at the */
+/* wrong (x, y) within the texture.                                   */
+/*                                                                    */
+/* The standard XGAddress2DTiledOffset function (used internally by   */
+/* the Xbox 360 SDK to map a logical (x, y) to a physical byte offset */
+/* in tiled GPU memory) gives the un-swizzle.  For BC formats, we     */
+/* treat each BC block as a single "texel" of stride = block size.    */
+/*                                                                    */
+/*   BC1 block = 8 bytes  → TexelPitch = 8                            */
+/*   BC3 block = 16 bytes → TexelPitch = 16                           */
+/*   BC5 block = 16 bytes → TexelPitch = 16                           */
+/*                                                                    */
+/* Width is in BLOCK units (not texel units) for this function.       */
+/* ----------------------------------------------------------------- */
+
+static uint32_t xbox360_tiled_offset(uint32_t x, uint32_t y,
+                                     uint32_t width_in_blocks,
+                                     uint32_t texel_byte_size)
+{
+    uint32_t aligned_w = (width_in_blocks + 31u) & ~31u;
+
+    /* logBpp = log2(texel_byte_size).  Closed-form trick from the
+       XBox 360 SDK so the compiler can inline it for known sizes. */
+    uint32_t log_bpp = (texel_byte_size >> 2) +
+                       ((texel_byte_size >> 1) >> (texel_byte_size >> 2));
+
+    uint32_t macro = ((x >> 5) + (y >> 5) * (aligned_w >> 5)) << (log_bpp + 7);
+    uint32_t micro = (((x & 7) + ((y & 6) << 2)) << log_bpp);
+    uint32_t offset = macro + ((micro & ~15u) << 1) + (micro & 15u) +
+                      ((y & 8u) << (3 + log_bpp)) + ((y & 16u) << 7);
+
+    uint32_t final_off =
+        ((offset & ~511u) << 3) + ((offset & 448u) << 2) + (offset & 63u) +
+        ((y & 1u) << 4) + (((x & 7u) << 1) ^ ((y >> 1) & 1u));
+
+    /* Returned offset is in bytes; mask off the low log_bpp bits so
+       the address aligns to a whole "texel" (= one BC block). */
+    return final_off & ~((1u << log_bpp) - 1u);
+}
+
+static void untile_xbox360_bc(const uint8_t* tiled, size_t tiled_size,
+                              std::vector<uint8_t>& linear_out,
+                              int width, int height, uint32_t block_size)
+{
+    const int blocks_w = (width  + 3) / 4;
+    const int blocks_h = (height + 3) / 4;
+    linear_out.assign((size_t)blocks_w * (size_t)blocks_h * block_size, 0);
+
+    for (int by = 0; by < blocks_h; ++by) {
+        for (int bx = 0; bx < blocks_w; ++bx) {
+            uint32_t src_off = xbox360_tiled_offset((uint32_t)bx, (uint32_t)by,
+                                                    (uint32_t)blocks_w,
+                                                    block_size);
+            if ((size_t)src_off + block_size > tiled_size) continue;
+            uint8_t* dst = linear_out.data() +
+                           ((size_t)by * blocks_w + bx) * block_size;
+            std::memcpy(dst, tiled + src_off, block_size);
+        }
+    }
+}
+
 bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                         std::vector<uint8_t>& rgba,
                         int& out_w, int& out_h, bool* out_has_alpha,
@@ -299,9 +366,12 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             if (m.MipDataSizeParsed < sz_bc1) {
                 return false;
             }
-            std::vector<uint8_t> swapped(src, src + sz_bc1);
-            swap_bc1_endian(swapped.data(), swapped.size());
-            blit_bc1_to_rgba(swapped.data(), w, h, rgba);
+            /* Untile the Xbox 360 BC1 layout into linear scan-of-blocks
+               order, then endian-swap each block, then BC decode. */
+            std::vector<uint8_t> linear;
+            untile_xbox360_bc(src, m.MipDataSizeParsed, linear, w, h, 8);
+            swap_bc1_endian(linear.data(), linear.size());
+            blit_bc1_to_rgba(linear.data(), w, h, rgba);
             out_w = w; out_h = h;
             if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
             return true;
@@ -310,9 +380,10 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             if (m.MipDataSizeParsed < sz_bc3) {
                 return false;
             }
-            std::vector<uint8_t> swapped(src, src + sz_bc3);
-            swap_bc3_endian(swapped.data(), swapped.size());
-            blit_bc3_to_rgba(swapped.data(), w, h, rgba);
+            std::vector<uint8_t> linear;
+            untile_xbox360_bc(src, m.MipDataSizeParsed, linear, w, h, 16);
+            swap_bc3_endian(linear.data(), linear.size());
+            blit_bc3_to_rgba(linear.data(), w, h, rgba);
             out_w = w; out_h = h;
             if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
             return true;
@@ -322,9 +393,10 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             if (m.MipDataSizeParsed < sz_bc3) {
                 return false;
             }
-            std::vector<uint8_t> swapped(src, src + sz_bc3);
-            swap_bc5_endian(swapped.data(), swapped.size());
-            blit_bc5_to_rgba(swapped.data(), w, h, rgba);
+            std::vector<uint8_t> linear;
+            untile_xbox360_bc(src, m.MipDataSizeParsed, linear, w, h, 16);
+            swap_bc5_endian(linear.data(), linear.size());
+            blit_bc5_to_rgba(linear.data(), w, h, rgba);
             out_w = w; out_h = h;
             if (out_has_alpha) *out_has_alpha = false;
             return true;
@@ -433,9 +505,10 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 if (fm.MipDataSizeParsed < fbx * fby * 16) {
                     return false;
                 }
-                std::vector<uint8_t> swapped(fsrc, fsrc + fbx * fby * 16);
-                swap_bc3_endian(swapped.data(), swapped.size());
-                blit_bc3_to_rgba(swapped.data(), fw, fh, rgba);
+                std::vector<uint8_t> linear;
+                untile_xbox360_bc(fsrc, fm.MipDataSizeParsed, linear, fw, fh, 16);
+                swap_bc3_endian(linear.data(), linear.size());
+                blit_bc3_to_rgba(linear.data(), fw, fh, rgba);
                 out_w = fw; out_h = fh;
                 if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
                 return true;
@@ -445,9 +518,10 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 if (fm.MipDataSizeParsed < fbx * fby * 16) {
                     return false;
                 }
-                std::vector<uint8_t> swapped(fsrc, fsrc + fbx * fby * 16);
-                swap_bc5_endian(swapped.data(), swapped.size());
-                blit_bc5_to_rgba(swapped.data(), fw, fh, rgba);
+                std::vector<uint8_t> linear;
+                untile_xbox360_bc(fsrc, fm.MipDataSizeParsed, linear, fw, fh, 16);
+                swap_bc5_endian(linear.data(), linear.size());
+                blit_bc5_to_rgba(linear.data(), fw, fh, rgba);
                 out_w = fw; out_h = fh;
                 if (out_has_alpha) *out_has_alpha = false;
                 return true;
@@ -678,8 +752,8 @@ static void mp_release_mesh(MPPerMesh& m){
     if(m.srv_diffuse){ m.srv_diffuse->Release(); m.srv_diffuse=nullptr; }
     if(m.srv_normal){ m.srv_normal->Release(); m.srv_normal=nullptr; }
     if(m.srv_specular){ m.srv_specular->Release(); m.srv_specular=nullptr; }
-    if(m.srv_unk){ m.srv_unk->Release(); m.srv_unk=nullptr; }
-    if(m.srv_tint){ m.srv_tint->Release(); m.srv_tint=nullptr; }
+    if(m.srv_metallic){ m.srv_metallic->Release(); m.srv_metallic=nullptr; }
+    if(m.srv_extra){ m.srv_extra->Release(); m.srv_extra=nullptr; }
     m.index_count = 0;
 }
 static void mp_release(ModelPreview& mp){
@@ -1017,10 +1091,33 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         if(m.srv_diffuse && m.srv_diffuse != mp.default_srv){m.srv_diffuse->Release();}
         if(m.srv_normal && m.srv_normal != mp.default_srv){m.srv_normal->Release();}
         if(m.srv_specular && m.srv_specular != mp.default_srv){m.srv_specular->Release();}
-        if(m.srv_unk && m.srv_unk != mp.default_srv){m.srv_unk->Release();}
-        if(m.srv_tint && m.srv_tint != mp.default_srv){m.srv_tint->Release();}
+        if(m.srv_metallic && m.srv_metallic != mp.default_srv){m.srv_metallic->Release();}
+        if(m.srv_extra && m.srv_extra != mp.default_srv){m.srv_extra->Release();}
     }
     mp.meshes.clear();
+    mp.lod_count    = 1;
+    mp.selected_lod = -1;   /* will be set to 0 below if any mesh had a
+                               "|lod<N>" suffix — i.e. the model has
+                               more than one LOD group. */
+
+    /* Helper: parse "|lod<N>" suffix from a mesh name, return the
+       LOD index (0 on no match) and strip the suffix from `name`. */
+    auto extract_lod = [](std::string& name) -> uint32_t {
+        size_t pos = name.rfind("|lod");
+        if (pos == std::string::npos) return 0;
+        const char* p = name.c_str() + pos + 4;
+        if (*p == '\0' || *p < '0' || *p > '9') return 0;
+        uint32_t v = 0;
+        const char* q = p;
+        while (*q >= '0' && *q <= '9') {
+            v = v * 10 + uint32_t(*q - '0');
+            ++q;
+        }
+        if (*q != '\0') return 0;          /* trailing junk → ignore */
+        name.erase(pos);
+        return v;
+    };
+
     float minx=1e9f,miny=1e9f,minz=1e9f,maxx=-1e9f,maxy=-1e9f,maxz=-1e9f;
     for(const auto& g: geoms){
         for(size_t i=0;i+2<g.positions.size();i+=3){
@@ -1088,11 +1185,13 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         m.diffuse_tex_name  = g.diffuse_tex_name;
         m.normal_tex_name   = g.normal_tex_name;
         m.specular_tex_name = g.specular_tex_name;
-        m.tint_tex_name     = g.tint_tex_name;
+        m.metallic_tex_name = g.metallic_tex_name;
+        m.extra_tex_name    = g.extra_tex_name;
         m.diffuse_visible   = true;
         m.normal_visible    = true;
         m.specular_visible  = true;
-        m.tint_visible      = true;
+        m.metallic_visible  = true;
+        m.extra_visible     = true;
 
         if (!g.name.empty()) {
             m.name = g.name;
@@ -1100,6 +1199,12 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             m.name = "mesh_" + std::to_string(g.MeshIndex)
                    + "_sub_" + std::to_string(g.SubMeshIndex);
         }
+        /* Pull the "|lod<N>" suffix out of the display name and into
+           a structured field.  Used by the LOD overlay to filter the
+           render down to a single LOD group. */
+        m.lod_index = extract_lod(m.name);
+        if (m.lod_index + 1 > mp.lod_count) mp.lod_count = m.lod_index + 1;
+
         m.highlight = false;
         m.isolated  = false;
 
@@ -1123,14 +1228,23 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         load_named_srv(g.diffuse_tex_name,  &m.srv_diffuse,  &hasA);
         load_named_srv(g.normal_tex_name,   &m.srv_normal,   nullptr);
         load_named_srv(g.specular_tex_name, &m.srv_specular, nullptr);
-        load_named_srv(g.tint_tex_name,     &m.srv_tint,     nullptr);
+        load_named_srv(g.metallic_tex_name, &m.srv_metallic, nullptr);
+        load_named_srv(g.extra_tex_name,    &m.srv_extra,    nullptr);
         if (!m.srv_diffuse && mp.default_srv) { m.srv_diffuse = mp.default_srv; m.srv_diffuse->AddRef(); }
         if (!m.srv_normal  && mp.default_srv) { m.srv_normal  = mp.default_srv; m.srv_normal->AddRef(); }
         if (!m.srv_specular&& mp.default_srv) { m.srv_specular= mp.default_srv; m.srv_specular->AddRef(); }
-        if (!m.srv_unk     && mp.default_srv) { m.srv_unk     = mp.default_srv; m.srv_unk->AddRef(); }
-        if (!m.srv_tint    && mp.default_srv) { m.srv_tint    = mp.default_srv; m.srv_tint->AddRef(); }
+        if (!m.srv_metallic     && mp.default_srv) { m.srv_metallic     = mp.default_srv; m.srv_metallic->AddRef(); }
+        if (!m.srv_extra    && mp.default_srv) { m.srv_extra    = mp.default_srv; m.srv_extra->AddRef(); }
         m.has_alpha = hasA;
         mp.meshes.push_back(m);
+    }
+
+    /* If any mesh exposed a "|lod<N>" tag, lod_count > 1 — default
+       the viewer to LOD 0 (highest detail) so the user sees a single
+       clean LOD instead of all of them overlaid.  Users can still
+       pick "All" from the overlay to recover legacy behavior. */
+    if (mp.lod_count > 1) {
+        mp.selected_lod = 0;
     }
 
     mp.bone_count = 0;
@@ -1303,6 +1417,8 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     for(const auto& m : mp.meshes){
         if(!m.vb || !m.ib || m.index_count==0 || m.has_alpha) continue;
         if (any_isolated && !m.isolated) continue;
+        if (mp.selected_lod >= 0 &&
+            m.lod_index != (uint32_t)mp.selected_lod) continue;
         upload_per_mesh_cb(m.highlight);
         ctx->OMSetBlendState(mp.bs, blend_factor, 0xFFFFFFFF);
         UINT stride=sizeof(MPVertex), offset=0;
@@ -1315,10 +1431,12 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             (m.normal_visible   && m.srv_normal)   ? m.srv_normal   : mp.default_srv;
         ID3D11ShaderResourceView* specular_to_use =
             (m.specular_visible && m.srv_specular) ? m.srv_specular : mp.default_srv;
-        ID3D11ShaderResourceView* tint_to_use     =
-            (m.tint_visible     && m.srv_tint)     ? m.srv_tint     : mp.default_srv;
+        ID3D11ShaderResourceView* metallic_to_use =
+            (m.metallic_visible && m.srv_metallic) ? m.srv_metallic : mp.default_srv;
+        ID3D11ShaderResourceView* extra_to_use    =
+            (m.extra_visible    && m.srv_extra)    ? m.srv_extra    : mp.default_srv;
         ID3D11ShaderResourceView* srvs[5] = { diffuse_to_use, normal_to_use, specular_to_use,
-                                              m.srv_unk ? m.srv_unk : mp.default_srv, tint_to_use };
+                                              metallic_to_use, extra_to_use };
         ctx->PSSetShaderResources(0, 5, srvs);
         ctx->DrawIndexed(m.index_count,0,0);
         ID3D11ShaderResourceView* nullsrvs[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
@@ -1328,6 +1446,8 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     for(const auto& m : mp.meshes){
         if(!m.vb || !m.ib || m.index_count==0 || !m.has_alpha) continue;
         if (any_isolated && !m.isolated) continue;
+        if (mp.selected_lod >= 0 &&
+            m.lod_index != (uint32_t)mp.selected_lod) continue;
         upload_per_mesh_cb(m.highlight);
         ctx->OMSetBlendState(mp.bsAlpha, blend_factor, 0xFFFFFFFF);
         UINT stride=sizeof(MPVertex), offset=0;
@@ -1340,10 +1460,12 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             (m.normal_visible   && m.srv_normal)   ? m.srv_normal   : mp.default_srv;
         ID3D11ShaderResourceView* specular_to_use =
             (m.specular_visible && m.srv_specular) ? m.srv_specular : mp.default_srv;
-        ID3D11ShaderResourceView* tint_to_use     =
-            (m.tint_visible     && m.srv_tint)     ? m.srv_tint     : mp.default_srv;
+        ID3D11ShaderResourceView* metallic_to_use =
+            (m.metallic_visible && m.srv_metallic) ? m.srv_metallic : mp.default_srv;
+        ID3D11ShaderResourceView* extra_to_use    =
+            (m.extra_visible    && m.srv_extra)    ? m.srv_extra    : mp.default_srv;
         ID3D11ShaderResourceView* srvs[5] = { diffuse_to_use, normal_to_use, specular_to_use,
-                                              m.srv_unk ? m.srv_unk : mp.default_srv, tint_to_use };
+                                              metallic_to_use, extra_to_use };
         ctx->PSSetShaderResources(0, 5, srvs);
         ctx->DrawIndexed(m.index_count,0,0);
         ID3D11ShaderResourceView* nullsrvs[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
@@ -1424,8 +1546,8 @@ in vec2 vTexCoord;
 uniform sampler2D uTexDiffuse;
 uniform sampler2D uTexNormal;
 uniform sampler2D uTexSpecular;
-uniform sampler2D uTexUnk;
-uniform sampler2D uTexTint;
+uniform sampler2D uTexMetallic;
+uniform sampler2D uTexExtra;
 out vec4 FragColor;
 void main() {
     // Diffuse
@@ -1514,8 +1636,8 @@ static void mp_release_mesh_gl(MPPerMesh& m) {
     if (m.tex_diffuse) { glDeleteTextures(1, &m.tex_diffuse); m.tex_diffuse = 0; }
     if (m.tex_normal) { glDeleteTextures(1, &m.tex_normal); m.tex_normal = 0; }
     if (m.tex_specular) { glDeleteTextures(1, &m.tex_specular); m.tex_specular = 0; }
-    if (m.tex_unk) { glDeleteTextures(1, &m.tex_unk); m.tex_unk = 0; }
-    if (m.tex_tint) { glDeleteTextures(1, &m.tex_tint); m.tex_tint = 0; }
+    if (m.tex_metallic) { glDeleteTextures(1, &m.tex_metallic); m.tex_metallic = 0; }
+    if (m.tex_extra) { glDeleteTextures(1, &m.tex_extra); m.tex_extra = 0; }
     m.index_count = 0;
 }
 static void mp_release_gl(ModelPreview& mp) {
@@ -1538,8 +1660,8 @@ bool MP_Init(ModelPreview& mp, int w, int h) {
     mp.tex_diffuse_loc = glGetUniformLocation(mp.shader_program, "uTexDiffuse");
     mp.tex_normal_loc = glGetUniformLocation(mp.shader_program, "uTexNormal");
     mp.tex_specular_loc = glGetUniformLocation(mp.shader_program, "uTexSpecular");
-    mp.tex_unk_loc = glGetUniformLocation(mp.shader_program, "uTexUnk");
-    mp.tex_tint_loc = glGetUniformLocation(mp.shader_program, "uTexTint");
+    mp.tex_metallic_loc = glGetUniformLocation(mp.shader_program, "uTexMetallic");
+    mp.tex_extra_loc = glGetUniformLocation(mp.shader_program, "uTexExtra");
     glGenFramebuffers(1, &mp.fbo);
     glGenTextures(1, &mp.color_tex);
     glGenRenderbuffers(1, &mp.depth_rbo);
@@ -1643,11 +1765,13 @@ bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelP
         m.diffuse_tex_name  = g.diffuse_tex_name;
         m.normal_tex_name   = g.normal_tex_name;
         m.specular_tex_name = g.specular_tex_name;
-        m.tint_tex_name     = g.tint_tex_name;
+        m.metallic_tex_name = g.metallic_tex_name;
+        m.extra_tex_name    = g.extra_tex_name;
         m.diffuse_visible   = true;
         m.normal_visible    = true;
         m.specular_visible  = true;
-        m.tint_visible      = true;
+        m.metallic_visible  = true;
+        m.extra_visible     = true;
 
         if (!g.name.empty()) {
             m.name = g.name;
@@ -1660,12 +1784,13 @@ bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelP
         if (!g.diffuse_tex_name.empty())  { m.tex_diffuse  = load_tex_from_name(g.diffuse_tex_name,  &hasA); }
         if (!g.normal_tex_name.empty())   { m.tex_normal   = load_tex_from_name(g.normal_tex_name,   nullptr); }
         if (!g.specular_tex_name.empty()) { m.tex_specular = load_tex_from_name(g.specular_tex_name, nullptr); }
-        if (!g.tint_tex_name.empty())     { m.tex_tint     = load_tex_from_name(g.tint_tex_name,     nullptr); }
+        if (!g.metallic_tex_name.empty()) { m.tex_metallic = load_tex_from_name(g.metallic_tex_name, nullptr); }
+        if (!g.extra_tex_name.empty())    { m.tex_extra    = load_tex_from_name(g.extra_tex_name,    nullptr); }
         if (!m.tex_diffuse) m.tex_diffuse = mp.default_tex;
         if (!m.tex_normal) m.tex_normal = mp.default_tex;
         if (!m.tex_specular) m.tex_specular = mp.default_tex;
-        if (!m.tex_unk) m.tex_unk = mp.default_tex;
-        if (!m.tex_tint) m.tex_tint = mp.default_tex;
+        if (!m.tex_metallic) m.tex_metallic = mp.default_tex;
+        if (!m.tex_extra) m.tex_extra = mp.default_tex;
         m.has_alpha = hasA;
         mp.meshes.push_back(m);
     }
@@ -1729,31 +1854,37 @@ void MP_Render(ModelPreview& mp, const FlyCam& cam) {
     glDepthMask(GL_TRUE);
     for (const auto& m : mp.meshes) {
         if (!m.vao || m.index_count == 0 || m.has_alpha) continue;
+        if (mp.selected_lod >= 0 &&
+            m.lod_index != (uint32_t)mp.selected_lod) continue;
         glDisable(GL_BLEND);
         unsigned int diffuse_to_use  = (m.diffuse_visible  && m.tex_diffuse)  ? m.tex_diffuse  : mp.default_tex;
         unsigned int normal_to_use   = (m.normal_visible   && m.tex_normal)   ? m.tex_normal   : mp.default_tex;
         unsigned int specular_to_use = (m.specular_visible && m.tex_specular) ? m.tex_specular : mp.default_tex;
-        unsigned int tint_to_use     = (m.tint_visible     && m.tex_tint)     ? m.tex_tint     : mp.default_tex;
+        unsigned int metallic_to_use = (m.metallic_visible && m.tex_metallic) ? m.tex_metallic : mp.default_tex;
+        unsigned int extra_to_use    = (m.extra_visible    && m.tex_extra)    ? m.tex_extra    : mp.default_tex;
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, diffuse_to_use); glUniform1i(mp.tex_diffuse_loc, 0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, normal_to_use); glUniform1i(mp.tex_normal_loc, 1);
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, specular_to_use); glUniform1i(mp.tex_specular_loc, 2);
-        glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m.tex_unk ? m.tex_unk : mp.default_tex); glUniform1i(mp.tex_unk_loc, 3);
-        glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, tint_to_use); glUniform1i(mp.tex_tint_loc, 4);
+        glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, metallic_to_use); glUniform1i(mp.tex_metallic_loc, 3);
+        glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, extra_to_use); glUniform1i(mp.tex_extra_loc, 4);
         glBindVertexArray(m.vao); glDrawElements(GL_TRIANGLES, m.index_count, GL_UNSIGNED_INT, 0); glBindVertexArray(0);
     }
     glDepthMask(GL_FALSE);
     for (const auto& m : mp.meshes) {
         if (!m.vao || m.index_count == 0 || !m.has_alpha) continue;
+        if (mp.selected_lod >= 0 &&
+            m.lod_index != (uint32_t)mp.selected_lod) continue;
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         unsigned int diffuse_to_use  = (m.diffuse_visible  && m.tex_diffuse)  ? m.tex_diffuse  : mp.default_tex;
         unsigned int normal_to_use   = (m.normal_visible   && m.tex_normal)   ? m.tex_normal   : mp.default_tex;
         unsigned int specular_to_use = (m.specular_visible && m.tex_specular) ? m.tex_specular : mp.default_tex;
-        unsigned int tint_to_use     = (m.tint_visible     && m.tex_tint)     ? m.tex_tint     : mp.default_tex;
+        unsigned int metallic_to_use = (m.metallic_visible && m.tex_metallic) ? m.tex_metallic : mp.default_tex;
+        unsigned int extra_to_use    = (m.extra_visible    && m.tex_extra)    ? m.tex_extra    : mp.default_tex;
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, diffuse_to_use); glUniform1i(mp.tex_diffuse_loc, 0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, normal_to_use); glUniform1i(mp.tex_normal_loc, 1);
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, specular_to_use); glUniform1i(mp.tex_specular_loc, 2);
-        glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m.tex_unk ? m.tex_unk : mp.default_tex); glUniform1i(mp.tex_unk_loc, 3);
-        glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, tint_to_use); glUniform1i(mp.tex_tint_loc, 4);
+        glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, metallic_to_use); glUniform1i(mp.tex_metallic_loc, 3);
+        glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, extra_to_use); glUniform1i(mp.tex_extra_loc, 4);
         glBindVertexArray(m.vao); glDrawElements(GL_TRIANGLES, m.index_count, GL_UNSIGNED_INT, 0); glBindVertexArray(0);
     }
     glDepthMask(GL_TRUE);

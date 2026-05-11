@@ -676,6 +676,62 @@ void draw_model_in_panel(ID3D11Device* device) {
         ImGui::PopStyleVar();
     }
 
+    /* LOD switcher — only shown when the model has more than one
+       LOD group (V2's walker tags each mesh's name with a "|lod<N>"
+       suffix that MP_Build parses into MPPerMesh.lod_index). */
+    if (g_mp.has_model && g_mp.lod_count > 1) {
+        static float s_lod_alpha = 0.30f;
+        const float kIdleAlpha   = 0.30f;
+        const float kHoverAlpha  = 1.00f;
+
+        const ImVec2 lod_pos (origin.x + 6, next_overlay_y);
+        const ImVec2 lod_size(190, 0);
+        ImGui::SetNextWindowPos(lod_pos);
+        ImGui::SetNextWindowSize(lod_size, ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(s_lod_alpha * 0.78f);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, s_lod_alpha);
+
+        ImGuiWindowFlags fl = ImGuiWindowFlags_NoTitleBar
+                            | ImGuiWindowFlags_NoResize
+                            | ImGuiWindowFlags_NoMove
+                            | ImGuiWindowFlags_NoCollapse
+                            | ImGuiWindowFlags_NoSavedSettings
+                            | ImGuiWindowFlags_AlwaysAutoResize;
+        if (ImGui::Begin("##lod_overlay", nullptr, fl)) {
+            bool hovering = ImGui::IsWindowHovered(
+                ImGuiHoveredFlags_AllowWhenBlockedByPopup |
+                ImGuiHoveredFlags_ChildWindows);
+            float target = hovering ? kHoverAlpha : kIdleAlpha;
+            s_lod_alpha += (target - s_lod_alpha) * 0.18f;
+            if (std::fabs(s_lod_alpha - target) < 0.005f) s_lod_alpha = target;
+
+            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "LOD");
+
+            const int lod_count = (int)g_mp.lod_count;
+            int current = g_mp.selected_lod;        /* -1 = All */
+            if (current < -1 || current >= lod_count) current = 0;
+
+            /* "All" radio shows every LOD overlaid (legacy behavior). */
+            if (ImGui::RadioButton("All", current == -1)) {
+                g_mp.selected_lod = -1;
+            }
+            for (int i = 0; i < lod_count; ++i) {
+                ImGui::SameLine();
+                char lbl[16];
+                std::snprintf(lbl, sizeof(lbl), "%d", i);
+                if (ImGui::RadioButton(lbl, current == i)) {
+                    g_mp.selected_lod = i;
+                }
+            }
+
+            ImVec2 wp = ImGui::GetWindowPos();
+            ImVec2 ws = ImGui::GetWindowSize();
+            next_overlay_y = wp.y + ws.y + 6.0f;
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
+    }
+
     if (g_mp.has_model && !g_mp.meshes.empty()) {
         static float s_mat_alpha = 0.30f;
         const float kIdleAlpha   = 0.30f;
@@ -744,14 +800,15 @@ void draw_model_in_panel(ID3D11Device* device) {
                     const std::string*        name;
                     bool*                     visible;
                 };
-                ThumbSpec thumbs[4] = {
+                ThumbSpec thumbs[5] = {
                     {"diffuse",  mesh.srv_diffuse,  &mesh.diffuse_tex_name,  &mesh.diffuse_visible},
                     {"normal",   mesh.srv_normal,   &mesh.normal_tex_name,   &mesh.normal_visible},
                     {"specular", mesh.srv_specular, &mesh.specular_tex_name, &mesh.specular_visible},
-                    {"tint",     mesh.srv_tint,     &mesh.tint_tex_name,     &mesh.tint_visible},
+                    {"metallic", mesh.srv_metallic, &mesh.metallic_tex_name, &mesh.metallic_visible},
+                    {"extra",    mesh.srv_extra,    &mesh.extra_tex_name,    &mesh.extra_visible},
                 };
                 bool any_thumb = false;
-                for (int ti = 0; ti < 4; ++ti) {
+                for (int ti = 0; ti < 5; ++ti) {
                     const ThumbSpec& t = thumbs[ti];
                     if (!t.srv || t.srv == g_mp.default_srv) continue;
                     if (t.name->empty()) continue;

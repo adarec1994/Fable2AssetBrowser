@@ -540,10 +540,11 @@ void draw_hex_window() {
                                         const auto& mat = m.Materials[mi];
                                         std::string ml = "Material " + std::to_string(mi);
                                         if(ImGui::TreeNode(ml.c_str())){
-                                            if(!mat.TextureName.empty())     ImGui::Text("Diffuse:  %s", std::filesystem::path(mat.TextureName).filename().string().c_str());
-                                            if(!mat.NormalMapName.empty())   ImGui::Text("Normal:   %s", std::filesystem::path(mat.NormalMapName).filename().string().c_str());
-                                            if(!mat.SpecularMapName.empty()) ImGui::Text("Specular: %s", std::filesystem::path(mat.SpecularMapName).filename().string().c_str());
-                                            if(!mat.TintName.empty())        ImGui::Text("Tint:     %s", std::filesystem::path(mat.TintName).filename().string().c_str());
+                                            if(!mat.DiffuseTexName.empty())  ImGui::Text("Diffuse:  %s", std::filesystem::path(mat.DiffuseTexName).filename().string().c_str());
+                                            if(!mat.NormalTexName.empty())   ImGui::Text("Normal:   %s", std::filesystem::path(mat.NormalTexName).filename().string().c_str());
+                                            if(!mat.SpecularTexName.empty()) ImGui::Text("Specular: %s", std::filesystem::path(mat.SpecularTexName).filename().string().c_str());
+                                            if(!mat.MetallicTexName.empty()) ImGui::Text("Metallic: %s", std::filesystem::path(mat.MetallicTexName).filename().string().c_str());
+                                            if(!mat.ExtraTexName.empty())    ImGui::Text("Extra:    %s", std::filesystem::path(mat.ExtraTexName).filename().string().c_str());
                                             ImGui::TreePop();
                                         }
                                     }
@@ -811,32 +812,35 @@ void draw_hex_window() {
                     std::vector<size_t> mesh_idx;
                     bool any_visible = false;
                 };
-                enum Slot { SLOT_DIFFUSE=0, SLOT_NORMAL=1, SLOT_SPEC=2, SLOT_TINT=3, SLOT_COUNT=4 };
-                const char* slot_label[SLOT_COUNT] = { "Diffuse", "Normal", "Specular", "Tint" };
+                enum Slot { SLOT_DIFFUSE=0, SLOT_NORMAL=1, SLOT_SPEC=2, SLOT_METALLIC=3, SLOT_EXTRA=4, SLOT_COUNT=5 };
+                const char* slot_label[SLOT_COUNT] = { "Diffuse", "Normal", "Specular", "Metallic", "Extra" };
                 std::vector<TexEntry> entries[SLOT_COUNT];
 
                 auto get_name = [&](const MPPerMesh& m, int s) -> const std::string& {
                     switch (s) {
-                        case SLOT_DIFFUSE: return m.diffuse_tex_name;
-                        case SLOT_NORMAL:  return m.normal_tex_name;
-                        case SLOT_SPEC:    return m.specular_tex_name;
-                        default:           return m.tint_tex_name;
+                        case SLOT_DIFFUSE:  return m.diffuse_tex_name;
+                        case SLOT_NORMAL:   return m.normal_tex_name;
+                        case SLOT_SPEC:     return m.specular_tex_name;
+                        case SLOT_METALLIC: return m.metallic_tex_name;
+                        default:            return m.extra_tex_name;
                     }
                 };
                 auto get_visible = [&](const MPPerMesh& m, int s) -> bool {
                     switch (s) {
-                        case SLOT_DIFFUSE: return m.diffuse_visible;
-                        case SLOT_NORMAL:  return m.normal_visible;
-                        case SLOT_SPEC:    return m.specular_visible;
-                        default:           return m.tint_visible;
+                        case SLOT_DIFFUSE:  return m.diffuse_visible;
+                        case SLOT_NORMAL:   return m.normal_visible;
+                        case SLOT_SPEC:     return m.specular_visible;
+                        case SLOT_METALLIC: return m.metallic_visible;
+                        default:            return m.extra_visible;
                     }
                 };
                 auto set_visible = [&](MPPerMesh& m, int s, bool v) {
                     switch (s) {
-                        case SLOT_DIFFUSE: m.diffuse_visible  = v; break;
-                        case SLOT_NORMAL:  m.normal_visible   = v; break;
-                        case SLOT_SPEC:    m.specular_visible = v; break;
-                        default:           m.tint_visible     = v; break;
+                        case SLOT_DIFFUSE:  m.diffuse_visible  = v; break;
+                        case SLOT_NORMAL:   m.normal_visible   = v; break;
+                        case SLOT_SPEC:     m.specular_visible = v; break;
+                        case SLOT_METALLIC: m.metallic_visible = v; break;
+                        default:            m.extra_visible    = v; break;
                     }
                 };
 
@@ -866,14 +870,16 @@ void draw_hex_window() {
                     if (ImGui::Button("Show All", ImVec2(140, 0))) {
                         for (auto& mm : g_mp.meshes) {
                             mm.diffuse_visible = mm.normal_visible =
-                            mm.specular_visible = mm.tint_visible = true;
+                            mm.specular_visible = mm.metallic_visible =
+                            mm.extra_visible = true;
                         }
                     }
                     ImGui::SameLine();
                     if (ImGui::Button("Hide All", ImVec2(140, 0))) {
                         for (auto& mm : g_mp.meshes) {
                             mm.diffuse_visible = mm.normal_visible =
-                            mm.specular_visible = mm.tint_visible = false;
+                            mm.specular_visible = mm.metallic_visible =
+                            mm.extra_visible = false;
                         }
                     }
                     ImGui::Separator();

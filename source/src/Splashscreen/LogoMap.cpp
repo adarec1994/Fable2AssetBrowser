@@ -1,4 +1,4 @@
-#include "LogoMap.h"
+    #include "LogoMap.h"
 
 namespace Splash {
 

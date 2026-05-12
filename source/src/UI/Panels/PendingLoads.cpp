@@ -98,68 +98,68 @@ void process_pending_loads() {
 
         if (!bnk_to_use.empty()) {
 
-            progress_open(0, "Loading model...");
-#ifdef _WIN32
-            ID3D11Device* device_ptr = device;
-            std::thread([device_ptr, item, name, parse_path, bnk_to_use, nested_temp_copy, is_nested]() {
-#else
-            std::thread([item, name, parse_path, bnk_to_use, nested_temp_copy, is_nested]() {
-#endif
-                std::vector<unsigned char> buf;
-                bool ok = false;
-                try {
-                    if (is_nested) {
-                        ok = reconstruct_nested_mdl(bnk_to_use, item.index, buf);
-                    } else {
-                        ok = build_mdl_buffer_for_name(name, buf);
-                    }
-                    if (!ok) {
-                        auto tmpdir = std::filesystem::temp_directory_path() / "f2_preview";
-                        std::error_code ec;
-                        std::filesystem::create_directories(tmpdir, ec);
-                        auto tmp_file = tmpdir / ("preview_" + std::to_string(std::hash<std::string>{}(name + std::to_string(std::time(nullptr)))) + ".bin");
-                        try {
-                            extract_one(bnk_to_use, item.index, tmp_file.string());
-                            buf = read_all_bytes(tmp_file);
-                            ok = !buf.empty();
-                            std::filesystem::remove(tmp_file, ec);
-                        } catch (...) {
-                            std::filesystem::remove(tmp_file, ec);
-                        }
-                    }
-                } catch (...) { ok = false; }
+            /* No progress dialog for model loads: with the BNK cache +
+               in-memory extracts + SRV cache, loads are typically
+               sub-frame.  A dialog that flashes for one frame feels
+               worse than no dialog at all.  Run the load synchronously
+               on the UI thread — one stall is cheaper than the cost of
+               spawning a thread and double-buffering state.
 
-                if (!nested_temp_copy.empty()) {
-                    std::error_code ec;
-                    std::filesystem::remove(nested_temp_copy, ec);
+               (The first cold load after app start can still take a
+                moment because the BNKReader has to decompress its file
+                table.  If that becomes the new bottleneck we'll prime
+                the cache during boot.) */
+            std::vector<unsigned char> buf;
+            bool ok = false;
+            try {
+                if (is_nested) {
+                    ok = reconstruct_nested_mdl(bnk_to_use, item.index, buf);
+                } else {
+                    ok = build_mdl_buffer_for_name(name, buf);
                 }
-
-                if (ok && !buf.empty()) {
-                    S.mdl_info_ok = parse_mdl_info(buf, S.mdl_info, parse_path);
-                    if (S.mdl_info_ok) {
-                        S.mdl_meshes.clear();
-                        parse_mdl_geometry(buf, S.mdl_info, S.mdl_meshes);
-#ifdef _WIN32
-                        extern ModelPreview g_mp;
-                        MP_Release(g_mp);
-                        MP_Init(device_ptr, g_mp, 800, 600);
-                        MP_Build(device_ptr, S.mdl_meshes, S.mdl_info, g_mp);
-
-                        S.cam_yaw = 3.14159265f;
-                        S.cam_pitch = 0.2f;
-                        S.cam_dist = 3.0f;
-
-                        if (S.texture_window_srv) {
-                            S.texture_window_srv->Release();
-                            S.texture_window_srv = nullptr;
-                        }
-#else
-                        S.pending_preview_build = true;
-#endif
-                    }
+                if (!ok) {
+                    /* Last-resort fallback: raw extract straight from
+                       the BNK.  Uses the cache so this is also
+                       in-memory. */
+                    try {
+                        buf = BnkCache::extract_bytes(bnk_to_use, item.index);
+                        ok  = !buf.empty();
+                    } catch (...) {}
                 }
-                progress_done();
-            }).detach();
+            } catch (...) { ok = false; }
+
+            if (!nested_temp_copy.empty()) {
+                std::error_code ec;
+                std::filesystem::remove(nested_temp_copy, ec);
+            }
+
+            if (ok && !buf.empty()) {
+                S.mdl_info_ok = parse_mdl_info(buf, S.mdl_info, parse_path);
+                if (S.mdl_info_ok) {
+                    S.mdl_meshes.clear();
+                    parse_mdl_geometry(buf, S.mdl_info, S.mdl_meshes);
+#ifdef _WIN32
+                    extern ModelPreview g_mp;
+                    extern bool         g_mp_initialized;
+                    if (!g_mp_initialized) {
+                        MP_Init(device, g_mp, 800, 600);
+                        g_mp_initialized = true;
+                    }
+                    MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
+
+                    S.cam_yaw = 3.14159265f;
+                    S.cam_pitch = 0.2f;
+                    S.cam_dist = 3.0f;
+
+                    if (S.texture_window_srv) {
+                        S.texture_window_srv->Release();
+                        S.texture_window_srv = nullptr;
+                    }
+#else
+                    S.pending_preview_build = true;
+#endif
+                }
+            }
         }
         g_pending_mdl_index = -1;
     }

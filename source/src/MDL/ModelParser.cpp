@@ -1,5 +1,4 @@
 #include "ModelParser.h"
-#include "ModelParserV2.h"
 #include "../Utilities/Files.h"
 #include "../Utilities/Utils.h"
 #include "../Utilities/State.h"
@@ -16,60 +15,31 @@
 
 using std::uint8_t; using std::uint16_t; using std::uint32_t;
 
-/* Recursion guard for the v1 ↔ v2 dispatch. When S.dev_mode is on, the
-   public parse_mdl_info / parse_mdl_geometry route to the v2 reader
-   first. v2 may fall back to v1 for parts it doesn't yet handle, and
-   this guard prevents the v1 entry from bouncing back into v2. */
-namespace {
-thread_local int g_v2_dispatch_depth = 0;
-
-struct V2DispatchGuard {
-    V2DispatchGuard()  { ++g_v2_dispatch_depth; }
-    ~V2DispatchGuard() { --g_v2_dispatch_depth; }
-};
-}
-
 bool build_mdl_buffer_for_name(const std::string &mdl_name, std::vector<unsigned char> &out){
     auto p_headers = find_bnk_by_filename("globals_model_headers.bnk");
     auto p_rest    = find_bnk_by_filename("globals_models.bnk");
     if(!p_headers || !p_rest) return false;
-    BNKReader r_headers(*p_headers);
-    BNKReader r_rest(*p_rest);
-    std::unordered_map<std::string,int> mapH, mapR;
-    for(size_t i=0;i<r_headers.list_files().size();++i){
-        auto &e=r_headers.list_files()[i];
-        std::string f=e.name;
-        std::transform(f.begin(),f.end(),f.begin(),::tolower);
-        std::replace(f.begin(), f.end(), '\\', '/');
-        mapH.emplace(f,(int)i);
-    }
-    for(size_t i=0;i<r_rest.list_files().size();++i){
-        auto &e=r_rest.list_files()[i];
-        std::string f=e.name;
-        std::transform(f.begin(),f.end(),f.begin(),::tolower);
-        std::replace(f.begin(), f.end(), '\\', '/');
-        mapR.emplace(f,(int)i);
-    }
-    std::string key=mdl_name;
-    std::transform(key.begin(),key.end(),key.begin(),::tolower);
-    std::replace(key.begin(), key.end(), '\\', '/');
-    if(!mapH.count(key) || !mapR.count(key)) return false;
 
-    auto tmpdir = std::filesystem::temp_directory_path() / "f2_mdl_hex";
-    std::error_code ec; std::filesystem::create_directories(tmpdir, ec);
-    auto tmp_h = tmpdir / "h.bin";
-    auto tmp_r = tmpdir / "r.bin";
-    try{
-        extract_one(*p_headers, mapH.at(key), tmp_h.string());
-        extract_one(*p_rest,    mapR.at(key), tmp_r.string());
-        auto vh = read_all_bytes(tmp_h);
-        auto vr = read_all_bytes(tmp_r);
-        out.clear(); out.reserve(vh.size()+vr.size());
+    /* Lowercase + forward-slash the lookup key.  BnkCache stores both
+       full-path and basename-only forms so either works. */
+    std::string key = mdl_name;
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    std::replace(key.begin(), key.end(), '\\', '/');
+
+    int hidx = BnkCache::find_index(*p_headers, key);
+    int ridx = BnkCache::find_index(*p_rest,    key);
+    if (hidx < 0 || ridx < 0) return false;
+
+    try {
+        auto vh = BnkCache::extract_bytes(*p_headers, hidx);
+        auto vr = BnkCache::extract_bytes(*p_rest,    ridx);
+        out.clear();
+        out.reserve(vh.size() + vr.size());
         out.insert(out.end(), vh.begin(), vh.end());
         out.insert(out.end(), vr.begin(), vr.end());
-        std::filesystem::remove(tmp_h, ec);
-        std::filesystem::remove(tmp_r, ec);
-    }catch(...){ return false; }
+    } catch (...) {
+        return false;
+    }
     return true;
 }
 
@@ -134,10 +104,6 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out){
 }
 
 bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const std::string& file_path){
-    if(S.dev_mode && g_v2_dispatch_depth == 0){
-        V2DispatchGuard guard;
-        return parse_mdl_info_v2(data, out, file_path);
-    }
     if(data.size() < 8) return false;
     R r{data.data(), data.size(), 0};
 
@@ -887,14 +853,11 @@ if(is_foliage){
             out.MeshBuffers.push_back(mb);
         }
     }
+
     return true;
 }
 
 bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& info, std::vector<MDLMeshGeom>& out){
-    if(S.dev_mode && g_v2_dispatch_depth == 0){
-        V2DispatchGuard guard;
-        return parse_mdl_geometry_v2(data, info, out);
-    }
     out.clear();
     if(info.MeshBuffers.size()!=info.Meshes.size()){
         return true;

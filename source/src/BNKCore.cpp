@@ -80,6 +80,116 @@ static void extract_one(const std::string& bnk_path, int index, const std::strin
     reader.extract_file(files[static_cast<size_t>(index)].name, out_path);
 }
 
+/* -------------------------------------------------------------------- *
+ * BNK reader / index cache + in-memory extract.
+ *
+ * Without this every model load re-opened each BNK (the BNKReader ctor
+ * decompresses the file table on every call), then rebuilt
+ * name → index lookup maps from scratch, then bounced the actual
+ * file data through a temp file on disk.  For a model with N
+ * materials, that pattern fired ~5×N times per load — that was the
+ * loading bar.
+ *
+ * BnkCache holds one shared BNKReader per path (created lazily on
+ * first request) and a lowercase-name → index map alongside it.  A
+ * single mutex guards the table; per-reader mutexes guard the
+ * underlying file handle while the chunked inflate runs.  Everything
+ * stays in-memory.
+ * -------------------------------------------------------------------- */
+namespace BnkCache {
+
+struct Entry {
+    std::shared_ptr<BNKReader>                       reader;
+    std::shared_ptr<const std::unordered_map<std::string,int>> index_map;
+    std::shared_ptr<std::mutex>                      io_mutex;
+};
+
+inline std::mutex& cache_mutex() {
+    static std::mutex m;
+    return m;
+}
+inline std::unordered_map<std::string, Entry>& table() {
+    static std::unordered_map<std::string, Entry> t;
+    return t;
+}
+
+inline std::string normalize_path(const std::string& p) {
+    /* Use the path as-is for cache key.  Callers pass the same form
+       consistently (either an ISO virtual path or a filesystem path),
+       so we don't try to canonicalize. */
+    return p;
+}
+
+inline Entry& get(const std::string& path) {
+    const std::string key = normalize_path(path);
+    {
+        std::lock_guard<std::mutex> lk(cache_mutex());
+        auto it = table().find(key);
+        if (it != table().end()) return it->second;
+    }
+
+    LazyNested::materialize(path);
+
+    Entry e;
+    e.reader   = std::make_shared<BNKReader>(path);
+    e.io_mutex = std::make_shared<std::mutex>();
+
+    {
+        auto im = std::make_shared<std::unordered_map<std::string,int>>();
+        const auto& files = e.reader->list_files();
+        im->reserve(files.size() * 2);
+        for (size_t i = 0; i < files.size(); ++i) {
+            const auto& name = files[i].name;
+            /* Full path key (lowercased, forward-slash). */
+            std::string full = name;
+            std::transform(full.begin(), full.end(), full.begin(),
+                           [](unsigned char c){ return std::tolower(c); });
+            std::replace(full.begin(), full.end(), '\\', '/');
+            im->emplace(full, (int)i);
+
+            /* Basename-only key, for callers that pass just a filename. */
+            std::string base = std::filesystem::path(full).filename().string();
+            if (base != full) im->emplace(base, (int)i);
+        }
+        e.index_map = im;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(cache_mutex());
+        auto& slot = table()[key];
+        if (!slot.reader) slot = e;
+        return slot;
+    }
+}
+
+inline int find_index(const std::string& path, const std::string& name_lower) {
+    try {
+        Entry& e = get(path);
+        auto it = e.index_map->find(name_lower);
+        return (it == e.index_map->end()) ? -1 : it->second;
+    } catch (...) {
+        return -1;
+    }
+}
+
+inline std::vector<uint8_t> extract_bytes(const std::string& path, int index) {
+    Entry& e = get(path);
+    std::lock_guard<std::mutex> lk(*e.io_mutex);
+    return e.reader->extract_index_bytes(index);
+}
+
+inline void invalidate(const std::string& path) {
+    std::lock_guard<std::mutex> lk(cache_mutex());
+    table().erase(normalize_path(path));
+}
+
+inline void clear() {
+    std::lock_guard<std::mutex> lk(cache_mutex());
+    table().clear();
+}
+
+}
+
 namespace LazyNested {
 inline bool materialize(const std::string& temp_path) {
     PendingExtract pe;

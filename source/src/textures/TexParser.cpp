@@ -441,169 +441,74 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
         std::stable_partition(search_paths.begin(), search_paths.end(), is_sibling);
     }
 
-    std::string header_bnk_path;
-    int header_idx = -1;
-
-    for (const auto& bnk_path : search_paths) {
-        std::string fname = std::filesystem::path(bnk_path).filename().string();
-        std::string fname_lower = fname;
-        std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
-
-        if (fname_lower.find("header") != std::string::npos && fname_lower.find("texture") != std::string::npos) {
-            try {
-                BNKReader reader(bnk_path);
-                for (size_t i = 0; i < reader.list_files().size(); ++i) {
-                    std::string file_lower = reader.list_files()[i].name;
-                    std::transform(file_lower.begin(), file_lower.end(), file_lower.begin(), ::tolower);
-                    std::string file_base = std::filesystem::path(file_lower).filename().string();
-
-                    if (file_base == key) {
-                        header_bnk_path = bnk_path;
-                        header_idx = (int)i;
-                        break;
-                    }
-                }
-            } catch (...) {}
-
-            if (header_idx != -1) break;
-        }
-    }
-
-    if (header_idx == -1) {
-        return false;
-    }
-
-    std::string mip0_bnk_path;
-    int mip0_idx = -1;
-
-    for (const auto& bnk_path : search_paths) {
-        std::string fname = std::filesystem::path(bnk_path).filename().string();
-        std::string fname_lower = fname;
-        std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
-
-        if (fname_lower.find("1024mip0") != std::string::npos && fname_lower.find("texture") != std::string::npos) {
-            try {
-                BNKReader reader(bnk_path);
-                for (size_t i = 0; i < reader.list_files().size(); ++i) {
-                    std::string file_lower = reader.list_files()[i].name;
-                    std::transform(file_lower.begin(), file_lower.end(), file_lower.begin(), ::tolower);
-                    std::string file_base = std::filesystem::path(file_lower).filename().string();
-
-                    if (file_base == key) {
-                        mip0_bnk_path = bnk_path;
-                        mip0_idx = (int)i;
-                        break;
-                    }
-                }
-            } catch (...) {}
-
-            if (mip0_idx != -1) break;
-        }
-    }
-
-    std::string body_bnk_path;
-    int body_idx = -1;
-
-    auto scan_bnk_for_body = [&](const std::string& bnk_path) -> bool {
-        try {
-            BNKReader reader(bnk_path);
-            for (size_t i = 0; i < reader.list_files().size(); ++i) {
-                std::string file_lower = reader.list_files()[i].name;
-                std::transform(file_lower.begin(), file_lower.end(), file_lower.begin(), ::tolower);
-                std::string file_base = std::filesystem::path(file_lower).filename().string();
-
-                if (file_base == key) {
-                    body_bnk_path = bnk_path;
-                    body_idx = (int)i;
-                    return true;
-                }
-            }
-        } catch (...) {}
-        return false;
+    /* Classify candidate paths by filename role (header / mip0 / body)
+       and use BnkCache::find_index to look the texture up in each.
+       The cache builds the lowercase name → index table once per BNK
+       and reuses it on every subsequent call — this is what makes
+       model loads feel instant: no more BNKReader reconstruction per
+       material, no more per-texture file table decompression. */
+    auto classify = [](const std::string& bnk_path) -> int {
+        std::string n = std::filesystem::path(bnk_path).filename().string();
+        std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+        const bool is_header  = n.find("header")   != std::string::npos
+                             && n.find("texture")  != std::string::npos;
+        const bool is_mip0    = n.find("1024mip0") != std::string::npos
+                             && n.find("texture")  != std::string::npos;
+        const bool is_texbody = n.find("texture")  != std::string::npos
+                             && !is_header && !is_mip0;
+        if (is_header)  return 1;
+        if (is_mip0)    return 2;
+        if (is_texbody) return 3;
+        /* Fallback body candidate: any .bnk that isn't a texture/header/mip0
+           variant and isn't a manifest. */
+        if (n.find(".manifest") != std::string::npos) return 0;
+        if (n.size() < 4 || n.compare(n.size() - 4, 4, ".bnk") != 0) return 0;
+        return 4;
     };
 
+    std::string header_bnk_path, mip0_bnk_path, body_bnk_path;
+    int header_idx = -1, mip0_idx = -1, body_idx = -1;
+
     for (const auto& bnk_path : search_paths) {
-        std::string fname_lower = std::filesystem::path(bnk_path).filename().string();
-        std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
-
-        if (fname_lower.find("texture") != std::string::npos &&
-            fname_lower.find("header") == std::string::npos &&
-            fname_lower.find("1024mip0") == std::string::npos) {
-            if (scan_bnk_for_body(bnk_path)) break;
+        int role = classify(bnk_path);
+        if (role == 1 && header_idx < 0) {
+            int idx = BnkCache::find_index(bnk_path, key);
+            if (idx >= 0) { header_idx = idx; header_bnk_path = bnk_path; }
+        } else if (role == 2 && mip0_idx < 0) {
+            int idx = BnkCache::find_index(bnk_path, key);
+            if (idx >= 0) { mip0_idx = idx; mip0_bnk_path = bnk_path; }
+        } else if (role == 3 && body_idx < 0) {
+            int idx = BnkCache::find_index(bnk_path, key);
+            if (idx >= 0) { body_idx = idx; body_bnk_path = bnk_path; }
         }
     }
 
-    if (body_idx == -1) {
+    if (header_idx < 0) return false;
+
+    /* Body fallback: any .bnk that wasn't a texture/header/mip0 BNK. */
+    if (body_idx < 0) {
         for (const auto& bnk_path : search_paths) {
-            std::string fname_lower = std::filesystem::path(bnk_path).filename().string();
-            std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
-
-            if (fname_lower.find("header")    != std::string::npos) continue;
-            if (fname_lower.find("1024mip0")  != std::string::npos) continue;
-            if (fname_lower.find("texture")   != std::string::npos) continue;
-            if (fname_lower.find(".manifest") != std::string::npos) continue;
-            if (fname_lower.size() < 4 ||
-                fname_lower.compare(fname_lower.size() - 4, 4, ".bnk") != 0) continue;
-
-            if (scan_bnk_for_body(bnk_path)) break;
+            if (classify(bnk_path) != 4) continue;
+            int idx = BnkCache::find_index(bnk_path, key);
+            if (idx >= 0) { body_idx = idx; body_bnk_path = bnk_path; break; }
         }
     }
-
-    auto tmpdir = std::filesystem::temp_directory_path() / "f2_tex_rebuild";
-    std::error_code ec;
-    std::filesystem::create_directories(tmpdir, ec);
-
-    auto tmp_h = tmpdir / ("h_" + std::to_string(std::hash<std::string>{}(tex_name)) + ".bin");
-    auto tmp_m = tmpdir / ("m_" + std::to_string(std::hash<std::string>{}(tex_name)) + ".bin");
-    auto tmp_b = tmpdir / ("b_" + std::to_string(std::hash<std::string>{}(tex_name)) + ".bin");
 
     try {
-        extract_one(header_bnk_path, header_idx, tmp_h.string());
-        auto vh = read_all_bytes(tmp_h);
+        auto vh = BnkCache::extract_bytes(header_bnk_path, header_idx);
+        if (vh.empty()) return false;
 
-        if (vh.empty()) {
-            std::filesystem::remove(tmp_h, ec);
-            return false;
-        }
-
-        std::vector<unsigned char> vm;
-        bool has_mip0 = false;
-        if (mip0_idx != -1) {
-            extract_one(mip0_bnk_path, mip0_idx, tmp_m.string());
-            vm = read_all_bytes(tmp_m);
-            has_mip0 = !vm.empty();
-        }
-
-        std::vector<unsigned char> vb;
-        bool has_body = false;
-        if (body_idx != -1) {
-            extract_one(body_bnk_path, body_idx, tmp_b.string());
-            vb = read_all_bytes(tmp_b);
-            has_body = !vb.empty();
-        }
+        std::vector<uint8_t> vm, vb;
+        if (mip0_idx >= 0) vm = BnkCache::extract_bytes(mip0_bnk_path, mip0_idx);
+        if (body_idx >= 0) vb = BnkCache::extract_bytes(body_bnk_path, body_idx);
 
         out.clear();
         out.reserve(vh.size() + vm.size() + vb.size());
         out.insert(out.end(), vh.begin(), vh.end());
-
-        if (has_mip0) {
-            out.insert(out.end(), vm.begin(), vm.end());
-        }
-
-        if (has_body) {
-            out.insert(out.end(), vb.begin(), vb.end());
-        }
-
-        std::filesystem::remove(tmp_h, ec);
-        if (has_mip0) std::filesystem::remove(tmp_m, ec);
-        if (has_body) std::filesystem::remove(tmp_b, ec);
-
+        if (!vm.empty()) out.insert(out.end(), vm.begin(), vm.end());
+        if (!vb.empty()) out.insert(out.end(), vb.begin(), vb.end());
         return !out.empty();
-
     } catch (...) {
-        std::filesystem::remove(tmp_h, ec);
-        std::filesystem::remove(tmp_m, ec);
-        std::filesystem::remove(tmp_b, ec);
         return false;
     }
 }

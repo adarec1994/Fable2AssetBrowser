@@ -322,7 +322,21 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
                     }
                     c1 = apply_delta(c1, kDeltaTable[d]);
                 }
-                if (c0 < c1) { uint16_t t = c0; c0 = c1; c1 = t; }
+                /* The comp-1 variant in the game (tex_decode_BC1_compressed
+                   @ 0x82B8C1C8) forces 4-color BC1 mode by swapping
+                   endpoints so c0 >= c1.  The comp-11 variant
+                   (sub_82B8C900 @ 0x82B8C900) does NOT swap — it
+                   leaves c0 < c1 in place, which on the PC GPU
+                   activates 3-color BC1 mode where index 3 means
+                   transparent.  This is what foliage textures
+                   (bluebell, dandelion, etc.) rely on for alpha
+                   cutouts.  Forcing the swap on comp-11 replaces the
+                   should-be-transparent texels with (c0+2c1)/3
+                   colors, which shows up as the dark stair-step
+                   pattern at the base of the bluebell's billboard. */
+                if (!comp11_layout && c0 < c1) {
+                    uint16_t t = c0; c0 = c1; c1 = t;
+                }
             }
 
             uint8_t* outb = out_bc1.data() + (size_t)(by * bw + bx) * 8;

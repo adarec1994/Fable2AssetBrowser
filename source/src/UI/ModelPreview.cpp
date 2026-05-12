@@ -7,6 +7,9 @@
 #include <cstring>
 #include <cmath>
 #include <sstream>
+#include <mutex>
+#include <unordered_map>
+#include <functional>
 #include "ModelPreview.h"
 #include "../Utilities/Files.h"
 #include "../Utilities/Utils.h"
@@ -1025,6 +1028,66 @@ void MP_Release(ModelPreview& mp){
     mp_release(mp);
 }
 
+/* -------------------------------------------------------------------- *
+ * Global texture SRV cache.
+ *
+ * Decoding a Fable 2 .tex blob and uploading it as a D3D texture is the
+ * single most expensive thing in a model load (Lionhead huffman decode
+ * + BC1 conversion + RGBA upload).  Without a cache, every navigation
+ * to a new model — even one that shares textures with the previous —
+ * re-pays that cost for every material.
+ *
+ * Strategy: cache the resulting SRV by (texture name, source BNK).
+ * Per-mesh SRV slots take an AddRef'd reference from the cache; the
+ * cache itself holds one ref so the SRV survives MP_Release.  Subsequent
+ * loads of the same texture just AddRef the cached SRV and return — no
+ * decode, no upload.  The cache survives until MP_TextureCache_Clear()
+ * is called (e.g. on app exit or a manual flush).
+ *
+ * The "source BNK" half of the key matters because the same name can
+ * resolve to different bytes in different nested BNKs.
+ * -------------------------------------------------------------------- */
+namespace {
+struct TexCacheKey {
+    std::string name_lower;
+    std::string preferred_bnk;
+    bool operator==(const TexCacheKey& o) const {
+        return name_lower == o.name_lower && preferred_bnk == o.preferred_bnk;
+    }
+};
+struct TexCacheKeyHash {
+    size_t operator()(const TexCacheKey& k) const noexcept {
+        return std::hash<std::string>{}(k.name_lower)
+             ^ (std::hash<std::string>{}(k.preferred_bnk) << 1);
+    }
+};
+struct TexCacheEntry {
+#ifdef _WIN32
+    ID3D11ShaderResourceView* srv = nullptr;
+#endif
+    bool has_alpha = false;
+};
+
+std::mutex& tex_cache_mutex() {
+    static std::mutex m;
+    return m;
+}
+std::unordered_map<TexCacheKey, TexCacheEntry, TexCacheKeyHash>& tex_cache_table() {
+    static std::unordered_map<TexCacheKey, TexCacheEntry, TexCacheKeyHash> t;
+    return t;
+}
+}
+
+void MP_TextureCache_Clear() {
+#ifdef _WIN32
+    std::lock_guard<std::mutex> lk(tex_cache_mutex());
+    for (auto& kv : tex_cache_table()) {
+        if (kv.second.srv) kv.second.srv->Release();
+    }
+    tex_cache_table().clear();
+#endif
+}
+
 static XMMATRIX bone_local_matrix(const float* tf, const float* delta /*xyzw or null*/){
     XMVECTOR q = XMVectorSet(tf[0], tf[1], tf[2], tf[3]);
     XMVECTOR t = XMVectorSet(tf[4], tf[5], tf[6], 0.0f);
@@ -1218,11 +1281,45 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
                                   ID3D11ShaderResourceView** out_srv,
                                   bool* out_has_alpha) {
             if (tex_name.empty()) return;
+
+            /* Cache hit short-circuit: same (name, source-BNK) pair?
+               AddRef the existing SRV and skip the entire fetch +
+               decode + upload pipeline. */
+            std::string key_name = tex_name;
+            std::transform(key_name.begin(), key_name.end(), key_name.begin(),
+                           [](unsigned char c){ return std::tolower(c); });
+            TexCacheKey ck{ key_name, preferred_for_tex };
+            {
+                std::lock_guard<std::mutex> lk(tex_cache_mutex());
+                auto it = tex_cache_table().find(ck);
+                if (it != tex_cache_table().end() && it->second.srv) {
+                    *out_srv = it->second.srv;
+                    (*out_srv)->AddRef();
+                    if (out_has_alpha) *out_has_alpha = it->second.has_alpha;
+                    return;
+                }
+            }
+
             std::vector<unsigned char> tex_buf;
-            if (build_any_tex_buffer_for_name(tex_name, tex_buf, preferred_for_tex)) {
-                bool dummyA = false;
-                bool* alpha_ptr = out_has_alpha ? out_has_alpha : &dummyA;
-                srv_from_tex_blob_auto(dev, tex_buf, out_srv, alpha_ptr);
+            if (!build_any_tex_buffer_for_name(tex_name, tex_buf, preferred_for_tex)) return;
+
+            bool dummyA = false;
+            bool* alpha_ptr = out_has_alpha ? out_has_alpha : &dummyA;
+            srv_from_tex_blob_auto(dev, tex_buf, out_srv, alpha_ptr);
+
+            if (*out_srv) {
+                /* Cache an extra ref so the SRV survives MP_Release of
+                   the model that triggered the load. */
+                (*out_srv)->AddRef();
+                std::lock_guard<std::mutex> lk(tex_cache_mutex());
+                auto& slot = tex_cache_table()[ck];
+                if (slot.srv == nullptr) {
+                    slot.srv       = *out_srv;
+                    slot.has_alpha = *alpha_ptr;
+                } else {
+                    /* Lost the race — drop our extra ref. */
+                    (*out_srv)->Release();
+                }
             }
         };
         load_named_srv(g.diffuse_tex_name,  &m.srv_diffuse,  &hasA);

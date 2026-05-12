@@ -149,6 +149,12 @@ unsigned int MP_GetTexture(ModelPreview& mp);
 void FlyCam_Reset(FlyCam& cam, float cx, float cy, float cz, float radius);
 void FlyCam_Update(FlyCam& cam, float dt, bool w, bool s, bool a, bool d, bool q, bool e, float mouse_dx, float mouse_dy);
 
+/* Release every SRV held by the global texture cache (decoded
+   textures shared across models).  Safe to call any time; cached SRVs
+   will be lazily re-decoded on the next model load that references
+   them. */
+void MP_TextureCache_Clear();
+
 bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                         std::vector<uint8_t>& rgba,
                         int& out_w, int& out_h, bool* out_has_alpha,

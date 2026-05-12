@@ -15,6 +15,7 @@
 #include <cmath>
 #include <vector>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <filesystem>
 
@@ -768,6 +769,14 @@ void draw_model_in_panel(ID3D11Device* device) {
 
             for (size_t mi = 0; mi < g_mp.meshes.size(); ++mi) {
                 auto& mesh = g_mp.meshes[mi];
+
+                /* Only list submeshes that belong to the currently
+                   selected LOD.  When selected_lod is -1 ("All") we
+                   list every submesh, mirroring the render filter. */
+                if (g_mp.selected_lod >= 0 &&
+                    mesh.lod_index != (uint32_t)g_mp.selected_lod) {
+                    continue;
+                }
 
                 ImGui::PushID((int)mi);
 

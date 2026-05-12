@@ -515,15 +515,26 @@ if(is_foliage){
         if(sub>0 && sub<65535u){
             for(uint32_t s=0;s<sub;s++){
                 uint32_t marker; if(!r.u32be(marker)) return false;
-                uint32_t subIdx; if(!r.u32be(subIdx)) return false;
-                uint8_t matIdx; if(!r.u8(matIdx)) return false;
+                /* The 4-byte field after the marker is the MATERIAL
+                   index (low byte populated, upper bytes zero).  The
+                   following 1-byte field is a per-submesh flag
+                   (always 0x01 in the assets I've inspected) — NOT
+                   the material index.  The old parser had these two
+                   fields swapped, which silently worked for any mesh
+                   with matCount<=1 (the geometry decoder clamps an
+                   out-of-range matIdx to 0) but broke meshes with
+                   multiple submeshes mapped to different materials
+                   (e.g. BL_Lamp_Post's "lantern" + "post"). */
+                uint32_t matIdxRaw; if(!r.u32be(matIdxRaw)) return false;
+                uint8_t subFlag; if(!r.u8(subFlag)) return false;
+                (void)subFlag;
                 uint32_t faceCount; if(!r.u32be(faceCount)) return false;
                 uint32_t startIdx; if(!r.u32be(startIdx)) return false;
                 float F4[6];
                 for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
 
                 MDLSubMeshInfo smi;
-                smi.MaterialIndex = matIdx;
+                smi.MaterialIndex = (uint8_t)(matIdxRaw & 0xFF);
                 smi.FaceCount = faceCount;
                 smi.StartIndex = startIdx;
                 submeshes.push_back(smi);
@@ -587,15 +598,19 @@ if(is_foliage){
             if(subn>0 && subn<65535u){
                 for(uint32_t s=0;s<subn;s++){
                     uint32_t marker; if(!r.u32be(marker)) return false;
-                    uint32_t subIdx; if(!r.u32be(subIdx)) return false;
-                    uint8_t matIdx; if(!r.u8(matIdx)) return false;
+                    /* See note above: 4-byte field after marker is
+                       the material index, the 1-byte field after
+                       that is a flag. */
+                    uint32_t matIdxRaw; if(!r.u32be(matIdxRaw)) return false;
+                    uint8_t subFlag; if(!r.u8(subFlag)) return false;
+                    (void)subFlag;
                     uint32_t faceCount; if(!r.u32be(faceCount)) return false;
                     uint32_t startIdx; if(!r.u32be(startIdx)) return false;
                     float F4[6];
                     for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
 
                     MDLSubMeshInfo smi;
-                    smi.MaterialIndex = matIdx;
+                    smi.MaterialIndex = (uint8_t)(matIdxRaw & 0xFF);
                     smi.FaceCount = faceCount;
                     smi.StartIndex = startIdx;
                     submeshesn.push_back(smi);
@@ -631,6 +646,14 @@ if(is_foliage){
         return true;
     }
 
+    /* Save r.i BEFORE the optional-string probe.  This is only used
+       by the else-branch's mi=0 bufferID search below: if the probe
+       advances r.i past a valid bufferID header (which can happen when
+       garbage at the end of the mesh-metadata section happens to start
+       with a printable byte), we want to be able to scan back to the
+       original offset.  We DO NOT rewind r.i directly here — that would
+       change behaviour for models that worked under the old rule. */
+    const size_t mesh_buf_search_anchor = r.i;
     bool wasStringFound = false;
     if(r.i < r.n){
         uint8_t nextByte = r.p[r.i];
@@ -726,21 +749,33 @@ if(is_foliage){
             std::vector<MDLSubMeshInfo> submeshes;
             for(uint32_t s=0; s<final_submesh_count; s++){
                 uint32_t marker; if(!r.u32be(marker)) return false;
-                uint32_t subIdx; if(!r.u32be(subIdx)) return false;
-                uint8_t matIdx; if(!r.u8(matIdx)) return false;
+                /* The 4-byte field after the marker is the MATERIAL
+                   index (low byte populated, upper bytes zero).  The
+                   following 1-byte field is a per-submesh flag
+                   (always 0x01 in the assets I've inspected) — NOT
+                   the material index.  The old parser had these two
+                   fields swapped, which silently worked for any mesh
+                   with matCount<=1 (the geometry decoder clamps an
+                   out-of-range matIdx to 0) but broke meshes with
+                   multiple submeshes mapped to different materials
+                   (e.g. BL_Lamp_Post's "lantern" + "post"). */
+                uint32_t matIdxRaw; if(!r.u32be(matIdxRaw)) return false;
+                uint8_t subFlag; if(!r.u8(subFlag)) return false;
+                (void)subFlag;
                 uint32_t faceCount; if(!r.u32be(faceCount)) return false;
                 uint32_t startIdx; if(!r.u32be(startIdx)) return false;
                 float F4[6];
                 for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
 
                 MDLSubMeshInfo smi;
-                smi.MaterialIndex = matIdx;
+                smi.MaterialIndex = (uint8_t)(matIdxRaw & 0xFF);
                 smi.FaceCount = faceCount;
                 smi.StartIndex = startIdx;
                 submeshes.push_back(smi);
             }
 
-            size_t vert_off=0, face_off=0;
+            size_t vert_off=0, face_off=0, uv_off=0;
+            uint32_t uv_stride = 0;
             if(vtx>0 && vtx<65535u){
                 vert_off=r.i;
                 size_t vsz=(size_t)vtx*20;
@@ -752,6 +787,106 @@ if(is_foliage){
                 if(!r.skip(fsz)) return false;
             }
 
+            /* MDL prop variants encountered so far differ in what
+               (if anything) sits between the index buffer and the
+               next mesh header:
+
+                 layout A (BS_Cemetary, BL_Lamp):
+                     [index buffer] [4-byte zero pad] [next mesh]
+
+                 layout B (BO_Lamp_Post):
+                     [index buffer] [secondary 16-byte/vert buffer]
+                                    [4-byte zero pad] [next mesh]
+
+                 layout C (rare / hypothetical):
+                     [index buffer] [next mesh — no pad]
+
+               Probe: a real next-mesh header is a printable ASCII
+               string (1..32 chars), null, then 0x01.  Walk the
+               candidate offsets in order and use the first that
+               matches.  Layout B's secondary block is recorded so
+               the geometry decoder has the option to read UVs from
+               it later. */
+            auto looks_like_mesh_header = [&](size_t at) -> bool {
+                if (at >= r.n) return false;
+                uint8_t b0 = r.p[at];
+                if (b0 < 32 || b0 >= 127) return false;
+                size_t lim = std::min(r.n, at + 64);
+                size_t p = at;
+                while (p < lim && r.p[p] != 0) {
+                    uint8_t c = r.p[p];
+                    if (c < 32 || c >= 127) return false;
+                    ++p;
+                }
+                if (p >= lim || r.p[p] != 0) return false;
+                if (p == at) return false;          /* empty string */
+                if (p - at > 32) return false;
+                if (p + 1 >= r.n) return false;
+                return r.p[p + 1] == 0x01;
+            };
+
+            if (vtx > 0 && vtx < 65535u) {
+                const size_t skip_pad_only  = 4;
+                const size_t skip_secondary = (size_t)vtx * 16 + 4;
+                const bool last_mesh = (mi + 1 == out.MeshCount);
+                const bool is_skinned = (out.BoneCount > 0);
+
+                if (is_skinned) {
+                    /* Skinned meshes (e.g. NeutralWolf) carry their UVs
+                       in a SECONDARY buffer of 16 bytes per vertex
+                       that lives immediately after the index buffer.
+                       The UV pair lives in bytes 0-7 as two BE floats;
+                       bytes 8-15 hold a second attribute (likely
+                       tangent / second UV set / normal pair) that the
+                       renderer doesn't currently use.
+
+                       The primary 20-byte vertex holds position +
+                       bone weights for skinned models, so the offset-12
+                       half-pair the geometry decoder normally reads
+                       comes out as (0, 0) — which is why textures
+                       appear solid-colour on unfixed skinned models.
+
+                       Record the offset+stride so parse_mdl_geometry
+                       can sample from it; do NOT advance r.i, because
+                       the next-mesh scan in the next iteration walks
+                       byte-by-byte and lands on the right header
+                       regardless of what's between. */
+                    if (r.i + (size_t)vtx * 16 <= r.n) {
+                        uv_off    = r.i;
+                        uv_stride = 16;
+                    }
+                } else if (!last_mesh) {
+                    if (looks_like_mesh_header(r.i)) {
+                        /* Layout C — nothing between index buffer
+                           and next mesh.  Leave r.i alone. */
+                    } else if (r.i + skip_pad_only <= r.n
+                            && looks_like_mesh_header(r.i + skip_pad_only)) {
+                        /* Layout A — 4-byte pad only. */
+                        if (!r.skip(skip_pad_only)) return false;
+                    } else if (r.i + skip_secondary <= r.n
+                            && looks_like_mesh_header(r.i + skip_secondary)) {
+                        /* Layout B — secondary buffer + 4-byte pad. */
+                        uv_off    = r.i;
+                        uv_stride = 16;
+                        if (!r.skip(skip_secondary)) return false;
+                    }
+                    /* None of the probes matched: fall through and let
+                       the existing scan-forward in the next iteration
+                       try to recover.  Don't guess. */
+                } else {
+                    /* Last mesh, non-skinned.  We can't probe against
+                       a successor, so only record a secondary block
+                       when the layout-B size fits the remaining file.
+                       Otherwise leave uv_off=0 — the geometry decoder
+                       will fall back to reading UVs from the primary
+                       20-byte vertex (which is correct for layout A & C). */
+                    if (r.i + skip_secondary <= r.n) {
+                        uv_off    = r.i;
+                        uv_stride = 16;
+                    }
+                }
+            }
+
             MDLMeshBufferInfo mb;
             mb.VertexCount=vtx;
             mb.VertexOffset=vert_off;
@@ -761,11 +896,22 @@ if(is_foliage){
             mb.IsAltPath=true;
             mb.SubMeshes=submeshes;
             mb.MeshIndex=mi;
+            mb.UvBufferOffset=uv_off;
+            mb.UvBufferStride=uv_stride;
             out.MeshBuffers.push_back(mb);
 
         } else {
             bool found = false;
-            size_t searchStart = r.i;
+            /* On the FIRST mesh-buffer iteration only, allow the
+               search to scan backwards a few bytes — the optional
+               wasStringFound probe at the top of the mesh-buffer
+               section can have advanced r.i past a valid bufferID
+               header when it ate a chunk of garbage (e.g.
+               NeutralDog).  For mi>0 we keep the original
+               behaviour (search forward from r.i). */
+            size_t searchStart = (mi == 0 && mesh_buf_search_anchor < r.i)
+                                   ? mesh_buf_search_anchor
+                                   : r.i;
             size_t searchLimit = r.n;
 
             for(size_t searchPos = searchStart; searchPos + 28 <= searchLimit; ++searchPos){
@@ -796,7 +942,22 @@ if(is_foliage){
                 break;
             }
 
-            if(!found) return false;
+            if(!found) {
+                /* No bufferID==mi header anywhere in the file — this
+                   slot corresponds to a metadata-only mesh (e.g.
+                   NeutralDog's "Scene_Material") OR the slot is
+                   beyond the actual buffer count (header MeshCount
+                   was inflated).  Either way, push an empty buffer
+                   so MeshBuffers stays 1:1 with Meshes (the
+                   geometry decoder requires that) and the user
+                   simply sees nothing for that mesh.  This path
+                   only fires when the old code would have returned
+                   false outright, so working models are unaffected. */
+                MDLMeshBufferInfo mb;
+                mb.MeshIndex = mi;
+                out.MeshBuffers.push_back(mb);
+                continue;
+            }
 
             uint32_t bufferID2=0, bufferID_copy2=0, someCount12=0;
             if(!r.u32be(bufferID2)) return false;
@@ -810,15 +971,19 @@ if(is_foliage){
             if(sub2>0 && sub2<65535u){
                 for(uint32_t s=0;s<sub2;s++){
                     uint32_t marker; if(!r.u32be(marker)) return false;
-                    uint32_t subIdx; if(!r.u32be(subIdx)) return false;
-                    uint8_t matIdx; if(!r.u8(matIdx)) return false;
+                    /* See note above: 4-byte field after marker is
+                       the material index, the 1-byte field after
+                       that is a flag. */
+                    uint32_t matIdxRaw; if(!r.u32be(matIdxRaw)) return false;
+                    uint8_t subFlag; if(!r.u8(subFlag)) return false;
+                    (void)subFlag;
                     uint32_t faceCount; if(!r.u32be(faceCount)) return false;
                     uint32_t startIdx; if(!r.u32be(startIdx)) return false;
                     float F4[6];
                     for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
 
                     MDLSubMeshInfo smi;
-                    smi.MaterialIndex = matIdx;
+                    smi.MaterialIndex = (uint8_t)(matIdxRaw & 0xFF);
                     smi.FaceCount = faceCount;
                     smi.StartIndex = startIdx;
                     submeshes.push_back(smi);
@@ -1101,6 +1266,17 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                 all_bone_weights[v*4+3] = 0.0f;
             }
 
+            /* Skinned meshes (info.BoneCount > 0) carry UVs in a
+               SECONDARY buffer of 16 bytes per vertex, with the UV
+               pair as 2 BE floats in bytes 0-7 of each record.  The
+               primary 20-byte vertex on those meshes holds position +
+               bone weights — no UV at byte +12 — so the offset-12
+               half-pair read below would give (0,0).
+
+               UvBufferStride == 16 with a non-zero offset is the
+               signal that parse_mdl_info detected this layout (it
+               only does so when BoneCount > 0).  Non-skinned models
+               keep the original behaviour. */
             size_t uv_offset = mb.IsAltPath ? 12 : 20;
             uint16_t uu=(uint16_t(p[uv_offset+0])<<8)|p[uv_offset+1];
             uint16_t vv=(uint16_t(p[uv_offset+2])<<8)|p[uv_offset+3];

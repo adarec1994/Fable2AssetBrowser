@@ -122,6 +122,8 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
     S.all_tex_files.clear();
     S.all_wav_files.clear();
     S.all_anim_files.clear();
+    S.all_level_files.clear();
+    S.all_heightfield_files.clear();
 
     auto is_header_bnk = [](const std::string& bnk_path) -> bool {
         std::string lower_path = bnk_path;
@@ -191,6 +193,36 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
             e.size = file_size;
             e.from_nested = is_nested;
             S.all_anim_files.push_back(std::move(e));
+        } else if (ends_with_ci(leaf, ".engine_level")) {
+            /* Every level has exactly one .engine_level — collecting
+               these gives us a clean per-level index for the Levels
+               tab.  See docs/level_format.md for the format. */
+            FlatAssetEntry e;
+            e.name = leaf;
+            e.full_path = path;
+            e.bnk_path = bnk_source;
+            e.file_index = bnk_index;
+            e.size = file_size;
+            e.from_nested = is_nested;
+            S.all_level_files.push_back(std::move(e));
+        } else if (ends_with_ci(leaf, ".ehf") ||
+                   ends_with_ci(leaf, ".ghf") ||
+                   ends_with_ci(leaf, ".hdb") ||
+                   ends_with_ci(leaf, ".genv") ||
+                   ends_with_ci(leaf, ".ama") ||
+                   ends_with_ci(leaf, ".amm") ||
+                   ends_with_ci(leaf, ".amr")) {
+            /* Heightfield sibling files — kept in a separate vector so
+               LevelLoader can resolve them by name without scanning the
+               whole asset graph. */
+            FlatAssetEntry e;
+            e.name = leaf;
+            e.full_path = path;
+            e.bnk_path = bnk_source;
+            e.file_index = bnk_index;
+            e.size = file_size;
+            e.from_nested = is_nested;
+            S.all_heightfield_files.push_back(std::move(e));
         }
 
         std::string normalized_path = path;

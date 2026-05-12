@@ -56,6 +56,10 @@ set(APP_SOURCES
         src/ISO/IsoMount.cpp
         src/ISO/IsoDump.cpp
         src/MDL/mdl_converter.cpp
+        src/Level/LevelLoader.cpp
+        src/Level/LevelLoader.h
+        src/Level/HeightfieldLoader.cpp
+        src/Level/HeightfieldLoader.h
         src/BNKCore.cpp
         src/Audio/AudioPlayer.cpp
         src/Audio/XmaDecoder.cpp

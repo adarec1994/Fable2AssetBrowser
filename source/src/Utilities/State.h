@@ -97,10 +97,27 @@ struct State {
     std::vector<FlatAssetEntry> all_wav_files;
 
     std::vector<FlatAssetEntry> all_anim_files;
+    /* One entry per `.engine_level` we find in any loaded BNK.
+       Each represents a discoverable level (world / region / scenario
+       combo).  Same FlatAssetEntry shape as the other asset lists so
+       it slots into the same UI helpers. */
+    std::vector<FlatAssetEntry> all_level_files;
+    /* Loose-format heightfield siblings of a `.engine_level` — the
+       terrain mesh (`.ehf`), gzipped raw heights (`.ghf`), heightfield
+       database (`.hdb`), environment table (`.genv`) and the three
+       `ADMP` variants (`.ama` / `.amm` / `.amr`).  Indexed for the
+       Levels tab + the terrain pipeline to find them by BNK lookup. */
+    std::vector<FlatAssetEntry> all_heightfield_files;
+    /* True while the render panel is showing a terrain (heightfield
+       mesh) instead of a regular MDL.  When set, the render panel
+       routes input through the flycam (WASD + Q/E + right-drag look)
+       and skips the orbit-on-left-drag logic. */
+    bool terrain_mode = false;
     std::string mdl_filter;
     std::string tex_filter;
     std::string wav_filter;
     std::string anim_filter_files;
+    std::string level_filter;
 
     bool show_paths = true;
 

@@ -133,6 +133,55 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
     if (out.MipMapOffset.empty()) {
         return true;
     }
+
+    /* Variant "raw ARGB8" layout — observed on PixelFormat=2 textures
+       like lanternrusticglass.tex where:
+         - only MipMapOffset[0] is non-zero, the rest are 0
+         - the u32 BE at that offset equals W*H*4 (mip0 byte count)
+         - the body that follows is raw 8-bit-per-channel ARGB pixel data
+           (alpha first, then R, G, B), not a per-mip MipDef chain.
+       The standard loop below would treat MipMapOffset[1..]==0 as
+       offsets into the file header and read garbage MipDefs; detect
+       and handle this layout up front instead.  We push a single
+       MipDef carrying CompFlag=99 — a sentinel decode_tex_to_rgba
+       recognises as "raw ARGB8". */
+    {
+        bool single_offset = (!out.MipMapOffset.empty()) && (out.MipMapOffset[0] != 0);
+        for (size_t j = 1; j < out.MipMapOffset.size() && single_offset; ++j) {
+            if (out.MipMapOffset[j] != 0) single_offset = false;
+        }
+        if (single_offset && out.TextureWidth > 0 && out.TextureHeight > 0) {
+            size_t mo = (size_t) out.MipMapOffset[0];
+            const size_t expected = (size_t)out.TextureWidth *
+                                    (size_t)out.TextureHeight * 4;
+            uint32_t size_prefix = 0;
+            size_t tmp_off = mo;
+            if (mo + 4 <= d.size() &&
+                rd32be(d, tmp_off, size_prefix) &&
+                (size_t)size_prefix == expected &&
+                mo + 4 + expected <= d.size())
+            {
+                TexInfo::MipDef md{};
+                md.DefOffset         = mo;
+                /* Two sentinel CompFlag values for this variant:
+                     99 → PixelFormat=2 (diffuse-like, alpha in byte 0)
+                    100 → other PixelFormats e.g. 4 (spec/normal style:
+                          byte 0 is 0x00 unused; force alpha=255 in the
+                          decoder so the texture renders opaque). */
+                md.CompFlag          = (out.PixelFormat == 2) ? 99u : 100u;
+                md.DataOffset        = 4;
+                md.DataSize          = size_prefix + 4;
+                md.HasWH             = true;
+                md.MipWidth          = (uint16_t)out.TextureWidth;
+                md.MipHeight         = (uint16_t)out.TextureHeight;
+                md.MipDataOffset     = mo + 4;
+                md.MipDataSizeParsed = expected;
+                out.Mips.push_back(md);
+                return true;
+            }
+        }
+    }
+
     for (uint32_t i = 0; i < out.MipMapOffset.size(); ++i) {
         size_t mo = (size_t) out.MipMapOffset[i];
         if (mo >= d.size()) {

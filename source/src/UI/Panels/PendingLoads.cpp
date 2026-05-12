@@ -1,16 +1,20 @@
 #include "../UI_Panels.h"
 #include "PanelInternal.h"
 #include "../ModelPreview.h"
+#include "../OutputLog.h"
 #include "../../textures/TexParser.h"
 #include "../../textures/LhTexCodec.h"
 #include "../../MDL/ModelParser.h"
 #include "../../MDL/mdl_converter.h"
+#include "../../Level/LevelLoader.h"
 #include "../../Utilities/Files.h"
 #include "../../Utilities/Utils.h"
 #include "../../Utilities/Progress.h"
 #include "../../BNKCore.cpp"
 #include <filesystem>
 #include <atomic>
+#include <algorithm>
+#include <cmath>
 #include <thread>
 #include <ctime>
 #include <cstring>
@@ -147,6 +151,9 @@ void process_pending_loads() {
                     }
                     MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
 
+                    /* MDL loaded — leave terrain mode if we were in it. */
+                    S.terrain_mode = false;
+
                     S.cam_yaw = 3.14159265f;
                     S.cam_pitch = 0.2f;
                     S.cam_dist = 3.0f;
@@ -242,6 +249,99 @@ void process_pending_loads() {
         MP_Release(g_mp);
         MP_Init(g_mp, 800, 600);
         MP_Build(S.mdl_meshes, S.mdl_info, g_mp);
+    }
+#endif
+
+#ifdef _WIN32
+    /* Pending terrain (heightfield-as-mesh) hand-off — populated by
+       Level::Open on the UI thread, consumed here on the renderer
+       thread so MP_Build sees a live ID3D11Device. */
+    if (g_pending_terrain_load.exchange(false)) {
+        const Level::TerrainMesh& tm = g_pending_terrain_mesh;
+        if (!tm.ok || tm.indices.empty()) {
+            OutputLog::error("pending terrain mesh is empty — skipped");
+        } else {
+            extern ModelPreview g_mp;
+            extern bool         g_mp_initialized;
+            if (!g_mp_initialized) {
+                MP_Init(device, g_mp, 800, 600);
+                g_mp_initialized = true;
+            }
+
+            /* Adapt the TerrainMesh into the MDLMeshGeom + MDLInfo
+               shape MP_Build wants.  Single submesh, no bones, one
+               diffuse-texture slot we leave empty for now (the
+               terrain will render with the default checker until we
+               wire texture-atlas sampling next). */
+            MDLMeshGeom g;
+            g.positions    = tm.positions;
+            g.normals      = tm.normals;
+            g.uvs          = tm.uvs;
+            g.indices      = tm.indices;
+            g.bone_ids.assign(tm.positions.size() / 3 * 4, 0);
+            g.bone_weights.assign(tm.positions.size() / 3 * 4, 0.f);
+            /* Bind everything to bone 0 with full weight so the
+               skinning vertex shader leaves positions alone. */
+            for (size_t v = 0; v < tm.positions.size() / 3; ++v) {
+                g.bone_weights[v * 4 + 0] = 1.0f;
+            }
+            g.name = "terrain";
+
+            MDLInfo info;
+            info.MeshCount = 1;
+            MDLMeshInfo mi;
+            mi.MeshName       = "terrain";
+            mi.MaterialCount  = 0;
+            info.Meshes.push_back(mi);
+            MDLMeshBufferInfo mb;
+            mb.VertexCount  = (uint32_t)(tm.positions.size() / 3);
+            mb.FaceCount    = (uint32_t)tm.indices.size();
+            mb.SubMeshCount = 1;
+            info.MeshBuffers.push_back(mb);
+
+            std::vector<MDLMeshGeom> geoms;
+            geoms.push_back(std::move(g));
+
+            if (g_mp.has_model) {
+                MP_Release(g_mp);
+                g_mp.has_model = false;
+                g_mp_initialized = false;
+                MP_Init(device, g_mp, 800, 600);
+                g_mp_initialized = true;
+            }
+            MP_Build(device, geoms, info, g_mp);
+
+            /* Switch the render panel into terrain / flycam mode. */
+            S.terrain_mode = true;
+
+            /* Place the flycam above + behind the terrain looking down
+               toward its centre.  The mesh is centred on origin, so a
+               position offset by ~max(extent) on +Y/+Z does the job.  */
+            float ax = 0.f, ay = 0.f, az = 0.f;
+            for (size_t v = 0; v + 2 < geoms[0].positions.size(); v += 3) {
+                ax = std::max(ax, std::abs(geoms[0].positions[v]));
+                ay = std::max(ay, std::abs(geoms[0].positions[v + 1]));
+                az = std::max(az, std::abs(geoms[0].positions[v + 2]));
+            }
+            const float diag = std::sqrt(ax * ax + az * az);
+
+            extern FlyCam g_flycam;
+            g_flycam.pos[0] = 0.0f;
+            g_flycam.pos[1] = ay + diag * 0.7f;
+            g_flycam.pos[2] = -diag * 1.0f;
+            g_flycam.yaw    = 0.0f;          /* look toward +Z */
+            g_flycam.pitch  = -0.6f;         /* angled down ~34° */
+            g_flycam.is_looking = false;
+
+            OutputLog::success("terrain '" + g_pending_terrain_label +
+                               "' built (" +
+                               std::to_string(geoms[0].positions.size()/3) +
+                               " verts)");
+        }
+
+        /* Release the heap memory the pending mesh held. */
+        g_pending_terrain_mesh = Level::TerrainMesh{};
+        g_pending_terrain_label.clear();
     }
 #endif
 }

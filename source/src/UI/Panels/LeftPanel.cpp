@@ -5,6 +5,7 @@
 #include "../ModelPreview.h"
 
 #include "../../ISO/IsoDump.h"
+#include "../../Level/LevelLoader.h"
 
 #include "../../Lua.h"
 #include "../../Utilities/Progress.h"
@@ -24,7 +25,7 @@
 extern ModelPreview g_mp;
 
 static const char* const kLeftPanelTabLabels[] = {
-    "BNK List", "File Tree", "Models", "Textures", "Audio", "Animations"
+    "BNK List", "File Tree", "Levels", "Models", "Textures", "Audio", "Animations"
 };
 
 static float compute_tab_button_width() {
@@ -214,6 +215,11 @@ void draw_left_panel() {
     if (tab_button("BNK List", s_active_tab == 0))   s_active_tab = 0;
     ImGui::SameLine(0, 2);
     if (tab_button("File Tree", s_active_tab == 1))  s_active_tab = 1;
+    ImGui::SameLine(0, 2);
+    /* Levels tab — listed right after File Tree, painted gold so it
+       stands out as "this loads a whole world, not just one asset". */
+    const ImU32 kGoldLabel = IM_COL32(255, 215, 0, 255);
+    if (tab_button("Levels", s_active_tab == 6, kGoldLabel)) s_active_tab = 6;
 
     const ImU32 kPurpleLabel = IM_COL32(200, 130, 255, 255);
     if (tab_button("Models",   s_active_tab == 2, kPurpleLabel)) s_active_tab = 2;
@@ -952,6 +958,83 @@ void draw_left_panel() {
                     }
                 }
                 clipper.End();
+            }
+            ImGui::EndChild();
+        }
+
+        if (s_active_tab == 6) {
+            /* Levels tab — discoverable .engine_level files from the
+               loaded BNKs, with click-to-load. */
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##level_filter", "Filter",
+                                     &S.level_filter);
+
+            std::vector<int> vis;
+            vis.reserve(S.all_level_files.size());
+            std::string flow = S.level_filter;
+            std::transform(flow.begin(), flow.end(), flow.begin(), ::tolower);
+            for (size_t i = 0; i < S.all_level_files.size(); ++i) {
+                if (flow.empty()) { vis.push_back((int)i); continue; }
+                std::string nlow = S.all_level_files[i].full_path;
+                std::transform(nlow.begin(), nlow.end(), nlow.begin(), ::tolower);
+                if (nlow.find(flow) != std::string::npos) vis.push_back((int)i);
+            }
+
+            if (S.dev_mode) {
+                ImGui::TextDisabled("%d / %zu", (int)vis.size(),
+                                    S.all_level_files.size());
+                ImGui::Separator();
+            }
+
+            ImGui::BeginChild("levels_list", ImVec2(0, 0), false);
+            if (S.all_level_files.empty()) {
+                ImGui::TextDisabled("No .engine_level files indexed yet.");
+                ImGui::TextDisabled("Open a Fable 2 root to populate the list.");
+            } else {
+                /* Render with gold text to match the tab.  Show the
+                   level's directory path so the user can tell apart
+                   region/scenario variants that share a name. */
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                                      ImVec4(1.0f, 0.84f, 0.0f, 1.0f));
+                ImGuiListClipper clipper;
+                clipper.Begin((int)vis.size());
+                while (clipper.Step()) {
+                    for (int row = clipper.DisplayStart;
+                         row < clipper.DisplayEnd; ++row) {
+                        const auto& e = S.all_level_files[(size_t)vis[(size_t)row]];
+                        ImGui::PushID(row);
+
+                        /* Derive a friendly name: the directory above
+                           the .engine_level usually names the scenario
+                           (e.g. ".../DefaultScenario/defaultscenario.engine_level"
+                            → "DefaultScenario"). */
+                        std::string label;
+                        {
+                            std::filesystem::path p = e.full_path;
+                            auto parent = p.parent_path().filename().string();
+                            label = parent.empty() ? e.name
+                                                   : parent + " — " + e.name;
+                        }
+
+                        if (ImGui::Selectable(label.c_str(), false,
+                                              ImGuiSelectableFlags_SpanAllColumns)) {
+                            Level::Open(e);
+                        }
+
+                        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                            ImGui::BeginTooltip();
+                            ImGui::TextUnformatted(e.full_path.c_str());
+                            ImGui::Text("BNK: %s",
+                                std::filesystem::path(e.bnk_path)
+                                    .filename().string().c_str());
+                            ImGui::Text("Size: %u bytes", e.size);
+                            ImGui::EndTooltip();
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                clipper.End();
+                ImGui::PopStyleColor();
             }
             ImGui::EndChild();
         }

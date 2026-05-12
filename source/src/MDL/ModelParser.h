@@ -41,6 +41,9 @@ struct MDLMeshBufferInfo {
     uint32_t FoliageVertexStride = 0;
     std::vector<MDLSubMeshInfo> SubMeshes;
     uint32_t MeshIndex = 0;
+
+    size_t   UvBufferOffset = 0;
+    uint32_t UvBufferStride = 0;
 };
 
 struct MDLInfo {

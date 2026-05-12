@@ -238,12 +238,71 @@ void draw() {
                               false,
                               ImGuiWindowFlags_HorizontalScrollbar);
 
+            /* Toolbar: "Copy All" + "Clear" so the user can grab the
+               whole log in one shot, since per-row right-click only
+               copies one line at a time. */
+            {
+                std::lock_guard<std::mutex> lk(g_mutex);
+                if (ImGui::SmallButton("Copy All")) {
+                    std::string blob;
+                    blob.reserve(g_entries.size() * 64);
+                    for (const auto& e : g_entries) {
+                        blob.append("[");
+                        blob.append(e.time_str);
+                        blob.append("] ");
+                        blob.append(e.msg);
+                        blob.push_back('\n');
+                    }
+                    ImGui::SetClipboardText(blob.c_str());
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Clear")) {
+                    g_entries.clear();
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("(right-click a line to copy it)");
+            }
+            ImGui::Separator();
+
             std::lock_guard<std::mutex> lk(g_mutex);
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 2));
-            for (const auto& e : g_entries) {
-                ImGui::TextDisabled("[%s]", e.time_str);
-                ImGui::SameLine();
-                ImGui::TextColored(colour_for(e.lvl), "%s", e.msg.c_str());
+            /* Render each entry as a Selectable so the user can
+               left-click to highlight, drag to select a range, and
+               right-click for a Copy popup.  The colour-on-text is
+               kept via PushStyleColor + Selectable's label-text. */
+            for (size_t i = 0; i < g_entries.size(); ++i) {
+                const auto& e = g_entries[i];
+                ImGui::PushID((int)i);
+
+                /* Build the visible line: "[hh:mm:ss] message". */
+                std::string line = "[";
+                line.append(e.time_str);
+                line.append("] ");
+                line.append(e.msg);
+
+                ImGui::PushStyleColor(ImGuiCol_Text, colour_for(e.lvl));
+                ImGui::Selectable(line.c_str(), false,
+                                  ImGuiSelectableFlags_AllowDoubleClick);
+                ImGui::PopStyleColor();
+
+                /* Double-click anywhere on the line copies it. */
+                if (ImGui::IsItemHovered() &&
+                    ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    ImGui::SetClipboardText(line.c_str());
+                }
+
+                /* Right-click context menu: "Copy line" / "Copy message". */
+                if (ImGui::BeginPopupContextItem("##log_ctx")) {
+                    if (ImGui::MenuItem("Copy line")) {
+                        ImGui::SetClipboardText(line.c_str());
+                    }
+                    if (ImGui::MenuItem("Copy message only")) {
+                        ImGui::SetClipboardText(e.msg.c_str());
+                    }
+                    ImGui::EndPopup();
+                }
+
+                ImGui::PopID();
             }
             ImGui::PopStyleVar();
 

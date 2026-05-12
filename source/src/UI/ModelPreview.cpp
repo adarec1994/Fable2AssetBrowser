@@ -17,6 +17,7 @@
 #include "../BNKCore.cpp"
 #include "../textures/TexParser.h"
 #include "../textures/LhTexCodec.h"
+#include "OutputLog.h"
 #ifdef _WIN32
 #include <initguid.h>
 #include <d3d11.h>
@@ -311,14 +312,106 @@ static void untile_xbox360_bc(const uint8_t* tiled, size_t tiled_size,
     }
 }
 
+/* ----------------------------------------------------------------- */
+/* ImageHeat / ReverseBox Xbox 360 unswizzle.                         */
+/*                                                                    */
+/* The canonical XGAddress2DTiledOffset formula in the codebase above */
+/* maps a logical (x, y) → tiled byte offset, and was designed/tuned  */
+/* for BC1/BC3 block coordinates (8- or 16-byte texels).  At 4-byte   */
+/* texel size (raw 32 bpp ARGB) the formula has bit collisions —      */
+/* multiple distinct (x, y) pairs map to the same tiled byte — and    */
+/* the result is the horizontally-banded / 4-vertical-strips garbage  */
+/* we saw on lanternrusticglass.tex.                                  */
+/*                                                                    */
+/* The pair of functions below goes the OTHER way: given a sequential */
+/* tiled storage offset, return the logical (x, y) of the texel that  */
+/* lives at that offset.  Iterating tiled offsets and scattering each */
+/* texel to its (x, y) destination produces a correct linear image    */
+/* even at 4-byte texels.  Ported verbatim from                       */
+/*   bartlomiejduda/ReverseBox swizzle_x360.py                        */
+/* which is what ImageHeat's "XBOX 360 (1, 4)" mode uses, confirmed   */
+/* against this exact .tex file by the user.                          */
+/* ----------------------------------------------------------------- */
+
+static uint32_t xg_address_2d_tiled_x(uint32_t block_offset,
+                                      uint32_t width_in_blocks,
+                                      uint32_t texel_byte_pitch)
+{
+    uint32_t aligned_width = (width_in_blocks + 31u) & ~31u;
+    uint32_t log_bpp = (texel_byte_pitch >> 2) +
+                       ((texel_byte_pitch >> 1) >> (texel_byte_pitch >> 2));
+    uint32_t offset_byte  = block_offset << log_bpp;
+    uint32_t offset_tile  = ((offset_byte & ~0xFFFu) >> 3) +
+                            ((offset_byte & 0x700u) >> 2) +
+                            (offset_byte & 0x3Fu);
+    uint32_t offset_macro = offset_tile >> (7 + log_bpp);
+
+    uint32_t macro_x = (offset_macro % (aligned_width >> 5)) << 2;
+    uint32_t tile    = (((offset_tile >> (5 + log_bpp)) & 2) +
+                        (offset_byte >> 6)) & 3;
+    uint32_t macro   = (macro_x + tile) << 3;
+    uint32_t micro   = ((((offset_tile >> 1) & ~0xFu) + (offset_tile & 0xFu))
+                        & ((texel_byte_pitch << 3) - 1)) >> log_bpp;
+
+    return macro + micro;
+}
+
+static uint32_t xg_address_2d_tiled_y(uint32_t block_offset,
+                                      uint32_t width_in_blocks,
+                                      uint32_t texel_byte_pitch)
+{
+    uint32_t aligned_width = (width_in_blocks + 31u) & ~31u;
+    uint32_t log_bpp = (texel_byte_pitch >> 2) +
+                       ((texel_byte_pitch >> 1) >> (texel_byte_pitch >> 2));
+    uint32_t offset_byte  = block_offset << log_bpp;
+    uint32_t offset_tile  = ((offset_byte & ~0xFFFu) >> 3) +
+                            ((offset_byte & 0x700u) >> 2) +
+                            (offset_byte & 0x3Fu);
+    uint32_t offset_macro = offset_tile >> (7 + log_bpp);
+
+    uint32_t macro_y = (offset_macro / (aligned_width >> 5)) << 2;
+    uint32_t tile    = ((offset_tile >> (6 + log_bpp)) & 1) +
+                       ((offset_byte & 0x800u) >> 10);
+    uint32_t macro   = (macro_y + tile) << 3;
+    uint32_t micro   = (((offset_tile & (((texel_byte_pitch << 6) - 1) & ~0x1Fu))
+                         + ((offset_tile & 0xFu) << 1)) >> (3 + log_bpp)) & ~1u;
+
+    return macro + micro + ((offset_tile & 0x10u) >> 4);
+}
+
+/* Per-thread tag for the most recent decode_tex_to_rgba failure.
+   load_named_srv reads this when an SRV doesn't materialise and
+   forwards it to the OutputLog so the user can see WHY a texture
+   came back blank instead of just "(no textures)". */
+static thread_local std::string g_last_decode_fail_reason;
+static thread_local std::string g_last_decode_info;
+
+const std::string& mp_last_decode_fail_reason() { return g_last_decode_fail_reason; }
+const std::string& mp_last_decode_info()        { return g_last_decode_info; }
+
+#define DEC_FAIL(reason) do { g_last_decode_fail_reason = (reason); return false; } while (0)
+
 bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                         std::vector<uint8_t>& rgba,
                         int& out_w, int& out_h, bool* out_has_alpha,
                         int mip_index) {
+    g_last_decode_fail_reason.clear();
+    g_last_decode_info.clear();
     if (out_has_alpha) *out_has_alpha = false;
     TexInfo ti{};
-    if (!parse_tex_info(blob, ti) || ti.Mips.empty()) {
-        return false;
+    if (!parse_tex_info(blob, ti)) DEC_FAIL("parse_tex_info_failed");
+    if (ti.Mips.empty())            DEC_FAIL("zero_mips");
+    {
+        std::ostringstream os;
+        os << "pf=" << (int)ti.PixelFormat
+           << " mips=" << ti.Mips.size()
+           << " w=" << (int)ti.TextureWidth
+           << " h=" << (int)ti.TextureHeight;
+        if (!ti.Mips.empty()) {
+            os << " cf0=" << (int)ti.Mips[0].CompFlag
+               << " ds0=" << (size_t)ti.Mips[0].DataSize;
+        }
+        g_last_decode_info = os.str();
     }
 
     auto mip_wh = [&](size_t i, int& mw, int& mh) {
@@ -355,7 +448,69 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         std::ostringstream os;
         os << "mip[" << best << "] data out of bounds (offset=" << m.MipDataOffset
            << " size=" << m.MipDataSizeParsed << " blob=" << blob.size() << ")";
-        return false;
+        DEC_FAIL("mip_oob");
+    }
+
+    /* CompFlag==99 / 100 is the parser's sentinel for the "size-prefixed,
+       Xbox 360 tiled raw 32-bpp" variant — e.g. lanternrusticglass.tex.
+       The header has a single non-zero MipMapOffset pointing at a u32
+       BE size prefix (= W*H*4) followed by mip0 stored as Xbox 360
+       tiled 32-bpp pixel data.
+
+         CompFlag=99  → PixelFormat=2.  Bytes per pixel laid out as
+                         A, R, G, B (diffuse — alpha in byte 0 is
+                         meaningful, typically 0xff with edge falloff).
+         CompFlag=100 → PixelFormat=4 (and other non-2 values).  Byte 0
+                         is unused (always 0x00 in samples seen) — most
+                         likely the engine reads byte 3 as a single
+                         intensity channel (specular / mask).  We force
+                         alpha=0xff so the texture isn't fully
+                         transparent in the renderer.
+
+       The unswizzle is the "XBOX 360 (1, 4)" variant from ImageHeat /
+       ReverseBox — block_pixel_size=1, texel_byte_pitch=4.  Iterate
+       tiled-storage offsets, compute the logical (x, y) each storage
+       texel belongs to, and scatter.  This avoids the bit-collision
+       problem the canonical XGAddress2DTiledOffset has at 4-byte
+       texels (which is why we couldn't reuse xbox360_tiled_offset). */
+    if (m.CompFlag == 99 || m.CompFlag == 100) {
+        const size_t pixels = (size_t)w * (size_t)h;
+        if (m.MipDataSizeParsed < pixels * 4) {
+            DEC_FAIL("argb8_size_short");
+        }
+
+        const uint8_t* tiled   = blob.data() + m.MipDataOffset;
+        const size_t   tiled_n = m.MipDataSizeParsed;
+        const uint32_t W       = (uint32_t)w;
+        const uint32_t H       = (uint32_t)h;
+        const uint32_t padded_W = (W + 31u) & ~31u;
+        const uint32_t padded_H = (H + 31u) & ~31u;
+        const uint32_t total    = padded_W * padded_H;
+
+        rgba.assign(pixels * 4, 0);
+
+        for (uint32_t off = 0; off < total; ++off) {
+            const uint32_t sx = xg_address_2d_tiled_x(off, padded_W, 4);
+            const uint32_t sy = xg_address_2d_tiled_y(off, padded_W, 4);
+            if (sx >= W || sy >= H) continue;
+
+            const size_t src_byte = (size_t)off * 4;
+            if (src_byte + 4 > tiled_n) continue;
+
+            const uint8_t A = tiled[src_byte + 0];
+            const uint8_t R = tiled[src_byte + 1];
+            const uint8_t G = tiled[src_byte + 2];
+            const uint8_t B = tiled[src_byte + 3];
+            const size_t  dst = ((size_t)sy * W + sx) * 4;
+            rgba[dst + 0] = R;
+            rgba[dst + 1] = G;
+            rgba[dst + 2] = B;
+            rgba[dst + 3] = (m.CompFlag == 100) ? 0xFFu : A;
+        }
+
+        out_w = w; out_h = h;
+        if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
+        return true;
     }
 
     const size_t bx = (size_t)((w + 3) / 4);
@@ -367,7 +522,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
     if (m.CompFlag == 7) {
         if (ti.PixelFormat == 35) {
             if (m.MipDataSizeParsed < sz_bc1) {
-                return false;
+                DEC_FAIL("c7_pf35_size_short");
             }
             /* Untile the Xbox 360 BC1 layout into linear scan-of-blocks
                order, then endian-swap each block, then BC decode. */
@@ -381,7 +536,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         }
         if (ti.PixelFormat == 39) {
             if (m.MipDataSizeParsed < sz_bc3) {
-                return false;
+                DEC_FAIL("c7_pf39_size_short");
             }
             std::vector<uint8_t> linear;
             untile_xbox360_bc(src, m.MipDataSizeParsed, linear, w, h, 16);
@@ -394,7 +549,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         if (ti.PixelFormat == 40) {
 
             if (m.MipDataSizeParsed < sz_bc3) {
-                return false;
+                DEC_FAIL("c7_pf40_size_short");
             }
             std::vector<uint8_t> linear;
             untile_xbox360_bc(src, m.MipDataSizeParsed, linear, w, h, 16);
@@ -411,7 +566,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             os << "unknown raw format and data too small for RGBA ("
                << m.MipDataSizeParsed << " < " << sz_raw
                << ", PixelFormat=" << ti.PixelFormat << ")";
-            return false;
+            DEC_FAIL("c7_raw_size_short");
         }
         rgba.assign(sz_raw, 0xFF);
         memcpy(rgba.data(), src, sz_raw);
@@ -493,20 +648,20 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 os << "PixelFormat " << ti.PixelFormat
                    << " is compressed and no comp=7 fallback exists; "
                       "Lionhead codec port currently handles BC1 (35) only";
-                return false;
+                DEC_FAIL("fallback_unhandled_pf");
             }
             const auto& fm = ti.Mips[fallback_idx];
             int fw = 0, fh = 0; mip_wh(fallback_idx, fw, fh);
             const size_t fbx = (size_t)((fw + 3) / 4);
             const size_t fby = (size_t)((fh + 3) / 4);
             if (fm.MipDataOffset + fm.MipDataSizeParsed > blob.size()) {
-                return false;
+                DEC_FAIL("fallback_mip_oob");
             }
             const uint8_t* fsrc = blob.data() + fm.MipDataOffset;
             if (ti.PixelFormat == 39 || ti.PixelFormat == 1 ||
                 ti.PixelFormat == 2  || ti.PixelFormat == 3) {
                 if (fm.MipDataSizeParsed < fbx * fby * 16) {
-                    return false;
+                    DEC_FAIL("fallback_bc3_size_short");
                 }
                 std::vector<uint8_t> linear;
                 untile_xbox360_bc(fsrc, fm.MipDataSizeParsed, linear, fw, fh, 16);
@@ -519,7 +674,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             if (ti.PixelFormat == 40) {
 
                 if (fm.MipDataSizeParsed < fbx * fby * 16) {
-                    return false;
+                    DEC_FAIL("fallback_bc5_size_short");
                 }
                 std::vector<uint8_t> linear;
                 untile_xbox360_bc(fsrc, fm.MipDataSizeParsed, linear, fw, fh, 16);
@@ -529,7 +684,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 if (out_has_alpha) *out_has_alpha = false;
                 return true;
             }
-            return false;
+            DEC_FAIL("fallback_no_match");
         }
 
         const size_t body_start = m.DefOffset + 48;
@@ -538,7 +693,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             std::ostringstream os;
             os << "compressed mip body OOB (start=" << body_start
                << " size=" << body_size << " blob=" << blob.size() << ")";
-            return false;
+            DEC_FAIL("comp_body_oob");
         }
         const uint8_t* body_ptr = blob.data() + body_start;
 
@@ -550,10 +705,8 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         bool ok = lh_decode_compressed_mip(body_ptr, body_size,
                                            dec_w, dec_h, bc1, &err, comp11);
         if (!ok) {
-            std::ostringstream os;
-            os << "lh_decode_compressed_mip failed for mip[" << best << "] "
-               << w << "x" << h << " (comp=" << m.CompFlag << "): " << err;
-            return false;
+            g_last_decode_info += " lh_err=\"" + err + "\"";
+            DEC_FAIL("lh_decode_failed");
         }
 
         if (dec_w != w || dec_h != h) {
@@ -1301,11 +1454,24 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             }
 
             std::vector<unsigned char> tex_buf;
-            if (!build_any_tex_buffer_for_name(tex_name, tex_buf, preferred_for_tex)) return;
+            if (!build_any_tex_buffer_for_name(tex_name, tex_buf, preferred_for_tex)) {
+                OutputLog::warn("texture '" + tex_name +
+                                "' not found in any loaded BNK");
+                return;
+            }
 
             bool dummyA = false;
             bool* alpha_ptr = out_has_alpha ? out_has_alpha : &dummyA;
             srv_from_tex_blob_auto(dev, tex_buf, out_srv, alpha_ptr);
+            if (!*out_srv) {
+                std::string reason = mp_last_decode_fail_reason();
+                std::string info   = mp_last_decode_info();
+                std::string msg = "texture '" + tex_name + "' failed to decode";
+                if (!reason.empty()) msg += " (" + reason + ")";
+                if (!info.empty())   msg += " [" + info + "]";
+                msg += " — bytes=" + std::to_string(tex_buf.size());
+                OutputLog::error(msg);
+            }
 
             if (*out_srv) {
                 /* Cache an extra ref so the SRV survives MP_Release of

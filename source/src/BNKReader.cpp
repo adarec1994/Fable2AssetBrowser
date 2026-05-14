@@ -86,10 +86,46 @@ public:
     }
     ~BNKReader() { close(); }
 
+    /* --- Locator API for write-back ----------------------------- */
+
+    enum class StorageMode { Disk, IsoStream, Memory };
+    StorageMode storage_mode() const {
+        switch (_mode) {
+            case Mode::Disk:      return StorageMode::Disk;
+            case Mode::IsoStream: return StorageMode::IsoStream;
+            default:              return StorageMode::Memory;
+        }
+    }
+    const std::string& disk_path() const { return _disk_path; }
+    const std::string& iso_vpath() const { return _iso_vpath; }
+
+    /* Absolute byte offset (within the underlying disk file or ISO
+       file) where entry[idx]'s on-disk payload starts.  For Memory
+       mode returns 0 since there's no backing file. */
+    uint64_t entry_disk_offset(int idx) const {
+        if (idx < 0 || idx >= (int)file_entries.size()) return 0;
+        return (uint64_t)file_entries[(size_t)idx].offset;
+    }
+
+    /* On-disk byte size of entry[idx].  For !is_compressed this is
+       the raw payload size; for is_compressed it's the chunked-zlib
+       blob size as packed in the BNK.                              */
+    uint32_t entry_on_disk_size(int idx) const {
+        if (idx < 0 || idx >= (int)file_entries.size()) return 0;
+        const auto& e = file_entries[(size_t)idx];
+        return e.is_compressed ? e.compressed_size : e.uncompressed_size;
+    }
+
+    bool entry_is_compressed(int idx) const {
+        if (idx < 0 || idx >= (int)file_entries.size()) return false;
+        return file_entries[(size_t)idx].is_compressed;
+    }
+
 private:
 
     enum class Mode { Disk, Memory, IsoStream };
     Mode _mode = Mode::Disk;
+    std::string _disk_path;
 
     std::ifstream _fh;
 
@@ -521,6 +557,7 @@ inline BNKReader::BNKReader(const std::string& path) {
     }
 
     _mode = Mode::Disk;
+    _disk_path = path;
     _fh.open(path, std::ios::binary);
     if (!_fh) throw std::runtime_error("open failed");
     _fh.seekg(0, std::ios::end);

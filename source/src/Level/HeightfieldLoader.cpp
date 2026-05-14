@@ -128,20 +128,32 @@ void parse_ehf_header(const std::vector<uint8_t>& bytes,
                       HeightfieldHeader&          out)
 {
     out = {};
-    if (bytes.size() < 31) return;
+    /* Full header is 63 bytes — see the docstring on HeightfieldHeader
+       for the IDA-validated layout (`sub_82A855A8` opens the .ehf as a
+       bundle and issues `bundle::read(buf, 0, 63)` once to grab the
+       header, then a second `bundle::read(buf, body_offset, body_size)`
+       to pull the body blob).                                          */
+    static constexpr char   kMagic[]   = "HeightFieldGraphicsFile";
+    static constexpr size_t kMagicLen  = sizeof(kMagic) - 1;       // 23
+    static constexpr size_t kHeaderLen = 63;
 
-    /* Magic is exactly 23 bytes — NO null terminator in the stream.
-       Layout in the Bloodstone sample:
-         0..22  "HeightFieldGraphicsFile" (23 chars)
-         23..26 u32 BE  version  (= 18)
-         27..30 f32 BE  prefix_float  (= 64.0)            */
-    static constexpr char kMagic[] = "HeightFieldGraphicsFile";
-    static constexpr size_t kMagicLen = sizeof(kMagic) - 1;   // 23
+    if (bytes.size() < kHeaderLen) return;
     if (std::memcmp(bytes.data(), kMagic, kMagicLen) != 0) return;
-    out.magic.assign(kMagic);
 
-    out.version      = be_u32(bytes.data() + kMagicLen);      // offset 23
-    out.prefix_float = be_f32(bytes.data() + kMagicLen + 4);  // offset 27
+    const uint8_t* p = bytes.data();
+    out.magic.assign(kMagic);
+    out.version      = be_u32(p + kMagicLen);          // +23
+    out.prefix_float = be_f32(p + kMagicLen + 4);      // +27  (alias for f0)
+    out.f0           = be_f32(p + 27);                 // state[+68]
+    out.f1           = be_f32(p + 31);                 // state[+64]
+    out.u0           = be_u32(p + 35);                 // state[+72]
+    out.u1           = be_u32(p + 39);                 // state[+76]
+    out.f2           = be_f32(p + 43);                 // state[+80]
+    out.f3           = be_f32(p + 47);                 // state[+84]
+    out.f4           = be_f32(p + 51);                 // state[+88]
+    out.body_offset  = be_u32(p + 55);
+    out.body_size    = be_u32(p + 59);
+    out.ok           = true;
 }
 
 }  // namespace
@@ -276,15 +288,35 @@ bool BuildTerrainMesh(const GhfHeights& hg, TerrainMesh& out)
     const float cx = (float(W) - 1.f) * 0.5f * tile;
     const float cz = (float(H) - 1.f) * 0.5f * tile;
 
-    /* Pass 1 — positions and texcoords. */
+    /* Pass 1 — positions and texcoords.
+
+       UVs cover [0, 1] across the whole heightmap so the baked
+       terrain-albedo BC1 page from `.ehf` (which is sized to ~1
+       texel per heightfield cell) lands each cell on its own
+       pixel.  Earlier we had to tile the texture_atlas N times
+       to get any visible detail because the atlas is a *source*
+       material page, not the baked terrain — but now that
+       Level::DecodeEhfTerrainAlbedo gives us the actual baked
+       albedo, the trivial mapping is what we want.                */
+    /* UVs are scaled to WORLD-SPACE / texture-repeat-size so detail
+       textures bound with a REPEAT sampler tile naturally and the
+       GPU can pick the right mip level based on screen-space
+       derivatives.  This replaces the old trivial [0,1] mapping
+       (which stretched a single composite across the whole map).
+
+       0.125 repeats per world unit ≈ 8 world units per texture
+       repeat — matches the EhfPalette tile_scale=0.125 default
+       observed in chapter3.  Callers that want a 1:1 composite-
+       sized lookup can divide back out in their shader.            */
+    constexpr float kUvRepeatsPerWu = 0.125f;
     for (uint32_t y = 0; y < H; ++y) {
         for (uint32_t x = 0; x < W; ++x) {
             const size_t i = size_t(y) * W + x;
             out.positions[i * 3 + 0] = float(x) * tile - cx;
             out.positions[i * 3 + 1] = hg.heights[i];
             out.positions[i * 3 + 2] = float(y) * tile - cz;
-            out.uvs[i * 2 + 0]       = float(x) / float(W - 1);
-            out.uvs[i * 2 + 1]       = float(y) / float(H - 1);
+            out.uvs[i * 2 + 0]       = float(x) * tile * kUvRepeatsPerWu;
+            out.uvs[i * 2 + 1]       = float(y) * tile * kUvRepeatsPerWu;
         }
     }
 

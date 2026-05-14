@@ -2,21 +2,27 @@
 #include "../../Utilities/State.h"
 #include "../ModelPreview.h"
 #include "../../textures/export/TextureExport.h"
+#include "../../Level/TerrainTextureRegistry.h"
+#include "../../Level/EhfLodThumbnails.h"
+#include "../../Level/TerrainEdit.h"
 #include "../../animations/AnimBank.h"
 #include "../../animations/AnimDataFile.h"
 #include "../../animations/AnimPlayer.h"
 #include "../IconButton.h"
 #include "IconsFontAwesome6.h"
+#include "../OutputLog.h"
 
 #include "imgui.h"
 #include "imgui_stdlib.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <vector>
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <sstream>
 #include <filesystem>
 
 #ifdef _WIN32
@@ -32,6 +38,12 @@ extern ModelPreview g_mp;
 extern bool g_mp_initialized;
 extern FlyCam g_flycam;
 
+/* Forward — defined in UI_Main.cpp at global scope; declared here so
+   the call inside the anonymous-namespaced draw_model_in_panel
+   resolves to the global symbol, not a (non-existent) one inside the
+   local namespace. */
+void render_panel_handle_flycam(float dt);
+
 bool g_skel_overlay_show = false;
 
 int g_highlight_mesh_idx = -1;
@@ -46,6 +58,47 @@ bool        g_tex_popout_open    = false;
 int         g_tex_popout_mesh_idx = -1;
 
 bool        g_tex_popout_show_uvs = false;
+
+/* Edit Terrain overlay state.  File-scope so the brush-picker block
+   (which runs OUTSIDE the overlay window's draw scope) can read the
+   selected tool / brush size / strength while doing ray-casting on
+   the render area.                                                  */
+namespace {
+struct TerrainEditUI {
+    int   tool             = 0;   // 0=None, 1=Raise, 2=Lower, 3=Smooth, 4=Flatten
+    float brush_size       = 32.f;
+    float brush_strength   = 1.f;
+    bool  has_changes      = false;
+    bool  open_save_confirm= false;
+    /* Picking state mutable inside the picker block. */
+    bool  hover_valid      = false;
+    float hover_x = 0.f, hover_y = 0.f, hover_z = 0.f;
+};
+static TerrainEditUI g_te_ui;
+}  // namespace
+
+/* Heightmap popout — separate floating window, shown when the user
+   right-clicks a level row → "View Heightmap".  The RGBA buffer is
+   kept alive so the in-window right-click can re-export it through
+   tex_export_menu_rgba.  All populated from PendingLoads via the
+   g_pending_heightmap_view_load hand-off. */
+#ifdef _WIN32
+ID3D11ShaderResourceView* g_heightmap_popout_srv = nullptr;
+#endif
+std::string          g_heightmap_popout_name;
+int                  g_heightmap_popout_w    = 0;
+int                  g_heightmap_popout_h    = 0;
+bool                 g_heightmap_popout_open = false;
+std::vector<uint8_t> g_heightmap_popout_rgba;
+
+/* Hand-off from the click handler (no device) → PendingLoads (has
+   device) → the popout (uses SRV).  PendingLoads consumes the flag
+   on its tick, creates the SRV, then surfaces the window. */
+std::atomic<bool>    g_pending_heightmap_view_load{false};
+std::vector<uint8_t> g_pending_heightmap_view_rgba;
+int                  g_pending_heightmap_view_w = 0;
+int                  g_pending_heightmap_view_h = 0;
+std::string          g_pending_heightmap_view_name;
 
 namespace UI {
 
@@ -499,23 +552,34 @@ void draw_model_in_panel(ID3D11Device* device) {
         S.selected_bone = picked;
     }
 
-    if (!rotate_active && active && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-        ImVec2 d = ImGui::GetIO().MouseDelta;
-        const float kOrbitSensitivity = 0.008f;
-        S.cam_yaw   += d.x * kOrbitSensitivity;
-        S.cam_pitch += d.y * kOrbitSensitivity;
+    /* Terrain (heightfield) preview uses the flycam.  No left-drag
+       orbit, no wheel-zoom of the orbit radius — WASD / Q-E to move,
+       right-click + drag for mouse-look.  Routed through the same
+       flycam handler the rest of the app uses. */
+    if (S.terrain_mode) {
+        const float dt = ImGui::GetIO().DeltaTime;
+        if (hovered || g_flycam.is_looking) {
+            ::render_panel_handle_flycam(dt);
+        }
+    } else {
+        if (!rotate_active && active && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            ImVec2 d = ImGui::GetIO().MouseDelta;
+            const float kOrbitSensitivity = 0.008f;
+            S.cam_yaw   += d.x * kOrbitSensitivity;
+            S.cam_pitch += d.y * kOrbitSensitivity;
 
-        const float kPitchLimit = 1.5f;
-        if (S.cam_pitch >  kPitchLimit) S.cam_pitch =  kPitchLimit;
-        if (S.cam_pitch < -kPitchLimit) S.cam_pitch = -kPitchLimit;
-    }
+            const float kPitchLimit = 1.5f;
+            if (S.cam_pitch >  kPitchLimit) S.cam_pitch =  kPitchLimit;
+            if (S.cam_pitch < -kPitchLimit) S.cam_pitch = -kPitchLimit;
+        }
 
-    if (hovered) {
-        float wheel = ImGui::GetIO().MouseWheel;
-        if (wheel != 0.0f) {
-            S.cam_dist *= (wheel > 0.0f) ? 0.9f : 1.111f;
-            if (S.cam_dist < 0.3f)  S.cam_dist = 0.3f;
-            if (S.cam_dist > 50.0f) S.cam_dist = 50.0f;
+        if (hovered) {
+            float wheel = ImGui::GetIO().MouseWheel;
+            if (wheel != 0.0f) {
+                S.cam_dist *= (wheel > 0.0f) ? 0.9f : 1.111f;
+                if (S.cam_dist < 0.3f)  S.cam_dist = 0.3f;
+                if (S.cam_dist > 50.0f) S.cam_dist = 50.0f;
+            }
         }
     }
 
@@ -542,7 +606,10 @@ void draw_model_in_panel(ID3D11Device* device) {
         g_mp.meshes[i].isolated  = ((int)i == ::g_isolate_mesh_idx);
     }
 
-    apply_orbit_to_flycam();
+    /* In terrain (flycam) mode, the flycam input handler is the
+       sole source of g_flycam state — don't overwrite it with the
+       orbit→flycam conversion. */
+    if (!S.terrain_mode) apply_orbit_to_flycam();
     MP_Render(device, g_mp, g_flycam);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -842,13 +909,31 @@ void draw_model_in_panel(ID3D11Device* device) {
                     }
 
                     if (ImGui::BeginPopupContextItem()) {
-                        const std::string& preferred_bnk =
-                            (S.selected_nested_index != -1 &&
-                             !S.selected_nested_temp_path.empty())
-                                ? S.selected_nested_temp_path
-                                : S.selected_bnk;
-                        tex_export_menu_named(*t.name, *t.name,
-                                              preferred_bnk, /*mip=*/0);
+                        /* Terrain-generated textures (lightmap, BC5
+                           normal, baked composite) don't live in any
+                           BNK — they're decoded from a `.ehf` and
+                           registered by name in
+                           TerrainTextureRegistry.  Check there first;
+                           on a hit, export from the cached RGBA
+                           buffer directly.  Otherwise fall through to
+                           the BNK-lookup path used for ordinary `.tex`
+                           textures.                                   */
+                        const auto* terrain_tex =
+                            TerrainTextureRegistry::Find(*t.name);
+                        if (terrain_tex) {
+                            tex_export_menu_rgba(*t.name,
+                                                 terrain_tex->rgba,
+                                                 terrain_tex->width,
+                                                 terrain_tex->height);
+                        } else {
+                            const std::string& preferred_bnk =
+                                (S.selected_nested_index != -1 &&
+                                 !S.selected_nested_temp_path.empty())
+                                    ? S.selected_nested_temp_path
+                                    : S.selected_bnk;
+                            tex_export_menu_named(*t.name, *t.name,
+                                                  preferred_bnk, /*mip=*/0);
+                        }
                         ImGui::EndPopup();
                     }
                     if (ImGui::IsItemHovered()) {
@@ -870,6 +955,99 @@ void draw_model_in_panel(ID3D11Device* device) {
                 ImGui::Separator();
                 ImGui::PopID();
             }
+
+            /* .ehf LOD palette — one row per material the .ehf
+               references.  These DON'T affect the rendered mesh; they
+               just let you see every detail texture the chunk-grid
+               can paint, and click-export any of them.              */
+            {
+                const auto& lod = EhfLodThumbnails::Get();
+                if (!lod.empty()) {
+                    ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1.0f),
+                        ".ehf LOD palette");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(%zu materials)", lod.size());
+                    ImGui::Separator();
+
+                    auto basename = [](const std::string& s) -> std::string {
+                        if (s.empty()) return {};
+                        size_t pos = s.find_last_of("/\\");
+                        return (pos == std::string::npos)
+                            ? s : s.substr(pos + 1);
+                    };
+
+                    auto thumb_or_placeholder =
+                        [&](ID3D11ShaderResourceView* srv,
+                            const std::string& path,
+                            const char* slot_tag,
+                            int slot_idx)
+                    {
+                        const ImVec2 sz(48, 48);
+                        ImGui::PushID(slot_idx);
+                        if (srv) {
+                            if (ImGui::ImageButton("##t",
+                                (ImTextureID)srv, sz,
+                                ImVec2(0, 0), ImVec2(1, 1),
+                                ImVec4(0, 0, 0, 0), ImVec4(1, 1, 1, 1)))
+                            {
+                                ::g_tex_popout_srv      = srv;
+                                ::g_tex_popout_name     = path;
+                                ::g_tex_popout_open     = true;
+                                ::g_tex_popout_mesh_idx = -1;
+                            }
+                            if (ImGui::BeginPopupContextItem()) {
+                                const std::string& preferred_bnk =
+                                    (S.selected_nested_index != -1 &&
+                                     !S.selected_nested_temp_path.empty())
+                                        ? S.selected_nested_temp_path
+                                        : S.selected_bnk;
+                                tex_export_menu_named(path, path,
+                                                      preferred_bnk, /*mip=*/0);
+                                ImGui::EndPopup();
+                            }
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("%s\n[%s]",
+                                                  path.c_str(), slot_tag);
+                            }
+                        } else {
+                            ImGui::Dummy(sz);
+                            if (!path.empty() && ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("decode failed: %s\n[%s]",
+                                                  path.c_str(), slot_tag);
+                            }
+                        }
+                        ImGui::PopID();
+                    };
+
+                    for (size_t i = 0; i < lod.size(); ++i) {
+                        const auto& e = lod[i];
+                        ImGui::PushID(int(0x10000 + i));
+
+                        const std::string title = "[" + std::to_string(i)
+                            + "] " + basename(e.base_diffuse_path);
+                        ImGui::TextUnformatted(title.c_str());
+
+                        thumb_or_placeholder(e.srv_base_diffuse,
+                                             e.base_diffuse_path,
+                                             "base diffuse", 0);
+                        ImGui::SameLine();
+                        thumb_or_placeholder(e.srv_base_normal,
+                                             e.base_normal_path,
+                                             "base normal", 1);
+                        ImGui::SameLine();
+                        thumb_or_placeholder(e.srv_detail_diffuse,
+                                             e.detail_diffuse_path,
+                                             "detail diffuse", 2);
+                        ImGui::SameLine();
+                        thumb_or_placeholder(e.srv_detail_normal,
+                                             e.detail_normal_path,
+                                             "detail normal", 3);
+
+                        ImGui::Separator();
+                        ImGui::PopID();
+                    }
+                }
+            }
         }
         ImGui::End();
         ImGui::PopStyleVar();
@@ -881,6 +1059,391 @@ void draw_model_in_panel(ID3D11Device* device) {
         ::g_tex_popout_srv      = nullptr;
         ::g_tex_popout_name.clear();
         ::g_tex_popout_mesh_idx = -1;
+    }
+
+    /* ===========================================================
+       Edit Terrain — floating overlay anchored TOP-RIGHT, only
+       visible while a level is loaded (we use g_mp.no_tilt as the
+       terrain marker since it's set true only for terrain meshes).
+
+       Phase 1: UI scaffolding + Save confirmation dialog.  The
+       editing tools and the actual .ghf → .bnk → .iso write are
+       wired separately and at this point are stubs that log
+       what they would do.  Per user direction we install the
+       SAVE button + confirmation BEFORE any destructive editing
+       is wired up.                                                */
+    /* Terrain editing — dev-mode-only.  The Edit Terrain overlay,
+       brush picker, and save-to-ISO are gated behind S.dev_mode so
+       regular users can't accidentally mutate their source ISO.   */
+    if (S.dev_mode && g_mp.has_model && g_mp.no_tilt) {
+        enum TerrainTool {
+            TT_NONE = 0,
+            TT_RAISE,
+            TT_LOWER,
+            TT_SMOOTH,
+            TT_FLATTEN,
+        };
+        int&   s_tool          = g_te_ui.tool;
+        float& s_brush_size    = g_te_ui.brush_size;
+        float& s_brush_strength= g_te_ui.brush_strength;
+        bool&  s_has_changes   = g_te_ui.has_changes;
+        bool&  s_open_save_confirm = g_te_ui.open_save_confirm;
+
+        /* Shared helper — pushes new positions to the GPU buffer and
+           syncs the dirty flag.  Hoisted to OUTER block scope so both
+           the Edit Terrain window's buttons AND the brush picker
+           (which runs after ImGui::End()) can call it. */
+        auto upload_after_edit = [&]() {
+            if (!g_mp.meshes.empty()) {
+                TerrainEdit::ApplyToGpu(device, &g_mp.meshes[0]);
+            }
+            s_has_changes = TerrainEdit::IsDirty();
+        };
+
+        const float kEditW    = 300.0f;
+        const float kEditPad  = 6.0f;
+        const ImVec2 edit_pos(origin.x + region.x - kEditW - kEditPad,
+                              origin.y + kEditPad);
+
+        ImGui::SetNextWindowPos(edit_pos, ImGuiCond_Always);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(kEditW, 0.0f),
+                                            ImVec2(kEditW, region.y - 2*kEditPad));
+        ImGui::SetNextWindowBgAlpha(0.88f);
+
+        ImGuiWindowFlags fl = ImGuiWindowFlags_NoResize
+                            | ImGuiWindowFlags_NoCollapse
+                            | ImGuiWindowFlags_NoSavedSettings
+                            | ImGuiWindowFlags_AlwaysAutoResize;
+
+        if (ImGui::Begin((std::string(ICON_FA_MOUNTAIN) +
+                          "  Edit Terrain###edit_terrain").c_str(),
+                         nullptr, fl))
+        {
+            /* ---- Save section (FIRST, before any edit tool, per
+                    user request — the destructive write needs to be
+                    in place before tools can apply changes). ---- */
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f),
+                "%s  Save", ICON_FA_FLOPPY_DISK);
+            ImGui::Separator();
+            if (s_has_changes) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                    "%s Unsaved changes", ICON_FA_TRIANGLE_EXCLAMATION);
+            } else {
+                ImGui::TextDisabled("(no pending changes)");
+            }
+            ImGui::BeginDisabled(!s_has_changes);
+            if (ImGui::Button((std::string(ICON_FA_FLOPPY_DISK)
+                              + "  Save to .iso").c_str(),
+                              ImVec2(-1, 0)))
+            {
+                s_open_save_confirm = true;
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered() && !s_has_changes) {
+                ImGui::SetTooltip("No changes to save");
+            }
+
+            if (s_open_save_confirm) {
+                ImGui::OpenPopup("Confirm Save");
+                s_open_save_confirm = false;
+            }
+            if (ImGui::BeginPopupModal("Confirm Save", nullptr,
+                ImGuiWindowFlags_AlwaysAutoResize))
+            {
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f),
+                    "%s  Save modified terrain heights",
+                    ICON_FA_TRIANGLE_EXCLAMATION);
+                ImGui::TextWrapped(
+                    "This will write the modified .ghf as a gzip "
+                    "file under  <fable_root>/edited_heightfields/.\n"
+                    "Your source ISO is NOT touched.");
+                ImGui::Separator();
+                ImGui::TextWrapped(
+                    "Direct BNK / ISO injection is still on the "
+                    "TODO list — for now you'll need to splice the "
+                    "saved .ghf back into the ISO externally.");
+                ImGui::Spacing();
+                if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Button,
+                    ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                    ImVec4(0.85f, 0.25f, 0.25f, 1.0f));
+                if (ImGui::Button((std::string(ICON_FA_FLOPPY_DISK)
+                                  + "  Save Anyway").c_str(),
+                                  ImVec2(160, 0)))
+                {
+                    /* Phase 2: write the modified .ghf alongside the
+                       loaded ISO (BNK repack + ISO splice are still
+                       pending, so for now the user gets a sibling
+                       .ghf gzip file they can inject externally).  */
+                    std::string msg;
+                    if (TerrainEdit::Save(msg)) {
+                        OutputLog::success(
+                            "Edit Terrain: saved modified .ghf → "
+                            + msg);
+                        s_has_changes = false;
+                    } else {
+                        OutputLog::error(
+                            "Edit Terrain: save failed: " + msg);
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::PopStyleColor(2);
+                ImGui::EndPopup();
+            }
+
+            ImGui::Spacing();
+            ImGui::Spacing();
+
+            /* ---- Tools palette ---- */
+            ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f),
+                "%s  Tools", ICON_FA_PAINTBRUSH);
+            ImGui::Separator();
+
+            const bool edit_ready = TerrainEdit::IsLoaded();
+            ImGui::BeginDisabled(!edit_ready);
+
+            /* Radio-style tool selector — picks the active brush
+               tool.  Click on the 3D terrain to apply.              */
+            auto tool_btn = [&](const char* label, int tool_id,
+                                const ImVec2& sz)
+            {
+                const bool active = (s_tool == tool_id);
+                if (active) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,
+                        ImVec4(0.30f, 0.55f, 0.30f, 1.f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                        ImVec4(0.40f, 0.65f, 0.40f, 1.f));
+                }
+                if (ImGui::Button(label, sz)) {
+                    s_tool = active ? TT_NONE : tool_id;
+                }
+                if (active) ImGui::PopStyleColor(2);
+            };
+
+            const ImVec2 btn_size(ImGui::GetContentRegionAvail().x * 0.49f, 0);
+            tool_btn((std::string(ICON_FA_ARROW_UP) + "  Raise##tool").c_str(),
+                     TT_RAISE, btn_size);
+            ImGui::SameLine();
+            tool_btn((std::string(ICON_FA_ARROW_DOWN) + "  Lower##tool").c_str(),
+                     TT_LOWER, btn_size);
+            tool_btn((std::string(ICON_FA_DROPLET) + "  Smooth##tool").c_str(),
+                     TT_SMOOTH, btn_size);
+            ImGui::SameLine();
+            tool_btn((std::string(ICON_FA_GRIP_LINES) + "  Flatten##tool").c_str(),
+                     TT_FLATTEN, btn_size);
+
+            ImGui::Spacing();
+            if (ImGui::Button((std::string(ICON_FA_ARROW_ROTATE_LEFT)
+                + "  Reset all changes").c_str(),
+                ImVec2(-1, 0)))
+            {
+                TerrainEdit::Reset();
+                upload_after_edit();
+                s_tool = TT_NONE;
+            }
+
+            ImGui::EndDisabled();
+            if (!edit_ready && ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Terrain edit state not initialized "
+                                  "(no .ghf loaded?)");
+            }
+
+            ImGui::Spacing();
+            ImGui::Spacing();
+
+            /* ---- Brush settings ---- */
+            ImGui::TextColored(ImVec4(0.8f, 0.9f, 1.0f, 1.0f),
+                "%s  Brush", ICON_FA_BRUSH);
+            ImGui::Separator();
+            ImGui::SliderFloat("Size##brush",     &s_brush_size,
+                               1.0f, 256.0f, "%.0f wu");
+            ImGui::SliderFloat("Strength##brush", &s_brush_strength,
+                               0.05f, 10.0f, "%.2f wu");
+
+            ImGui::Spacing();
+            if (s_tool == TT_NONE) {
+                ImGui::TextDisabled("Select a tool, then left-click + "
+                                    "drag on the terrain to apply.");
+            } else {
+                ImGui::TextColored(ImVec4(0.7f, 1.f, 0.7f, 1.f),
+                    "Click + drag on terrain to apply.");
+            }
+
+            /* "Apply to ALL" — runs the selected tool over every cell
+               regardless of brush position. */
+            ImGui::BeginDisabled(!edit_ready || s_tool == TT_NONE);
+            if (ImGui::Button((std::string(ICON_FA_ARROWS_UP_DOWN_LEFT_RIGHT)
+                + "  Apply to ALL").c_str(),
+                ImVec2(-1, 0)))
+            {
+                switch (s_tool) {
+                    case TT_RAISE:   TerrainEdit::RaiseAll(s_brush_strength); break;
+                    case TT_LOWER:   TerrainEdit::LowerAll(s_brush_strength); break;
+                    case TT_SMOOTH:  TerrainEdit::SmoothAll(); break;
+                    case TT_FLATTEN: {
+                        const auto& st = TerrainEdit::Get();
+                        float sum = 0.f;
+                        for (float h : st.heights_current) sum += h;
+                        const float avg = st.heights_current.empty() ? 0.f :
+                            sum / float(st.heights_current.size());
+                        TerrainEdit::FlattenAll(avg);
+                        break;
+                    }
+                    default: break;
+                }
+                upload_after_edit();
+            }
+            ImGui::EndDisabled();
+        }
+        ImGui::End();
+
+        /* ------------- Brush picker (ray-cast on render image) -------------
+           When a tool is active and the mouse is over the rendered terrain,
+           unproject the cursor into a world ray, find where it hits the
+           heightfield, and (on left-click) apply the brush.  Also draws a
+           ring on the terrain at the hit point so the user can see where
+           the brush will land.                                            */
+        if (TerrainEdit::IsLoaded() && s_tool != TT_NONE) {
+            ImVec2 mp_pos  = ImGui::GetIO().MousePos;
+            const bool over_view =
+                mp_pos.x >= origin.x   && mp_pos.x < origin.x + region.x &&
+                mp_pos.y >= origin.y   && mp_pos.y < origin.y + region.y;
+            /* The ring should ALWAYS track the cursor over the 3D
+               view, regardless of whether an ImGui panel overlaps
+               (the user wants to see where the brush would land).
+               We only gate brush APPLY on WantCaptureMouse below,
+               so dragging an ImGui slider doesn't also paint.       */
+            const bool imgui_captured = ImGui::GetIO().WantCaptureMouse;
+
+            g_te_ui.hover_valid = false;
+            if (over_view && g_mp.width > 0 && g_mp.height > 0) {
+                using namespace DirectX;
+
+                /* Same V / P math as MP_Render for terrain (no_tilt). */
+                const float cy = cosf(g_flycam.yaw);
+                const float sy = sinf(g_flycam.yaw);
+                const float cp = cosf(g_flycam.pitch);
+                const float sp = sinf(g_flycam.pitch);
+                const float forward[3] = { sy * cp, sp, cy * cp };
+                XMVECTOR eye = XMVectorSet(g_flycam.pos[0],
+                    g_flycam.pos[1], g_flycam.pos[2], 1);
+                XMVECTOR at  = XMVectorSet(g_flycam.pos[0] + forward[0],
+                    g_flycam.pos[1] + forward[1],
+                    g_flycam.pos[2] + forward[2], 1);
+                XMVECTOR up  = XMVectorSet(0, 1, 0, 0);
+                XMMATRIX V = XMMatrixLookAtLH(eye, at, up);
+                const float fov = XMConvertToRadians(60.0f);
+                const float aspect = (float)g_mp.width / (float)g_mp.height;
+                const float far_plane = g_mp.radius * 100.0f;
+                XMMATRIX P = XMMatrixPerspectiveFovLH(fov, aspect,
+                                                     0.05f, far_plane);
+                XMMATRIX VP = V * P;
+                XMVECTOR det;
+                XMMATRIX inv_VP = XMMatrixInverse(&det, VP);
+
+                /* Mouse → NDC.  Y is flipped in D3D NDC. */
+                const float u = (mp_pos.x - origin.x) / region.x;
+                const float v = (mp_pos.y - origin.y) / region.y;
+                const float ndc_x =  u * 2.f - 1.f;
+                const float ndc_y =  1.f - v * 2.f;
+
+                XMVECTOR near_pt = XMVector4Transform(
+                    XMVectorSet(ndc_x, ndc_y, 0.f, 1.f), inv_VP);
+                XMVECTOR far_pt  = XMVector4Transform(
+                    XMVectorSet(ndc_x, ndc_y, 1.f, 1.f), inv_VP);
+                near_pt = XMVectorScale(near_pt,
+                    1.f / XMVectorGetW(near_pt));
+                far_pt  = XMVectorScale(far_pt,
+                    1.f / XMVectorGetW(far_pt));
+                const float ox = XMVectorGetX(near_pt);
+                const float oy = XMVectorGetY(near_pt);
+                const float oz = XMVectorGetZ(near_pt);
+                const float dx = XMVectorGetX(far_pt) - ox;
+                const float dy = XMVectorGetY(far_pt) - oy;
+                const float dz = XMVectorGetZ(far_pt) - oz;
+
+                float hx, hy, hz;
+                if (TerrainEdit::Raycast(ox, oy, oz, dx, dy, dz,
+                                         hx, hy, hz))
+                {
+                    g_te_ui.hover_valid = true;
+                    g_te_ui.hover_x = hx;
+                    g_te_ui.hover_y = hy;
+                    g_te_ui.hover_z = hz;
+
+                    /* Draw brush ring as 32-segment polyline projected
+                       to screen.  Uses V*P with the same maths above. */
+                    const int kSeg = 48;
+                    ImVec2 last_screen{};
+                    ImDrawList* dlay = ImGui::GetForegroundDrawList();
+                    const float radius = s_brush_size;
+                    for (int i = 0; i <= kSeg; ++i) {
+                        const float ang =
+                            (float)i / (float)kSeg * 6.2831853f;
+                        const float wx = hx + cosf(ang) * radius;
+                        const float wz = hz + sinf(ang) * radius;
+                        const float wy =
+                            TerrainEdit::SampleHeightAtWorldXZ(wx, wz);
+                        XMVECTOR wpt = XMVectorSet(wx, wy, wz, 1.f);
+                        XMVECTOR cs  = XMVector4Transform(wpt, VP);
+                        const float ws = XMVectorGetW(cs);
+                        if (ws <= 0.f) { last_screen = ImVec2(0,0); continue; }
+                        const float nx = XMVectorGetX(cs) / ws;
+                        const float ny = XMVectorGetY(cs) / ws;
+                        const float sx = origin.x + (nx * 0.5f + 0.5f) * region.x;
+                        const float sy = origin.y + (1.f - (ny * 0.5f + 0.5f)) * region.y;
+                        const ImVec2 sc(sx, sy);
+                        if (i > 0) {
+                            dlay->AddLine(last_screen, sc,
+                                IM_COL32(255, 215, 0, 220), 1.5f);
+                        }
+                        last_screen = sc;
+                    }
+                    /* Centre crosshair. */
+                    XMVECTOR cpt = XMVector4Transform(
+                        XMVectorSet(hx, hy, hz, 1.f), VP);
+                    const float cw = XMVectorGetW(cpt);
+                    if (cw > 0.f) {
+                        const float cnx = XMVectorGetX(cpt) / cw;
+                        const float cny = XMVectorGetY(cpt) / cw;
+                        const float csx = origin.x
+                            + (cnx * 0.5f + 0.5f) * region.x;
+                        const float csy = origin.y
+                            + (1.f - (cny * 0.5f + 0.5f)) * region.y;
+                        dlay->AddCircleFilled(ImVec2(csx, csy), 3.f,
+                            IM_COL32(255, 215, 0, 255));
+                    }
+
+                    /* Mouse-held → apply brush (every frame while down).
+                       Skip apply when ImGui is using the mouse for one
+                       of its widgets so panel interactions don't paint. */
+                    if (!imgui_captured &&
+                        ImGui::IsMouseDown(ImGuiMouseButton_Left))
+                    {
+                        TerrainEdit::BrushTool bt =
+                            TerrainEdit::BrushTool::None;
+                        switch (s_tool) {
+                            case TT_RAISE:   bt = TerrainEdit::BrushTool::Raise; break;
+                            case TT_LOWER:   bt = TerrainEdit::BrushTool::Lower; break;
+                            case TT_SMOOTH:  bt = TerrainEdit::BrushTool::Smooth; break;
+                            case TT_FLATTEN: bt = TerrainEdit::BrushTool::Flatten; break;
+                            default: break;
+                        }
+                        const float target_h =
+                            (s_tool == TT_FLATTEN)
+                            ? TerrainEdit::SampleHeightAtWorldXZ(hx, hz)
+                            : 0.f;
+                        TerrainEdit::ApplyBrush(bt, hx, hz,
+                            s_brush_size, s_brush_strength, target_h);
+                        upload_after_edit();
+                    }
+                }
+            }
+        }
     }
 
     if (g_mp.has_model && g_mp.bone_count > 0 && !S.anim_clips.empty()) {
@@ -1280,6 +1843,68 @@ void draw_model_in_panel(ID3D11Device* device) {
         }
     }
 }
+
+/* Heightmap popout — floating window with the level's height grid
+   rendered as a grayscale image.  Always called from draw_render_panel
+   so it shows over models, textures, or the placeholder.  Right-click
+   inside exports via tex_export_menu_rgba. */
+void draw_heightmap_popout() {
+    if (::g_heightmap_popout_open && ::g_heightmap_popout_srv) {
+        const int hw = ::g_heightmap_popout_w;
+        const int hh = ::g_heightmap_popout_h;
+
+        if (hw > 0 && hh > 0) {
+            /* Auto-scale: don't open as huge as the source if it's
+               bigger than ~80% of the workspace.  Floats so the
+               max-clamp doesn't round to zero on tiny images. */
+            ImGuiViewport* vp = ImGui::GetMainViewport();
+            const float vw = vp->WorkSize.x;
+            const float vh = vp->WorkSize.y;
+            const float cap_w = vw * 0.8f;
+            const float cap_h = vh * 0.8f;
+            float scale = 1.0f;
+            if ((float)hw > cap_w || (float)hh > cap_h) {
+                scale = std::min(cap_w / (float)hw, cap_h / (float)hh);
+            }
+            const float dw = std::max(64.0f, (float)hw * scale);
+            const float dh = std::max(64.0f, (float)hh * scale);
+
+            std::string title = "Heightmap: " + ::g_heightmap_popout_name
+                              + "##heightmap_popout";
+            ImGuiWindowFlags fl = ImGuiWindowFlags_NoCollapse
+                                | ImGuiWindowFlags_AlwaysAutoResize;
+            if (ImGui::Begin(title.c_str(),
+                             &::g_heightmap_popout_open, fl)) {
+                ImGui::Image((ImTextureID)::g_heightmap_popout_srv,
+                             ImVec2(dw, dh));
+
+                /* Right-click → export menu. */
+                ImVec2 img_min = ImGui::GetItemRectMin();
+                ImGui::SetCursorScreenPos(img_min);
+                ImGui::InvisibleButton("##hmap_popout_hit",
+                                       ImVec2(dw, dh));
+                if (ImGui::BeginPopupContextItem()) {
+                    tex_export_menu_rgba(::g_heightmap_popout_name,
+                                         ::g_heightmap_popout_rgba,
+                                         hw, hh);
+                    ImGui::EndPopup();
+                }
+            }
+            ImGui::End();
+        }
+
+        if (!::g_heightmap_popout_open) {
+            if (::g_heightmap_popout_srv) {
+                ::g_heightmap_popout_srv->Release();
+                ::g_heightmap_popout_srv = nullptr;
+            }
+            ::g_heightmap_popout_name.clear();
+            ::g_heightmap_popout_rgba.clear();
+            ::g_heightmap_popout_w = 0;
+            ::g_heightmap_popout_h = 0;
+        }
+    }
+}
 #endif
 
 }
@@ -1296,6 +1921,10 @@ void draw_render_panel(ID3D11Device* device) {
     } else {
         draw_placeholder();
     }
+
+    /* Float the heightmap popout on top regardless of which mode the
+       main render panel is in. */
+    draw_heightmap_popout();
 }
 #else
 void draw_render_panel() {

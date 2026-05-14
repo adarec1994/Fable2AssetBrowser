@@ -259,8 +259,6 @@ void draw() {
                 if (ImGui::SmallButton("Clear")) {
                     g_entries.clear();
                 }
-                ImGui::SameLine();
-                ImGui::TextDisabled("(right-click a line to copy it)");
             }
             ImGui::Separator();
 

@@ -96,6 +96,59 @@ static void compute_smooth_normals(size_t vcount, const std::vector<uint32_t>& i
         float x=out_n[v*3+0], y=out_n[v*3+1], z=out_n[v*3+2];
         float l=std::sqrt(x*x+y*y+z*z); if(l>1e-6f){ out_n[v*3+0]=x/l; out_n[v*3+1]=y/l; out_n[v*3+2]=z/l; } else { out_n[v*3+0]=0; out_n[v*3+1]=1; out_n[v*3+2]=0; }
     }
+
+    /* Inverted-winding fixup.
+     *
+     * Some MDL assets (ESA_Wheatsheaves and friends) have face indices
+     * ordered such that the cross-product `u × v` we just summed points
+     * INTO the mesh's interior rather than out of it.  Since the
+     * shader's diffuse term uses abs(dot(N,L)) the surface still gets
+     * lit, but the normal-map perturbation and specular reflection are
+     * mirrored across the surface and the model reads "wrong" — the
+     * sheaf appears lit from the inside-out.
+     *
+     * Heuristic: take the mesh centroid (mean of vertex positions), and
+     * for each vertex with a non-zero normal sample the sign of
+     * dot(normal, vertex - centroid).  For a closed/quasi-closed mesh
+     * with consistent outward-pointing normals this dot is positive on
+     * the overwhelming majority of vertices; if it's negative on the
+     * overwhelming majority, the winding is reversed and we flip every
+     * normal in-place.
+     *
+     * Done as a strict majority vote (>= 80% inward) so working models
+     * — including hollow shells and concave shapes where some normals
+     * legitimately point in — are never touched. */
+    if (vcount >= 8) {
+        double cx_acc = 0, cy_acc = 0, cz_acc = 0;
+        for (size_t v = 0; v < vcount; ++v) {
+            cx_acc += pos[v*3+0];
+            cy_acc += pos[v*3+1];
+            cz_acc += pos[v*3+2];
+        }
+        const float cx = (float)(cx_acc / (double)vcount);
+        const float cy = (float)(cy_acc / (double)vcount);
+        const float cz = (float)(cz_acc / (double)vcount);
+
+        size_t outward = 0, inward = 0;
+        for (size_t v = 0; v < vcount; ++v) {
+            float dx = pos[v*3+0] - cx;
+            float dy = pos[v*3+1] - cy;
+            float dz = pos[v*3+2] - cz;
+            float r2 = dx*dx + dy*dy + dz*dz;
+            if (r2 < 1e-12f) continue;   // vertex sits at the centroid
+            float d = dx*out_n[v*3+0] + dy*out_n[v*3+1] + dz*out_n[v*3+2];
+            if (d >  1e-6f) ++outward;
+            else if (d < -1e-6f) ++inward;
+        }
+        const size_t voted = outward + inward;
+        if (voted >= 8 && inward * 5 >= voted * 4) {   // >= 80% inward
+            for (size_t v = 0; v < vcount; ++v) {
+                out_n[v*3+0] = -out_n[v*3+0];
+                out_n[v*3+1] = -out_n[v*3+1];
+                out_n[v*3+2] = -out_n[v*3+2];
+            }
+        }
+    }
 }
 }
 
@@ -1419,3 +1472,169 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
     }
     return true;
 }
+
+/* -----------------------------------------------------------------------
+ * polymsh-marker fallback.
+ *
+ * Some MDL assets (e.g. RS_Golden_Acorn) have a leaf-style material whose
+ * texture layout the standard material-list walker can't traverse — there
+ * are empty mt/extra string slots followed by an additional translucency
+ * texture path that the existing strz(5) + 3*u32 + peek schema doesn't
+ * account for.  The walker over-runs the metadata section, lands inside
+ * the translucency path, the optional-string probe at the top of the
+ * mesh-buffer section then mis-anchors, the per-mesh `bufferID == mi`
+ * scan never finds a valid anchor in the file (these models use the
+ * `polymsh\0\x01` wasStringFound layout, not the integer-prefixed
+ * bufferID layout the else-branch searches for), and we end up with
+ * three empty buffer records.
+ *
+ * This fallback runs after parse_mdl_info when every populated mesh has
+ * VertexCount == 0.  It walks the buffer scanning for the canonical
+ * `polymsh\0\x01` marker, decodes a wasStringFound-style buffer at each
+ * hit, and writes the recovered records back into info.MeshBuffers
+ * 1:1 with the existing Meshes (which the original walker parsed
+ * correctly — only the buffer-side anchor was off).
+ *
+ * Strictly additive: the function only mutates info when called, and is
+ * gated by the all-empty check at the call site. */
+bool reparse_mdl_buffers_via_polymsh_scan(const std::vector<unsigned char>& data,
+                                          MDLInfo& info)
+{
+    if (data.size() < 16) return false;
+
+    /* Walk every "polymsh\0\x01" run in the file. */
+    static const unsigned char kMagic[9] = {
+        'p','o','l','y','m','s','h','\0','\x01'
+    };
+
+    std::vector<MDLMeshBufferInfo> recovered;
+    R r{ data.data(), data.size(), 0 };
+
+    for (size_t scan = 0; scan + sizeof(kMagic) <= data.size(); ++scan) {
+        if (std::memcmp(data.data() + scan, kMagic, sizeof(kMagic)) != 0) continue;
+
+        /* Header layout matches parse_mdl_info's `wasStringFound` branch:
+             "polymsh\0\x01"  (9 bytes)
+             u32 mesh_id
+             u32 mesh_id_copy
+             u32 someCount1
+             u32 tlen        (face-index count)
+             u32 vtx         (vertex count)
+             u8[40]          (unknown — bbox / radius etc.)
+             u32 submesh_count
+             u32 next_value  (== 0xFFFFFFFF for a real submesh marker)
+             ... per-submesh records (marker u32, matIdx u32, flag u8,
+                                      faceCount u32, startIdx u32,
+                                      6 f32s)
+             u8[vtx*20]      (vertex buffer)
+             u8[tlen*2]      (16-bit index buffer)
+        */
+        r.i = scan + sizeof(kMagic);
+        uint32_t mesh_id = 0, mesh_id_copy = 0;
+        if (!r.u32be(mesh_id))      continue;
+        if (!r.u32be(mesh_id_copy)) continue;
+
+        uint32_t someCount1 = 0, tlen = 0, vtx = 0;
+        if (!r.u32be(someCount1) || !r.u32be(tlen) || !r.u32be(vtx)) continue;
+        if (vtx == 0 || vtx > 65535u || tlen == 0 || tlen > 65535u) continue;
+        if (!r.skip(40)) continue;
+
+        uint32_t submesh_count = 0;
+        if (!r.u32be(submesh_count)) continue;
+        uint32_t next_value = 0;
+        if (!r.u32be(next_value))    continue;
+
+        uint32_t final_submesh_count;
+        if (next_value != 0xFFFFFFFFu || submesh_count >= 256u) {
+            final_submesh_count = 1;
+        } else {
+            r.i -= 4;
+            final_submesh_count = submesh_count;
+        }
+
+        /* Locate the 0xFFFFFFFF submesh-start marker — same forward
+           probe the main parser uses, capped at 1 KB so a malformed
+           header bails fast instead of scanning the rest of the file. */
+        bool markerFound = false;
+        for (size_t sp = r.i; sp + 4 <= r.n && sp < r.i + 1024; ++sp) {
+            uint32_t m = (uint32_t(r.p[sp])<<24) | (uint32_t(r.p[sp+1])<<16) |
+                         (uint32_t(r.p[sp+2])<<8) | r.p[sp+3];
+            if (m == 0xFFFFFFFFu) { r.i = sp; markerFound = true; break; }
+        }
+        if (!markerFound) continue;
+
+        std::vector<MDLSubMeshInfo> submeshes;
+        bool sub_ok = true;
+        for (uint32_t s = 0; s < final_submesh_count && sub_ok; ++s) {
+            uint32_t marker = 0;
+            if (!r.u32be(marker)) { sub_ok = false; break; }
+            uint32_t matIdxRaw = 0;
+            if (!r.u32be(matIdxRaw)) { sub_ok = false; break; }
+            uint8_t subFlag = 0;
+            if (!r.u8(subFlag))      { sub_ok = false; break; }
+            (void)subFlag;
+            uint32_t faceCount = 0, startIdx = 0;
+            if (!r.u32be(faceCount)) { sub_ok = false; break; }
+            if (!r.u32be(startIdx))  { sub_ok = false; break; }
+            float F4[6];
+            for (int k = 0; k < 6 && sub_ok; ++k)
+                if (!r.f32be(F4[k])) { sub_ok = false; break; }
+            if (!sub_ok) break;
+
+            MDLSubMeshInfo smi;
+            smi.MaterialIndex = (uint8_t)(matIdxRaw & 0xFFu);
+            smi.FaceCount  = faceCount;
+            smi.StartIndex = startIdx;
+            submeshes.push_back(smi);
+        }
+        if (!sub_ok) continue;
+
+        const size_t vert_off = r.i;
+        if (!r.skip((size_t)vtx * 20)) continue;
+        const size_t face_off = r.i;
+        if (!r.skip((size_t)tlen * 2)) continue;
+
+        MDLMeshBufferInfo mb;
+        mb.VertexCount   = vtx;
+        mb.VertexOffset  = vert_off;
+        mb.FaceCount     = tlen;
+        mb.FaceOffset    = face_off;
+        mb.SubMeshCount  = final_submesh_count;
+        mb.SubMeshes     = submeshes;
+        mb.IsAltPath     = true;       // 20-byte vertex stride, matches alt-path decoder
+        mb.IsFoliagePath = false;
+        mb.MeshIndex     = (uint32_t)recovered.size();
+        recovered.push_back(std::move(mb));
+
+        /* Skip past this body so the loop doesn't re-scan into the
+           vertex/index data we just consumed. */
+        scan = r.i - 1;
+    }
+
+    if (recovered.empty()) return false;
+
+    /* Align the recovered buffers 1:1 with whatever Meshes the original
+       walker produced — parse_mdl_geometry asserts MeshBuffers.size()
+       == Meshes.size() and bails otherwise.  If we recovered more
+       buffers than the metadata declared, trim; if fewer, leave any
+       trailing slots as zero-filled (the geometry decoder already
+       tolerates that). */
+    info.MeshBuffers.clear();
+    info.MeshBuffers.reserve(info.Meshes.size());
+    for (size_t mi = 0; mi < info.Meshes.size(); ++mi) {
+        if (mi < recovered.size()) {
+            MDLMeshBufferInfo mb = recovered[mi];
+            mb.MeshIndex = (uint32_t)mi;
+            info.MeshBuffers.push_back(std::move(mb));
+        } else {
+            MDLMeshBufferInfo mb;
+            mb.MeshIndex = (uint32_t)mi;
+            info.MeshBuffers.push_back(std::move(mb));
+        }
+    }
+    if (info.MeshCount == 0 || info.MeshCount < (uint32_t)info.Meshes.size()) {
+        info.MeshCount = (uint32_t)info.Meshes.size();
+    }
+    return true;
+}
+

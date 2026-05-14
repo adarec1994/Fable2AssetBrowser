@@ -64,6 +64,11 @@ struct MPPerMesh {
     bool highlight = false;
     bool isolated  = false;
 
+    /* Marks this mesh as the chunk-splat terrain.  When set, MP_Render
+       binds the TerrainSplat resources (LOD array + chunk LUTs) and
+       uses the terrain pixel shader instead of the standard one. */
+    bool is_terrain = false;
+
     uint32_t source_mesh_idx = 0;
 
     /* LOD index extracted from the mesh-name suffix "|lod<N>".
@@ -82,6 +87,14 @@ struct ModelPreview {
     ID3D11InputLayout* layout = nullptr;
     ID3D11Buffer* cbuffer = nullptr;
     ID3D11SamplerState* sampler = nullptr;
+    /* Optional secondary pipeline for the chunk-splat terrain shader.
+       Compiled in create_pipeline alongside the standard one.  Same
+       input layout as the regular VS (we reuse `layout`) so we only
+       need new VS/PS objects + an extra constant buffer. */
+    ID3D11VertexShader* vs_terrain = nullptr;
+    ID3D11PixelShader*  ps_terrain = nullptr;
+    ID3D11Buffer*       cbuffer_terrain = nullptr;
+    ID3D11SamplerState* sampler_point = nullptr;   // for chunk LUT (point filter)
     ID3D11RasterizerState* rs = nullptr;
     ID3D11RasterizerState* rs_wire = nullptr;
     ID3D11BlendState* bs = nullptr;
@@ -113,6 +126,12 @@ struct ModelPreview {
     bool has_model = false;
 
     bool wireframe = false;
+
+    /* When set, MP_Render skips the global -90° X-axis tilt it normally
+       applies to MDL geometry.  MDL files are Z-up and the engine
+       rotates them to display Y-up; terrain meshes we build ourselves
+       are already Y-up so they need this disabled to stay flat. */
+    bool no_tilt = false;
 
     /* LOD selection.  `lod_count` is the number of distinct LODs in
        the loaded model (computed at build time from per-mesh

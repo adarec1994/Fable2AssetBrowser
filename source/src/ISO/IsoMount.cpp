@@ -270,6 +270,89 @@ bool IsoMount::read_at(const std::string& virtual_path,
     return std::fread(dst, 1, n, fp_) == n;
 }
 
+uint64_t IsoMount::abs_offset_of(const std::string& virtual_path,
+                                 uint64_t off) const
+{
+    const MountedFile* mf = find(virtual_path);
+    if (!mf) return 0;
+    return base_offset_ + (uint64_t)mf->sector * kSectorSize + off;
+}
+
+bool IsoMount::write_at(const std::string& virtual_path,
+                        uint64_t off, const void* src, size_t n)
+{
+    /* DESTRUCTIVE — writes bytes directly into the user's source ISO
+       at the absolute offset of `virtual_path` + `off`.  Callers must
+       have explicit user consent (e.g. the Edit Terrain save
+       confirmation popup) before invoking this. */
+    const MountedFile* mf = find(virtual_path);
+    if (!mf) return false;
+    if ((uint64_t)off + n > (uint64_t)mf->size) return false;
+    if (iso_path_.empty()) return false;
+
+    std::lock_guard<std::mutex> lock(read_mutex_);
+
+    /* On Windows std::fopen opens with deny-write sharing by default,
+       so our own read fp_ blocks a concurrent r+b open of the same
+       ISO.  Close it temporarily, do the write, then reopen.        */
+    const std::string saved_iso_path = iso_path_;
+    if (fp_) { std::fclose(fp_); fp_ = nullptr; }
+
+    std::FILE* wf = nullptr;
+#ifdef _WIN32
+    fopen_s(&wf, saved_iso_path.c_str(), "r+b");
+#else
+    wf = std::fopen(saved_iso_path.c_str(), "r+b");
+#endif
+    if (!wf) {
+        /* Reopen read handle so subsequent reads don't break. */
+#ifdef _WIN32
+        fopen_s(&fp_, saved_iso_path.c_str(), "rb");
+#else
+        fp_ = std::fopen(saved_iso_path.c_str(), "rb");
+#endif
+        return false;
+    }
+    const uint64_t abs =
+        base_offset_ + (uint64_t)mf->sector * kSectorSize + off;
+#ifdef _WIN32
+    if (_fseeki64(wf, (long long)abs, SEEK_SET) != 0) {
+        std::fclose(wf);
+        fopen_s(&fp_, saved_iso_path.c_str(), "rb");
+        return false;
+    }
+#else
+    if (std::fseek(wf, (long)abs, SEEK_SET) != 0) {
+        std::fclose(wf);
+        fp_ = std::fopen(saved_iso_path.c_str(), "rb");
+        return false;
+    }
+#endif
+    const size_t got = std::fwrite(src, 1, n, wf);
+    std::fflush(wf);
+    std::fclose(wf);
+
+    /* Reopen the read handle for subsequent IsoMount reads. */
+#ifdef _WIN32
+    fopen_s(&fp_, saved_iso_path.c_str(), "rb");
+#else
+    fp_ = std::fopen(saved_iso_path.c_str(), "rb");
+#endif
+
+    /* Invalidate the in-memory cache for this virtual file so any
+       subsequent read sees the new bytes.                          */
+    {
+        std::string key = lower(virtual_path);
+        auto it = cache_index_.find(key);
+        if (it != cache_index_.end()) {
+            cache_bytes_ -= it->second->bytes.size();
+            cache_.erase(it->second);
+            cache_index_.erase(it);
+        }
+    }
+    return got == n;
+}
+
 std::string IsoMount::make_iso_path(const std::string& virtual_path) {
     return std::string("iso://") + virtual_path;
 }

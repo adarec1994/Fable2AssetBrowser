@@ -211,10 +211,11 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
                    ends_with_ci(leaf, ".genv") ||
                    ends_with_ci(leaf, ".ama") ||
                    ends_with_ci(leaf, ".amm") ||
-                   ends_with_ci(leaf, ".amr")) {
-            /* Heightfield sibling files — kept in a separate vector so
-               LevelLoader can resolve them by name without scanning the
-               whole asset graph. */
+                   ends_with_ci(leaf, ".amr") ||
+                   ends_with_ci(leaf, ".texture_atlas")) {
+            /* Heightfield sibling files + the level texture atlas —
+               kept in a separate vector so LevelLoader can resolve them
+               by name without scanning the whole asset graph. */
             FlatAssetEntry e;
             e.name = leaf;
             e.full_path = path;

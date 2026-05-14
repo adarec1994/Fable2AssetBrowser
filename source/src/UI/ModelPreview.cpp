@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <functional>
 #include "ModelPreview.h"
+#include "../Level/TerrainSplat.h"
 #include "../Utilities/Files.h"
 #include "../Utilities/Utils.h"
 #include "../Utilities/State.h"
@@ -18,6 +19,7 @@
 #include "../textures/TexParser.h"
 #include "../textures/LhTexCodec.h"
 #include "OutputLog.h"
+#include <zlib.h>
 #ifdef _WIN32
 #include <initguid.h>
 #include <d3d11.h>
@@ -379,6 +381,54 @@ static uint32_t xg_address_2d_tiled_y(uint32_t block_offset,
     return macro + micro + ((offset_tile & 0x10u) >> 4);
 }
 
+/* ImageHeat-style untile for block-compressed (BC1 / BC3 / BC5) and
+   raw 32-bpp data.  Matches the algorithm in ReverseBox
+   `_convert_x360_image_data` and is what ImageHeat's "XBOX 360
+   (block_pixel_size, texel_byte_pitch)" modes do:
+
+     - block_pixel_size = 4, texel_byte_pitch = 8   → BC1 / DXT1
+     - block_pixel_size = 4, texel_byte_pitch = 16  → BC3 / BC5
+     - block_pixel_size = 1, texel_byte_pitch = 4   → raw 32 bpp ARGB
+
+   Iterates sequential tiled-storage block offsets, computes the
+   logical (x, y) each block belongs to via xg_address_2d_tiled_*,
+   and scatters each block to its destination.  The existing
+   `untile_xbox360_bc` uses a different formula that has bit
+   collisions past 32-block widths — keep that one in place for any
+   callers that depend on it, and use this for new code paths.    */
+static void untile_xbox360_imageheat(const uint8_t* tiled,
+                                     size_t          tiled_size,
+                                     std::vector<uint8_t>& linear_out,
+                                     int             width_pixels,
+                                     int             height_pixels,
+                                     uint32_t        block_pixel_size,
+                                     uint32_t        texel_byte_pitch)
+{
+    const uint32_t width_in_blocks  = (uint32_t)width_pixels  / block_pixel_size;
+    const uint32_t height_in_blocks = (uint32_t)height_pixels / block_pixel_size;
+    const uint32_t padded_w = (width_in_blocks  + 31u) & ~31u;
+    const uint32_t padded_h = (height_in_blocks + 31u) & ~31u;
+    const uint32_t total    = padded_w * padded_h;
+
+    linear_out.assign((size_t)width_in_blocks
+                      * (size_t)height_in_blocks
+                      * (size_t)texel_byte_pitch, 0);
+
+    for (uint32_t off = 0; off < total; ++off) {
+        const uint32_t x = xg_address_2d_tiled_x(off, padded_w, texel_byte_pitch);
+        const uint32_t y = xg_address_2d_tiled_y(off, padded_w, texel_byte_pitch);
+        if (x >= width_in_blocks || y >= height_in_blocks) continue;
+
+        const size_t src = (size_t)off * (size_t)texel_byte_pitch;
+        if (src + texel_byte_pitch > tiled_size) continue;
+        const size_t dst = ((size_t)y * (size_t)width_in_blocks + (size_t)x)
+                         * (size_t)texel_byte_pitch;
+        std::memcpy(linear_out.data() + dst,
+                    tiled + src,
+                    (size_t)texel_byte_pitch);
+    }
+}
+
 /* Per-thread tag for the most recent decode_tex_to_rgba failure.
    load_named_srv reads this when an SRV doesn't materialise and
    forwards it to the OutputLog so the user can see WHY a texture
@@ -432,23 +482,144 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
     if (mip_index >= 0 && (size_t)mip_index < ti.Mips.size()) {
         best = (size_t)mip_index;
     } else {
-        int bw = 0, bh = 0; mip_wh(0, bw, bh);
-        size_t best_area = (size_t)bw * (size_t)bh;
-        for (size_t i = 1; i < ti.Mips.size(); ++i) {
-            int w = 0, h = 0; mip_wh(i, w, h);
-            size_t area = (size_t)w * (size_t)h;
-            if (area > best_area) { best_area = area; best = i; }
+        /* Prefer the mip whose stored dimensions match the file-header's
+           TextureWidth/Height — that's the "real" intended texture, which
+           in the merged extraction layout is NOT the first record on the
+           chain (the first record is the optional 1024mip0 chunk, which
+           for many spec/selfillum maps is an all-zero placeholder that
+           decodes to a fully-transparent image and looks like "nothing
+           rendered" in the preview).  Fall back to largest-area only
+           when no mip matches the header W/H exactly. */
+        size_t match_idx = ti.Mips.size();
+        for (size_t i = 0; i < ti.Mips.size(); ++i) {
+            int w_i = 0, h_i = 0; mip_wh(i, w_i, h_i);
+            if ((uint32_t)w_i == ti.TextureWidth &&
+                (uint32_t)h_i == ti.TextureHeight) {
+                match_idx = i;
+                break;
+            }
+        }
+        if (match_idx < ti.Mips.size()) {
+            best = match_idx;
+        } else {
+            int bw = 0, bh = 0; mip_wh(0, bw, bh);
+            size_t best_area = (size_t)bw * (size_t)bh;
+            for (size_t i = 1; i < ti.Mips.size(); ++i) {
+                int wm = 0, hm = 0; mip_wh(i, wm, hm);
+                size_t area = (size_t)wm * (size_t)hm;
+                if (area > best_area) { best_area = area; best = i; }
+            }
         }
     }
 
     const auto& m = ti.Mips[best];
     int w = 0, h = 0; mip_wh(best, w, h);
 
-    if (m.MipDataOffset + m.MipDataSizeParsed > blob.size()) {
+    /* The zlib-deflated sentinels (200..203) set MipDataSizeParsed to
+       the COMPRESSED stream size which can legitimately exceed any
+       per-cell math; skip the standard OOB check for those. */
+    const bool is_zlib_sentinel =
+        (m.CompFlag >= 200 && m.CompFlag <= 203);
+    if (!is_zlib_sentinel &&
+        m.MipDataOffset + m.MipDataSizeParsed > blob.size()) {
         std::ostringstream os;
         os << "mip[" << best << "] data out of bounds (offset=" << m.MipDataOffset
            << " size=" << m.MipDataSizeParsed << " blob=" << blob.size() << ")";
         DEC_FAIL("mip_oob");
+    }
+
+    /* Sentinel CompFlag 200..203 — "size-prefixed + zlib-deflated"
+       variant from level texture_atlas pages.  The parser stashes
+       the expected POST-inflate raw size in Unknown_3 so we can cap
+       the inflate output buffer.  We inflate locally and run the
+       existing untile / endian / blit path inline (rather than
+       trying to rewrite the const blob the rest of the function
+       reads from). */
+    if (m.CompFlag == 200 || m.CompFlag == 201 ||
+        m.CompFlag == 202 || m.CompFlag == 203)
+    {
+        const size_t expected_raw = (size_t)m.Unknown_3;
+        if (expected_raw == 0) DEC_FAIL("zlib_no_raw_size");
+
+        std::vector<uint8_t> raw(expected_raw);
+        z_stream zs{};
+        zs.next_in   = const_cast<Bytef*>(blob.data() + m.MipDataOffset);
+        zs.avail_in  = (uInt)m.MipDataSizeParsed;
+        zs.next_out  = raw.data();
+        zs.avail_out = (uInt)expected_raw;
+        if (inflateInit2(&zs, 15) != Z_OK) DEC_FAIL("zlib_init_fail");
+        int rc = inflate(&zs, Z_FINISH);
+        const size_t produced = expected_raw - zs.avail_out;
+        inflateEnd(&zs);
+        if (produced != expected_raw &&
+            !(rc == Z_OK || rc == Z_STREAM_END || rc == Z_BUF_ERROR)) {
+            std::ostringstream os;
+            os << "zlib_inflate_fail rc=" << rc
+               << " produced=" << produced;
+            g_last_decode_info += " " + os.str();
+            DEC_FAIL("zlib_inflate_fail");
+        }
+
+        out_w = w; out_h = h;
+
+        /* Use the ImageHeat-port untile for these paths.  The older
+           untile_xbox360_bc has bit collisions past 32-block widths,
+           which broke BC1 1024×1024 atlas pages (256 blocks wide). */
+        if (m.CompFlag == 200) {              // BC1 — "XBOX 360 (4, 8)"
+            std::vector<uint8_t> linear;
+            untile_xbox360_imageheat(raw.data(), raw.size(), linear,
+                                     w, h, /*bpp_size=*/4, /*texel_pitch=*/8);
+            swap_bc1_endian(linear.data(), linear.size());
+            blit_bc1_to_rgba(linear.data(), w, h, rgba);
+            if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
+            return true;
+        }
+        if (m.CompFlag == 201) {              // BC3 — "XBOX 360 (4, 16)"
+            std::vector<uint8_t> linear;
+            untile_xbox360_imageheat(raw.data(), raw.size(), linear,
+                                     w, h, /*bpp_size=*/4, /*texel_pitch=*/16);
+            swap_bc3_endian(linear.data(), linear.size());
+            blit_bc3_to_rgba(linear.data(), w, h, rgba);
+            if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
+            return true;
+        }
+        if (m.CompFlag == 202) {              // BC5 — "XBOX 360 (4, 16)"
+            std::vector<uint8_t> linear;
+            untile_xbox360_imageheat(raw.data(), raw.size(), linear,
+                                     w, h, /*bpp_size=*/4, /*texel_pitch=*/16);
+            swap_bc5_endian(linear.data(), linear.size());
+            blit_bc5_to_rgba(linear.data(), w, h, rgba);
+            if (out_has_alpha) *out_has_alpha = false;
+            return true;
+        }
+        /* CompFlag == 203 — raw ARGB8 path mirrors the existing
+           CompFlag=99 untile (Xbox 360 "(1, 4)" swizzle). */
+        const size_t pixels = (size_t)w * (size_t)h;
+        if (raw.size() < pixels * 4) DEC_FAIL("zlib_argb8_size_short");
+        rgba.assign(pixels * 4, 0);
+        const uint32_t W2 = (uint32_t)w;
+        const uint32_t H2 = (uint32_t)h;
+        const uint32_t padded_W = (W2 + 31u) & ~31u;
+        const uint32_t padded_H = (H2 + 31u) & ~31u;
+        const uint32_t total    = padded_W * padded_H;
+        for (uint32_t off = 0; off < total; ++off) {
+            const uint32_t sx = xg_address_2d_tiled_x(off, padded_W, 4);
+            const uint32_t sy = xg_address_2d_tiled_y(off, padded_W, 4);
+            if (sx >= W2 || sy >= H2) continue;
+            const size_t src_byte = (size_t)off * 4;
+            if (src_byte + 4 > raw.size()) continue;
+            const uint8_t A = raw[src_byte + 0];
+            const uint8_t R = raw[src_byte + 1];
+            const uint8_t G = raw[src_byte + 2];
+            const uint8_t B = raw[src_byte + 3];
+            const size_t dst = ((size_t)sy * W2 + sx) * 4;
+            rgba[dst + 0] = R;
+            rgba[dst + 1] = G;
+            rgba[dst + 2] = B;
+            rgba[dst + 3] = A;
+        }
+        if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
+        return true;
     }
 
     /* CompFlag==99 / 100 is the parser's sentinel for the "size-prefixed,
@@ -917,6 +1088,10 @@ static void mp_release(ModelPreview& mp){
     mp.meshes.clear();
     if(mp.vs){ mp.vs->Release(); mp.vs=nullptr; }
     if(mp.ps){ mp.ps->Release(); mp.ps=nullptr; }
+    if(mp.vs_terrain){ mp.vs_terrain->Release(); mp.vs_terrain=nullptr; }
+    if(mp.ps_terrain){ mp.ps_terrain->Release(); mp.ps_terrain=nullptr; }
+    if(mp.cbuffer_terrain){ mp.cbuffer_terrain->Release(); mp.cbuffer_terrain=nullptr; }
+    if(mp.sampler_point){ mp.sampler_point->Release(); mp.sampler_point=nullptr; }
     if(mp.layout){ mp.layout->Release(); mp.layout=nullptr; }
     if(mp.cbuffer){ mp.cbuffer->Release(); mp.cbuffer=nullptr; }
     if(mp.bone_cb){ mp.bone_cb->Release(); mp.bone_cb=nullptr; }
@@ -1045,9 +1220,208 @@ float4 PS(VSOUT i) : SV_Target {
         color = lerp(color, hi, 0.65);
     }
 
+    // Alpha-cutout discard.  Fable 2 foliage/grain diffuse textures
+    // (esa_wheatsheaves.tex, bw_oak_leaf_1.tex, etc.) use alpha as a
+    // binary mask for the stalk silhouettes.  Without this discard the
+    // alpha-blend pass (depth-no-write) draws the low-alpha edges and
+    // back faces in front of the actual silhouette, which reads as a
+    // see-through / "flipped normals" haze.  Discarding very-low alpha
+    // turns the mask into a clean cutout that depth-tests correctly.
+    // For opaque textures the diff sample's alpha is 1, so the discard
+    // never fires and behaviour is unchanged.
+    if (alpha < 0.25) discard;
+
     return float4(color, alpha);
 }
 )";
+
+/* ---------------------- TERRAIN SPLAT SHADER ---------------------------
+
+   Bound INSTEAD of g_vs/g_ps when rendering a chunk-splat terrain mesh.
+   Same input layout as the standard shader (POS+NORMAL+UV+BONEIDS+BW)
+   so we reuse `mp.layout`.  The VS just passes world XY through to the
+   PS; the PS does the chunk grid lookup + multi-layer blending.
+
+   Bindings (set from MP_Render when m.is_terrain):
+     t0 : Texture2DArray<RGBA8>  LOD diffuse atlas (N slices)
+     t1 : Texture2DArray<RGBA8>  chunk index LUT  (kMaxLayers slices)
+     t2 : Texture2DArray<RGBA8>  chunk blend LUT  (kMaxLayers slices)
+     t3 : Texture2D<RGBA8>       lightmap
+     s0 : anisotropic wrap (already used by main shader)
+     s1 : point-clamp (for the chunk LUTs)
+     b2 : TerrainCB                                                  */
+
+static const char* g_terrain_vs = R"(
+cbuffer CB : register(b0){
+    float4x4 mvp;
+    float4   lightDir;
+    float4x4 mv;
+    float4   params;
+}
+cbuffer Bones : register(b1){
+    row_major float4x4 bones[256];
+}
+struct VSIN{
+    float3 p   : POSITION;
+    float3 n   : NORMAL;
+    float2 t   : TEXCOORD0;
+    uint4  bid : BONEIDS;
+    float4 bw  : BONEWEIGHTS;
+};
+struct VSOUT{
+    float4 p   : SV_Position;
+    float3 n   : NORMAL;
+    float2 t   : TEXCOORD0;  // world-space-tiled detail UV (set by CPU)
+    float3 wp  : TEXCOORD1;  // world XYZ (for chunk lookup + lightmap)
+};
+VSOUT VS(VSIN i){
+    VSOUT o;
+    o.p  = mul(float4(i.p, 1.0), mvp);
+    o.n  = normalize(mul(i.n, (float3x3)mv));
+    o.t  = i.t;
+    o.wp = i.p;
+    return o;
+}
+)";
+
+static const char* g_terrain_ps = R"(
+cbuffer CB : register(b0){
+    float4x4 mvp;
+    float4   lightDir;
+    float4x4 mv;
+    float4   params;
+}
+cbuffer TerrainCB : register(b2){
+    /* xy = world origin (XZ), zw = chunk extent (XZ) */
+    float4 chunk_origin_extent;
+    /* x = chunk_w, y = chunk_h, z = lod_count, w = max blend (255 max in u8) */
+    float4 chunk_grid_size;
+    /* x = blend_scale  (u8 / blend_scale → [0..1])
+       y = reserved */
+    float4 splat_params;
+    /* Affine mesh→world transform for chunk lookup:
+       world_xy = mesh_xy * mesh_xform.xy + mesh_xform.zw
+       Needed when the mesh was built with the wrong tile_size — for
+       chapter3 the .ghf has tile_size=0 so the mesh ends up 2× the
+       true world extent.  This is the cheap fix: shader rescales. */
+    float4 mesh_xform;
+}
+Texture2DArray  lod_array     : register(t0);
+Texture2DArray  chunk_idx     : register(t1);
+Texture2DArray  chunk_blend   : register(t2);
+Texture2D       lightmap      : register(t3);
+SamplerState    smp_wrap      : register(s0);
+SamplerState    smp_point     : register(s1);
+
+struct VSOUT{
+    float4 p   : SV_Position;
+    float3 n   : NORMAL;
+    float2 t   : TEXCOORD0;
+    float3 wp  : TEXCOORD1;
+};
+
+float3 sample_lod(int slice, float2 uv){
+    /* Sample uses screen-space derivatives implicitly → GPU mipmap. */
+    return lod_array.Sample(smp_wrap, float3(uv, slice)).rgb;
+}
+
+float4 PS(VSOUT i) : SV_Target {
+    /* Map mesh-space → world-space (chunk-grid space).  Mesh may be
+       at a different scale than the .ehf chunk world when .ghf tile
+       data is bogus (chapter3 has tile_size=0 in .ghf, so the mesh
+       gets built with the fallback tile=1 → 2× too big). */
+    float2 mesh_xy  = float2(i.wp.x, i.wp.z);
+    float2 world_xy = mesh_xy * mesh_xform.xy + mesh_xform.zw;
+    float2 origin   = chunk_origin_extent.xy;
+    float2 extent   = chunk_origin_extent.zw;
+    float  CW       = chunk_grid_size.x;
+    float  CH       = chunk_grid_size.y;
+    float  max_lod  = chunk_grid_size.z;
+
+    /* Map world → chunk-grid coords [0, CW] × [0, CH]. */
+    float2 chunk_co = (world_xy - origin) / extent;
+
+    /* Clamp to valid chunk range. */
+    float2 chunk_clamped = clamp(chunk_co,
+                                 float2(0, 0),
+                                 float2(CW - 0.001, CH - 0.001));
+    int2   chunk_xy = int2(floor(chunk_clamped));
+    float2 corner_uv = frac(chunk_clamped);
+
+    /* 4 bilinear corner weights. */
+    float wx = corner_uv.x, wy = corner_uv.y;
+    float w00 = (1.0 - wx) * (1.0 - wy);
+    float w10 =        wx  * (1.0 - wy);
+    float w01 = (1.0 - wx) *        wy ;
+    float w11 =        wx  *        wy ;
+
+    float3 final = float3(0.0, 0.0, 0.0);
+    float  alpha_sum = 0.0;
+
+    /* Walk up to 16 layers, alpha-stacking.  Runtime loop with
+       early-out at the 0xFF sentinel so most chunks (which have only
+       2-3 layers) skip the unused slots cheaply. */
+    [loop]
+    for (int L = 0; L < 16; ++L) {
+        float4 idx_norm = chunk_idx.Load(int4(chunk_xy, L, 0));
+        float4 idx255   = round(idx_norm * 255.0);
+        if (idx255.x > 254.5) break;       // 0xFF sentinel → no more layers
+
+        float4 bln_norm = chunk_blend.Load(int4(chunk_xy, L, 0));
+        /* blend_scale lets us recover the original 0..max_blend range
+           (chapter3's max was 3.0 so we map u8 [0,255] → [0, max]) */
+        float bscale = splat_params.x;
+        float4 bln   = bln_norm * 255.0 / bscale;
+
+        /* Sample 4 corner textures.  Indices may legitimately equal
+           each other; this is fine, the shader just does 4 samples. */
+        float3 c00 = sample_lod((int)idx255.x, i.t);
+        float3 c10 = sample_lod((int)idx255.y, i.t);
+        float3 c01 = sample_lod((int)idx255.z, i.t);
+        float3 c11 = sample_lod((int)idx255.w, i.t);
+
+        /* Bilinear-blend the 4 corner samples by position weights. */
+        float3 lc = c00 * w00 + c10 * w10 + c01 * w01 + c11 * w11;
+
+        /* Bilinear-blend the 4 corner blend amounts → per-pixel alpha. */
+        float la = saturate(bln.x * w00 + bln.y * w10
+                          + bln.z * w01 + bln.w * w11);
+
+        /* Alpha-over composite. */
+        float one_minus = 1.0 - la;
+        final     = final     * one_minus + lc * la;
+        alpha_sum = saturate(alpha_sum + la * (1.0 - alpha_sum));
+    }
+
+    /* Fallback: if no layer contributed (e.g. all blends zero), use
+       LOD slice 0 directly so we never render black terrain.       */
+    if (alpha_sum < 0.05) {
+        final = sample_lod(0, i.t);
+    }
+
+    /* Lightmap AO modulation.  Lightmap is sized to the heightfield;
+       map chunk_co (in [0, CW]×[0, CH]) to lightmap UV [0,1].      */
+    float2 lm_uv = chunk_co / float2(CW, CH);
+    float  ao    = lightmap.Sample(smp_wrap, lm_uv).r;
+    final *= (ao * 0.55 + 0.45);
+
+    /* Cheap headlamp-like diffuse term. */
+    float3 N = normalize(i.n);
+    float3 L = normalize(float3(0.3, 0.7, 0.5));
+    float  ndotl = saturate(dot(N, L));
+    float  shade = 0.55 + 0.45 * ndotl;
+    final *= shade;
+
+    /* Highlight tint (same as main shader). */
+    if (params.z > 0.5) {
+        float3 hi = float3(0.10, 0.95, 0.25);
+        final = lerp(final, hi, 0.65);
+    }
+
+    return float4(final, 1.0);
+}
+)";
+
 static bool create_white_srv(ID3D11Device* dev, ID3D11ShaderResourceView** out_srv){
     *out_srv = nullptr;
     UINT px = 0xFFFFFFFFu;
@@ -1131,6 +1505,43 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     if(FAILED(dev->CreateBuffer(&bcb, nullptr, &mp.bone_cb))) return false;
     D3D11_SAMPLER_DESC ssd{}; ssd.Filter=D3D11_FILTER_ANISOTROPIC; ssd.MaxAnisotropy=16; ssd.AddressU=ssd.AddressV=ssd.AddressW=D3D11_TEXTURE_ADDRESS_WRAP; ssd.MaxLOD=D3D11_FLOAT32_MAX;
     if(FAILED(dev->CreateSamplerState(&ssd,&mp.sampler))) return false;
+
+    /* Terrain shader pair — same input layout as the main shader.   */
+    {
+        ID3DBlob* tvsb = nullptr; ID3DBlob* tpsb = nullptr;
+        if (compile_shader(g_terrain_vs, "VS", "vs_5_0", &tvsb) &&
+            compile_shader(g_terrain_ps, "PS", "ps_5_0", &tpsb))
+        {
+            dev->CreateVertexShader(tvsb->GetBufferPointer(),
+                                    tvsb->GetBufferSize(),
+                                    nullptr, &mp.vs_terrain);
+            dev->CreatePixelShader(tpsb->GetBufferPointer(),
+                                   tpsb->GetBufferSize(),
+                                   nullptr, &mp.ps_terrain);
+        }
+        if (tvsb) tvsb->Release();
+        if (tpsb) tpsb->Release();
+    }
+    /* TerrainCB — packed: float4 origin_extent + float4 grid_size +
+       float4 splat_params = 48 bytes (padded to 64 for D3D11).      */
+    {
+        D3D11_BUFFER_DESC tcb{};
+        tcb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        tcb.ByteWidth = 64;
+        tcb.Usage = D3D11_USAGE_DYNAMIC;
+        tcb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        dev->CreateBuffer(&tcb, nullptr, &mp.cbuffer_terrain);
+    }
+    /* Point sampler for the chunk LUTs (NEAREST, clamp). */
+    {
+        D3D11_SAMPLER_DESC psd{};
+        psd.Filter   = D3D11_FILTER_MIN_MAG_MIP_POINT;
+        psd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        psd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        psd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        psd.MaxLOD = D3D11_FLOAT32_MAX;
+        dev->CreateSamplerState(&psd, &mp.sampler_point);
+    }
     D3D11_RASTERIZER_DESC rd{};
     rd.FillMode = D3D11_FILL_SOLID;
     rd.CullMode = D3D11_CULL_NONE;
@@ -1569,7 +1980,8 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     ctx->IASetInputLayout(mp.layout);
     ctx->VSSetShader(mp.vs,nullptr,0);
     ctx->PSSetShader(mp.ps,nullptr,0);
-    ctx->PSSetSamplers(0,1,&mp.sampler);
+    ID3D11SamplerState* samplers[2] = { mp.sampler, mp.sampler_point };
+    ctx->PSSetSamplers(0, 2, samplers);
 
     ctx->RSSetState((mp.wireframe && mp.rs_wire) ? mp.rs_wire : mp.rs);
     float cy = cosf(cam.yaw);
@@ -1585,11 +1997,16 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     float aspect = (float)mp.width / (float)mp.height;
     float far_plane = mp.radius * 100.0f;
     XMMATRIX P = XMMatrixPerspectiveFovLH(fov, aspect, 0.05f, far_plane);
-    const float tiltX = -XM_PIDIV2;
-    XMMATRIX Tm = XMMatrixTranslation(-mp.center[0], -mp.center[1], -mp.center[2]);
-    XMMATRIX R  = XMMatrixRotationX(tiltX);
-    XMMATRIX Tp = XMMatrixTranslation( mp.center[0],  mp.center[1],  mp.center[2]);
-    XMMATRIX W  = Tm * R * Tp;
+    /* Terrain meshes opt out of the engine-style 90° X tilt — they
+       are already Y-up.  MDL geometry keeps the original behaviour. */
+    XMMATRIX W = XMMatrixIdentity();
+    if (!mp.no_tilt) {
+        const float tiltX = -XM_PIDIV2;
+        XMMATRIX Tm = XMMatrixTranslation(-mp.center[0], -mp.center[1], -mp.center[2]);
+        XMMATRIX R  = XMMatrixRotationX(tiltX);
+        XMMATRIX Tp = XMMatrixTranslation( mp.center[0],  mp.center[1],  mp.center[2]);
+        W  = Tm * R * Tp;
+    }
     XMMATRIX MVP = XMMatrixTranspose(W * V * P);
     XMMATRIX MV  = XMMatrixTranspose(W * V);
     XMVECTOR lightDirV = XMVector3Normalize(XMVectorSet(0.5f, 1.0f, 0.3f, 0.0f));
@@ -1676,18 +2093,93 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     };
 
     float blend_factor[4] = {0,0,0,0};
-    ctx->OMSetDepthStencilState(mp.dssWrite, 0);
-    for(const auto& m : mp.meshes){
-        if(!m.vb || !m.ib || m.index_count==0 || m.has_alpha) continue;
-        if (any_isolated && !m.isolated) continue;
-        if (mp.selected_lod >= 0 &&
-            m.lod_index != (uint32_t)mp.selected_lod) continue;
-        upload_per_mesh_cb(m.highlight);
-        ctx->OMSetBlendState(mp.bs, blend_factor, 0xFFFFFFFF);
+
+    /* Per-mesh helper: switch shader + bind resources, draw, restore. */
+    auto draw_one = [&](const MPPerMesh& m, ID3D11BlendState* bs) {
         UINT stride=sizeof(MPVertex), offset=0;
         ctx->IASetVertexBuffers(0,1,&m.vb,&stride,&offset);
         ctx->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->OMSetBlendState(bs, blend_factor, 0xFFFFFFFF);
+
+        const auto& R = TerrainSplat::Get();
+        const bool use_terrain_shader =
+            m.is_terrain && R.ok &&
+            mp.vs_terrain && mp.ps_terrain && mp.cbuffer_terrain;
+
+        if (use_terrain_shader) {
+            /* Update TerrainCB. */
+            D3D11_MAPPED_SUBRESOURCE tms{};
+            if (SUCCEEDED(ctx->Map(mp.cbuffer_terrain, 0,
+                                   D3D11_MAP_WRITE_DISCARD, 0, &tms))) {
+                struct TCB {
+                    float origin_extent[4];
+                    float grid_size[4];
+                    float splat_params[4];
+                    float mesh_xform[4];
+                } t{};
+                t.origin_extent[0] = R.world_origin_x;
+                t.origin_extent[1] = R.world_origin_z;
+                t.origin_extent[2] = R.chunk_extent_x;
+                t.origin_extent[3] = R.chunk_extent_z;
+                t.grid_size[0] = (float)R.chunk_w;
+                t.grid_size[1] = (float)R.chunk_h;
+                t.grid_size[2] = (float)R.lod_count;
+                t.grid_size[3] = 255.f;
+                t.splat_params[0] = 3.0f;   // blend_scale
+                t.splat_params[1] = 0.0f;
+                t.splat_params[2] = 0.0f;
+                t.splat_params[3] = 0.0f;
+                /* world_xy = mesh_xy * scale + offset, where:
+                     scale  = chunk_total / mesh_total
+                     offset = chunk_total / 2 + chunk_world_origin
+                   For chapter3: chunk_total=384, mesh_total=768 → scale=0.5,
+                   offset=192.  The mesh is built centered, so mesh_xy in
+                   [-mesh_half, +mesh_half] maps to world [0, chunk_total].  */
+                const float chunk_total_x = float(R.chunk_w) * R.chunk_extent_x;
+                const float chunk_total_z = float(R.chunk_h) * R.chunk_extent_z;
+                const float mesh_total_x = 2.f * R.mesh_to_world_x;
+                const float mesh_total_z = 2.f * R.mesh_to_world_z;
+                const float sx = (mesh_total_x > 0.f) ?
+                    chunk_total_x / mesh_total_x : 1.f;
+                const float sz = (mesh_total_z > 0.f) ?
+                    chunk_total_z / mesh_total_z : 1.f;
+                t.mesh_xform[0] = sx;
+                t.mesh_xform[1] = sz;
+                t.mesh_xform[2] = chunk_total_x * 0.5f + R.world_origin_x;
+                t.mesh_xform[3] = chunk_total_z * 0.5f + R.world_origin_z;
+                std::memcpy(tms.pData, &t, sizeof(t));
+                ctx->Unmap(mp.cbuffer_terrain, 0);
+            }
+
+            ctx->VSSetShader(mp.vs_terrain, nullptr, 0);
+            ctx->PSSetShader(mp.ps_terrain, nullptr, 0);
+            /* b0 still bound from the outer setup; bind b2 = TerrainCB. */
+            ctx->VSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
+            ctx->PSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
+
+            ID3D11ShaderResourceView* srvs[4] = {
+                R.lod_diffuse_array,
+                R.chunk_idx_array,
+                R.chunk_blend_array,
+                R.lightmap
+            };
+            ctx->PSSetShaderResources(0, 4, srvs);
+
+            ctx->DrawIndexed(m.index_count, 0, 0);
+
+            ID3D11ShaderResourceView* nulls[4] = { nullptr, nullptr, nullptr, nullptr };
+            ctx->PSSetShaderResources(0, 4, nulls);
+            ID3D11Buffer* null_cb = nullptr;
+            ctx->VSSetConstantBuffers(2, 1, &null_cb);
+            ctx->PSSetConstantBuffers(2, 1, &null_cb);
+
+            /* Restore main shader for the next mesh in the loop. */
+            ctx->VSSetShader(mp.vs, nullptr, 0);
+            ctx->PSSetShader(mp.ps, nullptr, 0);
+            return;
+        }
+
         ID3D11ShaderResourceView* diffuse_to_use  =
             (m.diffuse_visible  && m.srv_diffuse)  ? m.srv_diffuse  : mp.default_srv;
         ID3D11ShaderResourceView* normal_to_use   =
@@ -1701,9 +2193,19 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         ID3D11ShaderResourceView* srvs[5] = { diffuse_to_use, normal_to_use, specular_to_use,
                                               metallic_to_use, extra_to_use };
         ctx->PSSetShaderResources(0, 5, srvs);
-        ctx->DrawIndexed(m.index_count,0,0);
+        ctx->DrawIndexed(m.index_count, 0, 0);
         ID3D11ShaderResourceView* nullsrvs[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
         ctx->PSSetShaderResources(0, 5, nullsrvs);
+    };
+
+    ctx->OMSetDepthStencilState(mp.dssWrite, 0);
+    for(const auto& m : mp.meshes){
+        if(!m.vb || !m.ib || m.index_count==0 || m.has_alpha) continue;
+        if (any_isolated && !m.isolated) continue;
+        if (mp.selected_lod >= 0 &&
+            m.lod_index != (uint32_t)mp.selected_lod) continue;
+        upload_per_mesh_cb(m.highlight);
+        draw_one(m, mp.bs);
     }
     ctx->OMSetDepthStencilState(mp.dssNoWrite, 0);
     for(const auto& m : mp.meshes){
@@ -1712,27 +2214,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         if (mp.selected_lod >= 0 &&
             m.lod_index != (uint32_t)mp.selected_lod) continue;
         upload_per_mesh_cb(m.highlight);
-        ctx->OMSetBlendState(mp.bsAlpha, blend_factor, 0xFFFFFFFF);
-        UINT stride=sizeof(MPVertex), offset=0;
-        ctx->IASetVertexBuffers(0,1,&m.vb,&stride,&offset);
-        ctx->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
-        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ID3D11ShaderResourceView* diffuse_to_use  =
-            (m.diffuse_visible  && m.srv_diffuse)  ? m.srv_diffuse  : mp.default_srv;
-        ID3D11ShaderResourceView* normal_to_use   =
-            (m.normal_visible   && m.srv_normal)   ? m.srv_normal   : mp.default_srv;
-        ID3D11ShaderResourceView* specular_to_use =
-            (m.specular_visible && m.srv_specular) ? m.srv_specular : mp.default_srv;
-        ID3D11ShaderResourceView* metallic_to_use =
-            (m.metallic_visible && m.srv_metallic) ? m.srv_metallic : mp.default_srv;
-        ID3D11ShaderResourceView* extra_to_use    =
-            (m.extra_visible    && m.srv_extra)    ? m.srv_extra    : mp.default_srv;
-        ID3D11ShaderResourceView* srvs[5] = { diffuse_to_use, normal_to_use, specular_to_use,
-                                              metallic_to_use, extra_to_use };
-        ctx->PSSetShaderResources(0, 5, srvs);
-        ctx->DrawIndexed(m.index_count,0,0);
-        ID3D11ShaderResourceView* nullsrvs[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-        ctx->PSSetShaderResources(0, 5, nullsrvs);
+        draw_one(m, mp.bsAlpha);
     }
     ctx->Release();
 }

@@ -134,17 +134,27 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
         return true;
     }
 
-    /* Variant "raw ARGB8" layout — observed on PixelFormat=2 textures
-       like lanternrusticglass.tex where:
+    /* "Size-prefixed mip0" layout variant.  Observed on assets where:
          - only MipMapOffset[0] is non-zero, the rest are 0
-         - the u32 BE at that offset equals W*H*4 (mip0 byte count)
-         - the body that follows is raw 8-bit-per-channel ARGB pixel data
-           (alpha first, then R, G, B), not a per-mip MipDef chain.
-       The standard loop below would treat MipMapOffset[1..]==0 as
-       offsets into the file header and read garbage MipDefs; detect
-       and handle this layout up front instead.  We push a single
-       MipDef carrying CompFlag=99 — a sentinel decode_tex_to_rgba
-       recognises as "raw ARGB8". */
+         - the u32 BE at that offset is the size of the raw mip0 body
+           in bytes (W*H*4 for ARGB8, W*H/2 for BC1, W*H for BC3, etc.)
+         - the bytes immediately after the size prefix are the mip0
+           payload — Xbox 360 tiled and (for BC) endian-swapped.
+
+       Concretely we've seen this variant for:
+         - PixelFormat=2 (raw ARGB8)        — lanternrusticglass.tex
+         - PixelFormat=4 (raw ?RGB/single)  — lanternrusticglass_spec.tex
+         - PixelFormat=35 (BC1 / DXT1)      — defaultscenario.texture_atlas
+         - PixelFormat=39 (BC3 / DXT5)      — other texture-atlas variants
+
+       Standard parse_tex_info below would interpret the size prefix
+       as a MipDef::CompFlag and walk into garbage; detect this layout
+       up front and push a single hand-crafted MipDef instead.
+
+       Sentinel CompFlag values steer decode_tex_to_rgba:
+         99 → raw ARGB8 (PF=2 diffuse-like, A in byte 0)
+        100 → raw ?RGB  (PF=4 spec/normal, byte 0 unused → force A=255)
+         7 → raw BC block (existing comp=7 BC1/BC3 untile path)        */
     {
         bool single_offset = (!out.MipMapOffset.empty()) && (out.MipMapOffset[0] != 0);
         for (size_t j = 1; j < out.MipMapOffset.size() && single_offset; ++j) {
@@ -152,118 +162,259 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
         }
         if (single_offset && out.TextureWidth > 0 && out.TextureHeight > 0) {
             size_t mo = (size_t) out.MipMapOffset[0];
-            const size_t expected = (size_t)out.TextureWidth *
-                                    (size_t)out.TextureHeight * 4;
             uint32_t size_prefix = 0;
             size_t tmp_off = mo;
-            if (mo + 4 <= d.size() &&
-                rd32be(d, tmp_off, size_prefix) &&
-                (size_t)size_prefix == expected &&
-                mo + 4 + expected <= d.size())
-            {
+            const bool prefix_ok = (mo + 4 <= d.size()) &&
+                                   rd32be(d, tmp_off, size_prefix) &&
+                                   (size_t)mo + 4 + size_prefix <= d.size();
+
+            /* Match the prefix against the byte-count of each plausible
+               raw layout for this texture's W/H. */
+            const size_t W = (size_t)out.TextureWidth;
+            const size_t H = (size_t)out.TextureHeight;
+            const size_t sz_argb8  = W * H * 4;
+            const size_t sz_bc1    = W * H / 2;        // BC1 = 4 bpp
+            const size_t sz_bc3    = W * H * 1;        // BC3 = 8 bpp
+
+            /* Xbox 360 tile pads each storage dimension up to a 32-texel
+               boundary (BC blocks count as one "texel" for this purpose,
+               i.e. a 4×4 chunk is one tile-grid cell).  Small textures
+               whose unpadded body is < a 4 KB page get rounded up to the
+               nearest page anyway; lots of selfillum / glow / spec maps
+               in globals_textures.bnk land here.  Without these padded
+               buckets the size-prefix wouldn't match anything and we'd
+               fall into the standard MipDef walker, which reads padding
+               zeros as a bogus CompFlag and produces an empty mip. */
+            const size_t pW_argb = (W + 31) & ~size_t(31);
+            const size_t pH_argb = (H + 31) & ~size_t(31);
+            const size_t sz_argb8_padded = pW_argb * pH_argb * 4;
+
+            const size_t Wb = (W + 3) / 4;   // width  in BC blocks
+            const size_t Hb = (H + 3) / 4;   // height in BC blocks
+            const size_t pWb = (Wb + 31) & ~size_t(31);
+            const size_t pHb = (Hb + 31) & ~size_t(31);
+            const size_t sz_bc1_padded = pWb * pHb * 8;
+            const size_t sz_bc3_padded = pWb * pHb * 16;
+
+            bool matched = false;
+            uint32_t comp_tag    = 0;
+            size_t   body_size   = 0;
+
+            if (prefix_ok && (size_t)size_prefix == sz_argb8) {
+                /* Raw ARGB8 — diffuse / mask variants. */
+                comp_tag  = (out.PixelFormat == 2) ? 99u : 100u;
+                body_size = sz_argb8;
+                matched   = true;
+            } else if (prefix_ok && (size_t)size_prefix == sz_argb8_padded &&
+                       sz_argb8_padded != sz_argb8 &&
+                       (out.PixelFormat == 2 || out.PixelFormat == 4)) {
+                /* Tile-padded raw ARGB8 — small selfillum maps where
+                   the body got rounded up to a 4 KB page in storage.
+                   The CompFlag=99/100 decode path already untiles via
+                   padded_W/padded_H, so it consumes the full padded
+                   body and only emits pixels within the logical W/H. */
+                comp_tag  = (out.PixelFormat == 2) ? 99u : 100u;
+                body_size = sz_argb8_padded;
+                matched   = true;
+            } else if (prefix_ok && (size_t)size_prefix == sz_bc1 &&
+                       (out.PixelFormat == 35)) {
+                /* BC1 / DXT1 — texture atlases.  Goes through the
+                   existing CompFlag==7 BC1 untile path in
+                   decode_tex_to_rgba. */
+                comp_tag  = 7u;
+                body_size = sz_bc1;
+                matched   = true;
+            } else if (prefix_ok && (size_t)size_prefix == sz_bc1_padded &&
+                       sz_bc1_padded != sz_bc1 &&
+                       (out.PixelFormat == 35)) {
+                /* Tile-padded BC1 — same idea as the ARGB8 case above. */
+                comp_tag  = 7u;
+                body_size = sz_bc1_padded;
+                matched   = true;
+            } else if (prefix_ok && (size_t)size_prefix == sz_bc3 &&
+                       (out.PixelFormat == 39)) {
+                /* BC3 / DXT5 — atlases with alpha.  Same comp=7 path. */
+                comp_tag  = 7u;
+                body_size = sz_bc3;
+                matched   = true;
+            } else if (prefix_ok && (size_t)size_prefix == sz_bc3_padded &&
+                       sz_bc3_padded != sz_bc3 &&
+                       (out.PixelFormat == 39)) {
+                /* Tile-padded BC3 — same idea as the ARGB8 case above. */
+                comp_tag  = 7u;
+                body_size = sz_bc3_padded;
+                matched   = true;
+            }
+
+            if (matched) {
                 TexInfo::MipDef md{};
                 md.DefOffset         = mo;
-                /* Two sentinel CompFlag values for this variant:
-                     99 → PixelFormat=2 (diffuse-like, alpha in byte 0)
-                    100 → other PixelFormats e.g. 4 (spec/normal style:
-                          byte 0 is 0x00 unused; force alpha=255 in the
-                          decoder so the texture renders opaque). */
-                md.CompFlag          = (out.PixelFormat == 2) ? 99u : 100u;
+                md.CompFlag          = comp_tag;
                 md.DataOffset        = 4;
-                md.DataSize          = size_prefix + 4;
+                md.DataSize          = (uint32_t)(body_size + 4);
                 md.HasWH             = true;
                 md.MipWidth          = (uint16_t)out.TextureWidth;
                 md.MipHeight         = (uint16_t)out.TextureHeight;
                 md.MipDataOffset     = mo + 4;
-                md.MipDataSizeParsed = expected;
+                md.MipDataSizeParsed = body_size;
                 out.Mips.push_back(md);
                 return true;
+            }
+
+            /* Alternate "size-prefixed + zlib-deflated" layout, used by
+               level texture atlases (defaultscenario.texture_atlas):
+                 +0  u32 raw_mip0_size  (matches sz_argb8 / sz_bc1 / sz_bc3
+                                         for the texture's W/H/PF)
+                 +4  u32 compressed_size_hint  (length the rest of the
+                                                page occupies, roughly)
+                 +8  zlib stream (header 78 DA / 78 9C / 78 01) that
+                     inflates to raw_mip0_size bytes of BC1 / BC3 / ARGB8.
+               The bytes the size prefix advertises live AFTER zlib
+               inflation — we tag the MipDef with comp_tag=200..203 so
+               decode_tex_to_rgba knows to inflate before handing the
+               buffer to the existing BC / ARGB blit path. */
+            if (prefix_ok && mo + 10 <= d.size()) {
+                const uint8_t* z = d.data() + mo + 8;
+                const bool zlib_magic =
+                    z[0] == 0x78 && (z[1] == 0xDA || z[1] == 0x9C ||
+                                     z[1] == 0x01 || z[1] == 0x5E);
+                size_t expected_raw = 0;
+                uint32_t z_tag      = 0;
+                if (zlib_magic && (size_t)size_prefix == sz_bc1 &&
+                    out.PixelFormat == 35) {
+                    expected_raw = sz_bc1;
+                    z_tag        = 200u;  // zlib → BC1
+                } else if (zlib_magic && (size_t)size_prefix == sz_bc3 &&
+                           out.PixelFormat == 39) {
+                    expected_raw = sz_bc3;
+                    z_tag        = 201u;  // zlib → BC3
+                } else if (zlib_magic && (size_t)size_prefix == sz_bc3 &&
+                           out.PixelFormat == 40) {
+                    expected_raw = sz_bc3;
+                    z_tag        = 202u;  // zlib → BC5
+                } else if (zlib_magic && (size_t)size_prefix == sz_argb8 &&
+                           (out.PixelFormat == 2 || out.PixelFormat == 4)) {
+                    expected_raw = sz_argb8;
+                    z_tag        = 203u;  // zlib → ARGB8
+                }
+                if (z_tag) {
+                    TexInfo::MipDef md{};
+                    md.DefOffset         = mo;
+                    md.CompFlag          = z_tag;
+                    md.DataOffset        = 8;
+                    md.HasWH             = true;
+                    md.MipWidth          = (uint16_t)out.TextureWidth;
+                    md.MipHeight         = (uint16_t)out.TextureHeight;
+                    md.MipDataOffset     = mo + 8;
+                    /* MipDataSizeParsed = bytes of *compressed* data
+                       available in the blob.  The expected raw size
+                       lives in Unknown_3 so the decoder can cap zlib
+                       inflate output without overrunning the buffer. */
+                    md.MipDataSizeParsed = d.size() - (mo + 8);
+                    md.DataSize          = (uint32_t)md.MipDataSizeParsed;
+                    md.Unknown_3         = (uint32_t)expected_raw;
+                    out.Mips.push_back(md);
+                    return true;
+                }
             }
         }
     }
 
-    for (uint32_t i = 0; i < out.MipMapOffset.size(); ++i) {
-        size_t mo = (size_t) out.MipMapOffset[i];
-        if (mo >= d.size()) {
-            continue;
-        }
-        if (mo + 12 * 4 > d.size()) {
-            continue;
-        }
-        TexInfo::MipDef md{};
-        md.DefOffset = mo;
+    /* Parse the MipRecord chain.
+     *
+     * The merged extraction layout (header BNK + 1024mip0 BNK + rest BNK)
+     * makes the file-header MipMapOffsets unreliable past index 0: the
+     * 1024mip0 body gets concatenated immediately after the file header
+     * but BEFORE the original smaller-mip records, so offsets [1..N]
+     * which the engine computed pre-merge end up landing inside MipRecord
+     * [0]'s bitstream (where the bytes are 0xFFFFFFFF garbage).
+     *
+     * Per docs/TEX_FORMAT.md the canonical structure is a CHAIN of
+     * (48-byte header + body) records.  We walk that chain starting from
+     * MipMapOffset[0] (the only file-header offset we trust) and follow
+     * the size fields forward — that recovers the real chain regardless
+     * of whether a 1024mip0 chunk was inserted.
+     *
+     * For dng_walls_detail_01_spec.tex the chain in the merged file is:
+     *   0x0054  CF=11, body=41444  → "1024x1024" empty placeholder
+     *   0xa268  CF=1,  body=2452   → real 128x128 LH-BC1
+     *   0xac2c  CF=1,  body=976    → 64x64 LH-BC1
+     *   0xb02c  CF=7,  body=512    → 32x32 raw BC1
+     *   0xb25c  CF=7,  body=128    → 16x16 raw BC1
+     * The standard MipMapOffsets [0xa18, 0xe18, 0x1048] all fall inside
+     * MipRecord[0]'s body — only chain-walking finds the real records. */
+    auto parse_one_mip = [&](size_t mo, TexInfo::MipDef& md, size_t& body_end) -> bool {
+        if (mo + 48 > d.size()) return false;
         size_t k = mo;
-        auto safe_rd32 = [&](uint32_t &outv)-> bool {
-            if (!rd32be(d, k, outv)) return false;
-            k += 4;
-            return true;
+        md = TexInfo::MipDef{};
+        md.DefOffset = mo;
+        auto rd = [&](uint32_t& v) {
+            if (!rd32be(d, k, v)) return false;
+            k += 4; return true;
         };
-        bool ok =
-                safe_rd32(md.CompFlag) &&
-                safe_rd32(md.DataOffset) &&
-                safe_rd32(md.DataSize) &&
-                safe_rd32(md.Unknown_3) &&
-                safe_rd32(md.Unknown_4) &&
-                safe_rd32(md.Unknown_5) &&
-                safe_rd32(md.Unknown_6) &&
-                safe_rd32(md.Unknown_7) &&
-                safe_rd32(md.Unknown_8) &&
-                safe_rd32(md.Unknown_9) &&
-                safe_rd32(md.Unknown_10) &&
-                safe_rd32(md.Unknown_11);
-        if (!ok) {
-            continue;
-        }
+        if (!(rd(md.CompFlag) && rd(md.DataOffset) && rd(md.DataSize) &&
+              rd(md.Unknown_3) && rd(md.Unknown_4) && rd(md.Unknown_5) &&
+              rd(md.Unknown_6) && rd(md.Unknown_7) && rd(md.Unknown_8) &&
+              rd(md.Unknown_9) && rd(md.Unknown_10) && rd(md.Unknown_11))) return false;
+
+        /* Invariants enforced by parse_bare_chain (matching the game's
+           tex_decode_mip dispatcher): CompFlag <= 24 (12+ traps but 24
+           is observed once and filtered upstream), DataOffset == 48. */
+        if (md.CompFlag > 24u || md.DataOffset != 48u) return false;
+
         md.HasWH = false;
         md.MipWidth = 0;
         md.MipHeight = 0;
         md.MipDataOffset = 0;
         md.MipDataSizeParsed = 0;
+
         if (md.CompFlag == 7) {
+            /* Raw BC blocks, no extra header. */
             size_t start = k;
             size_t max_sz = (start < d.size()) ? (d.size() - start) : 0;
             size_t want = (size_t) md.DataSize;
             size_t use = std::min(want, max_sz);
-
-            if (use == 0) {
-                use = max_sz;
-            }
-            if (use > 0) {
-                md.MipDataOffset = start;
-                md.MipDataSizeParsed = use;
-                out.Mips.push_back(md);
-            }
+            if (use == 0) use = max_sz;
+            if (use == 0) return false;
+            md.MipDataOffset = start;
+            md.MipDataSizeParsed = use;
         } else {
-            if (k + 4 > d.size()) {
-                continue;
-            }
+            if (k + 4 > d.size()) return false;
             uint16_t w16 = 0, h16 = 0;
-            size_t whp = k;
-            if (!rd16be(d, k, w16) || !rd16be(d, k, h16)) {
-                continue;
-            }
+            if (!rd16be(d, k, w16) || !rd16be(d, k, h16)) return false;
             md.HasWH = true;
             md.MipWidth = w16;
             md.MipHeight = h16;
             const size_t extra_hdr_bytes = 440;
-            if (k + extra_hdr_bytes > d.size()) {
-                continue;
-            }
+            if (k + extra_hdr_bytes > d.size()) return false;
             size_t start = k + extra_hdr_bytes;
             size_t header_bytes_total = 4 + extra_hdr_bytes;
-            size_t data_declared = (md.DataSize >= header_bytes_total) ? (md.DataSize - header_bytes_total) : 0;
+            size_t data_declared = (md.DataSize >= header_bytes_total)
+                                       ? (md.DataSize - header_bytes_total) : 0;
             size_t max_sz = (start < d.size()) ? (d.size() - start) : 0;
             size_t use = std::min(data_declared, max_sz);
-            if (use == 0) {
-                use = max_sz;
-            }
-
-            if (use > 0) {
-                md.MipDataOffset = start;
-                md.MipDataSizeParsed = use;
-                out.Mips.push_back(md);
-            }
+            if (use == 0) use = max_sz;
+            if (use == 0) return false;
+            md.MipDataOffset = start;
+            md.MipDataSizeParsed = use;
         }
+        body_end = mo + 48 + (size_t)md.DataSize;
+        return true;
+    };
+
+    if (out.MipMapOffset.empty()) return true;
+
+    size_t walk_off = (size_t) out.MipMapOffset[0];
+    int safety = 64;   // guard against degenerate self-referential chains
+    while (safety-- > 0 && walk_off + 48 <= d.size()) {
+        TexInfo::MipDef md{};
+        size_t body_end = 0;
+        if (!parse_one_mip(walk_off, md, body_end)) break;
+        out.Mips.push_back(md);
+        /* Advance past this record's declared body.  If DataSize would
+           push us off the end (or back), stop — that's the terminator. */
+        if (body_end <= walk_off || body_end > d.size()) break;
+        walk_off = body_end;
     }
     return true;
 }

@@ -60,6 +60,20 @@ set(APP_SOURCES
         src/Level/LevelLoader.h
         src/Level/HeightfieldLoader.cpp
         src/Level/HeightfieldLoader.h
+        src/Level/TextureAtlasDecoder.cpp
+        src/Level/TextureAtlasDecoder.h
+        src/Level/EhfPalette.cpp
+        src/Level/EhfPalette.h
+        src/Level/TerrainTextureRegistry.cpp
+        src/Level/TerrainTextureRegistry.h
+        src/Level/EhfChunkParser.cpp
+        src/Level/EhfChunkParser.h
+        src/Level/EhfLodThumbnails.cpp
+        src/Level/EhfLodThumbnails.h
+        src/Level/TerrainSplat.cpp
+        src/Level/TerrainSplat.h
+        src/Level/TerrainEdit.cpp
+        src/Level/TerrainEdit.h
         src/BNKCore.cpp
         src/Audio/AudioPlayer.cpp
         src/Audio/XmaDecoder.cpp

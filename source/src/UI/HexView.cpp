@@ -7,6 +7,7 @@
 #include "../textures/LhTexCodec.h"
 #include "../MDL/ModelParser.h"
 #include "ModelPreview.h"
+#include "../Level/TerrainTextureRegistry.h"
 #include "../BNKCore.cpp"
 #include "imgui.h"
 #include "imgui_hex.h"
@@ -920,6 +921,66 @@ void draw_hex_window() {
                 }
             } else {
                 ImGui::TextDisabled("(no model loaded)");
+            }
+
+            /* Terrain LOD palette from .ehf.  Shown whenever a level
+               has been loaded — the strings are pulled straight out
+               of the .ehf body's LOD vector (validated parser; see
+               EhfChunkParser.cpp).  Each entry pairs a BaseLayer
+               diffuse + normal with an optional DetailLayer pair. */
+            {
+                const auto& palette = TerrainTextureRegistry::GetLodPalette();
+                if (!palette.empty()) {
+                    ImGui::Separator();
+                    if (ImGui::CollapsingHeader(
+                            ".ehf LOD Palette",
+                            ImGuiTreeNodeFlags_DefaultOpen))
+                    {
+                        ImGui::TextDisabled("%zu materials referenced by .ehf",
+                                            palette.size());
+                        ImGui::Indent(8.0f);
+                        for (size_t i = 0; i < palette.size(); ++i) {
+                            const auto& e = palette[i];
+                            auto basename = [](const std::string& s) {
+                                if (s.empty()) return std::string("(none)");
+                                size_t pos = s.find_last_of("/\\");
+                                return (pos == std::string::npos)
+                                    ? s : s.substr(pos + 1);
+                            };
+                            ImGui::PushID(int(i));
+                            /* One header line per LOD index. */
+                            if (ImGui::TreeNodeEx((void*)i,
+                                ImGuiTreeNodeFlags_DefaultOpen,
+                                "[%zu] %s", i,
+                                basename(e.base_diffuse).c_str()))
+                            {
+                                auto row = [](const char* tag,
+                                              const std::string& path) {
+                                    ImGui::TextUnformatted(tag);
+                                    ImGui::SameLine(110.0f);
+                                    if (path.empty()) {
+                                        ImGui::TextDisabled("(none)");
+                                    } else {
+                                        size_t pos = path.find_last_of("/\\");
+                                        std::string bn = (pos == std::string::npos)
+                                            ? path : path.substr(pos + 1);
+                                        ImGui::TextUnformatted(bn.c_str());
+                                        if (ImGui::IsItemHovered()) {
+                                            ImGui::SetTooltip("%s", path.c_str());
+                                        }
+                                    }
+                                };
+                                row("base diffuse",   e.base_diffuse);
+                                row("base normal",    e.base_normal);
+                                row("detail diffuse", e.detail_diffuse);
+                                row("detail normal",  e.detail_normal);
+                                ImGui::TreePop();
+                            }
+                            ImGui::PopID();
+                        }
+                        ImGui::Unindent(8.0f);
+                    }
+                }
             }
             }
             ImGui::End();

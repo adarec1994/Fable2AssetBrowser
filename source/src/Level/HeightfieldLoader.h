@@ -24,10 +24,40 @@ struct FlatAssetEntry;
 namespace Level {
 
 struct HeightfieldHeader {
-    /* Common metadata extracted from the .ehf header. */
+    /* Common metadata extracted from the .ehf header.
+
+       Full 63-byte layout (big-endian, IDA-validated against the
+       parser at `sub_82A855A8` — see docs/level_format.md § 9b.11):
+
+         +0   23B  magic    "HeightFieldGraphicsFile" (no NUL)
+         +23   4B  u32      version (= 18 in Bloodstone)
+         +27   4B  f32      prefix_float  → renderer state[+68]
+         +31   4B  f32      f1            → renderer state[+64]
+         +35   4B  u32      u0            → renderer state[+72]
+         +39   4B  u32      u1            → renderer state[+76]
+         +43   4B  f32      f2            → renderer state[+80]
+         +47   4B  f32      f3            → renderer state[+84]
+         +51   4B  f32      f4            → renderer state[+88]
+         +55   4B  u32      body_offset (offset into .ehf of body blob)
+         +59   4B  u32      body_size   (size of body blob)
+
+       The 5 floats are likely world-space origin/extent + max height
+       for the heightfield; the 2 u32s look like per-cell resolution
+       (verts-per-tile-row × verts-per-tile-col).  We name them
+       generically until we've validated against multiple .ehfs.    */
     std::string magic;        // "HeightFieldGraphicsFile" if recognized
-    uint32_t    version = 0;  // BE u32 at offset 24 (sample = 18)
-    float       prefix_float = 0.f; // BE float at offset 28 (sample = 64.0)
+    bool        ok = false;   // true iff magic matched and 63B were available
+    uint32_t    version = 0;
+    float       prefix_float = 0.f;   // alias for f0 (state[+68])
+    float       f0 = 0.f;             // state[+68]
+    float       f1 = 0.f;             // state[+64]
+    uint32_t    u0 = 0;               // state[+72]
+    uint32_t    u1 = 0;               // state[+76]
+    float       f2 = 0.f;             // state[+80]
+    float       f3 = 0.f;             // state[+84]
+    float       f4 = 0.f;             // state[+88]
+    uint32_t    body_offset = 0;      // offset into .ehf
+    uint32_t    body_size   = 0;      // size of body blob
 };
 
 struct HeightfieldFiles {

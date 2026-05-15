@@ -85,6 +85,12 @@ struct LevelResources {
    Output Log on success or a single error line on failure.          */
 bool Open(const FlatAssetEntry& entry);
 
+/* UI-facing wrapper for level selection.  Runs `Open` on a worker
+   thread so parsing/extraction/heightfield mesh generation do not
+   block ImGui.  GPU uploads still happen later in process_pending_loads. */
+void OpenAsync(const FlatAssetEntry& entry);
+bool IsAsyncLoadInProgress();
+
 /* Lower-level: parse an already-extracted blob.  Exposed so the
    future terrain pipeline can re-use the parser without going
    through the Output Log path. */

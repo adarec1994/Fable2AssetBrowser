@@ -7,6 +7,7 @@
 
 #include "../Utilities/State.h"
 #include "../Utilities/Utils.h"
+#include "../Utilities/Progress.h"
 #include "../BNKCore.cpp"
 #include "../UI/OutputLog.h"
 #include "../textures/TexParser.h"
@@ -34,6 +35,8 @@ extern const std::string& mp_last_decode_info();
 #include <cstring>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <thread>
 #include <iomanip>
 #include <sstream>
 
@@ -56,8 +59,40 @@ int                   g_pending_terrain_ghf_height = 0;
 FlatAssetEntry        g_pending_terrain_ghf_entry;
 std::vector<Level::PropBlock> g_pending_level_prop_blocks;
 std::string                   g_pending_level_model_body_bnk;
+static std::atomic<bool>      g_level_async_loading{false};
 
 namespace Level {
+
+bool IsAsyncLoadInProgress()
+{
+    return g_level_async_loading.load() ||
+           g_pending_terrain_load.load() ||
+           S.show_progress.load();
+}
+
+void OpenAsync(const FlatAssetEntry& entry)
+{
+    bool expected = false;
+    if (!g_level_async_loading.compare_exchange_strong(expected, true)) {
+        OutputLog::warn("level load already in progress");
+        return;
+    }
+
+    progress_open(100, "Loading level...");
+    std::thread([entry]() {
+        progress_update(5, 100, "Extracting level...");
+        const bool ok = Open(entry);
+        if (!ok) {
+            progress_done();
+        } else {
+            progress_update(70, 100, "Preparing render...");
+            if (!g_pending_terrain_load.load()) {
+                progress_done();
+            }
+        }
+        g_level_async_loading.store(false);
+    }).detach();
+}
 
 namespace {
 
@@ -297,6 +332,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
 bool Open(const FlatAssetEntry& entry)
 {
     OutputLog::info("loading level '" + entry.name + "' …");
+    progress_update(8, 100, "Extracting " + entry.name);
 
     std::vector<uint8_t> bytes;
     try {
@@ -313,6 +349,7 @@ bool Open(const FlatAssetEntry& entry)
         return false;
     }
 
+    progress_update(18, 100, "Parsing level entries...");
     EngineLevelInfo info;
     if (!ParseEngineLevel(bytes, info)) {
         OutputLog::error("parse failed for '" + entry.name + "': "
@@ -561,6 +598,7 @@ bool Open(const FlatAssetEntry& entry)
        surface a header line so we know what we're working with. */
     if (!res.ehf_path.empty() || !res.ghf_path.empty()) {
         HeightfieldFiles hf;
+        progress_update(32, 100, "Loading heightfield files...");
         if (!LoadHeightfieldFiles(res.ehf_path, res.ghf_path,
                                   res.hdb_path, res.genv_path, hf)) {
             OutputLog::error("heightfield load failed: " + hf.error);
@@ -629,6 +667,7 @@ bool Open(const FlatAssetEntry& entry)
                14-byte records, first 4 bytes of each = f32 BE height. */
             if (!hf.ghf_bytes_raw.empty()) {
                 GhfHeights hg;
+                progress_update(45, 100, "Decoding height grid...");
                 if (!DecodeGhfHeights(hf.ghf_bytes_raw, hg)) {
                     OutputLog::error("  .ghf decode failed: " + hg.error);
                 } else {
@@ -641,6 +680,7 @@ bool Open(const FlatAssetEntry& entry)
                     /* Build the renderable mesh and hand it to the
                        renderer thread via the pending-load globals. */
                     TerrainMesh mesh;
+                    progress_update(58, 100, "Building terrain mesh...");
                     if (!BuildTerrainMesh(hg, mesh)) {
                         OutputLog::error("  terrain mesh build failed");
                     } else {

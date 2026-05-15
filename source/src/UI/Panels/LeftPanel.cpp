@@ -1186,11 +1186,14 @@ void draw_left_panel() {
                                       const std::string& friendly)
                 {
                     ImGui::PushID(&e);
+                    const bool level_busy = Level::IsAsyncLoadInProgress();
+                    if (level_busy) ImGui::BeginDisabled();
                     if (ImGui::Selectable(friendly.c_str(), false,
                                           ImGuiSelectableFlags_SpanAllColumns))
                     {
-                        Level::Open(e);
+                        Level::OpenAsync(e);
                     }
+                    if (level_busy) ImGui::EndDisabled();
                     if (ImGui::BeginPopupContextItem("##lvl_ctx")) {
                         if (ImGui::MenuItem("View Heightmap")) {
                             std::vector<uint8_t> rgba;

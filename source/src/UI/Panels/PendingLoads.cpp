@@ -50,6 +50,163 @@ static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
                                          const MDLMeshGeom& src,
                                          const Level::PropInstance& inst,
                                          float terrain_cx,
+                                         float terrain_cz);
+
+#ifdef _WIN32
+struct LevelPropStreamState {
+    bool active = false;
+    std::vector<Level::PropBlock> blocks;
+    std::string model_body_bnk;
+    std::vector<MDLMeshGeom> geoms;
+    MDLInfo info;
+    std::unordered_map<std::string, CachedPropModel> cache;
+    size_t block_index = 0;
+    size_t instance_index = 0;
+    size_t instances_loaded = 0;
+    size_t total_instances = 0;
+    size_t model_misses = 0;
+    float terrain_tile_size = 1.0f;
+    int terrain_width = 0;
+    int terrain_height = 0;
+};
+
+static LevelPropStreamState g_level_prop_stream;
+
+static void start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
+                                    MDLInfo info)
+{
+    g_level_prop_stream = LevelPropStreamState{};
+    g_level_prop_stream.blocks = g_pending_level_prop_blocks;
+    g_level_prop_stream.model_body_bnk = g_pending_level_model_body_bnk;
+    g_level_prop_stream.geoms = std::move(geoms);
+    g_level_prop_stream.info = std::move(info);
+    g_level_prop_stream.terrain_tile_size = g_pending_terrain_ghf_tile_size;
+    g_level_prop_stream.terrain_width = g_pending_terrain_ghf_width;
+    g_level_prop_stream.terrain_height = g_pending_terrain_ghf_height;
+    for (const auto& b : g_level_prop_stream.blocks) {
+        g_level_prop_stream.total_instances += b.instances.size();
+    }
+    g_level_prop_stream.total_instances =
+        std::min<size_t>(g_level_prop_stream.total_instances, 256);
+    g_level_prop_stream.active = g_level_prop_stream.total_instances > 0;
+}
+
+static bool stream_level_prop_batch(ID3D11Device* device)
+{
+    if (!g_level_prop_stream.active) return false;
+
+    constexpr size_t kBatchInstances = 8;
+    const float terrain_cx =
+        (float(g_level_prop_stream.terrain_width) - 1.0f) * 0.5f *
+        g_level_prop_stream.terrain_tile_size;
+    const float terrain_cz =
+        (float(g_level_prop_stream.terrain_height) - 1.0f) * 0.5f *
+        g_level_prop_stream.terrain_tile_size;
+
+    size_t added_this_frame = 0;
+    while (added_this_frame < kBatchInstances &&
+           g_level_prop_stream.instances_loaded <
+               g_level_prop_stream.total_instances &&
+           g_level_prop_stream.block_index < g_level_prop_stream.blocks.size())
+    {
+        auto& block = g_level_prop_stream.blocks[g_level_prop_stream.block_index];
+        if (block.model_path.empty() ||
+            g_level_prop_stream.instance_index >= block.instances.size())
+        {
+            ++g_level_prop_stream.block_index;
+            g_level_prop_stream.instance_index = 0;
+            continue;
+        }
+
+        auto& cached = g_level_prop_stream.cache[block.model_path];
+        if (!cached.loaded) {
+            std::vector<unsigned char> buf;
+            if (build_mdl_buffer_for_name_with_body(block.model_path,
+                                                    g_level_prop_stream.model_body_bnk,
+                                                    buf) &&
+                parse_mdl_info(buf, cached.info, block.model_path)) {
+                bool all_empty = !cached.info.MeshBuffers.empty();
+                for (const auto& mb : cached.info.MeshBuffers) {
+                    if (mb.VertexCount > 0) {
+                        all_empty = false;
+                        break;
+                    }
+                }
+                if (all_empty) {
+                    reparse_mdl_buffers_via_polymsh_scan(buf, cached.info);
+                }
+                parse_mdl_geometry(buf, cached.info, cached.geoms);
+            }
+            cached.loaded = true;
+            if (cached.geoms.empty()) {
+                ++g_level_prop_stream.model_misses;
+            }
+        }
+
+        if (!cached.geoms.empty()) {
+            const auto& inst = block.instances[g_level_prop_stream.instance_index];
+            for (const auto& src : cached.geoms) {
+                if (!src.positions.empty() && !src.indices.empty()) {
+                    append_transformed_prop_geom(g_level_prop_stream.geoms,
+                                                 src, inst,
+                                                 terrain_cx, terrain_cz);
+                }
+            }
+            ++added_this_frame;
+        }
+
+        ++g_level_prop_stream.instance_index;
+        ++g_level_prop_stream.instances_loaded;
+    }
+
+    if (added_this_frame > 0) {
+        extern ModelPreview g_mp;
+        extern bool         g_mp_initialized;
+        extern FlyCam       g_flycam;
+        FlyCam saved_cam = g_flycam;
+        if (!g_mp_initialized) {
+            MP_Init(device, g_mp, 800, 600);
+            g_mp_initialized = true;
+        }
+        MP_Build(device, g_level_prop_stream.geoms,
+                 g_level_prop_stream.info, g_mp);
+        g_mp.no_tilt = true;
+        S.terrain_mode = true;
+        g_flycam = saved_cam;
+    }
+
+    const int pct = 75 + (int)(
+        (20.0 * double(g_level_prop_stream.instances_loaded)) /
+        double(std::max<size_t>(g_level_prop_stream.total_instances, 1)));
+    progress_update(pct, 100,
+                    "Loading props " +
+                    std::to_string(g_level_prop_stream.instances_loaded) +
+                    "/" +
+                    std::to_string(g_level_prop_stream.total_instances));
+
+    if (g_level_prop_stream.instances_loaded >=
+            g_level_prop_stream.total_instances ||
+        g_level_prop_stream.block_index >= g_level_prop_stream.blocks.size())
+    {
+        OutputLog::info("level props: streamed " +
+                        std::to_string(g_level_prop_stream.instances_loaded) +
+                        " type-2 instances" +
+                        (g_level_prop_stream.model_misses
+                            ? " (" + std::to_string(g_level_prop_stream.model_misses) +
+                              " model load misses)"
+                            : std::string()));
+        g_level_prop_stream = LevelPropStreamState{};
+        progress_done();
+    }
+
+    return true;
+}
+#endif
+
+static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
+                                         const MDLMeshGeom& src,
+                                         const Level::PropInstance& inst,
+                                         float terrain_cx,
                                          float terrain_cz)
 {
     MDLMeshGeom dst = src;
@@ -555,6 +712,7 @@ void process_pending_loads() {
        Level::Open on the UI thread, consumed here on the renderer
        thread so MP_Build sees a live ID3D11Device. */
     if (g_pending_terrain_load.exchange(false)) {
+        progress_update(72, 100, "Uploading terrain...");
         const Level::TerrainMesh& tm = g_pending_terrain_mesh;
         if (!tm.ok || tm.indices.empty()) {
             OutputLog::error("pending terrain mesh is empty - skipped");
@@ -708,7 +866,7 @@ void process_pending_loads() {
 
             std::vector<MDLMeshGeom> geoms;
             geoms.push_back(std::move(g));
-            append_level_props_to_geoms(geoms);
+            start_level_prop_stream(geoms, info);
 
             if (g_mp.has_model) {
                 MP_Release(g_mp);
@@ -1098,6 +1256,9 @@ void process_pending_loads() {
                                "' built (" +
                                std::to_string(geoms[0].positions.size()/3) +
                                " verts)");
+            if (!g_level_prop_stream.active) {
+                progress_done();
+            }
         }
 
         /* Release the heap memory the pending mesh + the .ehf
@@ -1121,6 +1282,8 @@ void process_pending_loads() {
         g_pending_level_prop_blocks.shrink_to_fit();
         g_pending_level_model_body_bnk.clear();
     }
+
+    stream_level_prop_batch(device);
 #else
     if (g_pending_terrain_load.exchange(false)) {
         const Level::TerrainMesh& tm = g_pending_terrain_mesh;

@@ -415,7 +415,7 @@ void process_pending_loads() {
     if (g_pending_terrain_load.exchange(false)) {
         const Level::TerrainMesh& tm = g_pending_terrain_mesh;
         if (!tm.ok || tm.indices.empty()) {
-            OutputLog::error("pending terrain mesh is empty — skipped");
+            OutputLog::error("pending terrain mesh is empty - skipped");
         } else {
             /* Drop any RGBA buffers we cached for the previous
                level's terrain.  They're keyed by name (e.g.
@@ -969,6 +969,181 @@ void process_pending_loads() {
         /* TerrainEdit took its own copies — drop the pending .ghf
            buffers to free heap.  TerrainEdit::Clear() runs separately
            when the user navigates away from this level.            */
+        g_pending_terrain_ghf_payload.clear();
+        g_pending_terrain_ghf_payload.shrink_to_fit();
+        g_pending_terrain_ghf_heights.clear();
+        g_pending_terrain_ghf_heights.shrink_to_fit();
+        g_pending_terrain_ghf_entry = FlatAssetEntry{};
+    }
+#else
+    if (g_pending_terrain_load.exchange(false)) {
+        const Level::TerrainMesh& tm = g_pending_terrain_mesh;
+        if (!tm.ok || tm.indices.empty()) {
+            OutputLog::error("pending terrain mesh is empty — skipped");
+        } else {
+            TerrainTextureRegistry::Clear();
+            EhfLodThumbnails::Clear();
+            TerrainSplat::Clear();
+            TerrainEdit::Clear();
+
+            MDLMeshGeom g;
+            g.positions = tm.positions;
+            g.normals = tm.normals;
+            g.uvs = tm.uvs;
+            g.indices = tm.indices;
+            g.bone_ids.assign(tm.positions.size() / 3 * 4, 0);
+            g.bone_weights.assign(tm.positions.size() / 3 * 4, 0.f);
+            for (size_t v = 0; v < tm.positions.size() / 3; ++v) {
+                g.bone_weights[v * 4 + 0] = 1.0f;
+            }
+            g.name = "terrain";
+
+            MDLInfo info;
+            info.MeshCount = 1;
+            MDLMeshInfo mi;
+            mi.MeshName = "terrain";
+            mi.MaterialCount = 0;
+            info.Meshes.push_back(mi);
+            MDLMeshBufferInfo mb;
+            mb.VertexCount = (uint32_t)(tm.positions.size() / 3);
+            mb.FaceCount = (uint32_t)tm.indices.size();
+            mb.SubMeshCount = 1;
+            info.MeshBuffers.push_back(mb);
+
+            std::vector<uint8_t> picked_rgba;
+            int picked_w = 0;
+            int picked_h = 0;
+            std::string picked_label;
+            float uv_scale = 1.0f;
+            std::string composite_name;
+            std::vector<uint8_t> splat_dbg_rgba;
+            int splat_dbg_w = 0;
+            int splat_dbg_h = 0;
+
+            if (Level::BakeEhfTerrainCompositeAndSplatDebug(
+                    g_pending_terrain_ehf_bytes,
+                    g_pending_terrain_level_entry.bnk_path,
+                    picked_rgba, picked_w, picked_h,
+                    composite_name,
+                    splat_dbg_rgba, splat_dbg_w, splat_dbg_h)) {
+                picked_label = "ehf_composite[" + composite_name + " * lightmap]";
+                uv_scale = 1.0f;
+            } else if (Level::DecodeEhfTerrainAlbedoFromBytes(
+                    g_pending_terrain_ehf_bytes,
+                    g_pending_terrain_mesh.width,
+                    g_pending_terrain_mesh.height,
+                    picked_rgba, picked_w, picked_h)) {
+                picked_label = "ehf_baked_albedo";
+                uv_scale = 1.0f;
+            } else {
+                std::vector<uint8_t> pal_rgba;
+                int pal_w = 0;
+                int pal_h = 0;
+                float pal_tile_scale = 0.125f;
+                std::string pal_name;
+                if (Level::DecodeEhfPaletteFirstDiffuse(
+                        g_pending_terrain_ehf_bytes,
+                        pal_rgba, pal_w, pal_h,
+                        pal_tile_scale, pal_name)) {
+                    picked_rgba = std::move(pal_rgba);
+                    picked_w = pal_w;
+                    picked_h = pal_h;
+                    picked_label = "ehf_palette[" + pal_name + "]";
+                    uv_scale = 16.0f;
+                } else {
+                    std::vector<uint8_t> atlas_rgba;
+                    int atlas_w = 0;
+                    int atlas_h = 0;
+                    if (Level::DecodeLevelTextureAtlas(
+                            g_pending_terrain_level_entry,
+                            atlas_rgba, atlas_w, atlas_h)) {
+                        picked_rgba = std::move(atlas_rgba);
+                        picked_w = atlas_w;
+                        picked_h = atlas_h;
+                        picked_label = "texture_atlas_fallback";
+                        uv_scale = 32.0f;
+                    }
+                }
+            }
+
+            if (uv_scale != 1.0f) {
+                for (float& uv : g.uvs) uv *= uv_scale;
+            }
+
+            std::vector<MDLMeshGeom> geoms;
+            geoms.push_back(std::move(g));
+
+            extern ModelPreview g_mp;
+            extern bool g_mp_initialized;
+            extern FlyCam g_flycam;
+            MP_Release(g_mp);
+            g_mp_initialized = false;
+            g_mp_initialized = MP_Init(g_mp, 800, 600);
+            if (g_mp_initialized) {
+                MP_Build(geoms, info, g_mp);
+                g_mp.no_tilt = true;
+                S.terrain_mode = true;
+                S.show_model_preview = true;
+                S.model_preview_open = true;
+                S.model_materials_open = true;
+
+                float ax = 0.f;
+                float ay_max = 0.f;
+                float az = 0.f;
+                for (size_t v = 0; v + 2 < geoms[0].positions.size(); v += 3) {
+                    ax = std::max(ax, std::abs(geoms[0].positions[v]));
+                    ay_max = std::max(ay_max, std::abs(geoms[0].positions[v + 1]));
+                    az = std::max(az, std::abs(geoms[0].positions[v + 2]));
+                }
+                const float diag = std::sqrt(ax * ax + az * az);
+                g_flycam.pos[0] = 0.0f;
+                g_flycam.pos[1] = ay_max + diag * 0.7f;
+                g_flycam.pos[2] = -diag * 1.0f;
+                g_flycam.yaw = 0.0f;
+                g_flycam.pitch = -0.6f;
+                g_flycam.is_looking = false;
+                g_flycam.move_speed = std::max(diag * 0.2f, 50.0f);
+                g_mp.radius = std::max(g_mp.radius, diag);
+                g_mp.center[0] = 0.0f;
+                g_mp.center[1] = 0.0f;
+                g_mp.center[2] = 0.0f;
+
+                if (!picked_rgba.empty() && picked_w > 0 && picked_h > 0 &&
+                    !g_mp.meshes.empty()) {
+                    unsigned int terrain_tex =
+                        create_gl_texture_from_rgba(picked_w, picked_h,
+                                                    picked_rgba.data());
+                    if (terrain_tex) {
+                        MPPerMesh& m = g_mp.meshes[0];
+                        if (m.tex_diffuse && m.tex_diffuse != g_mp.default_tex) {
+                            glDeleteTextures(1, &m.tex_diffuse);
+                        }
+                        m.tex_diffuse = terrain_tex;
+                        m.diffuse_visible = true;
+                        m.diffuse_tex_name = picked_label;
+                        TerrainTextureRegistry::Register(picked_label,
+                                                         picked_rgba,
+                                                         picked_w,
+                                                         picked_h);
+                        OutputLog::success("terrain texture bound: " + picked_label +
+                                           " (" + std::to_string(picked_w) + "x" +
+                                           std::to_string(picked_h) + ")");
+                    }
+                } else {
+                    OutputLog::warn("terrain: no albedo texture decoded");
+                }
+
+                OutputLog::success("terrain '" + g_pending_terrain_label +
+                                   "' built (" +
+                                   std::to_string(geoms[0].positions.size() / 3) +
+                                   " verts)");
+            }
+        }
+
+        g_pending_terrain_mesh = Level::TerrainMesh{};
+        g_pending_terrain_label.clear();
+        g_pending_terrain_ehf_bytes.clear();
+        g_pending_terrain_ehf_bytes.shrink_to_fit();
         g_pending_terrain_ghf_payload.clear();
         g_pending_terrain_ghf_payload.shrink_to_fit();
         g_pending_terrain_ghf_heights.clear();

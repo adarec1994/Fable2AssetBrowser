@@ -1056,14 +1056,14 @@ void FlyCam_Update(FlyCam& cam, float dt, bool w, bool s, bool a, bool d, bool q
         cam.pos[2] -= forward[2] * speed;
     }
     if (a) {
-        cam.pos[0] -= right[0] * speed;
-        cam.pos[1] -= right[1] * speed;
-        cam.pos[2] -= right[2] * speed;
-    }
-    if (d) {
         cam.pos[0] += right[0] * speed;
         cam.pos[1] += right[1] * speed;
         cam.pos[2] += right[2] * speed;
+    }
+    if (d) {
+        cam.pos[0] -= right[0] * speed;
+        cam.pos[1] -= right[1] * speed;
+        cam.pos[2] -= right[2] * speed;
     }
     if (e) {
         cam.pos[1] += speed;

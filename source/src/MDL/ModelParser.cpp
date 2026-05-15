@@ -135,13 +135,13 @@ static void compute_smooth_normals(size_t vcount, const std::vector<uint32_t>& i
             float dy = pos[v*3+1] - cy;
             float dz = pos[v*3+2] - cz;
             float r2 = dx*dx + dy*dy + dz*dz;
-            if (r2 < 1e-12f) continue;   // vertex sits at the centroid
+            if (r2 < 1e-12f) continue;   
             float d = dx*out_n[v*3+0] + dy*out_n[v*3+1] + dz*out_n[v*3+2];
             if (d >  1e-6f) ++outward;
             else if (d < -1e-6f) ++inward;
         }
         const size_t voted = outward + inward;
-        if (voted >= 8 && inward * 5 >= voted * 4) {   // >= 80% inward
+        if (voted >= 8 && inward * 5 >= voted * 4) {   
             for (size_t v = 0; v < vcount; ++v) {
                 out_n[v*3+0] = -out_n[v*3+0];
                 out_n[v*3+1] = -out_n[v*3+1];
@@ -1601,7 +1601,7 @@ bool reparse_mdl_buffers_via_polymsh_scan(const std::vector<unsigned char>& data
         mb.FaceOffset    = face_off;
         mb.SubMeshCount  = final_submesh_count;
         mb.SubMeshes     = submeshes;
-        mb.IsAltPath     = true;       // 20-byte vertex stride, matches alt-path decoder
+        mb.IsAltPath     = true;       
         mb.IsFoliagePath = false;
         mb.MeshIndex     = (uint32_t)recovered.size();
         recovered.push_back(std::move(mb));

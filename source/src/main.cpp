@@ -11,7 +11,6 @@
 #include "imgui_impl_dx11.h"
 #include <shlobj.h>
 #include "Audio/play_audio.h"
-#include "Audio/AudioPlayer.h"
 #include "../resource.h"
 #else
 #include <GL/glew.h>
@@ -32,7 +31,9 @@
 #include "UI/OutputLog.h"
 #include "Splashscreen/Splashscreen.h"
 #include "Utilities/Files.h"
+#include "Audio/AudioPlayer.h"
 #include "Splashscreen/IconFont.h"
+#include <cmath>
 #include <string>
 #include <mutex>
 #include <map>
@@ -425,7 +426,7 @@ int main() {
                 if (indeterminate) {
                     float stripe_w = bar_w * 0.28f;
                     float t = (float) ImGui::GetTime();
-                    float phase = fmodf(t * 0.55f, 1.0f);
+                    float phase = std::fmod(t * 0.55f, 1.0f);
                     float eased = (phase < 0.5f) ? (phase * 2.0f) : ((1.0f - phase) * 2.0f);
                     float sx0 = bar_min.x + (bar_w - stripe_w) * eased;
                     float sx1 = sx0 + stripe_w;

@@ -112,7 +112,7 @@ void resize_rgba8(const std::vector<uint8_t>& src, int sw, int sh,
 }
 #endif
 
-}  // namespace
+}  
 
 const Resources& Get() {
     return storage();
@@ -377,6 +377,6 @@ bool Build(ID3D11Device*                                       device,
     return true;
 }
 
-#endif  // _WIN32
+#endif  
 
-}  // namespace TerrainSplat
+}  

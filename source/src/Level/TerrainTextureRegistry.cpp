@@ -18,7 +18,7 @@ std::vector<LodPaletteEntry>& lod_storage()
     return v;
 }
 
-}  // namespace
+}  
 
 void Register(const std::string&     name,
               std::vector<uint8_t>   rgba,
@@ -55,4 +55,4 @@ const std::vector<LodPaletteEntry>& GetLodPalette()
     return lod_storage();
 }
 
-}  // namespace TerrainTextureRegistry
+}  

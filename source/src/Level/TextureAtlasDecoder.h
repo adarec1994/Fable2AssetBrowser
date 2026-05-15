@@ -49,11 +49,11 @@ namespace TextureAtlas {
    format. */
 struct DecodedAtlas {
     bool                  ok          = false;
-    std::vector<uint8_t>  rgba;        // width * height * 4
+    std::vector<uint8_t>  rgba;        
     int                   width       = 0;
     int                   height      = 0;
-    uint32_t              pixel_format = 0;  // 35=BC1, 39=BC3, 40=BC5
-    std::string           error;       // human-readable failure reason
+    uint32_t              pixel_format = 0;  
+    std::string           error;       
 };
 
 /* Decode the largest page (mip 0) of a `.texture_atlas` blob.
@@ -131,4 +131,4 @@ bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,
                         int& out_w, int& out_h,
                         std::string& out_err);
 
-}  // namespace TextureAtlas
+}  

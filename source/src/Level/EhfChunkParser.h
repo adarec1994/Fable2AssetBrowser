@@ -50,15 +50,15 @@ struct EhfLodEntry {
 };
 
 struct EhfChunkLayer {
-    uint32_t name_idx;                  // index into a layer-name list
-    float    tile_uv[2];                // (u-scale, v-scale)-like vec2
-    uint8_t  texture_idx[4];            // indices into the LOD vector
-    uint8_t  blend[4];                  // 0..255 weight for each texture
+    uint32_t name_idx;                  
+    float    tile_uv[2];                
+    uint8_t  texture_idx[4];            
+    uint8_t  blend[4];                  
 };
 
 struct EhfChunk {
-    float                       origin[3];  // world-space position
-    float                       extent[3];  // world-space size
+    float                       origin[3];  
+    float                       extent[3];  
     std::vector<EhfChunkLayer>  layers;
 };
 
@@ -72,7 +72,7 @@ struct EhfParsedBody {
 
     /* Vectors. */
     std::vector<EhfLodEntry>     lods;
-    std::vector<EhfChunk>        chunks;     // size = chunk_w * chunk_h
+    std::vector<EhfChunk>        chunks;     
 
     /* Bytes consumed and remaining after the parse.  If
        `bytes_remaining == 0` we walked the body exactly.  Use this as
@@ -88,4 +88,4 @@ struct EhfParsedBody {
    On any structural error sets `error` and leaves `ok == false`.    */
 bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out);
 
-}  // namespace Level
+}  

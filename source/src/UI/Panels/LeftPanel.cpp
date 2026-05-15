@@ -1023,7 +1023,7 @@ void draw_left_panel() {
                display names.  Mapping is by case-insensitive full_path
                match; anything not in the table goes under "Other".  */
             struct LvlMap {
-                const char* path;     // lowercase forward/back-slash agnostic
+                const char* path;     
                 const char* name;
             };
             struct LvlGroup {
@@ -1261,7 +1261,7 @@ void draw_left_panel() {
                     if (rows.empty()) continue;
 
                     ImGui::PushStyleColor(ImGuiCol_Text,
-                        ImVec4(1.0f, 0.84f, 0.0f, 1.0f));   // gold heading
+                        ImVec4(1.0f, 0.84f, 0.0f, 1.0f));   
                     ImGui::TextUnformatted(g.heading);
                     ImGui::PopStyleColor();
                     ImGui::Indent(8.0f);

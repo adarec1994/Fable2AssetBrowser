@@ -26,6 +26,10 @@
 #include <cstring>
 #include <sstream>
 
+#ifndef _WIN32
+#include <GL/glew.h>
+#endif
+
 std::atomic<bool> g_pending_mdl_load{false};
 int g_pending_mdl_index = -1;
 std::string g_pending_mdl_full_path;
@@ -64,6 +68,14 @@ void process_pending_loads() {
             glDeleteTextures(1, &S.texture_window_gl);
             S.texture_window_gl = 0;
         }
+        extern unsigned int g_tex_popout_gl;
+        extern std::string  g_tex_popout_name;
+        extern bool         g_tex_popout_open;
+        extern int          g_tex_popout_mesh_idx;
+        g_tex_popout_gl       = 0;
+        g_tex_popout_name.clear();
+        g_tex_popout_open     = false;
+        g_tex_popout_mesh_idx = -1;
 #endif
         S.texture_window_name.clear();
         S.texture_window_width  = 0;
@@ -323,9 +335,20 @@ void process_pending_loads() {
         S.pending_preview_build = false;
         extern ModelPreview g_mp;
         extern FlyCam g_flycam;
+        extern bool g_mp_initialized;
         MP_Release(g_mp);
-        MP_Init(g_mp, 800, 600);
-        MP_Build(S.mdl_meshes, S.mdl_info, g_mp);
+        g_mp_initialized = MP_Init(g_mp, 800, 600);
+        if (g_mp_initialized) {
+            MP_Build(S.mdl_meshes, S.mdl_info, g_mp);
+            S.show_model_preview = true;
+            S.model_preview_open = true;
+            S.model_materials_open = true;
+            S.terrain_mode = false;
+            g_mp.no_tilt = false;
+            S.cam_yaw = 3.14159265f;
+            S.cam_pitch = 0.2f;
+            S.cam_dist = 3.0f;
+        }
     }
 #endif
 
@@ -742,7 +765,7 @@ void process_pending_loads() {
                         if (lm_srv) {
                             if (m.srv_extra) m.srv_extra->Release();
                             m.srv_extra      = lm_srv;
-                            m.extra_visible  = false;  // not a render input — view-only
+                            m.extra_visible  = false;  
                             m.extra_tex_name = "ehf_lightmap";
                             TerrainTextureRegistry::Register(
                                 "ehf_lightmap", lm.rgba, lm.width, lm.height);
@@ -776,7 +799,7 @@ void process_pending_loads() {
                             if (nm_srv) {
                                 if (m.srv_normal) m.srv_normal->Release();
                                 m.srv_normal      = nm_srv;
-                                m.normal_visible  = false;  // view-only
+                                m.normal_visible  = false;  
                                 m.normal_tex_name = "ehf_normal";
                                 TerrainTextureRegistry::Register(
                                     "ehf_normal", nm.rgba, nm.width, nm.height);

@@ -173,8 +173,8 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
             const size_t W = (size_t)out.TextureWidth;
             const size_t H = (size_t)out.TextureHeight;
             const size_t sz_argb8  = W * H * 4;
-            const size_t sz_bc1    = W * H / 2;        // BC1 = 4 bpp
-            const size_t sz_bc3    = W * H * 1;        // BC3 = 8 bpp
+            const size_t sz_bc1    = W * H / 2;        
+            const size_t sz_bc3    = W * H * 1;        
 
             /* Xbox 360 tile pads each storage dimension up to a 32-texel
                boundary (BC blocks count as one "texel" for this purpose,
@@ -189,8 +189,8 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
             const size_t pH_argb = (H + 31) & ~size_t(31);
             const size_t sz_argb8_padded = pW_argb * pH_argb * 4;
 
-            const size_t Wb = (W + 3) / 4;   // width  in BC blocks
-            const size_t Hb = (H + 3) / 4;   // height in BC blocks
+            const size_t Wb = (W + 3) / 4;   
+            const size_t Hb = (H + 3) / 4;   
             const size_t pWb = (Wb + 31) & ~size_t(31);
             const size_t pHb = (Hb + 31) & ~size_t(31);
             const size_t sz_bc1_padded = pWb * pHb * 8;
@@ -283,19 +283,19 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
                 if (zlib_magic && (size_t)size_prefix == sz_bc1 &&
                     out.PixelFormat == 35) {
                     expected_raw = sz_bc1;
-                    z_tag        = 200u;  // zlib → BC1
+                    z_tag        = 200u;  
                 } else if (zlib_magic && (size_t)size_prefix == sz_bc3 &&
                            out.PixelFormat == 39) {
                     expected_raw = sz_bc3;
-                    z_tag        = 201u;  // zlib → BC3
+                    z_tag        = 201u;  
                 } else if (zlib_magic && (size_t)size_prefix == sz_bc3 &&
                            out.PixelFormat == 40) {
                     expected_raw = sz_bc3;
-                    z_tag        = 202u;  // zlib → BC5
+                    z_tag        = 202u;  
                 } else if (zlib_magic && (size_t)size_prefix == sz_argb8 &&
                            (out.PixelFormat == 2 || out.PixelFormat == 4)) {
                     expected_raw = sz_argb8;
-                    z_tag        = 203u;  // zlib → ARGB8
+                    z_tag        = 203u;  
                 }
                 if (z_tag) {
                     TexInfo::MipDef md{};
@@ -405,7 +405,7 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
     if (out.MipMapOffset.empty()) return true;
 
     size_t walk_off = (size_t) out.MipMapOffset[0];
-    int safety = 64;   // guard against degenerate self-referential chains
+    int safety = 64;   
     while (safety-- > 0 && walk_off + 48 <= d.size()) {
         TexInfo::MipDef md{};
         size_t body_end = 0;
@@ -616,37 +616,26 @@ bool build_gui_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
 
 bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsigned char> &out,
                                    const std::string &preferred_bnk) {
-    std::string key = std::filesystem::path(tex_name).filename().string();
-    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    auto normalize_lookup_key = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
+        std::replace(s.begin(), s.end(), '\\', '/');
+        return s;
+    };
+
+    auto basename_key = [](const std::string& s) {
+        size_t pos = s.find_last_of("/\\");
+        return pos == std::string::npos ? s : s.substr(pos + 1);
+    };
+
+    std::string full_key = normalize_lookup_key(tex_name);
+    std::string base_key = normalize_lookup_key(basename_key(tex_name));
 
     std::vector<std::string> search_paths;
     search_paths.reserve(S.bnk_paths.size() + S.nested_bnk_paths.size());
     search_paths.insert(search_paths.end(), S.bnk_paths.begin(), S.bnk_paths.end());
     search_paths.insert(search_paths.end(), S.nested_bnk_paths.begin(), S.nested_bnk_paths.end());
 
-    if (!preferred_bnk.empty()) {
-        std::string preferred_parent;
-        auto it_pp = S.nested_bnk_parents.find(preferred_bnk);
-        if (it_pp != S.nested_bnk_parents.end()) {
-            preferred_parent = it_pp->second;
-        }
-
-        auto is_sibling = [&](const std::string& p) -> bool {
-            if (p == preferred_bnk) return true;
-            if (preferred_parent.empty()) return false;
-            auto it = S.nested_bnk_parents.find(p);
-            return it != S.nested_bnk_parents.end() && it->second == preferred_parent;
-        };
-
-        std::stable_partition(search_paths.begin(), search_paths.end(), is_sibling);
-    }
-
-    /* Classify candidate paths by filename role (header / mip0 / body)
-       and use BnkCache::find_index to look the texture up in each.
-       The cache builds the lowercase name → index table once per BNK
-       and reuses it on every subsequent call — this is what makes
-       model loads feel instant: no more BNKReader reconstruction per
-       material, no more per-texture file table decompression. */
     auto classify = [](const std::string& bnk_path) -> int {
         std::string n = std::filesystem::path(bnk_path).filename().string();
         std::transform(n.begin(), n.end(), n.begin(), ::tolower);
@@ -666,19 +655,86 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
         return 4;
     };
 
+    auto family_key = [](const std::string& bnk_path) {
+        std::string n = std::filesystem::path(bnk_path).filename().string();
+        std::transform(n.begin(), n.end(), n.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
+        if (n.size() >= 4 && n.compare(n.size() - 4, 4, ".bnk") == 0) {
+            n.resize(n.size() - 4);
+        }
+        const std::string suffixes[] = {
+            "_texture_headers",
+            "_textures",
+            "_texture",
+            "_headers"
+        };
+        for (const auto& suffix : suffixes) {
+            if (n.size() > suffix.size() &&
+                n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                n.resize(n.size() - suffix.size());
+                break;
+            }
+        }
+        return n;
+    };
+
+    if (!preferred_bnk.empty()) {
+        std::string preferred_parent;
+        auto it_pp = S.nested_bnk_parents.find(preferred_bnk);
+        if (it_pp != S.nested_bnk_parents.end()) {
+            preferred_parent = it_pp->second;
+        }
+        const bool preferred_is_nested = !preferred_parent.empty();
+        const std::string preferred_family = family_key(preferred_bnk);
+
+        auto is_sibling = [&](const std::string& p) {
+            if (p == preferred_bnk) return true;
+            if (preferred_parent.empty()) return false;
+            auto it = S.nested_bnk_parents.find(p);
+            return it != S.nested_bnk_parents.end() && it->second == preferred_parent;
+        };
+
+        auto is_nested_path = [&](const std::string& p) {
+            return S.nested_bnk_parents.find(p) != S.nested_bnk_parents.end();
+        };
+
+        auto rank = [&](const std::string& p) {
+            if (preferred_is_nested) {
+                if (is_sibling(p)) return 0;
+                return is_nested_path(p) ? 2 : 1;
+            }
+            if (p == preferred_bnk || family_key(p) == preferred_family) return 0;
+            if (classify(p) == 2) return 1;
+            return is_nested_path(p) ? 3 : 2;
+        };
+
+        std::stable_sort(search_paths.begin(), search_paths.end(),
+                         [&](const std::string& a, const std::string& b) {
+                             return rank(a) < rank(b);
+                         });
+    }
+
+    auto find_tex_index = [&](const std::string& bnk_path) {
+        int idx = BnkCache::find_index(bnk_path, full_key);
+        if (idx < 0 && base_key != full_key) {
+            idx = BnkCache::find_index(bnk_path, base_key);
+        }
+        return idx;
+    };
+
     std::string header_bnk_path, mip0_bnk_path, body_bnk_path;
     int header_idx = -1, mip0_idx = -1, body_idx = -1;
 
     for (const auto& bnk_path : search_paths) {
         int role = classify(bnk_path);
         if (role == 1 && header_idx < 0) {
-            int idx = BnkCache::find_index(bnk_path, key);
+            int idx = find_tex_index(bnk_path);
             if (idx >= 0) { header_idx = idx; header_bnk_path = bnk_path; }
         } else if (role == 2 && mip0_idx < 0) {
-            int idx = BnkCache::find_index(bnk_path, key);
+            int idx = find_tex_index(bnk_path);
             if (idx >= 0) { mip0_idx = idx; mip0_bnk_path = bnk_path; }
         } else if (role == 3 && body_idx < 0) {
-            int idx = BnkCache::find_index(bnk_path, key);
+            int idx = find_tex_index(bnk_path);
             if (idx >= 0) { body_idx = idx; body_bnk_path = bnk_path; }
         }
     }
@@ -689,7 +745,7 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
     if (body_idx < 0) {
         for (const auto& bnk_path : search_paths) {
             if (classify(bnk_path) != 4) continue;
-            int idx = BnkCache::find_index(bnk_path, key);
+            int idx = find_tex_index(bnk_path);
             if (idx >= 0) { body_idx = idx; body_bnk_path = bnk_path; break; }
         }
     }

@@ -61,7 +61,7 @@ bool gunzip(const std::vector<uint8_t>& in,
         return false;
     }
 
-    out.resize(in.size() * 4);     // first-pass guess
+    out.resize(in.size() * 4);     
     size_t produced = 0;
     while (true) {
         zs.next_out  = out.data() + produced;
@@ -134,7 +134,7 @@ void parse_ehf_header(const std::vector<uint8_t>& bytes,
        header, then a second `bundle::read(buf, body_offset, body_size)`
        to pull the body blob).                                          */
     static constexpr char   kMagic[]   = "HeightFieldGraphicsFile";
-    static constexpr size_t kMagicLen  = sizeof(kMagic) - 1;       // 23
+    static constexpr size_t kMagicLen  = sizeof(kMagic) - 1;       
     static constexpr size_t kHeaderLen = 63;
 
     if (bytes.size() < kHeaderLen) return;
@@ -142,21 +142,21 @@ void parse_ehf_header(const std::vector<uint8_t>& bytes,
 
     const uint8_t* p = bytes.data();
     out.magic.assign(kMagic);
-    out.version      = be_u32(p + kMagicLen);          // +23
-    out.prefix_float = be_f32(p + kMagicLen + 4);      // +27  (alias for f0)
-    out.f0           = be_f32(p + 27);                 // state[+68]
-    out.f1           = be_f32(p + 31);                 // state[+64]
-    out.u0           = be_u32(p + 35);                 // state[+72]
-    out.u1           = be_u32(p + 39);                 // state[+76]
-    out.f2           = be_f32(p + 43);                 // state[+80]
-    out.f3           = be_f32(p + 47);                 // state[+84]
-    out.f4           = be_f32(p + 51);                 // state[+88]
+    out.version      = be_u32(p + kMagicLen);          
+    out.prefix_float = be_f32(p + kMagicLen + 4);      
+    out.f0           = be_f32(p + 27);                 
+    out.f1           = be_f32(p + 31);                 
+    out.u0           = be_u32(p + 35);                 
+    out.u1           = be_u32(p + 39);                 
+    out.f2           = be_f32(p + 43);                 
+    out.f3           = be_f32(p + 47);                 
+    out.f4           = be_f32(p + 51);                 
     out.body_offset  = be_u32(p + 55);
     out.body_size    = be_u32(p + 59);
     out.ok           = true;
 }
 
-}  // namespace
+}  
 
 const FlatAssetEntry* FindHeightfieldByPath(const std::string& relative_path)
 {
@@ -373,4 +373,4 @@ bool BuildTerrainMesh(const GhfHeights& hg, TerrainMesh& out)
     return true;
 }
 
-}  // namespace Level
+}  

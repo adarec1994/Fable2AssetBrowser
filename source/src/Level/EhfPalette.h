@@ -39,20 +39,20 @@
 namespace EhfPalette {
 
 struct Entry {
-    std::string diffuse_path;   // e.g. "art\themetextures\grass_diffuse.tex"
+    std::string diffuse_path;   
     std::string normal_path;
-    float       tile_scale = 0.125f;  // f32 BE from metadata
+    float       tile_scale = 0.125f;  
     float       intensity  = 1.0f;
 };
 
 struct Palette {
     bool                 ok = false;
     std::vector<Entry>   entries;
-    size_t               palette_offset = 0;  // byte offset in .ehf where palette starts
+    size_t               palette_offset = 0;  
 };
 
 /* Parse the ground-texture palette out of an in-memory `.ehf` blob.
    Returns `ok = false` if the magic/structure doesn't match. */
 Palette Parse(const std::vector<uint8_t>& ehf);
 
-}  // namespace EhfPalette
+}  

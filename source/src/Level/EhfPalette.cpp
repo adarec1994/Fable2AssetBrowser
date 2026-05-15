@@ -29,7 +29,7 @@ bool starts_with(const std::vector<uint8_t>& d, size_t at, const char* lit, size
     return std::memcmp(d.data() + at, lit, n) == 0;
 }
 
-}  // namespace
+}  
 
 Palette Parse(const std::vector<uint8_t>& d)
 {
@@ -90,4 +90,4 @@ Palette Parse(const std::vector<uint8_t>& d)
     return r;
 }
 
-}  // namespace EhfPalette
+}  

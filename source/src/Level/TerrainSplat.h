@@ -46,7 +46,7 @@ namespace EhfLodThumbnails { struct Entry; }
 
 namespace TerrainSplat {
 
-constexpr int kCommonLodSize = 512;   // every LOD diffuse resampled to this
+constexpr int kCommonLodSize = 512;   
 /* Chapter3 chunks have up to 13 layers each; 16 gives headroom while
    staying well within typical D3D Texture2DArray slice limits. */
 constexpr int kMaxLayers     = 16;
@@ -100,4 +100,4 @@ const Resources& Get();
 /* Release every SRV; call on level change. */
 void Clear();
 
-}  // namespace TerrainSplat
+}  

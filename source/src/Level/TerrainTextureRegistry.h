@@ -21,7 +21,7 @@
 namespace TerrainTextureRegistry {
 
 struct Entry {
-    std::vector<uint8_t> rgba;       // tightly packed, 4 bytes per pixel
+    std::vector<uint8_t> rgba;       
     int                  width  = 0;
     int                  height = 0;
 };
@@ -48,10 +48,10 @@ void Clear();
    Filled by PendingLoads when terrain mesh loads, consumed by the
    "Materials & Textures" window in HexView.cpp.                  */
 struct LodPaletteEntry {
-    std::string base_diffuse;     // strs[0]
-    std::string base_normal;      // strs[1]
-    std::string detail_diffuse;   // strs[3]
-    std::string detail_normal;    // strs[4]
+    std::string base_diffuse;     
+    std::string base_normal;      
+    std::string detail_diffuse;   
+    std::string detail_normal;    
 };
 
 /* Replace the entire LOD palette list. Cleared with Clear(). */
@@ -60,4 +60,4 @@ void SetLodPalette(std::vector<LodPaletteEntry> entries);
 /* Returns a pointer to the stored list (may be empty). */
 const std::vector<LodPaletteEntry>& GetLodPalette();
 
-}  // namespace TerrainTextureRegistry
+}  

@@ -20,7 +20,7 @@
    The format itself is documented in docs/level_format.md.  The IDA
    parser sits at `level_parse_LevelGraphicsFile @ 0x82AAAC20`.       */
 
-struct FlatAssetEntry;   // forward — defined in Utilities/State.h
+struct FlatAssetEntry;   
 
 namespace Level {
 
@@ -34,10 +34,10 @@ namespace Level {
      32 → external streaming index (array of u64 pairs)              */
 struct EngineLevelEntry {
     uint32_t type   = 0;
-    size_t   offset = 0;   // byte offset of the entry inside the file
-    size_t   size   = 0;   // best-effort entry byte length
-    std::string str_a;     // first string field if applicable
-    std::string str_b;     // second string field if applicable
+    size_t   offset = 0;   
+    size_t   size   = 0;   
+    std::string str_a;     
+    std::string str_b;     
 };
 
 struct EngineLevelInfo {
@@ -54,11 +54,11 @@ struct EngineLevelInfo {
    Populated by `Open` after it inspects the `.list` companion file
    and consults the global heightfield index. */
 struct LevelResources {
-    std::string ehf_path;   // .ehf  — heightfield graphics descriptor
-    std::string ghf_path;   // .ghf  — gzipped raw heightmap
-    std::string hdb_path;   // .hdb
-    std::string genv_path;  // .genv
-    std::string ama_path;   // .ama / .amm / .amr — ADMP triplet
+    std::string ehf_path;   
+    std::string ghf_path;   
+    std::string hdb_path;   
+    std::string genv_path;  
+    std::string ama_path;   
     std::string amm_path;
     std::string amr_path;
 };
@@ -197,7 +197,7 @@ bool BakeEhfTerrainComposite(const std::vector<uint8_t>& ehf,
                              int&                   out_h,
                              std::string&           out_picked_name);
 
-}  // namespace Level
+}  
 
 /* When `Level::Open` succeeds and the level has a usable heightfield,
    it stashes a built TerrainMesh here and sets `g_pending_terrain_load`

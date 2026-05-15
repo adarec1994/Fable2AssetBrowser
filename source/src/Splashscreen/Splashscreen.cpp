@@ -21,6 +21,8 @@ void save_audio_muted(bool muted);
 #include <d3d11.h>
 #include <windows.h>
 #include "../../resource.h"
+#else
+#include <GL/glew.h>
 #endif
 
 #include "stb_image.h"

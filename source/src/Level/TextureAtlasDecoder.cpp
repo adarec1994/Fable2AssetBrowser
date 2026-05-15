@@ -346,7 +346,7 @@ bool inflate_zlib(const uint8_t* in, size_t in_size,
            produced == expected_raw;
 }
 
-}  // namespace
+}  
 
 namespace TextureAtlas {
 
@@ -420,7 +420,7 @@ DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob)
          the engine adds for textures larger than 16K texels).
          We trust the file's raw_size verbatim for PF=24.            */
     size_t   expected_raw = 0;
-    uint32_t block_bytes  = 0;        // BC block size in bytes
+    uint32_t block_bytes  = 0;        
     if      (PF == 35u) { expected_raw = (size_t)W * H / 2; block_bytes = 8;  }
     else if (PF == 24u) { expected_raw = (size_t)raw_size;  block_bytes = 2;  }
     else                { expected_raw = (size_t)W * H;     block_bytes = 16; }
@@ -559,7 +559,7 @@ bool decode_zlib_bc_page_generic(const uint8_t* zlib_stream,
     }
     return true;
 }
-}  // namespace
+}  
 
 bool DecodeZlibBc1Page(const uint8_t* zlib_stream, size_t comp_size,
                        size_t expected_raw, int w, int h,
@@ -732,4 +732,4 @@ bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,
     return true;
 }
 
-}  // namespace TextureAtlas
+}  

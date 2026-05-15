@@ -51,6 +51,8 @@ int g_isolate_mesh_idx   = -1;
 
 #ifdef _WIN32
 ID3D11ShaderResourceView* g_tex_popout_srv = nullptr;
+#else
+unsigned int g_tex_popout_gl = 0;
 #endif
 std::string g_tex_popout_name;
 bool        g_tex_popout_open    = false;
@@ -65,7 +67,7 @@ bool        g_tex_popout_show_uvs = false;
    the render area.                                                  */
 namespace {
 struct TerrainEditUI {
-    int   tool             = 0;   // 0=None, 1=Raise, 2=Lower, 3=Smooth, 4=Flatten
+    int   tool             = 0;   
     float brush_size       = 32.f;
     float brush_strength   = 1.f;
     bool  has_changes      = false;
@@ -75,7 +77,7 @@ struct TerrainEditUI {
     float hover_x = 0.f, hover_y = 0.f, hover_z = 0.f;
 };
 static TerrainEditUI g_te_ui;
-}  // namespace
+}  
 
 /* Heightmap popout — separate floating window, shown when the user
    right-clicks a level row → "View Heightmap".  The RGBA buffer is
@@ -1927,8 +1929,432 @@ void draw_render_panel(ID3D11Device* device) {
     draw_heightmap_popout();
 }
 #else
+namespace {
+void draw_texture_in_panel_gl() {
+    ImVec2 region = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    dl->AddRectFilled(origin,
+                      ImVec2(origin.x + region.x, origin.y + region.y),
+                      IM_COL32(20, 22, 28, 255));
+
+    if (!S.texture_window_gl || S.texture_window_width <= 0 || S.texture_window_height <= 0) {
+        const char* msg = S.texture_window_name.empty()
+            ? "Texture decode failed"
+            : S.texture_window_name.c_str();
+        ImVec2 sz = ImGui::CalcTextSize(msg);
+        ImVec2 pos(origin.x + (region.x - sz.x) * 0.5f,
+                   origin.y + (region.y - sz.y) * 0.5f);
+        dl->AddText(pos, IM_COL32(255, 90, 90, 230), msg);
+        ImGui::Dummy(region);
+        return;
+    }
+
+    float tw = (float)S.texture_window_width;
+    float th = (float)S.texture_window_height;
+    float scale = std::min(region.x / tw, region.y / th);
+    if (scale > 4.0f) scale = 4.0f;
+    float dw = tw * scale;
+    float dh = th * scale;
+    float x0 = origin.x + (region.x - dw) * 0.5f;
+    float y0 = origin.y + (region.y - dh) * 0.5f;
+
+    dl->AddImage((ImTextureID)(intptr_t)S.texture_window_gl,
+                 ImVec2(x0, y0),
+                 ImVec2(x0 + dw, y0 + dh));
+
+    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
+    ImGui::InvisibleButton("##tex_preview_hit", ImVec2(dw, dh));
+    if (S.tex_info_ok && !S.texture_blob.empty() &&
+        ImGui::BeginPopupContextItem()) {
+        tex_export_menu_blob(S.texture_window_name,
+                             S.texture_blob,
+                             S.texture_mip_index);
+        ImGui::EndPopup();
+    }
+}
+
+void apply_orbit_to_flycam_gl() {
+    float cy = std::cos(S.cam_yaw);
+    float sy = std::sin(S.cam_yaw);
+    float cp = std::cos(S.cam_pitch);
+    float sp = std::sin(S.cam_pitch);
+    g_flycam.pos[0] = g_mp.center[0] + sy * cp * S.cam_dist * g_mp.radius;
+    g_flycam.pos[1] = g_mp.center[1] + sp * S.cam_dist * g_mp.radius;
+    g_flycam.pos[2] = g_mp.center[2] + cy * cp * S.cam_dist * g_mp.radius;
+    float dx = g_mp.center[0] - g_flycam.pos[0];
+    float dy = g_mp.center[1] - g_flycam.pos[1];
+    float dz = g_mp.center[2] - g_flycam.pos[2];
+    float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (len > 0.0001f) {
+        g_flycam.yaw = std::atan2(dx, dz);
+        g_flycam.pitch = std::asin(dy / len);
+    }
+}
+
+void draw_materials_overlay_gl(const ImVec2& origin,
+                               const ImVec2& region,
+                               float next_overlay_y) {
+    if (g_mp.has_model && g_mp.lod_count > 1) {
+        static float s_lod_alpha = 0.30f;
+        const float kIdleAlpha = 0.30f;
+        const float kHoverAlpha = 1.00f;
+
+        ImGui::SetNextWindowPos(ImVec2(origin.x + 6, next_overlay_y));
+        ImGui::SetNextWindowSize(ImVec2(190, 0), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(s_lod_alpha * 0.78f);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, s_lod_alpha);
+
+        ImGuiWindowFlags fl = ImGuiWindowFlags_NoTitleBar
+                            | ImGuiWindowFlags_NoResize
+                            | ImGuiWindowFlags_NoMove
+                            | ImGuiWindowFlags_NoCollapse
+                            | ImGuiWindowFlags_NoSavedSettings
+                            | ImGuiWindowFlags_AlwaysAutoResize;
+        if (ImGui::Begin("##lod_overlay", nullptr, fl)) {
+            bool hovering = ImGui::IsWindowHovered(
+                ImGuiHoveredFlags_AllowWhenBlockedByPopup |
+                ImGuiHoveredFlags_ChildWindows);
+            float target = hovering ? kHoverAlpha : kIdleAlpha;
+            s_lod_alpha += (target - s_lod_alpha) * 0.18f;
+            if (std::fabs(s_lod_alpha - target) < 0.005f) s_lod_alpha = target;
+
+            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "LOD");
+            const int lod_count = (int)g_mp.lod_count;
+            int current = g_mp.selected_lod;
+            if (current < -1 || current >= lod_count) current = 0;
+
+            if (ImGui::RadioButton("All", current == -1)) {
+                g_mp.selected_lod = -1;
+            }
+            for (int i = 0; i < lod_count; ++i) {
+                ImGui::SameLine();
+                char lbl[16];
+                std::snprintf(lbl, sizeof(lbl), "%d", i);
+                if (ImGui::RadioButton(lbl, current == i)) {
+                    g_mp.selected_lod = i;
+                }
+            }
+
+            ImVec2 wp = ImGui::GetWindowPos();
+            ImVec2 ws = ImGui::GetWindowSize();
+            next_overlay_y = wp.y + ws.y + 6.0f;
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
+    }
+
+    if (!g_mp.has_model || g_mp.meshes.empty()) {
+        ::g_highlight_mesh_idx = -1;
+        ::g_isolate_mesh_idx = -1;
+        ::g_tex_popout_open = false;
+        ::g_tex_popout_gl = 0;
+        ::g_tex_popout_name.clear();
+        ::g_tex_popout_mesh_idx = -1;
+        return;
+    }
+
+    static float s_mat_alpha = 0.30f;
+    const float kIdleAlpha = 0.30f;
+    const float kHoverAlpha = 1.00f;
+    const float kMatW = 296.0f;
+    float max_h = std::max(160.0f,
+                           region.y - (next_overlay_y - origin.y) - 20.0f);
+
+    ImGui::SetNextWindowPos(ImVec2(origin.x + 6, next_overlay_y));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(kMatW, 0.0f),
+                                        ImVec2(kMatW, max_h));
+    ImGui::SetNextWindowBgAlpha(s_mat_alpha * 0.78f);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, s_mat_alpha);
+
+    ImGuiWindowFlags fl = ImGuiWindowFlags_NoTitleBar
+                        | ImGuiWindowFlags_NoResize
+                        | ImGuiWindowFlags_NoMove
+                        | ImGuiWindowFlags_NoCollapse
+                        | ImGuiWindowFlags_NoSavedSettings
+                        | ImGuiWindowFlags_AlwaysAutoResize;
+    if (ImGui::Begin("##materials_overlay", nullptr, fl)) {
+        bool hovering = ImGui::IsWindowHovered(
+            ImGuiHoveredFlags_AllowWhenBlockedByPopup |
+            ImGuiHoveredFlags_ChildWindows);
+        float target = hovering ? kHoverAlpha : kIdleAlpha;
+        s_mat_alpha += (target - s_mat_alpha) * 0.18f;
+        if (std::fabs(s_mat_alpha - target) < 0.005f) s_mat_alpha = target;
+
+        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Materials");
+        ImGui::Separator();
+
+        const ImVec2 thumb_size(48, 48);
+        for (size_t mi = 0; mi < g_mp.meshes.size(); ++mi) {
+        auto& mesh = g_mp.meshes[mi];
+
+        if (g_mp.selected_lod >= 0 &&
+            mesh.lod_index != (uint32_t)g_mp.selected_lod) {
+            continue;
+        }
+
+        ImGui::PushID((int)mi);
+        ImGui::TextUnformatted(mesh.name.c_str());
+            bool h = (::g_highlight_mesh_idx == (int)mi);
+            bool iso = (::g_isolate_mesh_idx == (int)mi);
+            if (ImGui::Checkbox("Highlight", &h)) {
+                if (h) {
+                    ::g_highlight_mesh_idx = (int)mi;
+                    ::g_isolate_mesh_idx = -1;
+                } else if (::g_highlight_mesh_idx == (int)mi) {
+                    ::g_highlight_mesh_idx = -1;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Isolate", &iso)) {
+                if (iso) {
+                    ::g_isolate_mesh_idx = (int)mi;
+                    ::g_highlight_mesh_idx = -1;
+                } else if (::g_isolate_mesh_idx == (int)mi) {
+                    ::g_isolate_mesh_idx = -1;
+                }
+            }
+
+            struct ThumbSpec {
+                const char* slot_id;
+                unsigned int tex;
+                const std::string* name;
+                bool* visible;
+            };
+            ThumbSpec thumbs[5] = {
+                {"diffuse",  mesh.tex_diffuse,  &mesh.diffuse_tex_name,  &mesh.diffuse_visible},
+                {"normal",   mesh.tex_normal,   &mesh.normal_tex_name,   &mesh.normal_visible},
+                {"specular", mesh.tex_specular, &mesh.specular_tex_name, &mesh.specular_visible},
+                {"metallic", mesh.tex_metallic, &mesh.metallic_tex_name, &mesh.metallic_visible},
+                {"extra",    mesh.tex_extra,    &mesh.extra_tex_name,    &mesh.extra_visible},
+            };
+
+            bool any_thumb = false;
+            for (int ti = 0; ti < 5; ++ti) {
+                const ThumbSpec& t = thumbs[ti];
+                if (!t.tex || t.tex == g_mp.default_tex) continue;
+                if (t.name->empty()) continue;
+                if (any_thumb) ImGui::SameLine();
+                any_thumb = true;
+                ImGui::PushID(t.slot_id);
+                ImGui::BeginGroup();
+                ImVec4 tint = (*t.visible) ? ImVec4(1, 1, 1, 1)
+                                           : ImVec4(0.45f, 0.45f, 0.45f, 1);
+                if (ImGui::ImageButton("##t",
+                                       (ImTextureID)(intptr_t)t.tex,
+                                       thumb_size,
+                                       ImVec2(0, 0), ImVec2(1, 1),
+                                       ImVec4(0, 0, 0, 0), tint)) {
+                    ::g_tex_popout_gl = t.tex;
+                    ::g_tex_popout_name = *t.name;
+                    ::g_tex_popout_open = true;
+                    ::g_tex_popout_mesh_idx = (int)mi;
+                }
+                if (ImGui::BeginPopupContextItem()) {
+                    const std::string& preferred_bnk =
+                        (S.selected_nested_index != -1 &&
+                         !S.selected_nested_temp_path.empty())
+                            ? S.selected_nested_temp_path
+                            : S.selected_bnk;
+                    tex_export_menu_named(*t.name, *t.name,
+                                          preferred_bnk, 0);
+                    ImGui::EndPopup();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s\n[%s]", t.name->c_str(), t.slot_id);
+                }
+                ImGui::Checkbox("##vis", t.visible);
+                ImGui::EndGroup();
+                ImGui::PopID();
+            }
+            if (!any_thumb) ImGui::TextDisabled("(no textures)");
+            ImGui::Separator();
+        ImGui::PopID();
+    }
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
+void draw_model_in_panel_gl() {
+    ImVec2 region = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    int w = std::max(1, (int)region.x);
+    int h = std::max(1, (int)region.y);
+
+    if (!g_mp_initialized) {
+        g_mp_initialized = MP_Init(g_mp, w, h);
+    }
+    if (!g_mp_initialized) {
+        ImGui::Dummy(region);
+        return;
+    }
+
+    MP_Resize(g_mp, w, h);
+    ImGui::InvisibleButton("##model_render", region);
+    bool hovered = ImGui::IsItemHovered();
+    bool active = ImGui::IsItemActive();
+
+    if (S.terrain_mode) {
+        float dt = ImGui::GetIO().DeltaTime;
+        if (hovered || g_flycam.is_looking) {
+            ::render_panel_handle_flycam(dt);
+        }
+    } else {
+        if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            ImVec2 d = ImGui::GetIO().MouseDelta;
+            const float kOrbitSensitivity = 0.008f;
+            S.cam_yaw += d.x * kOrbitSensitivity;
+            S.cam_pitch += d.y * kOrbitSensitivity;
+            const float kPitchLimit = 1.5f;
+            if (S.cam_pitch > kPitchLimit) S.cam_pitch = kPitchLimit;
+            if (S.cam_pitch < -kPitchLimit) S.cam_pitch = -kPitchLimit;
+        }
+        if (hovered) {
+            float wheel = ImGui::GetIO().MouseWheel;
+            if (wheel != 0.0f) {
+                S.cam_dist *= (wheel > 0.0f) ? 0.9f : 1.111f;
+                if (S.cam_dist < 0.3f) S.cam_dist = 0.3f;
+                if (S.cam_dist > 50.0f) S.cam_dist = 50.0f;
+            }
+        }
+        apply_orbit_to_flycam_gl();
+    }
+
+    for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
+        g_mp.meshes[i].highlight = ((int)i == ::g_highlight_mesh_idx);
+        g_mp.meshes[i].isolated = ((int)i == ::g_isolate_mesh_idx);
+    }
+
+    MP_Render(g_mp, g_flycam);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    unsigned int tex = MP_GetTexture(g_mp);
+    if (tex) {
+        dl->AddImage((ImTextureID)(intptr_t)tex,
+                     origin,
+                     ImVec2(origin.x + region.x, origin.y + region.y),
+                     ImVec2(0.0f, 1.0f),
+                     ImVec2(1.0f, 0.0f));
+    }
+
+    if (hovered && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        MP_Release(g_mp);
+        g_mp.has_model = false;
+        g_mp_initialized = false;
+        S.show_model_preview = false;
+        S.model_preview_open = false;
+        S.selected_bone = -1;
+    }
+
+    dl->AddRectFilled(ImVec2(origin.x + 6, origin.y + 6),
+                      ImVec2(origin.x + 196, origin.y + 70),
+                      IM_COL32(20, 22, 28, 200), 4.0f);
+    ImGui::SetCursorScreenPos(ImVec2(origin.x + 14, origin.y + 12));
+    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Controls");
+    ImGui::SetCursorScreenPos(ImVec2(origin.x + 14, origin.y + 30));
+    ImGui::TextDisabled(S.terrain_mode ? "R-Drag  look" : "L-Drag  rotate");
+    ImGui::SetCursorScreenPos(ImVec2(origin.x + 14, origin.y + 46));
+    ImGui::TextDisabled(S.terrain_mode ? "WASD/QE  move" : "Wheel  zoom  /  ESC  close");
+
+    draw_materials_overlay_gl(origin, region, origin.y + 76.0f);
+}
+
+void draw_texture_popout_gl() {
+    if (!::g_tex_popout_open || !::g_tex_popout_gl) return;
+
+    int tw = 0;
+    int th = 0;
+    GLint prev_tex = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex);
+    glBindTexture(GL_TEXTURE_2D, ::g_tex_popout_gl);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)prev_tex);
+
+    if (tw > 0 && th > 0) {
+        std::string title = "Texture: "
+            + std::filesystem::path(::g_tex_popout_name).filename().string()
+            + "##tex_popout";
+        ImGuiWindowFlags fl = ImGuiWindowFlags_NoCollapse
+                            | ImGuiWindowFlags_NoResize
+                            | ImGuiWindowFlags_AlwaysAutoResize;
+        if (ImGui::Begin(title.c_str(), &::g_tex_popout_open, fl)) {
+            ImGui::Checkbox("Show UVs", &::g_tex_popout_show_uvs);
+            ImGui::Image((ImTextureID)(intptr_t)::g_tex_popout_gl,
+                         ImVec2((float)tw, (float)th));
+
+            ImVec2 img_min = ImGui::GetItemRectMin();
+            ImGui::SetCursorScreenPos(img_min);
+            ImGui::InvisibleButton("##popout_hit",
+                                   ImVec2((float)tw, (float)th));
+            if (ImGui::BeginPopupContextItem()) {
+                const std::string& preferred_bnk =
+                    (S.selected_nested_index != -1 &&
+                     !S.selected_nested_temp_path.empty())
+                        ? S.selected_nested_temp_path
+                        : S.selected_bnk;
+                tex_export_menu_named(::g_tex_popout_name,
+                                      ::g_tex_popout_name,
+                                      preferred_bnk, 0);
+                ImGui::EndPopup();
+            }
+
+            if (::g_tex_popout_show_uvs &&
+                ::g_tex_popout_mesh_idx >= 0 &&
+                (size_t)::g_tex_popout_mesh_idx < g_mp.meshes.size()) {
+                uint32_t src = g_mp.meshes[(size_t)::g_tex_popout_mesh_idx].source_mesh_idx;
+                if (src < S.mdl_meshes.size()) {
+                    const auto& geom = S.mdl_meshes[src];
+                    if (!geom.uvs.empty() && !geom.indices.empty()) {
+                        ImVec2 img_max = ImGui::GetItemRectMax();
+                        float w_px = img_max.x - img_min.x;
+                        float h_px = img_max.y - img_min.y;
+                        ImDrawList* dl = ImGui::GetWindowDrawList();
+                        const ImU32 col = IM_COL32(255, 255, 255, 200);
+                        for (size_t i = 0; i + 2 < geom.indices.size(); i += 3) {
+                            uint32_t a = geom.indices[i];
+                            uint32_t b = geom.indices[i + 1];
+                            uint32_t c = geom.indices[i + 2];
+                            if ((size_t)a * 2 + 1 >= geom.uvs.size()) continue;
+                            if ((size_t)b * 2 + 1 >= geom.uvs.size()) continue;
+                            if ((size_t)c * 2 + 1 >= geom.uvs.size()) continue;
+                            ImVec2 pa(img_min.x + geom.uvs[a * 2 + 0] * w_px,
+                                      img_min.y + geom.uvs[a * 2 + 1] * h_px);
+                            ImVec2 pb(img_min.x + geom.uvs[b * 2 + 0] * w_px,
+                                      img_min.y + geom.uvs[b * 2 + 1] * h_px);
+                            ImVec2 pc(img_min.x + geom.uvs[c * 2 + 0] * w_px,
+                                      img_min.y + geom.uvs[c * 2 + 1] * h_px);
+                            dl->AddLine(pa, pb, col, 1.0f);
+                            dl->AddLine(pb, pc, col, 1.0f);
+                            dl->AddLine(pc, pa, col, 1.0f);
+                        }
+                    }
+                }
+            }
+        }
+        ImGui::End();
+    }
+
+    if (!::g_tex_popout_open) {
+        ::g_tex_popout_gl = 0;
+        ::g_tex_popout_name.clear();
+    }
+}
+}
+
 void draw_render_panel() {
-    UI::draw_placeholder();
+    if (g_mp.has_model) {
+        draw_model_in_panel_gl();
+    } else if (S.texture_window_gl) {
+        draw_texture_in_panel_gl();
+    } else if (S.show_lua_render) {
+        draw_lua_in_panel();
+    } else {
+        draw_placeholder();
+    }
+    draw_texture_popout_gl();
 }
 #endif
 

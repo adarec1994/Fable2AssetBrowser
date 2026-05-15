@@ -24,6 +24,7 @@
 #include <ctime>
 #include <cstring>
 #include <optional>
+#include <thread>
 
 void refresh_file_table() { S.selected_file_index = -1; }
 

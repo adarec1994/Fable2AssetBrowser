@@ -31,7 +31,7 @@ void release_all(std::vector<Entry>& v) {
 #endif
 }
 
-}  // namespace
+}  
 
 void Set(std::vector<Entry> entries)
 {
@@ -52,4 +52,4 @@ void Clear()
     v.clear();
 }
 
-}  // namespace EhfLodThumbnails
+}  

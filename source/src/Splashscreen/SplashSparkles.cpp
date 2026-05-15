@@ -1,6 +1,7 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "SplashSparkles.h"
 #include "LogoMap.h"
+#include <cstdint>
 #include <cstdlib>
 
 namespace Splash {

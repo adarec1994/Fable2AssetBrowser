@@ -94,7 +94,7 @@ struct ModelPreview {
     ID3D11VertexShader* vs_terrain = nullptr;
     ID3D11PixelShader*  ps_terrain = nullptr;
     ID3D11Buffer*       cbuffer_terrain = nullptr;
-    ID3D11SamplerState* sampler_point = nullptr;   // for chunk LUT (point filter)
+    ID3D11SamplerState* sampler_point = nullptr;   
     ID3D11RasterizerState* rs = nullptr;
     ID3D11RasterizerState* rs_wire = nullptr;
     ID3D11BlendState* bs = nullptr;

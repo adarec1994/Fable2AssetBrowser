@@ -31,6 +31,7 @@ extern const std::string& mp_last_decode_info();
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
@@ -108,9 +109,9 @@ struct BeReader {
 };
 
 constexpr char kEngineLevelMagic[]  = "LevelGraphicsFile";
-constexpr size_t kEngineLevelMagicLen = sizeof(kEngineLevelMagic) - 1;  // 17
+constexpr size_t kEngineLevelMagicLen = sizeof(kEngineLevelMagic) - 1;  
 
-}  // namespace
+}  
 
 bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                       EngineLevelInfo&            out)
@@ -313,7 +314,7 @@ bool Open(const FlatAssetEntry& entry)
 
     int n_heightfield_refs = 0;
     int n_logged           = 0;
-    const int kMaxLog      = 16;       // keep the spam reasonable
+    const int kMaxLog      = 16;       
 
     /* Capture EVERY `.ehf` path the level references in its entry
        table.  The companion `.list` file doesn't include the .ehf —
@@ -928,7 +929,7 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
         const uint32_t PF = u32_at(i + 24);
         const uint32_t mip_off = u32_at(i + 32);
         if (W == 0 || H == 0 || W > 8192 || H > 8192) continue;
-        if (PF != 35u) continue;     // BC1 only — that's the diffuse path
+        if (PF != 35u) continue;     
         if (mip_off != 0x54) continue;
 
         /* Read the actual raw_size from the embedded mip table — that's
@@ -1047,7 +1048,7 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
     std::vector<Cand> cands;
     auto add = [&](uint32_t w, uint32_t h) {
         if (w == 0 || h == 0) return;
-        if ((w & 3u) != 0 || (h & 3u) != 0) return;       // BC1 needs *4
+        if ((w & 3u) != 0 || (h & 3u) != 0) return;       
         cands.push_back({w, h, (size_t)w * h / 2});
     };
     /* Power-of-2 ≥ cells (the most common case across Albion). */
@@ -1648,7 +1649,7 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
         }
     };
 
-    constexpr float kBlendMax     = 3.0f;  // max observed in chapter3 data
+    constexpr float kBlendMax     = 3.0f;  
 
     /* Multi-layer per-chunk bake.  For each composite texel:
          1. Find the chunk + bilinear position within it (4 corner weights).
@@ -1741,4 +1742,4 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
     return true;
 }
 
-}  // namespace Level
+}  

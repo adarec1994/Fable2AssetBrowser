@@ -40,20 +40,20 @@ struct State {
     /* All-axis CPU position buffer (3 floats per vertex), kept in
        sync with `heights_current` so we can re-upload the vertex
        buffer cheaply after any edit. */
-    std::vector<float>    positions;     // width*height*3 floats
+    std::vector<float>    positions;     
 
     /* Source .ghf bytes (uncompressed payload after gunzip).  Saving
        writes back into this buffer then back into the BNK / ISO.   */
     std::vector<uint8_t>  ghf_payload_original;
 
     /* Locator info so save can find the right slot in the .iso. */
-    std::string           ghf_bnk_path;       // path (iso:// or disk) to the .bnk
+    std::string           ghf_bnk_path;       
     int                   ghf_file_index = -1;
-    std::string           ghf_full_path;      // relative path inside BNK
+    std::string           ghf_full_path;      
 
     /* BNK entry record for the .ghf — captured at level-load time so
        Save doesn't need to re-open the BNK reader.                  */
-    uint64_t              ghf_bnk_entry_offset = 0;     // byte offset within the BNK file
+    uint64_t              ghf_bnk_entry_offset = 0;     
     uint32_t              ghf_bnk_entry_on_disk_size = 0;
     bool                  ghf_bnk_entry_is_compressed = false;
 
@@ -88,9 +88,9 @@ bool IsDirty();
 
 void RaiseAll(float delta);
 void LowerAll(float delta);
-void SmoothAll();            // single pass of 3x3 box filter
+void SmoothAll();            
 void FlattenAll(float target_height);
-void Reset();                // restore heights_original → heights_current
+void Reset();                
 
 /* --- Brush tools (operate on grid cells within a radius). --- */
 
@@ -144,4 +144,4 @@ bool Save(std::string& out_path_or_error);
 /* Drop everything (called on level change). */
 void Clear();
 
-}  // namespace TerrainEdit
+}  

@@ -51,4 +51,4 @@ const std::vector<Entry>& Get();
 /* Release every SRV and drop the entries (called on level change). */
 void Clear();
 
-}  // namespace EhfLodThumbnails
+}  

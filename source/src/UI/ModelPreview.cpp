@@ -565,7 +565,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         /* Use the ImageHeat-port untile for these paths.  The older
            untile_xbox360_bc has bit collisions past 32-block widths,
            which broke BC1 1024×1024 atlas pages (256 blocks wide). */
-        if (m.CompFlag == 200) {              // BC1 — "XBOX 360 (4, 8)"
+        if (m.CompFlag == 200) {              
             std::vector<uint8_t> linear;
             untile_xbox360_imageheat(raw.data(), raw.size(), linear,
                                      w, h, /*bpp_size=*/4, /*texel_pitch=*/8);
@@ -574,7 +574,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
             return true;
         }
-        if (m.CompFlag == 201) {              // BC3 — "XBOX 360 (4, 16)"
+        if (m.CompFlag == 201) {              
             std::vector<uint8_t> linear;
             untile_xbox360_imageheat(raw.data(), raw.size(), linear,
                                      w, h, /*bpp_size=*/4, /*texel_pitch=*/16);
@@ -583,7 +583,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
             return true;
         }
-        if (m.CompFlag == 202) {              // BC5 — "XBOX 360 (4, 16)"
+        if (m.CompFlag == 202) {              
             std::vector<uint8_t> linear;
             untile_xbox360_imageheat(raw.data(), raw.size(), linear,
                                      w, h, /*bpp_size=*/4, /*texel_pitch=*/16);
@@ -1127,8 +1127,8 @@ cbuffer CB : register(b0){
     float4x4 mv;
     float4   params;
 }
-// Bones cbuffer — one matrix per bone, row-major. The CPU side caps the
-// upload at MP_MAX_BONES so the array size matches MP_MAX_BONES exactly.
+
+
 cbuffer Bones : register(b1){
     row_major float4x4 bones[256];
 }
@@ -1143,9 +1143,9 @@ struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
 VSOUT VS(VSIN i){
     VSOUT o;
 
-    // Skinning — combine up to 4 bone matrices weighted by bw. For
-    // unskinned meshes the CPU sets bw = (1,0,0,0) and bid.x = 0, with
-    // bones[0] = identity, so this collapses to a no-op multiply.
+    
+    
+    
     float4x4 skin =
         bones[i.bid.x] * i.bw.x +
         bones[i.bid.y] * i.bw.y +
@@ -1177,13 +1177,13 @@ Texture2D tex4 : register(t4);
 SamplerState smp : register(s0);
 struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
 float4 PS(VSOUT i) : SV_Target {
-    // Diffuse
+    
     float4 diffSamp = tex0.Sample(smp, i.t);
     float3 albedo   = diffSamp.rgb;
     float  alpha    = diffSamp.a;
 
-    // Normal map. Default texture is white (1,1,1); skip perturbation in
-    // that case so lighting stays correct on meshes without normal maps.
+    
+    
     float3 nSamp = tex1.Sample(smp, i.t).rgb;
     bool   nIsDefault = (nSamp.r > 0.98 && nSamp.g > 0.98 && nSamp.b > 0.98);
     float3 N_geo = normalize(i.n);
@@ -1193,17 +1193,17 @@ float4 PS(VSOUT i) : SV_Target {
         N = normalize(N_geo + N_m * 0.5);
     }
 
-    // Light direction in view space (fixed — moves with camera, headlamp-like).
+    
     float3 L = normalize(float3(0.3, 0.7, 0.5));
     float3 V = float3(0.0, 0.0, 1.0);
     float3 H = normalize(L + V);
 
-    // Diffuse term — double-sided via abs (back faces lit too).
+    
     float ndotl = abs(dot(N, L));
     float diff_term = 0.55 + 0.45 * ndotl;
 
-    // Specular. Default texture white; treat as zero spec so meshes
-    // without a spec map don't go shiny.
+    
+    
     float3 sSamp = tex2.Sample(smp, i.t).rgb;
     bool   sIsDefault = (sSamp.r > 0.98 && sSamp.g > 0.98 && sSamp.b > 0.98);
     float  spec_mask  = sIsDefault ? 0.0 : sSamp.r;
@@ -1212,23 +1212,23 @@ float4 PS(VSOUT i) : SV_Target {
 
     float3 color = albedo * diff_term + spec.xxx;
 
-    // Highlight tint — params.z carries a 0/1 flag from MP_Render. When
-    // on, blend the lit colour toward a saturated green so the user can
-    // visually pick out the selected submesh in the Materials overlay.
+    
+    
+    
     if (params.z > 0.5) {
         float3 hi = float3(0.10, 0.95, 0.25);
         color = lerp(color, hi, 0.65);
     }
 
-    // Alpha-cutout discard.  Fable 2 foliage/grain diffuse textures
-    // (esa_wheatsheaves.tex, bw_oak_leaf_1.tex, etc.) use alpha as a
-    // binary mask for the stalk silhouettes.  Without this discard the
-    // alpha-blend pass (depth-no-write) draws the low-alpha edges and
-    // back faces in front of the actual silhouette, which reads as a
-    // see-through / "flipped normals" haze.  Discarding very-low alpha
-    // turns the mask into a clean cutout that depth-tests correctly.
-    // For opaque textures the diff sample's alpha is 1, so the discard
-    // never fires and behaviour is unchanged.
+    
+    
+    
+    
+    
+    
+    
+    
+    
     if (alpha < 0.25) discard;
 
     return float4(color, alpha);
@@ -1271,8 +1271,8 @@ struct VSIN{
 struct VSOUT{
     float4 p   : SV_Position;
     float3 n   : NORMAL;
-    float2 t   : TEXCOORD0;  // world-space-tiled detail UV (set by CPU)
-    float3 wp  : TEXCOORD1;  // world XYZ (for chunk lookup + lightmap)
+    float2 t   : TEXCOORD0;  
+    float3 wp  : TEXCOORD1;  
 };
 VSOUT VS(VSIN i){
     VSOUT o;
@@ -1365,7 +1365,7 @@ float4 PS(VSOUT i) : SV_Target {
     for (int L = 0; L < 16; ++L) {
         float4 idx_norm = chunk_idx.Load(int4(chunk_xy, L, 0));
         float4 idx255   = round(idx_norm * 255.0);
-        if (idx255.x > 254.5) break;       // 0xFF sentinel → no more layers
+        if (idx255.x > 254.5) break;       
 
         float4 bln_norm = chunk_blend.Load(int4(chunk_xy, L, 0));
         /* blend_scale lets us recover the original 0..max_blend range
@@ -2126,7 +2126,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 t.grid_size[1] = (float)R.chunk_h;
                 t.grid_size[2] = (float)R.lod_count;
                 t.grid_size[3] = 255.f;
-                t.splat_params[0] = 3.0f;   // blend_scale
+                t.splat_params[0] = 3.0f;   
                 t.splat_params[1] = 0.0f;
                 t.splat_params[2] = 0.0f;
                 t.splat_params[3] = 0.0f;
@@ -2295,12 +2295,12 @@ uniform sampler2D uTexMetallic;
 uniform sampler2D uTexExtra;
 out vec4 FragColor;
 void main() {
-    // Diffuse
+    
     vec4 diffSamp = texture(uTexDiffuse, vTexCoord);
     vec3 albedo = diffSamp.rgb;
     float alpha = diffSamp.a;
 
-    // Normal map (skip if default-white)
+    
     vec3 nSamp = texture(uTexNormal, vTexCoord).rgb;
     bool nIsDefault = (nSamp.r > 0.98 && nSamp.g > 0.98 && nSamp.b > 0.98);
     vec3 N_geo = normalize(vNormal);
@@ -2314,11 +2314,11 @@ void main() {
     vec3 V = vec3(0.0, 0.0, 1.0);
     vec3 H = normalize(L + V);
 
-    // Double-sided diffuse
+    
     float ndotl = abs(dot(N, L));
     float diff_term = 0.55 + 0.45 * ndotl;
 
-    // Specular (skip if default-white)
+    
     vec3 sSamp = texture(uTexSpecular, vTexCoord).rgb;
     bool sIsDefault = (sSamp.r > 0.98 && sSamp.g > 0.98 && sSamp.b > 0.98);
     float spec_mask = sIsDefault ? 0.0 : sSamp.r;
@@ -2587,11 +2587,14 @@ void MP_Render(ModelPreview& mp, const FlyCam& cam) {
     float fov = 60.0f * 3.14159265f / 180.0f, aspect = (float)mp.width / (float)mp.height;
     float far_plane = mp.radius * 100.0f;
     mat4_perspective(P, fov, aspect, 0.05f, far_plane);
-    const float tiltX = 3.14159265f / 2.0f;
-    mat4_translate(Tm, -mp.center[0], -mp.center[1], -mp.center[2]);
-    mat4_rotateX(R, tiltX);
-    mat4_translate(Tp, mp.center[0], mp.center[1], mp.center[2]);
-    mat4_mult(tmp, R, Tm); mat4_mult(W, Tp, tmp);
+    mat4_identity(W);
+    if (!mp.no_tilt) {
+        const float tiltX = -3.14159265f / 2.0f;
+        mat4_translate(Tm, -mp.center[0], -mp.center[1], -mp.center[2]);
+        mat4_rotateX(R, tiltX);
+        mat4_translate(Tp, mp.center[0], mp.center[1], mp.center[2]);
+        mat4_mult(tmp, R, Tm); mat4_mult(W, Tp, tmp);
+    }
     float MV[16], MVP[16];
     mat4_mult(MV, V, W); mat4_mult(MVP, P, MV);
     glUniformMatrix4fv(mp.mvp_loc, 1, GL_FALSE, MVP);

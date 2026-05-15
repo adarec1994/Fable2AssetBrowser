@@ -9,7 +9,7 @@ namespace Level {
 namespace {
 
 constexpr char   kMagic[]   = "HeightFieldGraphicsFile";
-constexpr size_t kMagicLen  = sizeof(kMagic) - 1;   // 23
+constexpr size_t kMagicLen  = sizeof(kMagic) - 1;   
 constexpr size_t kHeaderLen = 63;
 
 inline uint32_t be_u32(const uint8_t* p) {
@@ -97,17 +97,17 @@ bool skip_tex_blob(Walker& w) {
         w.err = os.str();
         return false;
     }
-    // Read raw_size at tex_start + mt
+    
     if (!w.need(mt + 8)) return false;
     uint32_t raw_size = be_u32(w.p + tex_start + mt);
 
     if (pf == 98u) {
-        // Uncompressed: header bytes (tex_start..tex_start+mt+4) + raw_size
-        // data bytes immediately after raw_size field.  No comp_size.
+        
+        
         w.pos = tex_start + mt + 4 + raw_size;
     } else {
-        // Zlib-compressed: header (mt+8 bytes total — raw_size and
-        // comp_size) + comp_size zlib bytes after.
+        
+        
         uint32_t comp_size = be_u32(w.p + tex_start + mt + 4);
         w.pos = tex_start + mt + 8 + comp_size;
     }
@@ -121,7 +121,7 @@ bool skip_tex_blob(Walker& w) {
     return true;
 }
 
-}  // namespace
+}  
 
 
 bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
@@ -192,7 +192,7 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
             return false;
         }
         /* Stash count so the final pass below knows how many sub-vectors. */
-        out.bytes_consumed = cnt;  // (will overwrite at end — repurpose for now)
+        out.bytes_consumed = cnt;  
     }
     const uint32_t cnt_860e8 = uint32_t(out.bytes_consumed);
 
@@ -308,7 +308,7 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
                 if (!w.u8(L.texture_idx[i])) { out.error = "layer idx"; return false; }
                 if (!w.u8(L.blend[i])) { out.error = "layer blend"; return false; }
             }
-            (void)v0;  // currently unused
+            (void)v0;  
         }
     }
 
@@ -331,4 +331,4 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
     return true;
 }
 
-}  // namespace Level
+}  

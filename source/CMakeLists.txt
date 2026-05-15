@@ -78,11 +78,6 @@ set(APP_SOURCES
         src/Audio/AudioPlayer.cpp
         src/Audio/XmaDecoder.cpp
         src/Audio/MfAudioEncoder.cpp
-        # Minimal override of libavcodec/allcodecs.obj — defines codec_list
-        # with only XMA1/XMA2/WMAPro so the linker drops every other codec
-        # via /OPT:REF instead of dragging the full FFmpeg surface (~25MB)
-        # into the exe. See the file header for the link-order trick.
-        src/Audio/Xma2Codec/xma_codec_list.cpp
         src/UI/ModelPreview.cpp
         src/UI/ModelPreview.h
         src/Lua.cpp
@@ -283,6 +278,13 @@ if(WIN32)
             d3d11 dxgi d3dcompiler dwmapi winmm mfreadwrite)
 
     if(FFMPEG_AVAILABLE)
+        target_sources(Fable_2_Asset_Browser PRIVATE
+                # Minimal override of libavcodec/allcodecs.obj — defines codec_list
+                # with only XMA1/XMA2/WMAPro so the linker drops every other codec
+                # via /OPT:REF instead of dragging the full FFmpeg surface (~25MB)
+                # into the exe. See the file header for the link-order trick.
+                src/Audio/Xma2Codec/xma_codec_list.cpp)
+
         target_compile_definitions(Fable_2_Asset_Browser PRIVATE F2_HAVE_FFMPEG=1)
         target_include_directories(Fable_2_Asset_Browser PRIVATE "${FFMPEG_ROOT}/include")
         target_link_libraries(Fable_2_Asset_Browser PRIVATE
@@ -330,6 +332,7 @@ else()
             ${imgui_SOURCE_DIR}/backends
             ${imguifiledialog_SOURCE_DIR}
             ${imgui_hex_editor_SOURCE_DIR}
+            ${iconfontcpp_SOURCE_DIR}
             ${stb_SOURCE_DIR}
             ${miniaudio_SOURCE_DIR}
             ${OPENGL_INCLUDE_DIR}

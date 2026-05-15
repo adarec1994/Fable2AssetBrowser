@@ -45,19 +45,19 @@ struct HeightfieldHeader {
        for the heightfield; the 2 u32s look like per-cell resolution
        (verts-per-tile-row × verts-per-tile-col).  We name them
        generically until we've validated against multiple .ehfs.    */
-    std::string magic;        // "HeightFieldGraphicsFile" if recognized
-    bool        ok = false;   // true iff magic matched and 63B were available
+    std::string magic;        
+    bool        ok = false;   
     uint32_t    version = 0;
-    float       prefix_float = 0.f;   // alias for f0 (state[+68])
-    float       f0 = 0.f;             // state[+68]
-    float       f1 = 0.f;             // state[+64]
-    uint32_t    u0 = 0;               // state[+72]
-    uint32_t    u1 = 0;               // state[+76]
-    float       f2 = 0.f;             // state[+80]
-    float       f3 = 0.f;             // state[+84]
-    float       f4 = 0.f;             // state[+88]
-    uint32_t    body_offset = 0;      // offset into .ehf
-    uint32_t    body_size   = 0;      // size of body blob
+    float       prefix_float = 0.f;   
+    float       f0 = 0.f;             
+    float       f1 = 0.f;             
+    uint32_t    u0 = 0;               
+    uint32_t    u1 = 0;               
+    float       f2 = 0.f;             
+    float       f3 = 0.f;             
+    float       f4 = 0.f;             
+    uint32_t    body_offset = 0;      
+    uint32_t    body_size   = 0;      
 };
 
 struct HeightfieldFiles {
@@ -65,9 +65,9 @@ struct HeightfieldFiles {
     std::string           error;
 
     HeightfieldHeader     ehf_header;
-    std::vector<uint8_t>  ehf_bytes;            // raw .ehf
-    std::vector<uint8_t>  ghf_bytes_compressed; // raw .ghf as stored
-    std::vector<uint8_t>  ghf_bytes_raw;        // decompressed payload
+    std::vector<uint8_t>  ehf_bytes;            
+    std::vector<uint8_t>  ghf_bytes_compressed; 
+    std::vector<uint8_t>  ghf_bytes_raw;        
 };
 
 /* Decoded heightmap pulled out of a .ghf payload.
@@ -91,12 +91,12 @@ struct HeightfieldFiles {
                                      Left untouched for now.)        */
 struct GhfHeights {
     bool                  ok        = false;
-    uint32_t              width     = 0;   // cells horizontally
-    uint32_t              height    = 0;   // cells vertically
+    uint32_t              width     = 0;   
+    uint32_t              height    = 0;   
     float                 tile_size = 64.f;
     float                 min_height = 0.f;
     float                 max_height = 0.f;
-    std::vector<float>    heights;         // width * height floats, row-major
+    std::vector<float>    heights;         
     std::string           error;
 };
 
@@ -140,10 +140,10 @@ struct TerrainMesh {
     uint32_t              width  = 0;
     uint32_t              height = 0;
 
-    std::vector<float>    positions;   // 3 floats per vertex
-    std::vector<float>    normals;     // 3 floats per vertex
-    std::vector<float>    uvs;         // 2 floats per vertex
-    std::vector<uint32_t> indices;     // 3 indices per triangle
+    std::vector<float>    positions;   
+    std::vector<float>    normals;     
+    std::vector<float>    uvs;         
+    std::vector<uint32_t> indices;     
 
     float                 min_height = 0.f;
     float                 max_height = 0.f;
@@ -151,4 +151,4 @@ struct TerrainMesh {
 
 bool BuildTerrainMesh(const GhfHeights& heights, TerrainMesh& out);
 
-}  // namespace Level
+}  

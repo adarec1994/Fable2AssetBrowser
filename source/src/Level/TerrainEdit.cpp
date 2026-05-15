@@ -1,8 +1,8 @@
 #include "TerrainEdit.h"
 
-#include "../UI/ModelPreview.h"   // MPPerMesh + MPVertex layout
-#include "../Utilities/State.h"   // S.root_dir for save path
-#include "../ISO/IsoMount.h"      // in-place ISO splice
+#include "../UI/ModelPreview.h"   
+#include "../Utilities/State.h"   
+#include "../ISO/IsoMount.h"      
 #include "../UI/OutputLog.h"
 
 #ifdef _WIN32
@@ -39,7 +39,7 @@ void sync_positions_y() {
     s.dirty = true;
 }
 
-}  // namespace
+}  
 
 void Init(int width, int height, float tile_size,
           float center_x, float center_z,
@@ -147,7 +147,7 @@ void Reset() {
     if (!s.loaded) return;
     s.heights_current = s.heights_original;
     sync_positions_y();
-    s.dirty = false;   // back at the snapshot — no pending diff
+    s.dirty = false;   
 }
 
 float SampleHeightAtWorldXZ(float wx, float wz) {
@@ -190,7 +190,7 @@ bool Raycast(float ox, float oy, float oz,
         (s.max_x - s.min_x) + (s.max_z - s.min_z),
         std::abs(oy) * 8.f);
     float prev_t  = 0.f;
-    float prev_dh = oy - SampleHeightAtWorldXZ(ox, oz); // ray-y minus terrain-y
+    float prev_dh = oy - SampleHeightAtWorldXZ(ox, oz); 
     for (float t = step; t < max_dist; t += step) {
         const float wx = ox + dx * t;
         const float wy = oy + dy * t;
@@ -341,7 +341,7 @@ void ApplyToGpu(ID3D11Device* device, void* mesh_v) {
 
     D3D11_BUFFER_DESC vd{};
     mesh->vb->GetDesc(&vd);
-    if (vd.ByteWidth != need_bytes) return;   // size mismatch — bail
+    if (vd.ByteWidth != need_bytes) return;   
 
     /* 1) Stage the existing buffer for readback. */
     D3D11_BUFFER_DESC sd = vd;
@@ -390,7 +390,7 @@ void ApplyToGpu(ID3D11Device* device, void* mesh_v) {
     ctx->Release();
 }
 
-#endif  // _WIN32
+#endif  
 
 namespace {
 
@@ -429,7 +429,7 @@ bool gzip_compress(const std::vector<uint8_t>& payload,
     return true;
 }
 
-}  // namespace
+}  
 
 bool Save(std::string& out_path_or_error) {
     auto& s = storage();
@@ -587,4 +587,4 @@ void Clear() {
     storage() = State{};
 }
 
-}  // namespace TerrainEdit
+}  

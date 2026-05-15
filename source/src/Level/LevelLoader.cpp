@@ -6,6 +6,7 @@
 #include "TerrainTextureRegistry.h"
 
 #include "../Utilities/State.h"
+#include "../Utilities/Utils.h"
 #include "../BNKCore.cpp"
 #include "../UI/OutputLog.h"
 #include "../textures/TexParser.h"
@@ -53,6 +54,8 @@ float                 g_pending_terrain_ghf_tile_size = 1.f;
 int                   g_pending_terrain_ghf_width = 0;
 int                   g_pending_terrain_ghf_height = 0;
 FlatAssetEntry        g_pending_terrain_ghf_entry;
+std::vector<Level::PropBlock> g_pending_level_prop_blocks;
+std::string                   g_pending_level_model_body_bnk;
 
 namespace Level {
 
@@ -80,6 +83,19 @@ struct BeReader {
            | (uint32_t(p[i + 2]) << 8)
            |  uint32_t(p[i + 3]);
         i += 4;
+        return true;
+    }
+    bool u64(uint64_t& v) {
+        uint32_t hi = 0;
+        uint32_t lo = 0;
+        if (!u32(hi) || !u32(lo)) return false;
+        v = (uint64_t(hi) << 32) | uint64_t(lo);
+        return true;
+    }
+    bool f32(float& f) {
+        uint32_t u = 0;
+        if (!u32(u)) return false;
+        std::memcpy(&f, &u, sizeof(f));
         return true;
     }
     bool skip(size_t k) {
@@ -177,6 +193,52 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
         }
 
         switch (e.type) {
+            case 2: {
+                PropBlock block;
+                block.offset = e.offset;
+                if (!r.cstr(block.model_path) ||
+                    !r.cstr(block.shadow_model_path) ||
+                    !r.cstr(block.lod_model_path) ||
+                    !r.cstr(block.extra_model_path)) {
+                    out.error = "truncated reading type-2 model paths";
+                    return false;
+                }
+
+                e.str_a = block.model_path;
+                e.str_b = block.lod_model_path;
+
+                uint32_t instance_count = 0;
+                if (!r.u32(instance_count)) {
+                    out.error = "truncated reading type-2 instance count";
+                    return false;
+                }
+                if (instance_count > 100000) {
+                    out.error = "type-2 instance count looks corrupt";
+                    return false;
+                }
+
+                block.instances.reserve(instance_count);
+                for (uint32_t pi = 0; pi < instance_count; ++pi) {
+                    PropInstance inst;
+                    if (!r.u8(inst.flags[0]) ||
+                        !r.u8(inst.flags[1]) ||
+                        !r.u8(inst.flags[2]) ||
+                        !r.u64(inst.hash)) {
+                        out.error = "truncated reading type-2 instance header";
+                        return false;
+                    }
+                    for (float& v : inst.values) {
+                        if (!r.f32(v)) {
+                            out.error = "truncated reading type-2 instance floats";
+                            return false;
+                        }
+                    }
+                    block.instances.push_back(inst);
+                }
+
+                out.prop_blocks.push_back(std::move(block));
+                break;
+            }
             case 4:
             case 5:
             case 32: {
@@ -436,6 +498,7 @@ bool Open(const FlatAssetEntry& entry)
                 else if (matches(".ama"))  res.ama_path  = line;
                 else if (matches(".amm"))  res.amm_path  = line;
                 else if (matches(".amr"))  res.amr_path  = line;
+                else if (matches("_models.bnk")) res.model_body_bnk = line;
 
                 OutputLog::info("  " + line);
             }
@@ -451,7 +514,10 @@ bool Open(const FlatAssetEntry& entry)
        matches the .ghf basename (that's the main playable terrain;
        the others are distant vistas / fillers).                   */
     auto basename_no_ext = [](const std::string& p) -> std::string {
-        std::string s = std::filesystem::path(p).filename().string();
+        size_t slash = p.find_last_of("/\\");
+        std::string s = (slash == std::string::npos)
+            ? p
+            : p.substr(slash + 1);
         auto dot = s.find_last_of('.');
         if (dot != std::string::npos) s.resize(dot);
         std::transform(s.begin(), s.end(), s.begin(),
@@ -489,6 +555,7 @@ bool Open(const FlatAssetEntry& entry)
     report_slot(".ama  (ambient)",       res.ama_path);
     report_slot(".amm  (ambient meta)",  res.amm_path);
     report_slot(".amr  (ambient refs)",  res.amr_path);
+    report_slot("models",                res.model_body_bnk);
 
     /* Load the heightfield triplet (raw .ehf + gunzipped .ghf) and
        surface a header line so we know what we're working with. */
@@ -607,6 +674,22 @@ bool Open(const FlatAssetEntry& entry)
                                 Level::FindHeightfieldByPath(res.ghf_path);
                             g_pending_terrain_ghf_entry =
                                 fe ? *fe : FlatAssetEntry{};
+                        }
+
+                        g_pending_level_prop_blocks = info.prop_blocks;
+                        g_pending_level_model_body_bnk.clear();
+                        if (!res.model_body_bnk.empty()) {
+                            size_t slash = res.model_body_bnk.find_last_of("/\\");
+                            std::string model_leaf =
+                                (slash == std::string::npos)
+                                    ? res.model_body_bnk
+                                    : res.model_body_bnk.substr(slash + 1);
+                            std::transform(model_leaf.begin(), model_leaf.end(),
+                                           model_leaf.begin(), ::tolower);
+                            auto found_model_bnk = find_bnk_by_filename(model_leaf);
+                            if (found_model_bnk) {
+                                g_pending_level_model_body_bnk = *found_model_bnk;
+                            }
                         }
 
                         g_pending_terrain_load        = true;

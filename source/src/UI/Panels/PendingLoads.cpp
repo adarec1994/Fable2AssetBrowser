@@ -25,6 +25,7 @@
 #include <ctime>
 #include <cstring>
 #include <sstream>
+#include <unordered_map>
 
 #ifndef _WIN32
 #include <GL/glew.h>
@@ -36,6 +37,147 @@ std::string g_pending_mdl_full_path;
 
 std::atomic<bool> g_pending_tex_load{false};
 int g_pending_tex_index = -1;
+
+namespace {
+
+struct CachedPropModel {
+    bool loaded = false;
+    MDLInfo info;
+    std::vector<MDLMeshGeom> geoms;
+};
+
+static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
+                                         const MDLMeshGeom& src,
+                                         const Level::PropInstance& inst,
+                                         float terrain_cx,
+                                         float terrain_cz)
+{
+    MDLMeshGeom dst = src;
+    const float px = inst.values[0] - terrain_cx;
+    const float py = inst.values[2];
+    const float pz = inst.values[1] - terrain_cz;
+    const float s = inst.values[6];
+    const float c = inst.values[7];
+    const float sx = inst.values[9] == 0.0f ? 1.0f : inst.values[9];
+    const float sy = inst.values[10] == 0.0f ? sx : inst.values[10];
+    const float sz = inst.values[11] == 0.0f ? sx : inst.values[11];
+
+    for (size_t i = 0; i + 2 < dst.positions.size(); i += 3) {
+        const float lx = src.positions[i + 0] * sx;
+        const float ly = src.positions[i + 2] * sy;
+        const float lz = -src.positions[i + 1] * sz;
+        dst.positions[i + 0] = px + lx * c + lz * s;
+        dst.positions[i + 1] = py + ly;
+        dst.positions[i + 2] = pz - lx * s + lz * c;
+    }
+
+    if (dst.normals.size() == src.normals.size()) {
+        for (size_t i = 0; i + 2 < dst.normals.size(); i += 3) {
+            const float lx = src.normals[i + 0];
+            const float ly = src.normals[i + 2];
+            const float lz = -src.normals[i + 1];
+            dst.normals[i + 0] = lx * c + lz * s;
+            dst.normals[i + 1] = ly;
+            dst.normals[i + 2] = -lx * s + lz * c;
+        }
+    }
+
+    dst.name = src.name.empty()
+        ? std::string("prop")
+        : std::string("prop: ") + src.name;
+    out.push_back(std::move(dst));
+}
+
+static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
+{
+    if (g_pending_level_prop_blocks.empty()) return;
+
+    constexpr size_t kMaxInstances = 256;
+    const float terrain_cx =
+        (float(g_pending_terrain_ghf_width) - 1.0f) * 0.5f *
+        g_pending_terrain_ghf_tile_size;
+    const float terrain_cz =
+        (float(g_pending_terrain_ghf_height) - 1.0f) * 0.5f *
+        g_pending_terrain_ghf_tile_size;
+
+    std::unordered_map<std::string, CachedPropModel> cache;
+    size_t instances_seen = 0;
+    size_t instances_loaded = 0;
+    size_t models_failed = 0;
+    size_t misses_logged = 0;
+
+    if (g_pending_level_model_body_bnk.empty()) {
+        OutputLog::warn("level props: no level model body BNK resolved");
+    } else {
+        OutputLog::info("level props: model body BNK " +
+                        std::filesystem::path(g_pending_level_model_body_bnk)
+                            .filename().string());
+    }
+
+    for (const auto& block : g_pending_level_prop_blocks) {
+        if (block.model_path.empty()) continue;
+        auto& cached = cache[block.model_path];
+        if (!cached.loaded && cached.geoms.empty()) {
+            std::vector<unsigned char> buf;
+            if (build_mdl_buffer_for_name_with_body(block.model_path,
+                                                    g_pending_level_model_body_bnk,
+                                                    buf) &&
+                parse_mdl_info(buf, cached.info, block.model_path)) {
+                bool all_empty = !cached.info.MeshBuffers.empty();
+                for (const auto& mb : cached.info.MeshBuffers) {
+                    if (mb.VertexCount > 0) {
+                        all_empty = false;
+                        break;
+                    }
+                }
+                if (all_empty) {
+                    reparse_mdl_buffers_via_polymsh_scan(buf, cached.info);
+                }
+                parse_mdl_geometry(buf, cached.info, cached.geoms);
+                cached.loaded = !cached.geoms.empty();
+            }
+            if (!cached.loaded) {
+                ++models_failed;
+                if (misses_logged < 5) {
+                    ++misses_logged;
+                    OutputLog::warn("level props: model load miss " +
+                                    block.model_path);
+                }
+                cached.loaded = true;
+            }
+        }
+
+        if (cached.geoms.empty()) continue;
+        for (const auto& inst : block.instances) {
+            if (instances_seen >= kMaxInstances) break;
+            ++instances_seen;
+            for (const auto& src : cached.geoms) {
+                if (!src.positions.empty() && !src.indices.empty()) {
+                    append_transformed_prop_geom(geoms, src, inst,
+                                                 terrain_cx, terrain_cz);
+                }
+            }
+            ++instances_loaded;
+        }
+        if (instances_seen >= kMaxInstances) break;
+    }
+
+    OutputLog::info("level props: appended " +
+                    std::to_string(instances_loaded) +
+                    " of " +
+                    std::to_string([&] {
+                        size_t n = 0;
+                        for (const auto& b : g_pending_level_prop_blocks) {
+                            n += b.instances.size();
+                        }
+                        return n;
+                    }()) +
+                    " type-2 instances" +
+                    (models_failed ? " (" + std::to_string(models_failed) +
+                                      " model load misses)" : std::string()));
+}
+
+}
 
 #ifdef _WIN32
 void process_pending_loads(ID3D11Device* device) {
@@ -566,6 +708,7 @@ void process_pending_loads() {
 
             std::vector<MDLMeshGeom> geoms;
             geoms.push_back(std::move(g));
+            append_level_props_to_geoms(geoms);
 
             if (g_mp.has_model) {
                 MP_Release(g_mp);
@@ -974,6 +1117,9 @@ void process_pending_loads() {
         g_pending_terrain_ghf_heights.clear();
         g_pending_terrain_ghf_heights.shrink_to_fit();
         g_pending_terrain_ghf_entry = FlatAssetEntry{};
+        g_pending_level_prop_blocks.clear();
+        g_pending_level_prop_blocks.shrink_to_fit();
+        g_pending_level_model_body_bnk.clear();
     }
 #else
     if (g_pending_terrain_load.exchange(false)) {
@@ -1072,6 +1218,7 @@ void process_pending_loads() {
 
             std::vector<MDLMeshGeom> geoms;
             geoms.push_back(std::move(g));
+            append_level_props_to_geoms(geoms);
 
             extern ModelPreview g_mp;
             extern bool g_mp_initialized;
@@ -1149,6 +1296,9 @@ void process_pending_loads() {
         g_pending_terrain_ghf_heights.clear();
         g_pending_terrain_ghf_heights.shrink_to_fit();
         g_pending_terrain_ghf_entry = FlatAssetEntry{};
+        g_pending_level_prop_blocks.clear();
+        g_pending_level_prop_blocks.shrink_to_fit();
+        g_pending_level_model_body_bnk.clear();
     }
 #endif
 }

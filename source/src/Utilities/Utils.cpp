@@ -115,16 +115,23 @@ bool any_mdl_in_bnk() {
 }
 
 std::optional<std::string> find_bnk_by_filename(const std::string &fname_lower) {
+    auto leaf_lower = [](const std::string& path) {
+        size_t slash = path.find_last_of("/\\");
+        std::string s = (slash == std::string::npos)
+            ? path
+            : path.substr(slash + 1);
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        return s;
+    };
+    std::string wanted = fname_lower;
+    std::transform(wanted.begin(), wanted.end(), wanted.begin(), ::tolower);
+
     for (auto &p: S.bnk_paths) {
-        std::string b = std::filesystem::path(p).filename().string();
-        std::transform(b.begin(), b.end(), b.begin(), ::tolower);
-        if (b == fname_lower) return p;
+        if (leaf_lower(p) == wanted) return p;
     }
 
     for (auto &p: S.nested_bnk_paths) {
-        std::string b = std::filesystem::path(p).filename().string();
-        std::transform(b.begin(), b.end(), b.begin(), ::tolower);
-        if (b == fname_lower) return p;
+        if (leaf_lower(p) == wanted) return p;
     }
     return std::nullopt;
 }

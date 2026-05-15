@@ -12,35 +12,89 @@
 #include <fstream>
 #include <cstdarg>
 #include <cstdio>
+#include <optional>
 
 using std::uint8_t; using std::uint16_t; using std::uint32_t;
 
-bool build_mdl_buffer_for_name(const std::string &mdl_name, std::vector<unsigned char> &out){
-    auto p_headers = find_bnk_by_filename("globals_model_headers.bnk");
-    auto p_rest    = find_bnk_by_filename("globals_models.bnk");
-    if(!p_headers || !p_rest) return false;
+bool build_mdl_buffer_for_name_with_body(const std::string& mdl_name,
+                                         const std::string& preferred_body_bnk,
+                                         std::vector<unsigned char>& out)
+{
+    out.clear();
 
-    /* Lowercase + forward-slash the lookup key.  BnkCache stores both
-       full-path and basename-only forms so either works. */
     std::string key = mdl_name;
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
     std::replace(key.begin(), key.end(), '\\', '/');
 
-    int hidx = BnkCache::find_index(*p_headers, key);
-    int ridx = BnkCache::find_index(*p_rest,    key);
-    if (hidx < 0 || ridx < 0) return false;
+    std::vector<std::string> header_candidates;
+    std::vector<std::string> body_candidates;
 
-    try {
-        auto vh = BnkCache::extract_bytes(*p_headers, hidx);
-        auto vr = BnkCache::extract_bytes(*p_rest,    ridx);
-        out.clear();
-        out.reserve(vh.size() + vr.size());
-        out.insert(out.end(), vh.begin(), vh.end());
-        out.insert(out.end(), vr.begin(), vr.end());
-    } catch (...) {
-        return false;
+    auto add_unique = [](std::vector<std::string>& dst,
+                         const std::optional<std::string>& v)
+    {
+        if (!v || v->empty()) return;
+        if (std::find(dst.begin(), dst.end(), *v) == dst.end()) {
+            dst.push_back(*v);
+        }
+    };
+
+    if (!preferred_body_bnk.empty()) {
+        body_candidates.push_back(preferred_body_bnk);
+        size_t slash = preferred_body_bnk.find_last_of("/\\");
+        std::string body_leaf = (slash == std::string::npos)
+            ? preferred_body_bnk
+            : preferred_body_bnk.substr(slash + 1);
+        std::transform(body_leaf.begin(), body_leaf.end(),
+                       body_leaf.begin(), ::tolower);
+        const std::string suffix = "_models.bnk";
+        if (body_leaf.size() >= suffix.size() &&
+            body_leaf.compare(body_leaf.size() - suffix.size(),
+                              suffix.size(), suffix) == 0) {
+            std::string paired =
+                body_leaf.substr(0, body_leaf.size() - suffix.size())
+                + "_model_headers.bnk";
+            add_unique(header_candidates, find_bnk_by_filename(paired));
+        }
     }
-    return true;
+
+    add_unique(header_candidates, find_bnk_by_filename("globals_model_headers.bnk"));
+    add_unique(body_candidates, find_bnk_by_filename("globals_models.bnk"));
+
+    for (const auto& header_bnk : header_candidates) {
+        const int hidx = BnkCache::find_index(header_bnk, key);
+        if (hidx < 0) continue;
+        for (const auto& body_bnk : body_candidates) {
+            const int ridx = BnkCache::find_index(body_bnk, key);
+            if (ridx < 0) continue;
+            try {
+                auto vh = BnkCache::extract_bytes(header_bnk, hidx);
+                auto vr = BnkCache::extract_bytes(body_bnk, ridx);
+                out.reserve(vh.size() + vr.size());
+                out.insert(out.end(), vh.begin(), vh.end());
+                out.insert(out.end(), vr.begin(), vr.end());
+                return !out.empty();
+            } catch (...) {
+                out.clear();
+            }
+        }
+    }
+
+    for (const auto& body_bnk : body_candidates) {
+        const int ridx = BnkCache::find_index(body_bnk, key);
+        if (ridx < 0) continue;
+        try {
+            out = BnkCache::extract_bytes(body_bnk, ridx);
+            if (!out.empty()) return true;
+        } catch (...) {
+            out.clear();
+        }
+    }
+
+    return false;
+}
+
+bool build_mdl_buffer_for_name(const std::string &mdl_name, std::vector<unsigned char> &out){
+    return build_mdl_buffer_for_name_with_body(mdl_name, std::string(), out);
 }
 
 namespace {
@@ -1637,4 +1691,3 @@ bool reparse_mdl_buffers_via_polymsh_scan(const std::vector<unsigned char>& data
     }
     return true;
 }
-

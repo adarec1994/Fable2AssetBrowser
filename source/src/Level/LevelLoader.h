@@ -40,12 +40,28 @@ struct EngineLevelEntry {
     std::string str_b;     
 };
 
+struct PropInstance {
+    uint64_t hash = 0;
+    uint8_t flags[3] = {0, 0, 0};
+    float values[20] = {};
+};
+
+struct PropBlock {
+    size_t offset = 0;
+    std::string model_path;
+    std::string shadow_model_path;
+    std::string lod_model_path;
+    std::string extra_model_path;
+    std::vector<PropInstance> instances;
+};
+
 struct EngineLevelInfo {
     bool                          ok        = false;
     std::string                   source_path;
     uint32_t                      version   = 0;
     uint32_t                      entry_count = 0;
     std::vector<EngineLevelEntry> entries;
+    std::vector<PropBlock>        prop_blocks;
     /* If parsing bailed mid-way, this is the human-readable reason. */
     std::string                   error;
 };
@@ -61,6 +77,7 @@ struct LevelResources {
     std::string ama_path;   
     std::string amm_path;
     std::string amr_path;
+    std::string model_body_bnk;
 };
 
 /* Open the level the user clicked.  `entry` points at the
@@ -221,3 +238,6 @@ extern float                 g_pending_terrain_ghf_tile_size;
 extern int                   g_pending_terrain_ghf_width;
 extern int                   g_pending_terrain_ghf_height;
 extern FlatAssetEntry        g_pending_terrain_ghf_entry;
+
+extern std::vector<Level::PropBlock> g_pending_level_prop_blocks;
+extern std::string                   g_pending_level_model_body_bnk;

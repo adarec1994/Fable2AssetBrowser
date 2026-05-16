@@ -17,3 +17,4 @@ bool any_wav_in_bnk();
 bool any_tex_in_bnk();
 bool any_mdl_in_bnk();
 std::optional<std::string> find_bnk_by_filename(const std::string &fname_lower);
+std::optional<std::string> find_bnk_by_virtual_path(const std::string &vpath);

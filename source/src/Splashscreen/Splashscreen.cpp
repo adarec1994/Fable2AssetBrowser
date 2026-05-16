@@ -219,7 +219,7 @@ void open_picker() {
 void draw(ID3D11Device* device) {
     load_textures_if_needed(device);
 #else
-void draw(GLFWwindow* /*window*/) {
+void draw(GLFWwindow* ) {
     load_textures_if_needed();
 #endif
     float dt = ImGui::GetIO().DeltaTime;

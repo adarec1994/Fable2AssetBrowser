@@ -121,8 +121,8 @@ void open_url(const char* url) {
     ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
 }
 #else
-void load_image_if_needed() { /* image preview only on Win32 for now */ }
-void open_url(const char* /*url*/) {}
+void load_image_if_needed() {  }
+void open_url(const char* ) {}
 #endif
 
 ImVec2 fit_image_size(ImVec2 avail) {

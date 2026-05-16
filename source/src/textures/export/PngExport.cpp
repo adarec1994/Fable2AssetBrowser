@@ -7,5 +7,5 @@
 bool tex_export_png(const std::string& path, const uint8_t* rgba, int w, int h) {
     if (!rgba || w <= 0 || h <= 0) return false;
 
-    return stbi_write_png(path.c_str(), w, h, /*comp=*/4, rgba, w * 4) != 0;
+    return stbi_write_png(path.c_str(), w, h, 4, rgba, w * 4) != 0;
 }

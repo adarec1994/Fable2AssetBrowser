@@ -322,18 +322,6 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
                     }
                     c1 = apply_delta(c1, kDeltaTable[d]);
                 }
-                /* The comp-1 variant in the game (tex_decode_BC1_compressed
-                   @ 0x82B8C1C8) forces 4-color BC1 mode by swapping
-                   endpoints so c0 >= c1.  The comp-11 variant
-                   (sub_82B8C900 @ 0x82B8C900) does NOT swap — it
-                   leaves c0 < c1 in place, which on the PC GPU
-                   activates 3-color BC1 mode where index 3 means
-                   transparent.  This is what foliage textures
-                   (bluebell, dandelion, etc.) rely on for alpha
-                   cutouts.  Forcing the swap on comp-11 replaces the
-                   should-be-transparent texels with (c0+2c1)/3
-                   colors, which shows up as the dark stair-step
-                   pattern at the base of the bluebell's billboard. */
                 if (!comp11_layout && c0 < c1) {
                     uint16_t t = c0; c0 = c1; c1 = t;
                 }
@@ -359,27 +347,6 @@ bool lh_decode_compressed_mip(const uint8_t* body, size_t body_size,
                     return fail(os.str());
                 }
 
-                /* B0..B3 each encode one 2x2 quadrant of the 4x4 BC1
-                   index grid as:
-                     bits 0-3 (low nibble)  = top  row of the 2x2 quadrant
-                     bits 4-7 (high nibble) = bottom row of the 2x2 quadrant
-
-                   For PC BC1 the index dword is in LE byte order, where:
-                     outb[4] = row 0 indices  (4 texels × 2 bits)
-                     outb[5] = row 1 indices
-                     outb[6] = row 2 indices
-                     outb[7] = row 3 indices
-
-                   With B0 = left quadrants (cols 0-1), B1 = right
-                   quadrants (cols 2-3), row 0 is the LOW nibbles of
-                   B0 (left) and B1 (right), and row 1 is the HIGH
-                   nibbles.  Same for rows 2-3 via B2/B3.
-
-                   The previous packing had outb[4] ↔ outb[5] and
-                   outb[6] ↔ outb[7] swapped, which produced a
-                   pair-wise row swap in every 4x4 block — the
-                   "rows look flipped" artifact in the texture
-                   preview. */
                 outb[4] = (uint8_t)(( B0       & 0x0F)        | ((B1 & 0x0F) << 4));
                 outb[5] = (uint8_t)(((B0 >> 4) & 0x0F)        |  (B1 & 0xF0));
                 outb[6] = (uint8_t)(( B2       & 0x0F)        | ((B3 & 0x0F) << 4));
@@ -444,8 +411,8 @@ bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,
         return fail("variant_2_3_4: invalid dimensions");
 
     BitReader br(body, body_size);
-    /*int mw =*/ (void)br.read(16);
-    /*int mh =*/ (void)br.read(16);
+     (void)br.read(16);
+     (void)br.read(16);
     int mode_flag = (int)br.read(4);
     (void)br.read(8);
 

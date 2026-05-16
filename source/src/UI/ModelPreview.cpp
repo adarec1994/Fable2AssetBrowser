@@ -247,26 +247,6 @@ static void blit_bc5_to_rgba(const uint8_t* src, int w, int h,
     }
 }
 
-/* ----------------------------------------------------------------- */
-/* Xbox 360 BC texture untiling.                                      */
-/*                                                                    */
-/* The 360 stores BC1/BC3/BC5 blocks in a swizzled tile layout — not  */
-/* in linear scanline-of-blocks order.  Decoding the raw bytes as if  */
-/* they were linear produces the blocky / "pixelated" look the user   */
-/* sees in the texture preview because each 4x4 BC block lands at the */
-/* wrong (x, y) within the texture.                                   */
-/*                                                                    */
-/* The standard XGAddress2DTiledOffset function (used internally by   */
-/* the Xbox 360 SDK to map a logical (x, y) to a physical byte offset */
-/* in tiled GPU memory) gives the un-swizzle.  For BC formats, we     */
-/* treat each BC block as a single "texel" of stride = block size.    */
-/*                                                                    */
-/*   BC1 block = 8 bytes  → TexelPitch = 8                            */
-/*   BC3 block = 16 bytes → TexelPitch = 16                           */
-/*   BC5 block = 16 bytes → TexelPitch = 16                           */
-/*                                                                    */
-/* Width is in BLOCK units (not texel units) for this function.       */
-/* ----------------------------------------------------------------- */
 
 static uint32_t xbox360_tiled_offset(uint32_t x, uint32_t y,
                                      uint32_t width_in_blocks,
@@ -274,8 +254,6 @@ static uint32_t xbox360_tiled_offset(uint32_t x, uint32_t y,
 {
     uint32_t aligned_w = (width_in_blocks + 31u) & ~31u;
 
-    /* logBpp = log2(texel_byte_size).  Closed-form trick from the
-       XBox 360 SDK so the compiler can inline it for known sizes. */
     uint32_t log_bpp = (texel_byte_size >> 2) +
                        ((texel_byte_size >> 1) >> (texel_byte_size >> 2));
 
@@ -288,8 +266,6 @@ static uint32_t xbox360_tiled_offset(uint32_t x, uint32_t y,
         ((offset & ~511u) << 3) + ((offset & 448u) << 2) + (offset & 63u) +
         ((y & 1u) << 4) + (((x & 7u) << 1) ^ ((y >> 1) & 1u));
 
-    /* Returned offset is in bytes; mask off the low log_bpp bits so
-       the address aligns to a whole "texel" (= one BC block). */
     return final_off & ~((1u << log_bpp) - 1u);
 }
 
@@ -314,26 +290,6 @@ static void untile_xbox360_bc(const uint8_t* tiled, size_t tiled_size,
     }
 }
 
-/* ----------------------------------------------------------------- */
-/* ImageHeat / ReverseBox Xbox 360 unswizzle.                         */
-/*                                                                    */
-/* The canonical XGAddress2DTiledOffset formula in the codebase above */
-/* maps a logical (x, y) → tiled byte offset, and was designed/tuned  */
-/* for BC1/BC3 block coordinates (8- or 16-byte texels).  At 4-byte   */
-/* texel size (raw 32 bpp ARGB) the formula has bit collisions —      */
-/* multiple distinct (x, y) pairs map to the same tiled byte — and    */
-/* the result is the horizontally-banded / 4-vertical-strips garbage  */
-/* we saw on lanternrusticglass.tex.                                  */
-/*                                                                    */
-/* The pair of functions below goes the OTHER way: given a sequential */
-/* tiled storage offset, return the logical (x, y) of the texel that  */
-/* lives at that offset.  Iterating tiled offsets and scattering each */
-/* texel to its (x, y) destination produces a correct linear image    */
-/* even at 4-byte texels.  Ported verbatim from                       */
-/*   bartlomiejduda/ReverseBox swizzle_x360.py                        */
-/* which is what ImageHeat's "XBOX 360 (1, 4)" mode uses, confirmed   */
-/* against this exact .tex file by the user.                          */
-/* ----------------------------------------------------------------- */
 
 static uint32_t xg_address_2d_tiled_x(uint32_t block_offset,
                                       uint32_t width_in_blocks,
@@ -381,21 +337,6 @@ static uint32_t xg_address_2d_tiled_y(uint32_t block_offset,
     return macro + micro + ((offset_tile & 0x10u) >> 4);
 }
 
-/* ImageHeat-style untile for block-compressed (BC1 / BC3 / BC5) and
-   raw 32-bpp data.  Matches the algorithm in ReverseBox
-   `_convert_x360_image_data` and is what ImageHeat's "XBOX 360
-   (block_pixel_size, texel_byte_pitch)" modes do:
-
-     - block_pixel_size = 4, texel_byte_pitch = 8   → BC1 / DXT1
-     - block_pixel_size = 4, texel_byte_pitch = 16  → BC3 / BC5
-     - block_pixel_size = 1, texel_byte_pitch = 4   → raw 32 bpp ARGB
-
-   Iterates sequential tiled-storage block offsets, computes the
-   logical (x, y) each block belongs to via xg_address_2d_tiled_*,
-   and scatters each block to its destination.  The existing
-   `untile_xbox360_bc` uses a different formula that has bit
-   collisions past 32-block widths — keep that one in place for any
-   callers that depend on it, and use this for new code paths.    */
 static void untile_xbox360_imageheat(const uint8_t* tiled,
                                      size_t          tiled_size,
                                      std::vector<uint8_t>& linear_out,
@@ -429,10 +370,6 @@ static void untile_xbox360_imageheat(const uint8_t* tiled,
     }
 }
 
-/* Per-thread tag for the most recent decode_tex_to_rgba failure.
-   load_named_srv reads this when an SRV doesn't materialise and
-   forwards it to the OutputLog so the user can see WHY a texture
-   came back blank instead of just "(no textures)". */
 static thread_local std::string g_last_decode_fail_reason;
 static thread_local std::string g_last_decode_info;
 
@@ -482,14 +419,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
     if (mip_index >= 0 && (size_t)mip_index < ti.Mips.size()) {
         best = (size_t)mip_index;
     } else {
-        /* Prefer the mip whose stored dimensions match the file-header's
-           TextureWidth/Height — that's the "real" intended texture, which
-           in the merged extraction layout is NOT the first record on the
-           chain (the first record is the optional 1024mip0 chunk, which
-           for many spec/selfillum maps is an all-zero placeholder that
-           decodes to a fully-transparent image and looks like "nothing
-           rendered" in the preview).  Fall back to largest-area only
-           when no mip matches the header W/H exactly. */
         size_t match_idx = ti.Mips.size();
         for (size_t i = 0; i < ti.Mips.size(); ++i) {
             int w_i = 0, h_i = 0; mip_wh(i, w_i, h_i);
@@ -515,9 +444,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
     const auto& m = ti.Mips[best];
     int w = 0, h = 0; mip_wh(best, w, h);
 
-    /* The zlib-deflated sentinels (200..203) set MipDataSizeParsed to
-       the COMPRESSED stream size which can legitimately exceed any
-       per-cell math; skip the standard OOB check for those. */
     const bool is_zlib_sentinel =
         (m.CompFlag >= 200 && m.CompFlag <= 203);
     if (!is_zlib_sentinel &&
@@ -528,13 +454,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         DEC_FAIL("mip_oob");
     }
 
-    /* Sentinel CompFlag 200..203 — "size-prefixed + zlib-deflated"
-       variant from level texture_atlas pages.  The parser stashes
-       the expected POST-inflate raw size in Unknown_3 so we can cap
-       the inflate output buffer.  We inflate locally and run the
-       existing untile / endian / blit path inline (rather than
-       trying to rewrite the const blob the rest of the function
-       reads from). */
     if (m.CompFlag == 200 || m.CompFlag == 201 ||
         m.CompFlag == 202 || m.CompFlag == 203)
     {
@@ -562,13 +481,10 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
 
         out_w = w; out_h = h;
 
-        /* Use the ImageHeat-port untile for these paths.  The older
-           untile_xbox360_bc has bit collisions past 32-block widths,
-           which broke BC1 1024×1024 atlas pages (256 blocks wide). */
         if (m.CompFlag == 200) {              
             std::vector<uint8_t> linear;
             untile_xbox360_imageheat(raw.data(), raw.size(), linear,
-                                     w, h, /*bpp_size=*/4, /*texel_pitch=*/8);
+                                     w, h, 4, 8);
             swap_bc1_endian(linear.data(), linear.size());
             blit_bc1_to_rgba(linear.data(), w, h, rgba);
             if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
@@ -577,7 +493,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         if (m.CompFlag == 201) {              
             std::vector<uint8_t> linear;
             untile_xbox360_imageheat(raw.data(), raw.size(), linear,
-                                     w, h, /*bpp_size=*/4, /*texel_pitch=*/16);
+                                     w, h, 4, 16);
             swap_bc3_endian(linear.data(), linear.size());
             blit_bc3_to_rgba(linear.data(), w, h, rgba);
             if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
@@ -586,14 +502,12 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         if (m.CompFlag == 202) {              
             std::vector<uint8_t> linear;
             untile_xbox360_imageheat(raw.data(), raw.size(), linear,
-                                     w, h, /*bpp_size=*/4, /*texel_pitch=*/16);
+                                     w, h, 4, 16);
             swap_bc5_endian(linear.data(), linear.size());
             blit_bc5_to_rgba(linear.data(), w, h, rgba);
             if (out_has_alpha) *out_has_alpha = false;
             return true;
         }
-        /* CompFlag == 203 — raw ARGB8 path mirrors the existing
-           CompFlag=99 untile (Xbox 360 "(1, 4)" swizzle). */
         const size_t pixels = (size_t)w * (size_t)h;
         if (raw.size() < pixels * 4) DEC_FAIL("zlib_argb8_size_short");
         rgba.assign(pixels * 4, 0);
@@ -622,28 +536,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
         return true;
     }
 
-    /* CompFlag==99 / 100 is the parser's sentinel for the "size-prefixed,
-       Xbox 360 tiled raw 32-bpp" variant — e.g. lanternrusticglass.tex.
-       The header has a single non-zero MipMapOffset pointing at a u32
-       BE size prefix (= W*H*4) followed by mip0 stored as Xbox 360
-       tiled 32-bpp pixel data.
-
-         CompFlag=99  → PixelFormat=2.  Bytes per pixel laid out as
-                         A, R, G, B (diffuse — alpha in byte 0 is
-                         meaningful, typically 0xff with edge falloff).
-         CompFlag=100 → PixelFormat=4 (and other non-2 values).  Byte 0
-                         is unused (always 0x00 in samples seen) — most
-                         likely the engine reads byte 3 as a single
-                         intensity channel (specular / mask).  We force
-                         alpha=0xff so the texture isn't fully
-                         transparent in the renderer.
-
-       The unswizzle is the "XBOX 360 (1, 4)" variant from ImageHeat /
-       ReverseBox — block_pixel_size=1, texel_byte_pitch=4.  Iterate
-       tiled-storage offsets, compute the logical (x, y) each storage
-       texel belongs to, and scatter.  This avoids the bit-collision
-       problem the canonical XGAddress2DTiledOffset has at 4-byte
-       texels (which is why we couldn't reuse xbox360_tiled_offset). */
     if (m.CompFlag == 99 || m.CompFlag == 100) {
         const size_t pixels = (size_t)w * (size_t)h;
         if (m.MipDataSizeParsed < pixels * 4) {
@@ -695,8 +587,6 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             if (m.MipDataSizeParsed < sz_bc1) {
                 DEC_FAIL("c7_pf35_size_short");
             }
-            /* Untile the Xbox 360 BC1 layout into linear scan-of-blocks
-               order, then endian-swap each block, then BC decode. */
             std::vector<uint8_t> linear;
             untile_xbox360_bc(src, m.MipDataSizeParsed, linear, w, h, 8);
             swap_bc1_endian(linear.data(), linear.size());
@@ -905,12 +795,12 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                     aok = lh_decode_compressed_mip(
                         blob.data() + a_body_start, a_body_size,
                         adec_w, adec_h, alpha_blocks, &aerr,
-                        /*comp11_layout=*/(a_cf == 11));
+                        (a_cf == 11));
                 } else if (a_cf == 3 || a_cf == 2 || a_cf == 4) {
 
                     aok = lh_decode_variant_2_3_4(
                         blob.data() + a_body_start, a_body_size,
-                        /*mode=*/2, w, h, alpha_blocks, &aerr);
+                        2, w, h, alpha_blocks, &aerr);
                     adec_w = w; adec_h = h;
                 } else if (a_cf == 7) {
 
@@ -1031,8 +921,10 @@ void FlyCam_Reset(FlyCam& cam, float cx, float cy, float cz, float radius) {
 }
 void FlyCam_Update(FlyCam& cam, float dt, bool w, bool s, bool a, bool d, bool q, bool e, float mouse_dx, float mouse_dy) {
     if (cam.is_looking) {
-        cam.yaw -= mouse_dx * cam.look_sensitivity;
-        cam.pitch += mouse_dy * cam.look_sensitivity;
+        const float sx = S.cam_invert_x ? -1.0f : 1.0f;
+        const float sy = S.cam_invert_y ? -1.0f : 1.0f;
+        cam.yaw   -= sx * mouse_dx * cam.look_sensitivity;
+        cam.pitch += sy * mouse_dy * cam.look_sensitivity;
         const float max_pitch = 1.5f;
         if (cam.pitch > max_pitch) cam.pitch = max_pitch;
         if (cam.pitch < -max_pitch) cam.pitch = -max_pitch;
@@ -1235,21 +1127,6 @@ float4 PS(VSOUT i) : SV_Target {
 }
 )";
 
-/* ---------------------- TERRAIN SPLAT SHADER ---------------------------
-
-   Bound INSTEAD of g_vs/g_ps when rendering a chunk-splat terrain mesh.
-   Same input layout as the standard shader (POS+NORMAL+UV+BONEIDS+BW)
-   so we reuse `mp.layout`.  The VS just passes world XY through to the
-   PS; the PS does the chunk grid lookup + multi-layer blending.
-
-   Bindings (set from MP_Render when m.is_terrain):
-     t0 : Texture2DArray<RGBA8>  LOD diffuse atlas (N slices)
-     t1 : Texture2DArray<RGBA8>  chunk index LUT  (kMaxLayers slices)
-     t2 : Texture2DArray<RGBA8>  chunk blend LUT  (kMaxLayers slices)
-     t3 : Texture2D<RGBA8>       lightmap
-     s0 : anisotropic wrap (already used by main shader)
-     s1 : point-clamp (for the chunk LUTs)
-     b2 : TerrainCB                                                  */
 
 static const char* g_terrain_vs = R"(
 cbuffer CB : register(b0){
@@ -1506,7 +1383,6 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     D3D11_SAMPLER_DESC ssd{}; ssd.Filter=D3D11_FILTER_ANISOTROPIC; ssd.MaxAnisotropy=16; ssd.AddressU=ssd.AddressV=ssd.AddressW=D3D11_TEXTURE_ADDRESS_WRAP; ssd.MaxLOD=D3D11_FLOAT32_MAX;
     if(FAILED(dev->CreateSamplerState(&ssd,&mp.sampler))) return false;
 
-    /* Terrain shader pair — same input layout as the main shader.   */
     {
         ID3DBlob* tvsb = nullptr; ID3DBlob* tpsb = nullptr;
         if (compile_shader(g_terrain_vs, "VS", "vs_5_0", &tvsb) &&
@@ -1522,8 +1398,6 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
         if (tvsb) tvsb->Release();
         if (tpsb) tpsb->Release();
     }
-    /* TerrainCB — packed: float4 origin_extent + float4 grid_size +
-       float4 splat_params = 48 bytes (padded to 64 for D3D11).      */
     {
         D3D11_BUFFER_DESC tcb{};
         tcb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
@@ -1532,7 +1406,6 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
         tcb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         dev->CreateBuffer(&tcb, nullptr, &mp.cbuffer_terrain);
     }
-    /* Point sampler for the chunk LUTs (NEAREST, clamp). */
     {
         D3D11_SAMPLER_DESC psd{};
         psd.Filter   = D3D11_FILTER_MIN_MAG_MIP_POINT;
@@ -1592,25 +1465,6 @@ void MP_Release(ModelPreview& mp){
     mp_release(mp);
 }
 
-/* -------------------------------------------------------------------- *
- * Global texture SRV cache.
- *
- * Decoding a Fable 2 .tex blob and uploading it as a D3D texture is the
- * single most expensive thing in a model load (Lionhead huffman decode
- * + BC1 conversion + RGBA upload).  Without a cache, every navigation
- * to a new model — even one that shares textures with the previous —
- * re-pays that cost for every material.
- *
- * Strategy: cache the resulting SRV by (texture name, source BNK).
- * Per-mesh SRV slots take an AddRef'd reference from the cache; the
- * cache itself holds one ref so the SRV survives MP_Release.  Subsequent
- * loads of the same texture just AddRef the cached SRV and return — no
- * decode, no upload.  The cache survives until MP_TextureCache_Clear()
- * is called (e.g. on app exit or a manual flush).
- *
- * The "source BNK" half of the key matters because the same name can
- * resolve to different bytes in different nested BNKs.
- * -------------------------------------------------------------------- */
 namespace {
 struct TexCacheKey {
     std::string name_lower;
@@ -1630,6 +1484,7 @@ struct TexCacheEntry {
     ID3D11ShaderResourceView* srv = nullptr;
 #endif
     bool has_alpha = false;
+    bool tried     = false;
 };
 
 std::mutex& tex_cache_mutex() {
@@ -1652,7 +1507,7 @@ void MP_TextureCache_Clear() {
 #endif
 }
 
-static XMMATRIX bone_local_matrix(const float* tf, const float* delta /*xyzw or null*/){
+static XMMATRIX bone_local_matrix(const float* tf, const float* delta ){
     XMVECTOR q = XMVectorSet(tf[0], tf[1], tf[2], tf[3]);
     XMVECTOR t = XMVectorSet(tf[4], tf[5], tf[6], 0.0f);
     XMVECTOR s = XMVectorSet(tf[7], tf[8], tf[9], 1.0f);
@@ -1723,12 +1578,8 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     }
     mp.meshes.clear();
     mp.lod_count    = 1;
-    mp.selected_lod = -1;   /* will be set to 0 below if any mesh had a
-                               "|lod<N>" suffix — i.e. the model has
-                               more than one LOD group. */
+    mp.selected_lod = -1;   
 
-    /* Helper: parse "|lod<N>" suffix from a mesh name, return the
-       LOD index (0 on no match) and strip the suffix from `name`. */
     auto extract_lod = [](std::string& name) -> uint32_t {
         size_t pos = name.rfind("|lod");
         if (pos == std::string::npos) return 0;
@@ -1740,7 +1591,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             v = v * 10 + uint32_t(*q - '0');
             ++q;
         }
-        if (*q != '\0') return 0;          /* trailing junk → ignore */
+        if (*q != '\0') return 0;          
         name.erase(pos);
         return v;
     };
@@ -1826,9 +1677,6 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             m.name = "mesh_" + std::to_string(g.MeshIndex)
                    + "_sub_" + std::to_string(g.SubMeshIndex);
         }
-        /* Pull the "|lod<N>" suffix out of the display name and into
-           a structured field.  Used by the LOD overlay to filter the
-           render down to a single LOD group. */
         m.lod_index = extract_lod(m.name);
         if (m.lod_index + 1 > mp.lod_count) mp.lod_count = m.lod_index + 1;
 
@@ -1846,9 +1694,6 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
                                   bool* out_has_alpha) {
             if (tex_name.empty()) return;
 
-            /* Cache hit short-circuit: same (name, source-BNK) pair?
-               AddRef the existing SRV and skip the entire fetch +
-               decode + upload pipeline. */
             std::string key_name = tex_name;
             std::transform(key_name.begin(), key_name.end(), key_name.begin(),
                            [](unsigned char c){ return std::tolower(c); });
@@ -1856,46 +1701,47 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             {
                 std::lock_guard<std::mutex> lk(tex_cache_mutex());
                 auto it = tex_cache_table().find(ck);
-                if (it != tex_cache_table().end() && it->second.srv) {
-                    *out_srv = it->second.srv;
-                    (*out_srv)->AddRef();
-                    if (out_has_alpha) *out_has_alpha = it->second.has_alpha;
-                    return;
+                if (it != tex_cache_table().end()) {
+                    if (it->second.srv) {
+                        *out_srv = it->second.srv;
+                        (*out_srv)->AddRef();
+                        if (out_has_alpha) *out_has_alpha = it->second.has_alpha;
+                    }
+                    if (it->second.tried) return;
                 }
             }
 
             std::vector<unsigned char> tex_buf;
-            if (!build_any_tex_buffer_for_name(tex_name, tex_buf, preferred_for_tex)) {
+            const bool found = build_any_tex_buffer_for_name(tex_name, tex_buf, preferred_for_tex);
+            if (!found) {
                 OutputLog::warn("texture '" + tex_name +
                                 "' not found in any loaded BNK");
-                return;
             }
 
             bool dummyA = false;
             bool* alpha_ptr = out_has_alpha ? out_has_alpha : &dummyA;
-            srv_from_tex_blob_auto(dev, tex_buf, out_srv, alpha_ptr);
-            if (!*out_srv) {
-                std::string reason = mp_last_decode_fail_reason();
-                std::string info   = mp_last_decode_info();
-                std::string msg = "texture '" + tex_name + "' failed to decode";
-                if (!reason.empty()) msg += " (" + reason + ")";
-                if (!info.empty())   msg += " [" + info + "]";
-                msg += " — bytes=" + std::to_string(tex_buf.size());
-                OutputLog::error(msg);
+            if (found) {
+                srv_from_tex_blob_auto(dev, tex_buf, out_srv, alpha_ptr);
+                if (!*out_srv) {
+                    std::string reason = mp_last_decode_fail_reason();
+                    std::string info   = mp_last_decode_info();
+                    std::string msg = "texture '" + tex_name + "' failed to decode";
+                    if (!reason.empty()) msg += " (" + reason + ")";
+                    if (!info.empty())   msg += " [" + info + "]";
+                    msg += " — bytes=" + std::to_string(tex_buf.size());
+                    OutputLog::error(msg);
+                }
             }
 
-            if (*out_srv) {
-                /* Cache an extra ref so the SRV survives MP_Release of
-                   the model that triggered the load. */
-                (*out_srv)->AddRef();
+            {
                 std::lock_guard<std::mutex> lk(tex_cache_mutex());
                 auto& slot = tex_cache_table()[ck];
-                if (slot.srv == nullptr) {
+                slot.tried = true;
+                if (*out_srv && slot.srv == nullptr) {
+                    (*out_srv)->AddRef();   
                     slot.srv       = *out_srv;
                     slot.has_alpha = *alpha_ptr;
-                } else {
-                    /* Lost the race — drop our extra ref. */
-                    (*out_srv)->Release();
+                } else if (*out_srv && slot.srv != nullptr) {
                 }
             }
         };
@@ -1913,10 +1759,6 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         mp.meshes.push_back(m);
     }
 
-    /* If any mesh exposed a "|lod<N>" tag, lod_count > 1 — default
-       the viewer to LOD 0 (highest detail) so the user sees a single
-       clean LOD instead of all of them overlaid.  Users can still
-       pick "All" from the overlay to recover legacy behavior. */
     if (mp.lod_count > 1) {
         mp.selected_lod = 0;
     }
@@ -1997,8 +1839,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     float aspect = (float)mp.width / (float)mp.height;
     float far_plane = mp.radius * 100.0f;
     XMMATRIX P = XMMatrixPerspectiveFovLH(fov, aspect, 0.05f, far_plane);
-    /* Terrain meshes opt out of the engine-style 90° X tilt — they
-       are already Y-up.  MDL geometry keeps the original behaviour. */
     XMMATRIX W = XMMatrixIdentity();
     if (!mp.no_tilt) {
         const float tiltX = -XM_PIDIV2;
@@ -2006,6 +1846,8 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         XMMATRIX R  = XMMatrixRotationX(tiltX);
         XMMATRIX Tp = XMMatrixTranslation( mp.center[0],  mp.center[1],  mp.center[2]);
         W  = Tm * R * Tp;
+        XMMATRIX FlipX = XMMatrixScaling(-1.0f, 1.0f, 1.0f);
+        W = W * FlipX;
     }
     XMMATRIX MVP = XMMatrixTranspose(W * V * P);
     XMMATRIX MV  = XMMatrixTranspose(W * V);
@@ -2094,7 +1936,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
 
     float blend_factor[4] = {0,0,0,0};
 
-    /* Per-mesh helper: switch shader + bind resources, draw, restore. */
     auto draw_one = [&](const MPPerMesh& m, ID3D11BlendState* bs) {
         UINT stride=sizeof(MPVertex), offset=0;
         ctx->IASetVertexBuffers(0,1,&m.vb,&stride,&offset);
@@ -2108,7 +1949,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             mp.vs_terrain && mp.ps_terrain && mp.cbuffer_terrain;
 
         if (use_terrain_shader) {
-            /* Update TerrainCB. */
             D3D11_MAPPED_SUBRESOURCE tms{};
             if (SUCCEEDED(ctx->Map(mp.cbuffer_terrain, 0,
                                    D3D11_MAP_WRITE_DISCARD, 0, &tms))) {
@@ -2130,31 +1970,16 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 t.splat_params[1] = 0.0f;
                 t.splat_params[2] = 0.0f;
                 t.splat_params[3] = 0.0f;
-                /* world_xy = mesh_xy * scale + offset, where:
-                     scale  = chunk_total / mesh_total
-                     offset = chunk_total / 2 + chunk_world_origin
-                   For chapter3: chunk_total=384, mesh_total=768 → scale=0.5,
-                   offset=192.  The mesh is built centered, so mesh_xy in
-                   [-mesh_half, +mesh_half] maps to world [0, chunk_total].  */
-                const float chunk_total_x = float(R.chunk_w) * R.chunk_extent_x;
-                const float chunk_total_z = float(R.chunk_h) * R.chunk_extent_z;
-                const float mesh_total_x = 2.f * R.mesh_to_world_x;
-                const float mesh_total_z = 2.f * R.mesh_to_world_z;
-                const float sx = (mesh_total_x > 0.f) ?
-                    chunk_total_x / mesh_total_x : 1.f;
-                const float sz = (mesh_total_z > 0.f) ?
-                    chunk_total_z / mesh_total_z : 1.f;
-                t.mesh_xform[0] = sx;
-                t.mesh_xform[1] = sz;
-                t.mesh_xform[2] = chunk_total_x * 0.5f + R.world_origin_x;
-                t.mesh_xform[3] = chunk_total_z * 0.5f + R.world_origin_z;
+                t.mesh_xform[0] = 1.0f;
+                t.mesh_xform[1] = 1.0f;
+                t.mesh_xform[2] = R.mesh_to_world_x;
+                t.mesh_xform[3] = R.mesh_to_world_z;
                 std::memcpy(tms.pData, &t, sizeof(t));
                 ctx->Unmap(mp.cbuffer_terrain, 0);
             }
 
             ctx->VSSetShader(mp.vs_terrain, nullptr, 0);
             ctx->PSSetShader(mp.ps_terrain, nullptr, 0);
-            /* b0 still bound from the outer setup; bind b2 = TerrainCB. */
             ctx->VSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
             ctx->PSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
 
@@ -2174,7 +1999,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             ctx->VSSetConstantBuffers(2, 1, &null_cb);
             ctx->PSSetConstantBuffers(2, 1, &null_cb);
 
-            /* Restore main shader for the next mesh in the loop. */
             ctx->VSSetShader(mp.vs, nullptr, 0);
             ctx->PSSetShader(mp.ps, nullptr, 0);
             return;

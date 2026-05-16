@@ -39,16 +39,9 @@ public:
     bool read_at(const std::string& virtual_path,
                  uint64_t off, void* dst, size_t n);
 
-    /* Returns the absolute byte offset inside the ISO file where
-       `virtual_path`'s content begins (plus `off` if you want to
-       address a particular byte within it).  Returns 0 on miss.   */
     uint64_t abs_offset_of(const std::string& virtual_path,
                            uint64_t off = 0) const;
 
-    /* In-place byte write back into the ISO file at the absolute
-       offset corresponding to (virtual_path, off).  Opens the ISO
-       in r+b mode for this call only (the read fp_ stays unchanged).
-       Returns false on any failure.                                */
     bool write_at(const std::string& virtual_path,
                   uint64_t off, const void* src, size_t n);
 

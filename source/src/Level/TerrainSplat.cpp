@@ -25,10 +25,6 @@ void release_srv(ID3D11ShaderResourceView*& srv) {
     if (srv) { srv->Release(); srv = nullptr; }
 }
 
-/* Read an SRV's underlying Texture2D back to a flat RGBA8 vector via
-   a STAGING copy.  We need this to seed slices of the LOD texture
-   array from the existing per-LOD diffuse SRVs (created at full
-   resolution earlier in PendingLoads).                              */
 bool readback_srv_rgba(ID3D11Device* dev,
                        ID3D11ShaderResourceView* srv,
                        std::vector<uint8_t>& out_rgba,
@@ -53,7 +49,6 @@ bool readback_srv_rgba(ID3D11Device* dev,
     out_w = (int)td.Width;
     out_h = (int)td.Height;
 
-    /* Build a STAGING texture (CPU-readable). */
     D3D11_TEXTURE2D_DESC sd = td;
     sd.MipLevels = 1;
     sd.Usage = D3D11_USAGE_STAGING;
@@ -68,7 +63,6 @@ bool readback_srv_rgba(ID3D11Device* dev,
 
     ID3D11DeviceContext* ctx = nullptr;
     dev->GetImmediateContext(&ctx);
-    /* Copy mip 0 only. */
     ctx->CopySubresourceRegion(staging, 0, 0, 0, 0, tex, 0, nullptr);
 
     D3D11_MAPPED_SUBRESOURCE map{};
@@ -91,9 +85,6 @@ bool readback_srv_rgba(ID3D11Device* dev,
     return true;
 }
 
-/* Box-filter resize RGBA8 src (sw×sh) → dst (dw×dh).  Cheap, good
-   enough for our purposes (the array slices feed into a mip chain
-   so any aliasing here gets blurred out anyway).                  */
 void resize_rgba8(const std::vector<uint8_t>& src, int sw, int sh,
                   std::vector<uint8_t>& dst, int dw, int dh)
 {
@@ -147,18 +138,12 @@ bool Build(ID3D11Device*                                       device,
         return false;
     }
 
-    /* --- 1) Chunk grid placement (assumes uniform chunks). ---------
-       .ehf origin/extent format is (X-horiz, Z-horiz, Y-height) where
-       Y-height (offset 2) is the chunk's per-corner min/max height.
-       For texturing we only care about the 2 horizontal axes.
-       `extent` is the MAX-CORNER world position (not the chunk size),
-       so the actual chunk size = extent - origin.                    */
     R.chunk_w = (int)parsed.chunk_w;
     R.chunk_h = (int)parsed.chunk_h;
-    R.world_origin_x = parsed.chunks[0].origin[1];
-    R.world_origin_z = parsed.chunks[0].origin[0];
-    R.chunk_extent_x = parsed.chunks[0].extent[1] - parsed.chunks[0].origin[1];
-    R.chunk_extent_z = parsed.chunks[0].extent[0] - parsed.chunks[0].origin[0];
+    R.world_origin_x = parsed.chunks[0].origin[0];
+    R.world_origin_z = parsed.chunks[0].origin[1];
+    R.chunk_extent_x = parsed.chunks[0].extent[0] - parsed.chunks[0].origin[0];
+    R.chunk_extent_z = parsed.chunks[0].extent[1] - parsed.chunks[0].origin[1];
     R.lod_count = (int)lod_thumbs.size();
     R.mesh_to_world_x = mesh_to_world_x;
     R.mesh_to_world_z = mesh_to_world_z;
@@ -180,13 +165,11 @@ bool Build(ID3D11Device*                                       device,
         OutputLog::info(s.str());
     }
 
-    /* --- 2) Build LOD diffuse Texture2DArray. ------------------------ */
     {
         const int W = kCommonLodSize, H = kCommonLodSize;
         const int N = R.lod_count;
         if (N <= 0) return false;
 
-        /* Compute mip levels (full chain). */
         int max_mip = 1;
         for (int s = W; s > 1; s >>= 1) ++max_mip;
 
@@ -211,7 +194,6 @@ bool Build(ID3D11Device*                                       device,
         ID3D11DeviceContext* ctx = nullptr;
         device->GetImmediateContext(&ctx);
 
-        /* Seed mip 0 of each slice. */
         int seeded = 0;
         for (int s = 0; s < N; ++s) {
             ID3D11ShaderResourceView* src_srv =
@@ -239,7 +221,6 @@ bool Build(ID3D11Device*                                       device,
             return false;
         }
 
-        /* Create SRV for the array, then generate mip chain. */
         D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
         sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
@@ -263,7 +244,6 @@ bool Build(ID3D11Device*                                       device,
             + " (" + std::to_string(seeded) + " seeded)");
     }
 
-    /* --- 3) Build chunk_idx and chunk_blend Texture2DArrays. ------- */
     {
         const int CW = R.chunk_w, CH = R.chunk_h;
         const int L  = kMaxLayers;
@@ -288,7 +268,6 @@ bool Build(ID3D11Device*                                       device,
                     bln_data[base + 2] = Lr.blend[2];
                     bln_data[base + 3] = Lr.blend[3];
                 }
-                /* Unused layers stay at idx=0xFF (sentinel), blend=0. */
             }
         }
 
@@ -350,7 +329,6 @@ bool Build(ID3D11Device*                                       device,
             + " layers");
     }
 
-    /* --- 4) Lightmap SRV. ------------------------------------------ */
     if (!lightmap_rgba.empty() && lightmap_w > 0 && lightmap_h > 0) {
         D3D11_TEXTURE2D_DESC td{};
         td.Width            = lightmap_w;

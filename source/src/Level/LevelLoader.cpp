@@ -4,6 +4,9 @@
 #include "EhfPalette.h"
 #include "EhfChunkParser.h"
 #include "TerrainTextureRegistry.h"
+#include "VfsConfig.h"
+#include "GdbParser.h"
+#include "../Havok/HavokPackfileReader.h"
 
 #include "../Utilities/State.h"
 #include "../Utilities/Utils.h"
@@ -15,9 +18,6 @@
 #include "../textures/export/TextureExport.h"
 #include <zlib.h>
 
-/* Forward — defined in src/UI/ModelPreview.cpp.  We don't include
-   ModelPreview.h here because it drags in D3D11 headers we don't
-   need; the function signature is small enough to declare inline. */
 #include <vector>
 #include <cstdint>
 extern bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
@@ -39,18 +39,15 @@ extern const std::string& mp_last_decode_info();
 #include <thread>
 #include <iomanip>
 #include <sstream>
+#include <unordered_map>
 
-/* Pending-load globals — populated by Level::Open, consumed in
-   process_pending_loads(device) on the renderer thread. */
 std::atomic<bool>   g_pending_terrain_load{false};
 Level::TerrainMesh  g_pending_terrain_mesh;
 std::string         g_pending_terrain_label;
 FlatAssetEntry      g_pending_terrain_level_entry;
 std::vector<uint8_t> g_pending_terrain_ehf_bytes;
+std::vector<Level::PendingAdjacentTerrain> g_pending_adjacent_terrain_meshes;
 
-/* Companion .ghf payload + heights snapshot — used by TerrainEdit so
-   the user can mutate heights and save the modified .ghf back into
-   the BNK / ISO without redoing the whole load.                     */
 std::vector<uint8_t>  g_pending_terrain_ghf_payload;
 std::vector<float>    g_pending_terrain_ghf_heights;
 float                 g_pending_terrain_ghf_tile_size = 1.f;
@@ -59,6 +56,11 @@ int                   g_pending_terrain_ghf_height = 0;
 FlatAssetEntry        g_pending_terrain_ghf_entry;
 std::vector<Level::PropBlock> g_pending_level_prop_blocks;
 std::string                   g_pending_level_model_body_bnk;
+std::vector<std::string>           g_level_vfs_texture_body_bnks;
+std::vector<std::string>           g_level_vfs_model_bnks;
+std::vector<std::string>           g_level_vfs_streaming_bnks;
+std::vector<HavokCollisionMesh>    g_level_havok_collision;
+std::vector<GdbWorldPlacement>     g_level_gdb_placements;
 static std::atomic<bool>      g_level_async_loading{false};
 
 namespace Level {
@@ -96,9 +98,6 @@ void OpenAsync(const FlatAssetEntry& entry)
 
 namespace {
 
-/* Big-endian readers matching the format documented in
-   docs/level_format.md.  The engine's parser is also BE since it
-   runs on Xbox 360 (PowerPC).  */
 struct BeReader {
     const uint8_t* p = nullptr;
     size_t         n = 0;
@@ -138,13 +137,33 @@ struct BeReader {
         i += k;
         return true;
     }
-    /* Engine string format (per `stream_read_length_prefixed_string`
-       @ `0x82A1D5C8` — IDA-confirmed): the function reads from the
-       current stream position until it hits a NUL byte, then advances
-       the stream by `strlen + 1` to skip past the terminator.  No
-       length prefix — the original name was misleading.
-
-       We cap at 4 KiB to keep a corrupt file from spinning forever. */
+    bool half(float& out) {
+        if (!need(2)) return false;
+        const uint16_t h =
+            (uint16_t(p[i]) << 8) | uint16_t(p[i + 1]);
+        i += 2;
+        const uint32_t sign = (uint32_t(h & 0x8000)) << 16;
+        const uint32_t exp_h = (h >> 10) & 0x1f;
+        const uint32_t mant = h & 0x3ff;
+        uint32_t bits;
+        if (exp_h == 0) {
+            if (mant == 0) {
+                bits = sign;
+            } else {
+                uint32_t e = 127 - 14;
+                uint32_t m = mant;
+                while ((m & 0x400) == 0) { m <<= 1; --e; }
+                m &= 0x3ff;
+                bits = sign | (e << 23) | (m << 13);
+            }
+        } else if (exp_h == 31) {
+            bits = sign | (0xff << 23) | (mant << 13);
+        } else {
+            bits = sign | ((exp_h + (127 - 15)) << 23) | (mant << 13);
+        }
+        std::memcpy(&out, &bits, sizeof(out));
+        return true;
+    }
     bool cstr(std::string& s) {
         s.clear();
         const size_t start = i;
@@ -154,7 +173,6 @@ struct BeReader {
             if (c == 0) return true;
             s.push_back(static_cast<char>(c));
         }
-        /* No NUL within range — fail rather than silently truncate. */
         return false;
     }
 };
@@ -175,7 +193,6 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
 
     BeReader r{bytes.data(), bytes.size(), 0};
 
-    /* Magic — read 17 chars and compare against "LevelGraphicsFile". */
     if (std::memcmp(r.p, kEngineLevelMagic, kEngineLevelMagicLen) != 0) {
         out.error = "magic mismatch (expected \"LevelGraphicsFile\")";
         return false;
@@ -189,7 +206,6 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
         out.error = "truncated reading version";
         return false;
     }
-    /* Engine accepts 11 or 12 — observed sample is 12. */
     if (out.version < 11 || out.version > 12) {
         std::ostringstream os;
         os << "unsupported version " << out.version
@@ -208,11 +224,6 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
     }
     out.entries.reserve(out.entry_count);
 
-    /* Walk the typed-entry list.  We only fully decode the entry
-       header (`type`) for now; payload-length recovery for the
-       arbitrary types comes later when we have the full parsers
-       ported.  For each entry we record the byte offset where it
-       starts so future code can seek directly to a specific entry. */
     for (uint32_t mi = 0; mi < out.entry_count; ++mi) {
         EngineLevelEntry e;
         e.offset = r.i;
@@ -221,8 +232,6 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
             std::ostringstream os;
             os << "truncated at entry " << mi << " of " << out.entry_count;
             out.error = os.str();
-            /* Keep what we managed to read so the UI can still show
-               *something*. */
             out.ok = false;
             return false;
         }
@@ -231,6 +240,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
             case 2: {
                 PropBlock block;
                 block.offset = e.offset;
+                block.type = e.type;
                 if (!r.cstr(block.model_path) ||
                     !r.cstr(block.shadow_model_path) ||
                     !r.cstr(block.lod_model_path) ||
@@ -277,18 +287,12 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
             case 4:
             case 5:
             case 32: {
-                /* All three of these start with a single
-                   null-terminated string read via
-                   `stream_read_length_prefixed_string` (sic — the
-                   IDA name is misleading; see the cstr() helper). */
                 if (!r.cstr(e.str_a)) {
                     out.error = "truncated reading string for type "
                               + std::to_string(e.type);
                     return false;
                 }
                 if (e.type == 4) {
-                    /* Type 4 follows the string with an 8-byte
-                       inline payload (engine resource ref). */
                     if (!r.skip(8)) {
                         out.error = "truncated reading type-4 tail";
                         return false;
@@ -297,24 +301,177 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                 break;
             }
             case 21: {
-                /* Two null-terminated strings + 8-byte hash + 2 flag
-                   bytes per docs/level_format.md.  We skip the
-                   trailing payload conservatively. */
-                if (!r.cstr(e.str_a) || !r.cstr(e.str_b)) {
-                    out.error = "truncated reading strings for type 21";
+                e.str_b.clear();
+                if (!r.cstr(e.str_a)) {
+                    out.error = "truncated reading string A for type 21";
                     return false;
                 }
-                if (!r.skip(8 + 2)) {
-                    out.error = "truncated reading type-21 tail";
+                if (!r.cstr(e.str_b)) {
+                    out.error = "truncated reading string B for type 21";
                     return false;
+                }
+                if (!r.skip(8 + 1 + 1)) {
+                    out.error = "truncated reading type-21 hash+flags";
+                    return false;
+                }
+
+                uint32_t loop1_count = 0;
+                if (!r.u32(loop1_count)) {
+                    out.error = "truncated type-21 ext header";
+                    return false;
+                }
+                if (!r.skip(7 * 4 + 12 + 4 + 24)) {
+                    out.error = "truncated type-21 ext header (mid)";
+                    return false;
+                }
+                if (loop1_count > 100000) {
+                    out.error = "type-21 loop1 count looks corrupt";
+                    return false;
+                }
+
+                PropBlock t21_block;
+                t21_block.offset = e.offset;
+                t21_block.type = e.type;
+                t21_block.model_path = e.str_a;
+                t21_block.lod_model_path = e.str_b;
+                t21_block.instances.reserve(loop1_count);
+
+                if (out.version == 11) {
+                    for (uint32_t k = 0; k < loop1_count; ++k) {
+                        PropInstance inst;
+                        for (int j = 0; j < 4; ++j) {
+                            if (!r.f32(inst.values[j])) {
+                                out.error = "truncated type-21 v11 loop1 body";
+                                return false;
+                            }
+                        }
+                        inst.values[7] = 1.0f;  // cos(0) = identity
+                        inst.values[9] = inst.values[10] = inst.values[11] = 1.0f;
+                        t21_block.instances.push_back(inst);
+                    }
+                } else {
+                    for (uint32_t k = 0; k < loop1_count; ++k) {
+                        float pos[3];
+                        if (!r.f32(pos[0]) || !r.f32(pos[1]) || !r.f32(pos[2])) {
+                            out.error = "truncated type-21 v12 instance vec3";
+                            return false;
+                        }
+                        float qx, qy, qz, qw, scale;
+                        if (!r.half(qx) || !r.half(qy) ||
+                            !r.half(qz) || !r.half(qw) ||
+                            !r.half(scale)) {
+                            out.error = "truncated type-21 v12 instance quat/scale";
+                            return false;
+                        }
+                        PropInstance inst;
+                        inst.values[0] = pos[0];
+                        inst.values[1] = pos[1];
+                        inst.values[2] = pos[2];
+
+                        const float num = 2.0f * (qw * qz + qx * qy);
+                        const float den = 1.0f - 2.0f * (qy * qy + qz * qz);
+                        const float mag = std::sqrt(num * num + den * den);
+                        if (mag > 1e-6f) {
+                            inst.values[6] = num / mag;  // sin(yaw)
+                            inst.values[7] = den / mag;  // cos(yaw)
+                        } else {
+                            inst.values[6] = 0.0f;
+                            inst.values[7] = 1.0f;
+                        }
+
+                        const float s = (scale > 0.0f) ? scale : 1.0f;
+                        inst.values[9]  = s;
+                        inst.values[10] = s;
+                        inst.values[11] = s;
+                        t21_block.instances.push_back(inst);
+                    }
+                }
+
+                uint32_t loop2_count = 0;
+                if (!r.u32(loop2_count)) {
+                    out.error = "truncated type-21 loop2 count";
+                    return false;
+                }
+                if (loop2_count > 100000) {
+                    out.error = "type-21 loop2 count looks corrupt";
+                    return false;
+                }
+
+                size_t loop2_emitted = 0;
+                size_t loop2_skipped = 0;
+                for (uint32_t k = 0; k < loop2_count; ++k) {
+                    float a_val, b_val;
+                    float p1[3], p2[3];
+                    if (!r.f32(a_val) || !r.f32(b_val) ||
+                        !r.f32(p1[0]) || !r.f32(p1[1]) || !r.f32(p1[2]) ||
+                        !r.f32(p2[0]) || !r.f32(p2[1]) || !r.f32(p2[2]))
+                    {
+                        out.error = "truncated type-21 loop2 body";
+                        return false;
+                    }
+
+                    auto in_bounds = [](float v, float lo, float hi) {
+                        return std::isfinite(v) && v >= lo && v <= hi;
+                    };
+                    const bool plausible =
+                        in_bounds(p1[0], -2048.0f, 2048.0f) &&
+                        in_bounds(p1[1], -2048.0f, 2048.0f) &&
+                        in_bounds(p1[2], -512.0f,   512.0f) &&
+                        (std::fabs(p1[0]) + std::fabs(p1[1]) + std::fabs(p1[2]) > 0.5f);
+                    if (!plausible) {
+                        ++loop2_skipped;
+                        continue;
+                    }
+
+                    PropInstance inst;
+                    inst.values[0] = p1[0];
+                    inst.values[1] = p1[1];
+                    inst.values[2] = p1[2];
+                    const float fxy =
+                        std::sqrt(p2[0] * p2[0] + p2[1] * p2[1]);
+                    if (std::isfinite(fxy) && fxy > 0.001f && fxy < 100.0f) {
+                        inst.values[6] = p2[1] / fxy;  // sin
+                        inst.values[7] = p2[0] / fxy;  // cos
+                    } else {
+                        inst.values[6] = 0.0f;
+                        inst.values[7] = 1.0f;
+                    }
+                    const float s = (std::isfinite(a_val) &&
+                                     a_val > 0.05f && a_val < 100.0f)
+                                        ? a_val : 1.0f;
+                    inst.values[9]  = s;
+                    inst.values[10] = s;
+                    inst.values[11] = s;
+                    t21_block.instances.push_back(inst);
+                    ++loop2_emitted;
+                }
+                (void)loop2_emitted;
+                (void)loop2_skipped;
+
+                if (!t21_block.instances.empty()) {
+                    out.prop_blocks.push_back(std::move(t21_block));
                 }
                 break;
             }
             default: {
-                /* Type 2 (instance placements) and unrecognised types:
-                   we don't know the full length yet without the
-                   per-entry sub-parser, so stop scanning further.
-                   The entries we already captured are still valid. */
+                std::ostringstream uos;
+                uos << "  unknown entry type 0x"
+                    << std::hex << e.type << std::dec
+                    << " (" << e.type << ") at offset 0x"
+                    << std::hex << e.offset << std::dec
+                    << " — last 6 entries:";
+                OutputLog::warn(uos.str());
+                const size_t n = out.entries.size();
+                for (size_t k = (n > 6 ? n - 6 : 0); k < n; ++k) {
+                    const auto& pe = out.entries[k];
+                    std::ostringstream ros;
+                    ros << "    [" << k << "] type=" << pe.type
+                        << " @ 0x" << std::hex << pe.offset
+                        << "  size=" << std::dec << pe.size;
+                    if (!pe.str_a.empty()) ros << "  a=" << pe.str_a;
+                    if (!pe.str_b.empty()) ros << "  b=" << pe.str_b;
+                    OutputLog::info(ros.str());
+                }
                 e.size = 0;
                 out.entries.push_back(e);
                 out.ok = true;
@@ -333,6 +490,9 @@ bool Open(const FlatAssetEntry& entry)
 {
     OutputLog::info("loading level '" + entry.name + "' …");
     progress_update(8, 100, "Extracting " + entry.name);
+
+    g_pending_level_prop_blocks.clear();
+    g_pending_adjacent_terrain_meshes.clear();
 
     std::vector<uint8_t> bytes;
     try {
@@ -357,11 +517,8 @@ bool Open(const FlatAssetEntry& entry)
         return false;
     }
 
-    /* Stash the source path so anyone resuming the load knows where
-       it came from. */
     info.source_path = entry.full_path;
 
-    /* Summary: per-type entry tally. */
     int n_t2 = 0, n_t4 = 0, n_t5 = 0, n_t21 = 0, n_t32 = 0, n_other = 0;
     for (const auto& e : info.entries) {
         switch (e.type) {
@@ -386,18 +543,69 @@ bool Open(const FlatAssetEntry& entry)
        << " other=" << n_other << ")";
     OutputLog::success(os.str());
 
-    /* Walk the entries and surface anything that looks like a
-       heightfield reference.  The engine's type-4 entries are the
-       generic "engine resource reference" with a path string +
-       8-byte payload — the heightfield's `.ehf` / `.ghf` siblings
-       will appear here if they're tracked by the level graphics
-       file (vs. being loaded by the world streamer side-channel).
-       Even if they're not, logging the strings is the fastest way
-       to learn the level's resource layout for the first time.
+    size_t t2_prop_blocks = 0, t2_prop_instances = 0;
+    size_t t21_prop_blocks = 0, t21_prop_instances = 0;
+    size_t other_prop_blocks = 0, other_prop_instances = 0;
+    for (const auto& b : info.prop_blocks) {
+        if (b.type == 2) {
+            ++t2_prop_blocks;
+            t2_prop_instances += b.instances.size();
+        } else if (b.type == 21) {
+            ++t21_prop_blocks;
+            t21_prop_instances += b.instances.size();
+        } else {
+            ++other_prop_blocks;
+            other_prop_instances += b.instances.size();
+        }
+    }
+    std::ostringstream ps;
+    ps << "level prop placements: "
+       << "t2=" << t2_prop_blocks << " blocks / " << t2_prop_instances << " instances, "
+       << "t21=" << t21_prop_blocks << " blocks / " << t21_prop_instances << " instances";
+    if (other_prop_blocks > 0) {
+        ps << ", other=" << other_prop_blocks << " blocks / "
+           << other_prop_instances << " instances";
+    }
+    OutputLog::info(ps.str());
 
-       Also pull out type-5 (texture composites) and type-32
-       (streaming-index file) references so we can see which BNKs
-       the level wants to mount. */
+    {
+        const std::vector<std::string> wanted = {
+            "bridge", "lamp", "lantern", "fence", "bench", "post",
+            "archway", "gate", "stall", "shop", "wall"
+        };
+        std::map<std::string, std::pair<size_t, size_t>> match_counts;
+        std::map<std::string, std::vector<std::string>> match_paths;
+        for (const auto& pb : info.prop_blocks) {
+            std::string p = pb.model_path;
+            std::transform(p.begin(), p.end(), p.begin(), ::tolower);
+            for (const auto& kw : wanted) {
+                if (p.find(kw) != std::string::npos) {
+                    match_counts[kw].first += 1;
+                    match_counts[kw].second += pb.instances.size();
+                    if (match_paths[kw].size() < 3) {
+                        match_paths[kw].push_back(pb.model_path);
+                    }
+                    break;
+                }
+            }
+        }
+        OutputLog::info("engine_level keyword scan (bridge/lamp/fence/...):");
+        for (const auto& kw : wanted) {
+            auto it = match_counts.find(kw);
+            if (it == match_counts.end()) {
+                OutputLog::warn("  " + kw + ":  NONE in engine_level");
+            } else {
+                std::ostringstream os;
+                os << "  " << kw << ":  " << it->second.first
+                   << " blocks / " << it->second.second << " instances";
+                OutputLog::success(os.str());
+                for (const auto& path : match_paths[kw]) {
+                    OutputLog::info("    " + path);
+                }
+            }
+        }
+    }
+
     auto ends_with_ci = [](const std::string& s, const char* suffix) {
         size_t n = std::strlen(suffix);
         if (s.size() < n) return false;
@@ -413,19 +621,8 @@ bool Open(const FlatAssetEntry& entry)
 
     int n_heightfield_refs = 0;
     int n_logged           = 0;
-    const int kMaxLog      = 16;       
+    const int kMaxLog      = 16;
 
-    /* Capture EVERY `.ehf` path the level references in its entry
-       table.  The companion `.list` file doesn't include the .ehf —
-       only .ghf/.hdb/.genv/.ama/.amm/.amr — but the level's t4
-       entries do.
-
-       A level can reference multiple .ehf's: typically one for the
-       main heightfield and several for distant "vista" / "filler"
-       backdrops.  We can't tell which is the main one from the
-       entry list alone — they're all type-4 strings — so we keep
-       all of them and match against the .ghf basename later (the
-       .ghf reliably names the playable terrain).                  */
     std::vector<std::string> all_ehf_refs;
 
     for (const auto& e : info.entries) {
@@ -464,10 +661,6 @@ bool Open(const FlatAssetEntry& entry)
                         "names instead.");
     }
 
-    /* Try the companion .list file.  It lives in the same BNK with
-       the same basename but with extension `.list`, and is plain
-       text — one resource path per line.  Faster + more reliable
-       than guessing from the .engine_level's referenced strings. */
     auto sibling_with_ext = [&](const std::string& new_ext) {
         std::filesystem::path p = entry.full_path;
         p.replace_extension(new_ext);
@@ -477,9 +670,6 @@ bool Open(const FlatAssetEntry& entry)
     auto load_text_sibling = [&](const std::string& sibling_full_path,
                                  std::vector<uint8_t>& out_bytes) -> bool
     {
-        /* Look it up in the same BNK first — that's where the
-           .engine_level just came from.  Use a lowercased, forward-
-           slashed key like BnkCache::find_index expects. */
         std::string key = sibling_full_path;
         std::transform(key.begin(), key.end(), key.begin(),
                        [](unsigned char c){ return std::tolower(c); });
@@ -504,8 +694,6 @@ bool Open(const FlatAssetEntry& entry)
             std::ostringstream ls; ls << "list (" << list_bytes.size() << " bytes):";
             OutputLog::info(ls.str());
 
-            /* Stream the .list line-by-line — Windows-style line
-               endings are common, handle CRLF / LF / CR. */
             size_t pos = 0;
             while (pos < list_str.size()) {
                 size_t eol = list_str.find_first_of("\r\n", pos);
@@ -518,8 +706,6 @@ bool Open(const FlatAssetEntry& entry)
                 if (pos == std::string::npos) pos = list_str.size();
                 if (line.empty()) continue;
 
-                /* Bucket each path by its extension into the
-                   LevelResources record. */
                 std::string low = line;
                 std::transform(low.begin(), low.end(), low.begin(),
                                [](unsigned char c){ return std::tolower(c); });
@@ -544,12 +730,6 @@ bool Open(const FlatAssetEntry& entry)
         }
     }
 
-    /* The `.list` text file lists .ghf/.hdb/.genv/.am? but NOT the
-       .ehf — Fable 2 stores the .ehf reference in the level's t4
-       entry table instead.  We collected every .ehf path the level
-       references into `all_ehf_refs`; pick the one whose basename
-       matches the .ghf basename (that's the main playable terrain;
-       the others are distant vistas / fillers).                   */
     auto basename_no_ext = [](const std::string& p) -> std::string {
         size_t slash = p.find_last_of("/\\");
         std::string s = (slash == std::string::npos)
@@ -570,13 +750,9 @@ bool Open(const FlatAssetEntry& entry)
                 break;
             }
         }
-        /* If nothing matched the .ghf basename, fall back to the
-           first .ehf — better than nothing on levels that don't
-           even have a .ghf reference. */
         if (res.ehf_path.empty()) res.ehf_path = all_ehf_refs.front();
     }
 
-    /* Summarise what we found. */
     auto report_slot = [](const char* label, const std::string& v) {
         if (v.empty()) {
             OutputLog::warn(std::string("  ") + label + ": (missing)");
@@ -594,8 +770,507 @@ bool Open(const FlatAssetEntry& entry)
     report_slot(".amr  (ambient refs)",  res.amr_path);
     report_slot("models",                res.model_body_bnk);
 
-    /* Load the heightfield triplet (raw .ehf + gunzipped .ghf) and
-       surface a header line so we know what we're working with. */
+    {
+        struct SiblingSlot { const char* label; const std::string& path; };
+        const SiblingSlot slots[] = {
+            { ".hdb  (height database)", res.hdb_path  },
+            { ".genv (env table)",       res.genv_path },
+            { ".ama  (ambient)",         res.ama_path  },
+            { ".amm  (ambient meta)",    res.amm_path  },
+            { ".amr  (ambient refs)",    res.amr_path  },
+        };
+        OutputLog::info("loading .list terrain siblings:");
+        for (const auto& s : slots) {
+            if (s.path.empty()) continue;
+            std::vector<uint8_t> bytes;
+            if (load_text_sibling(s.path, bytes)) {
+                std::ostringstream os;
+                os << "  " << s.label << " loaded (" << bytes.size() << " bytes)";
+                OutputLog::success(os.str());
+            } else {
+                OutputLog::warn(std::string("  ") + s.label + " load FAILED: " + s.path);
+            }
+        }
+    }
+
+    {
+        std::vector<uint8_t> hk_bytes;
+        const std::string hk_path = sibling_with_ext(".havok_scenario");
+        if (load_text_sibling(hk_path, hk_bytes)) {
+            auto pf = Havok::LoadPackFileFromBytes(std::move(hk_bytes), hk_path);
+            if (pf) {
+                Havok::LogPackFileSummary(*pf);
+                Havok::ApplyLocalFixups(*pf);
+                auto meshes = Havok::ExtractCollisionMeshes(*pf);
+                g_level_havok_collision.clear();
+                g_level_havok_collision.reserve(meshes.size());
+                size_t total_verts = 0;
+                size_t total_tris  = 0;
+                for (auto& m : meshes) {
+                    total_verts += m.vertices.size() / 3;
+                    total_tris  += (m.indices16.size() + m.indices32.size()) / 3;
+                    HavokCollisionMesh hm;
+                    hm.vertices  = std::move(m.vertices);
+                    hm.indices16 = std::move(m.indices16);
+                    hm.indices32 = std::move(m.indices32);
+                    g_level_havok_collision.push_back(std::move(hm));
+                }
+                std::ostringstream os;
+                os << "havok collision: " << g_level_havok_collision.size()
+                   << " subparts, " << total_verts << " verts, "
+                   << total_tris << " tris extracted";
+                OutputLog::success(os.str());
+            }
+        }
+    }
+
+    g_level_vfs_texture_body_bnks.clear();
+    g_level_vfs_model_bnks.clear();
+    g_level_vfs_streaming_bnks.clear();
+    {
+        std::vector<uint8_t> vfs_bytes;
+        std::filesystem::path vfs_path = entry.full_path;
+        vfs_path.replace_filename("level.vfsconfig");
+        if (load_text_sibling(vfs_path.string(), vfs_bytes)) {
+            auto vfs = Level::ParseVfsConfig(vfs_bytes);
+            g_level_vfs_texture_body_bnks = std::move(vfs.texture_body_bnks);
+            g_level_vfs_model_bnks        = std::move(vfs.model_bnks);
+            g_level_vfs_streaming_bnks    = std::move(vfs.streaming_bnks);
+            std::ostringstream os;
+            os << "vfsconfig: "
+               << g_level_vfs_texture_body_bnks.size() << " texture body BNKs, "
+               << g_level_vfs_model_bnks.size() << " model BNKs, "
+               << g_level_vfs_streaming_bnks.size() << " streaming BNKs";
+            OutputLog::info(os.str());
+            for (const auto& p : g_level_vfs_texture_body_bnks) {
+                OutputLog::info("  tex-body: " + p);
+            }
+            for (const auto& p : g_level_vfs_model_bnks) {
+                OutputLog::info("  model:    " + p);
+            }
+            for (const auto& p : g_level_vfs_streaming_bnks) {
+                OutputLog::info("  stream:   " + p);
+            }
+        } else {
+            OutputLog::warn("no level.vfsconfig sibling in BNK");
+        }
+    }
+
+    g_level_gdb_placements.clear();
+    {
+        std::vector<std::pair<uint32_t, std::string>> save_hash_to_name;
+        {
+            std::vector<uint8_t> save_bytes;
+            const std::string save_path = sibling_with_ext(".save");
+            if (load_text_sibling(save_path, save_bytes)) {
+                std::string xml(reinterpret_cast<const char*>(save_bytes.data()),
+                                save_bytes.size());
+                const std::string tag_open  = "<Entity name=\"";
+                const std::string tag_close = "</Entity>";
+                size_t pos = 0;
+                while (true) {
+                    size_t a = xml.find(tag_open, pos);
+                    if (a == std::string::npos) break;
+                    a += tag_open.size();
+                    size_t name_end = xml.find('"', a);
+                    if (name_end == std::string::npos) break;
+                    std::string name = xml.substr(a, name_end - a);
+                    size_t hash_start = xml.find("0x", name_end);
+                    if (hash_start == std::string::npos) break;
+                    size_t hash_end = xml.find('<', hash_start);
+                    if (hash_end == std::string::npos) break;
+                    std::string hex = xml.substr(hash_start + 2, hash_end - hash_start - 2);
+                    uint32_t h = 0;
+                    for (char c : hex) {
+                        h <<= 4;
+                        if (c >= '0' && c <= '9') h |= (c - '0');
+                        else if (c >= 'A' && c <= 'F') h |= (c - 'A' + 10);
+                        else if (c >= 'a' && c <= 'f') h |= (c - 'a' + 10);
+                    }
+                    save_hash_to_name.emplace_back(h, std::move(name));
+                    pos = hash_end;
+                }
+                OutputLog::info("save: " + std::to_string(save_hash_to_name.size())
+                                + " entity hash→name mappings");
+            } else {
+                OutputLog::warn("no .save sibling in BNK");
+            }
+        }
+
+        std::vector<uint8_t> gdb_bytes;
+        const std::string gdb_path = sibling_with_ext(".gdb");
+        if (load_text_sibling(gdb_path, gdb_bytes)) {
+            auto info = Gdb::ParseWithSaveMap(gdb_bytes, save_hash_to_name);
+            g_level_gdb_placements.reserve(info.placements.size());
+
+            size_t fixed_count = 0, var_count = 0, named_count = 0;
+            for (const auto& p : info.placements) {
+                GdbWorldPlacement gp;
+                gp.x      = p.x;
+                gp.y      = p.y;
+                gp.z      = p.z;
+                gp.yaw    = p.yaw;
+                gp.scale  = p.scale;
+                gp.hash   = p.hash_a;
+                gp.marker = p.marker;
+                g_level_gdb_placements.push_back(gp);
+                if (p.marker == 0x00004B40) ++fixed_count;
+                else                         ++var_count;
+                if (!p.entity_name.empty())  ++named_count;
+            }
+            std::ostringstream os;
+            os << "gdb: " << g_level_gdb_placements.size()
+               << " placements (" << fixed_count << " fixed + "
+               << var_count << " variable, "
+               << named_count << " resolved to .save entity names)";
+            OutputLog::success(os.str());
+
+            auto strip_suffix = [](std::string s, const char* suf) {
+                size_t n = std::strlen(suf);
+                if (s.size() > n && s.compare(s.size() - n, n, suf) == 0) {
+                    s.resize(s.size() - n);
+                }
+                return s;
+            };
+            auto canonicalize_for_match = [&strip_suffix](std::string s) {
+                size_t us = s.find_last_of('_');
+                if (us != std::string::npos && us + 1 < s.size()) {
+                    bool all_digits = true;
+                    for (size_t k = us + 1; k < s.size(); ++k) {
+                        if (s[k] < '0' || s[k] > '9') { all_digits = false; break; }
+                    }
+                    if (all_digits) s.resize(us);
+                }
+                static const char* prefixes[] = {
+                    "NewObjectBuilding", "ObjectBuilding",
+                    "NewObjectFurniture", "ObjectFurniture",
+                    "NewObjectStatic", "ObjectStatic",
+                    "NewObject", "Object",
+                    "Static", "New"
+                };
+                for (const char* pfx : prefixes) {
+                    size_t pn = std::strlen(pfx);
+                    if (s.size() > pn && s.compare(0, pn, pfx) == 0) {
+                        s = s.substr(pn);
+                        break;
+                    }
+                }
+                std::string out;
+                out.reserve(s.size());
+                for (char c : s) {
+                    if (c == '_') continue;
+                    out.push_back(char(std::tolower(static_cast<unsigned char>(c))));
+                }
+                out = strip_suffix(out, "facademid");
+                out = strip_suffix(out, "facade");
+                out = strip_suffix(out, "lod1");
+                out = strip_suffix(out, "lod0");
+                out = strip_suffix(out, "mid");
+                return out;
+            };
+
+            std::unordered_map<std::string, const FlatAssetEntry*> mdl_by_token;
+            mdl_by_token.reserve(S.all_mdl_files.size() * 2);
+            for (const auto& m : S.all_mdl_files) {
+                std::string base = m.name;
+                size_t dot = base.find_last_of('.');
+                if (dot != std::string::npos) base.resize(dot);
+                std::string lc;
+                lc.reserve(base.size());
+                for (char c : base) {
+                    if (c == '_') continue;
+                    lc.push_back(char(std::tolower(static_cast<unsigned char>(c))));
+                }
+                lc = strip_suffix(lc, "facademid");
+                lc = strip_suffix(lc, "facade");
+                lc = strip_suffix(lc, "lod1");
+                lc = strip_suffix(lc, "lod0");
+                lc = strip_suffix(lc, "mid");
+                mdl_by_token.emplace(lc, &m);
+            }
+
+            std::unordered_map<std::string, Level::PropBlock> blocks_by_path;
+            size_t resolved = 0;
+            for (const auto& p : info.placements) {
+                if (p.entity_name.empty()) continue;
+                std::string tok = canonicalize_for_match(p.entity_name);
+                if (tok.empty()) continue;
+
+                const FlatAssetEntry* hit = nullptr;
+                auto it = mdl_by_token.find(tok);
+                if (it != mdl_by_token.end()) hit = it->second;
+
+                if (!hit) {
+                    size_t best_len = SIZE_MAX;
+                    for (const auto& kv : mdl_by_token) {
+                        const std::string& mk = kv.first;
+                        bool match =
+                            mk.find(tok) != std::string::npos ||
+                            tok.find(mk) != std::string::npos;
+                        if (!match) continue;
+                        if (mk.size() < best_len) {
+                            best_len = mk.size();
+                            hit = kv.second;
+                        }
+                    }
+                }
+                if (!hit) continue;
+
+                auto& pb = blocks_by_path[hit->full_path];
+                if (pb.model_path.empty()) {
+                    pb.type = 0xB1;            
+                    pb.model_path = hit->full_path;
+                }
+                Level::PropInstance pi;
+                pi.values[0]  = p.x;
+                pi.values[1]  = p.y;
+                pi.values[2]  = p.z;
+                pi.values[6]  = std::sin(p.yaw);
+                pi.values[7]  = std::cos(p.yaw);
+                pi.values[9]  = pi.values[10] = pi.values[11] =
+                    (p.scale > 0.0f && p.scale < 1000.0f) ? p.scale : 1.0f;
+                pb.instances.push_back(pi);
+                ++resolved;
+            }
+
+            for (auto& kv : blocks_by_path) {
+                g_pending_level_prop_blocks.push_back(std::move(kv.second));
+            }
+
+            std::ostringstream os3;
+            os3 << "gdb-derived placements: "
+                << blocks_by_path.size() << " unique models / "
+                << resolved << " instances appended to prop pipeline";
+            if (resolved > 0) OutputLog::success(os3.str());
+            else              OutputLog::warn(os3.str());
+        } else {
+            OutputLog::warn("no .gdb sibling in BNK");
+        }
+    }
+
+    for (const auto& vfs_stream_path : g_level_vfs_streaming_bnks) {
+        std::string wanted_leaf =
+            std::filesystem::path(vfs_stream_path).filename().string();
+        std::transform(wanted_leaf.begin(), wanted_leaf.end(),
+                       wanted_leaf.begin(), ::tolower);
+
+        auto leaf_matches = [&](const std::string& mounted_leaf_lower) {
+            if (mounted_leaf_lower == wanted_leaf) return true;
+            if (mounted_leaf_lower.size() <= wanted_leaf.size() + 1) return false;
+            const size_t off = mounted_leaf_lower.size() - wanted_leaf.size();
+            if (mounted_leaf_lower.compare(off, wanted_leaf.size(),
+                                           wanted_leaf) != 0) return false;
+            return mounted_leaf_lower[off - 1] == '_';
+        };
+
+        std::string mounted_path;
+        if (auto resolved = find_bnk_by_virtual_path(vfs_stream_path)) {
+            mounted_path = *resolved;
+        }
+        if (mounted_path.empty()) {
+            for (const auto& p : S.bnk_paths) {
+                std::string leaf =
+                    std::filesystem::path(p).filename().string();
+                std::transform(leaf.begin(), leaf.end(), leaf.begin(), ::tolower);
+                if (leaf_matches(leaf)) { mounted_path = p; break; }
+            }
+        }
+        if (mounted_path.empty()) {
+            for (const auto& p : S.nested_bnk_paths) {
+                std::string leaf =
+                    std::filesystem::path(p).filename().string();
+                std::transform(leaf.begin(), leaf.end(),
+                               leaf.begin(), ::tolower);
+                if (leaf_matches(leaf)) { mounted_path = p; break; }
+            }
+        }
+        if (mounted_path.empty()) {
+            OutputLog::warn("streaming bnk not mounted: " + vfs_stream_path);
+            continue;
+        }
+
+        try {
+            BnkCache::Entry& bnk = BnkCache::get(mounted_path);
+            const auto& files = bnk.reader->list_files();
+            size_t hkx_count = 0;
+            size_t total_rb  = 0;
+            size_t total_inst = 0;
+
+            constexpr size_t kProbeLimit = 8;
+            size_t probed = 0;
+            size_t with_world_pos = 0;
+            std::vector<std::string> world_pos_hits;
+            world_pos_hits.reserve(kProbeLimit);
+
+            auto looks_world_scale = [](float v) {
+                return std::isfinite(v) && std::fabs(v) > 5.0f &&
+                       std::fabs(v) < 1000.0f;
+            };
+            auto looks_world_pos = [&](float x, float y, float z) {
+                if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+                    return false;
+                if (std::fabs(x) > 1000.0f || std::fabs(y) > 1000.0f ||
+                    std::fabs(z) > 1000.0f) return false;
+                return looks_world_scale(x) || looks_world_scale(y) ||
+                       looks_world_scale(z);
+            };
+
+            std::map<std::string, size_t> streaming_extensions;
+            std::map<std::string, std::vector<size_t>> ext_size_samples;
+            std::map<std::string, int>                 ext_sample_idx;
+            std::map<std::string, std::string>         ext_sample_name;
+
+            for (size_t i = 0; i < files.size(); ++i) {
+                const auto& name = files[i].name;
+                std::string lower = name;
+                std::transform(lower.begin(), lower.end(),
+                               lower.begin(), ::tolower);
+
+                {
+                    size_t dot = lower.find_last_of('.');
+                    std::string ext = (dot != std::string::npos)
+                                        ? lower.substr(dot) : "(no-ext)";
+                    streaming_extensions[ext]++;
+                    ext_size_samples[ext].push_back(files[i].size());
+                    if (ext_sample_idx.find(ext) == ext_sample_idx.end()) {
+                        ext_sample_idx[ext]  = (int)i;
+                        ext_sample_name[ext] = name;
+                    }
+                }
+
+                if (lower.size() < 4 ||
+                    lower.compare(lower.size() - 4, 4, ".hkx") != 0) continue;
+                ++hkx_count;
+                std::vector<uint8_t> hkx_bytes;
+                try {
+                    hkx_bytes = bnk.reader->extract_index_bytes((int)i);
+                } catch (...) { continue; }
+                auto pf = Havok::LoadPackFileFromBytes(
+                    std::move(hkx_bytes), name);
+                if (!pf) continue;
+                total_inst += pf->virtual_fixups.size();
+                const auto* rb_class = pf->find_class("hkpRigidBody");
+                size_t this_rb = 0;
+                if (rb_class) {
+                    for (const auto& vf : pf->virtual_fixups) {
+                        if (vf.classnames_offset ==
+                            rb_class->classnames_offset) {
+                            ++total_rb;
+                            ++this_rb;
+                        }
+                    }
+                }
+
+                if (this_rb > 0 && rb_class && probed < kProbeLimit) {
+                    ++probed;
+                    auto rdf32 = [&](size_t o) -> float {
+                        if (o + 4 > pf->bytes.size()) return 0.0f;
+                        uint32_t u =
+                            (uint32_t(pf->bytes[o])     << 24) |
+                            (uint32_t(pf->bytes[o + 1]) << 16) |
+                            (uint32_t(pf->bytes[o + 2]) <<  8) |
+                             uint32_t(pf->bytes[o + 3]);
+                        float f; std::memcpy(&f, &u, 4); return f;
+                    };
+                    for (const auto& vf : pf->virtual_fixups) {
+                        if (vf.classnames_offset !=
+                            rb_class->classnames_offset) continue;
+                        const size_t base = pf->data_section.absolute_data_start
+                                          + vf.data_offset;
+                        if (base + 12 > pf->bytes.size()) break;
+                        const size_t end_ok =
+                            std::min(base + 0x200, pf->bytes.size());
+                        for (size_t q = base; q + 12 <= end_ok; q += 4) {
+                            float x = rdf32(q);
+                            float y = rdf32(q + 4);
+                            float z = rdf32(q + 8);
+                            if (looks_world_pos(x, y, z)) {
+                                ++with_world_pos;
+                                std::ostringstream osp;
+                                osp << "    [probe " << with_world_pos
+                                    << "] " << name << "  vec3 @+0x"
+                                    << std::hex << (q - base) << std::dec
+                                    << " = (" << x << ", " << y << ", "
+                                    << z << ")";
+                                world_pos_hits.push_back(osp.str());
+                                break;
+                            }
+                        }
+                        break;   
+                    }
+                }
+
+            }
+
+            std::ostringstream os;
+            os << "streaming bnk '"
+               << std::filesystem::path(mounted_path).filename().string()
+               << "':  " << files.size() << " files, " << hkx_count
+               << " .hkx,  " << total_rb << " rigid bodies across "
+               << total_inst << " havok instances";
+            OutputLog::success(os.str());
+
+            std::ostringstream osp;
+            osp << "  world-pos probe: " << with_world_pos << " / "
+                << probed << " HKX have a world-scale vec3 in their first "
+                << "rigid body (diagnostic only — no placements emitted)";
+            if (with_world_pos > 0) OutputLog::info(osp.str());
+            else                     OutputLog::info(osp.str());
+            for (const auto& line : world_pos_hits) {
+                OutputLog::info(line);
+            }
+
+            std::vector<std::pair<std::string, size_t>> ext_sorted(
+                streaming_extensions.begin(), streaming_extensions.end());
+            std::sort(ext_sorted.begin(), ext_sorted.end(),
+                      [](const auto& a, const auto& b){
+                          return a.second > b.second;
+                      });
+            OutputLog::info("  streaming BNK file extensions:");
+            for (const auto& [ext, n] : ext_sorted) {
+                auto& sizes = ext_size_samples[ext];
+                size_t mn = sizes.empty() ? 0 : *std::min_element(sizes.begin(), sizes.end());
+                size_t mx = sizes.empty() ? 0 : *std::max_element(sizes.begin(), sizes.end());
+                size_t total = 0;
+                for (auto s : sizes) total += s;
+                size_t avg = sizes.empty() ? 0 : total / sizes.size();
+
+                std::ostringstream osx;
+                osx << "    " << ext << "  ×" << n
+                    << "  sizes: min=" << mn << " avg=" << avg << " max=" << mx;
+                OutputLog::info(osx.str());
+
+                if (ext != ".hkx" && ext_sample_idx.count(ext)) {
+                    int idx = ext_sample_idx[ext];
+                    try {
+                        auto bytes = bnk.reader->extract_index_bytes(idx);
+                        const size_t dump_n = std::min<size_t>(bytes.size(), 128);
+                        OutputLog::info("      sample: " + ext_sample_name[ext]
+                                        + "  (" + std::to_string(bytes.size())
+                                        + " bytes)");
+                        for (size_t off = 0; off < dump_n; off += 16) {
+                            std::ostringstream lineh, linea;
+                            lineh << "        +0x" << std::hex
+                                  << std::setw(3) << std::setfill('0')
+                                  << off << "  ";
+                            for (size_t k = 0; k < 16 && off + k < dump_n; ++k) {
+                                lineh << std::setw(2) << std::setfill('0')
+                                      << (unsigned)bytes[off + k] << " ";
+                                unsigned char c = bytes[off + k];
+                                linea << (char)((c >= 32 && c < 127) ? c : '.');
+                            }
+                            OutputLog::info(lineh.str() + "  " + linea.str());
+                        }
+                    } catch (...) {
+                        OutputLog::warn("      (failed to extract sample)");
+                    }
+                }
+            }
+        } catch (const std::exception& ex) {
+            OutputLog::warn(std::string("streaming bnk scan failed: ") + ex.what());
+        }
+    }
+
     if (!res.ehf_path.empty() || !res.ghf_path.empty()) {
         HeightfieldFiles hf;
         progress_update(32, 100, "Loading heightfield files...");
@@ -625,10 +1300,6 @@ bool Open(const FlatAssetEntry& entry)
                     << (h.body_offset + h.body_size) << std::dec << ")";
                 OutputLog::info(eos.str());
 
-                /* Sanity check: body offset+size should fit inside the
-                   .ehf file.  If it doesn't, the IDA-derived layout is
-                   wrong (or .ehf is wrapped in some outer container we
-                   haven't accounted for). */
                 const uint64_t body_end =
                     uint64_t(h.body_offset) + uint64_t(h.body_size);
                 if (body_end > hf.ehf_bytes.size()) {
@@ -638,9 +1309,6 @@ bool Open(const FlatAssetEntry& entry)
                         << "B) — header layout may be wrong";
                     OutputLog::warn(wos.str());
                 } else {
-                    /* Hex-dump the first 64 bytes of the body so we
-                       can eyeball what sub_82A85DB0 / sub_82A85F20
-                       reads next.  Format: "[+0x000] AA BB CC DD ..." */
                     const size_t dump_start = h.body_offset;
                     const size_t dump_end   = std::min<size_t>(
                         h.body_offset + 64, hf.ehf_bytes.size());
@@ -662,23 +1330,33 @@ bool Open(const FlatAssetEntry& entry)
                 OutputLog::warn("  .ehf header missing or invalid (need 63B + magic)");
             }
 
-            /* Decode the .ghf height grid.  We now know its layout:
-               20-byte header (tile_size + W + H) followed by W*H
-               14-byte records, first 4 bytes of each = f32 BE height. */
             if (!hf.ghf_bytes_raw.empty()) {
                 GhfHeights hg;
                 progress_update(45, 100, "Decoding height grid...");
                 if (!DecodeGhfHeights(hf.ghf_bytes_raw, hg)) {
                     OutputLog::error("  .ghf decode failed: " + hg.error);
                 } else {
+                    if (hg.tile_size <= 0.0f) {
+                        const float ehf_tile = hf.ehf_header.ok
+                                             ? hf.ehf_header.f2 : 0.0f;
+                        const float fallback =
+                            (ehf_tile > 0.0f && std::isfinite(ehf_tile))
+                                ? ehf_tile : 0.5f;
+                        std::ostringstream tos;
+                        tos << "  .ghf tile_size was 0 — using .ehf f2 = "
+                            << fallback << " (world = "
+                            << (hg.width  - 1) * fallback << " x "
+                            << (hg.height - 1) * fallback << ")";
+                        OutputLog::info(tos.str());
+                        hg.tile_size = fallback;
+                    }
+
                     std::ostringstream gos;
                     gos << "  .ghf heightmap: " << hg.width << "x" << hg.height
                         << "  tile=" << hg.tile_size
                         << "  h=[" << hg.min_height << ".." << hg.max_height << "]";
                     OutputLog::success(gos.str());
 
-                    /* Build the renderable mesh and hand it to the
-                       renderer thread via the pending-load globals. */
                     TerrainMesh mesh;
                     progress_update(58, 100, "Building terrain mesh...");
                     if (!BuildTerrainMesh(hg, mesh)) {
@@ -690,53 +1368,184 @@ bool Open(const FlatAssetEntry& entry)
                             << "  tris=" << tri_count;
                         OutputLog::success(mos.str());
 
-                        /* Hand off to the renderer thread.  Also
-                           stash the raw .ehf bytes so the texture
-                           decode in PendingLoads can scan them for
-                           the baked-terrain BC1 page without a
-                           second BNK lookup.                       */
                         g_pending_terrain_mesh        = std::move(mesh);
                         g_pending_terrain_label       = entry.name;
                         g_pending_terrain_level_entry = entry;
                         g_pending_terrain_ehf_bytes   = hf.ehf_bytes;
+                        g_pending_adjacent_terrain_meshes.clear();
 
-                        /* Stash the .ghf data so TerrainEdit can do
-                           snapshot/restore + (later) save-to-iso.   */
+                        auto norm_path = [](std::string s) {
+                            std::replace(s.begin(), s.end(), '\\', '/');
+                            std::transform(s.begin(), s.end(), s.begin(),
+                                [](unsigned char c) { return (char)std::tolower(c); });
+                            return s;
+                        };
+                        auto with_ext = [](std::string p, const char* ext) {
+                            const size_t slash = p.find_last_of("/\\");
+                            const size_t dot = p.find_last_of('.');
+                            if (dot != std::string::npos &&
+                                (slash == std::string::npos || dot > slash)) {
+                                p.resize(dot);
+                            }
+                            p += ext;
+                            return p;
+                        };
+                        const std::string main_ehf_norm = norm_path(res.ehf_path);
+                        for (const auto& adj_ehf_path : all_ehf_refs) {
+                            if (norm_path(adj_ehf_path) == main_ehf_norm) continue;
+                            const std::string adj_ghf_path = with_ext(adj_ehf_path, ".ghf");
+                            if (!Level::FindHeightfieldByPath(adj_ghf_path)) {
+                                OutputLog::info("adjacent terrain skipped (no .ghf): " +
+                                                adj_ehf_path);
+                                continue;
+                            }
+
+                            HeightfieldFiles adj_hf;
+                            if (!LoadHeightfieldFiles(adj_ehf_path, adj_ghf_path,
+                                                      {}, {}, adj_hf)) {
+                                OutputLog::warn("adjacent terrain load failed: " +
+                                                adj_ehf_path + " (" + adj_hf.error + ")");
+                                continue;
+                            }
+                            GhfHeights adj_hg;
+                            if (!DecodeGhfHeights(adj_hf.ghf_bytes_raw, adj_hg)) {
+                                OutputLog::warn("adjacent terrain .ghf decode failed: " +
+                                                adj_ghf_path + " (" + adj_hg.error + ")");
+                                continue;
+                            }
+                            if (adj_hg.tile_size <= 0.0f) {
+                                const float ehf_tile = adj_hf.ehf_header.ok
+                                    ? adj_hf.ehf_header.f2 : 0.0f;
+                                adj_hg.tile_size =
+                                    (ehf_tile > 0.0f && std::isfinite(ehf_tile))
+                                        ? ehf_tile : hg.tile_size;
+                            }
+
+                            TerrainMesh adj_mesh;
+                            if (!BuildTerrainMesh(adj_hg, adj_mesh)) {
+                                OutputLog::warn("adjacent terrain mesh build failed: " +
+                                                adj_ehf_path);
+                                continue;
+                            }
+
+                            EhfParsedBody adj_body;
+                            if (ParseEhfBody(adj_hf.ehf_bytes, adj_body) &&
+                                !adj_body.chunks.empty()) {
+                                float min_x = 1e30f, min_z = 1e30f;
+                                for (const auto& c : adj_body.chunks) {
+                                    min_x = std::min(min_x, c.origin[0]);
+                                    min_z = std::min(min_z, c.origin[1]);
+                                }
+                                if (std::isfinite(min_x) && std::isfinite(min_z) &&
+                                    (std::fabs(min_x) > 1e-4f ||
+                                     std::fabs(min_z) > 1e-4f)) {
+                                    for (size_t pi = 0;
+                                         pi + 2 < adj_mesh.positions.size();
+                                         pi += 3) {
+                                        adj_mesh.positions[pi + 0] += min_x;
+                                        adj_mesh.positions[pi + 2] += min_z;
+                                    }
+                                }
+                            }
+
+                            Level::PendingAdjacentTerrain adj;
+                            adj.label = std::filesystem::path(adj_ehf_path)
+                                            .filename().string();
+                            adj.preferred_bnk = g_pending_terrain_level_entry.bnk_path;
+                            adj.ehf_bytes = std::move(adj_hf.ehf_bytes);
+                            adj.mesh = std::move(adj_mesh);
+                            g_pending_adjacent_terrain_meshes.push_back(std::move(adj));
+                        }
+                        if (!g_pending_adjacent_terrain_meshes.empty()) {
+                            OutputLog::success("adjacent terrain meshes loaded: " +
+                                std::to_string(g_pending_adjacent_terrain_meshes.size()));
+                        }
+
                         g_pending_terrain_ghf_payload   = hf.ghf_bytes_raw;
                         g_pending_terrain_ghf_heights   = hg.heights;
                         g_pending_terrain_ghf_tile_size = hg.tile_size;
                         g_pending_terrain_ghf_width     = (int)hg.width;
                         g_pending_terrain_ghf_height    = (int)hg.height;
                         {
-                            /* Resolve the .ghf entry in the BNK so we
-                               know where to write back later.       */
                             const FlatAssetEntry* fe =
                                 Level::FindHeightfieldByPath(res.ghf_path);
                             g_pending_terrain_ghf_entry =
                                 fe ? *fe : FlatAssetEntry{};
                         }
 
-                        g_pending_level_prop_blocks = info.prop_blocks;
+                        {
+                            std::vector<Level::PropBlock> hkx_blocks =
+                                std::move(g_pending_level_prop_blocks);
+                            g_pending_level_prop_blocks = info.prop_blocks;
+                            g_pending_level_prop_blocks.insert(
+                                g_pending_level_prop_blocks.end(),
+                                std::make_move_iterator(hkx_blocks.begin()),
+                                std::make_move_iterator(hkx_blocks.end()));
+                        }
+
+                        if (!g_pending_terrain_ghf_heights.empty() &&
+                            g_pending_terrain_ghf_width > 0 &&
+                            g_pending_terrain_ghf_height > 0)
+                        {
+                            const int   gw = g_pending_terrain_ghf_width;
+                            const int   gh = g_pending_terrain_ghf_height;
+                            const float tile =
+                                g_pending_terrain_ghf_tile_size > 0.0f
+                                    ? g_pending_terrain_ghf_tile_size : 0.5f;
+                            const auto& heights = g_pending_terrain_ghf_heights;
+                            auto sample_h = [&](float wx, float wy) -> float {
+                                float gx = wx / tile;
+                                float gy = wy / tile;
+                                int ix = int(gx); int iy = int(gy);
+                                if (ix < 0) ix = 0; else if (ix >= gw) ix = gw - 1;
+                                if (iy < 0) iy = 0; else if (iy >= gh) iy = gh - 1;
+                                return heights[size_t(iy) * size_t(gw) + size_t(ix)];
+                            };
+                            size_t grounded = 0;
+                            for (auto& pb : g_pending_level_prop_blocks) {
+                                if (pb.type != 0xB1) continue;
+                                for (auto& inst : pb.instances) {
+                                    inst.values[2] = sample_h(inst.values[0],
+                                                              inst.values[1]);
+                                    ++grounded;
+                                }
+                            }
+                            std::ostringstream gs;
+                            gs << "grounded " << grounded
+                               << " GDB-derived placements to terrain";
+                            OutputLog::info(gs.str());
+                        }
+
                         g_pending_level_model_body_bnk.clear();
                         if (!res.model_body_bnk.empty()) {
-                            size_t slash = res.model_body_bnk.find_last_of("/\\");
-                            std::string model_leaf =
-                                (slash == std::string::npos)
-                                    ? res.model_body_bnk
-                                    : res.model_body_bnk.substr(slash + 1);
-                            std::transform(model_leaf.begin(), model_leaf.end(),
-                                           model_leaf.begin(), ::tolower);
-                            auto found_model_bnk = find_bnk_by_filename(model_leaf);
+                            auto found_model_bnk =
+                                find_bnk_by_virtual_path(res.model_body_bnk);
+                            if (!found_model_bnk) {
+                                size_t slash =
+                                    res.model_body_bnk.find_last_of("/\\");
+                                std::string model_leaf =
+                                    (slash == std::string::npos)
+                                        ? res.model_body_bnk
+                                        : res.model_body_bnk.substr(slash + 1);
+                                std::transform(model_leaf.begin(),
+                                               model_leaf.end(),
+                                               model_leaf.begin(), ::tolower);
+                                found_model_bnk = find_bnk_by_filename(model_leaf);
+                            }
                             if (found_model_bnk) {
                                 g_pending_level_model_body_bnk = *found_model_bnk;
+                                OutputLog::info("level props: resolved model BNK " +
+                                                res.model_body_bnk + " -> " +
+                                                std::filesystem::path(*found_model_bnk)
+                                                    .filename().string());
+                            } else {
+                                OutputLog::warn("level props: model BNK not mounted: " +
+                                                res.model_body_bnk);
                             }
                         }
 
                         g_pending_terrain_load        = true;
 
-                        /* Parse + log the ground-texture palette so
-                           we can see what `.tex` files the level
-                           expects to render the terrain with.    */
                         {
                             auto pal = EhfPalette::Parse(hf.ehf_bytes);
                             if (pal.ok) {
@@ -766,11 +1575,6 @@ bool Open(const FlatAssetEntry& entry)
                             }
                         }
 
-                        /* DEBUG: dump the .ehf alongside the
-                           extracted/ folder so we can walk it
-                           offline when the BC1 picker grabs the
-                           wrong page.  Cheap (just a file write)
-                           and the path is predictable. */
                         try {
                             std::filesystem::path dump =
                                 std::filesystem::path("extracted") /
@@ -788,14 +1592,6 @@ bool Open(const FlatAssetEntry& entry)
                             }
                         } catch (...) {}
 
-                        /* The .ehf body contains a PF=24 lightmap and
-                           a PF=40 BC5 normal map (plus a still-WIP
-                           PF=99 baked albedo).  We don't auto-export
-                           anything here — PendingLoads will decode +
-                           bind them as clickable thumbnails on the
-                           terrain mesh, and the right-click "Export
-                           to" menu on each thumbnail handles export
-                           on demand.                                  */
                     }
                 }
             }
@@ -804,10 +1600,6 @@ bool Open(const FlatAssetEntry& entry)
         OutputLog::warn("no .ehf or .ghf path in level — can't load terrain");
     }
 
-    /* TODO(terrain): with heights in hand, build a renderable terrain
-       mesh (W*H verts, (W-1)*(H-1)*2 tris, smooth normals from height
-       gradients) and feed it to ModelPreview.  Texture mapping will
-       come next from the level's texture_atlas. */
 
     return true;
 }
@@ -821,10 +1613,6 @@ bool RenderHeightmapToRGBA(const FlatAssetEntry& entry,
     out_w = 0;
     out_h = 0;
 
-    /* Locate the sibling `.list` text file and pull the .ghf path
-       out of it.  Mirrors the logic in Open(), kept independent so
-       the export path doesn't depend on a successful full level
-       load. */
     std::filesystem::path lp = entry.full_path;
     lp.replace_extension(".list");
     std::string list_full = lp.string();
@@ -876,9 +1664,8 @@ bool RenderHeightmapToRGBA(const FlatAssetEntry& entry,
         return false;
     }
 
-    /* Load + gunzip the .ghf and decode it. */
     HeightfieldFiles hf;
-    if (!LoadHeightfieldFiles(/*ehf*/{}, ghf_path, {}, {}, hf)) {
+    if (!LoadHeightfieldFiles({}, ghf_path, {}, {}, hf)) {
         OutputLog::error("View Heightmap: .ghf load failed: " + hf.error);
         return false;
     }
@@ -889,9 +1676,6 @@ bool RenderHeightmapToRGBA(const FlatAssetEntry& entry,
         return false;
     }
 
-    /* Normalise heights to [0, 255] and pack as grayscale RGBA8.
-       Use the actual span if it's well-defined; otherwise emit
-       black so the viewer at least shows the dimensions. */
     const float lo   = hg.min_height;
     const float hi   = hg.max_height;
     const float span = (hi > lo) ? (hi - lo) : 1.f;
@@ -923,8 +1707,6 @@ bool DecodeLevelTextureAtlas(const FlatAssetEntry& level_entry,
     out_w = 0;
     out_h = 0;
 
-    /* The .texture_atlas sibling — same dir + same base name as the
-       .engine_level, different extension. */
     std::filesystem::path atlas_path = level_entry.full_path;
     atlas_path.replace_extension(".texture_atlas");
     const std::string atlas_full = atlas_path.string();
@@ -934,8 +1716,6 @@ bool DecodeLevelTextureAtlas(const FlatAssetEntry& level_entry,
                    [](unsigned char c){ return std::tolower(c); });
     std::replace(atlas_key.begin(), atlas_key.end(), '\\', '/');
 
-    /* Try the same BNK first (cheapest); fall back to every loaded
-       BNK if the level's sibling isn't there. */
     auto try_bnk = [&](const std::string& bnk_path,
                        std::vector<uint8_t>& out_blob) -> bool {
         int idx = BnkCache::find_index(bnk_path, atlas_key);
@@ -953,11 +1733,6 @@ bool DecodeLevelTextureAtlas(const FlatAssetEntry& level_entry,
     std::vector<uint8_t> blob;
     bool found = try_bnk(level_entry.bnk_path, blob);
 
-    /* First fallback: walk the global heightfield-files index that
-       TreeBuilder populates with .texture_atlas (alongside the
-       .ehf / .ghf / .hdb / .genv / .am? group).  Cheaper than
-       scanning every BNK from scratch and works regardless of
-       which BNK actually holds the atlas. */
     if (!found) {
         const std::string base_lower = std::filesystem::path(atlas_full)
                                            .filename().string();
@@ -992,12 +1767,6 @@ bool DecodeLevelTextureAtlas(const FlatAssetEntry& level_entry,
         return false;
     }
 
-    /* `.texture_atlas` files have their own layout
-       ([u32 raw][u32 comp][zlib BCn → tiled+endian-swapped]) that
-       the generic .tex parser in TexParser.cpp misroutes through
-       the buggy CompFlag=7 untile (32-block-collision formula).
-       Use the dedicated TextureAtlas::DecodeAtlas path which
-       mirrors ImageHeat exactly. */
     TextureAtlas::DecodedAtlas dec = TextureAtlas::DecodeAtlas(blob);
     if (!dec.ok) {
         OutputLog::error("texture_atlas: " + dec.error +
@@ -1009,6 +1778,352 @@ bool DecodeLevelTextureAtlas(const FlatAssetEntry& level_entry,
     out_h    = dec.height;
     return true;
 }
+
+namespace {
+
+struct EhfRenderTileDesc {
+    uint32_t cell_x = 0;
+    uint32_t cell_y = 0;
+    uint32_t cell_w = 0;
+    uint32_t cell_h = 0;
+    uint32_t sub_w  = 0;
+    uint32_t sub_h  = 0;
+};
+
+struct EhfEmbeddedBc1Mip {
+    size_t   offset = 0;
+    uint32_t header_w = 0;
+    uint32_t header_h = 0;
+    uint32_t raw_size = 0;
+    uint32_t comp_size = 0;
+};
+
+static uint32_t ehf_be32(const std::vector<uint8_t>& d, size_t off)
+{
+    return (uint32_t(d[off + 0]) << 24) |
+           (uint32_t(d[off + 1]) << 16) |
+           (uint32_t(d[off + 2]) <<  8) |
+            uint32_t(d[off + 3]);
+}
+
+static bool ehf_skip_tex_blob(const std::vector<uint8_t>& ehf,
+                              size_t limit,
+                              size_t& pos)
+{
+    if (pos + 0x60 > limit) return false;
+    if (ehf_be32(ehf, pos) != 0xFFFFFFFEu) return false;
+
+    const uint32_t pf = ehf_be32(ehf, pos + 0x18);
+    const uint32_t mt = ehf_be32(ehf, pos + 0x20);
+    if (mt < 0x54 || mt > 0x200) return false;
+
+    const size_t table = pos + mt;
+    if (table + 8 > limit) return false;
+    const uint32_t raw_size  = ehf_be32(ehf, table);
+    const uint32_t comp_size = ehf_be32(ehf, table + 4);
+    const size_t next = (pf == 98u)
+        ? table + 4 + size_t(raw_size)
+        : table + 8 + size_t(comp_size);
+    if (next > limit) return false;
+    pos = next;
+    return true;
+}
+
+static bool parse_ehf_render_tiles(const std::vector<uint8_t>& ehf,
+                                   uint32_t terrain_cells_w,
+                                   std::vector<EhfRenderTileDesc>& out)
+{
+    out.clear();
+    if (ehf.size() < 63) return false;
+    const uint32_t body_off  = ehf_be32(ehf, 55);
+    const uint32_t body_size = ehf_be32(ehf, 59);
+    const size_t body_end = size_t(body_off) + size_t(body_size);
+    if (body_end > ehf.size()) return false;
+
+    size_t pos = body_off;
+    if (!ehf_skip_tex_blob(ehf, body_end, pos)) return false;
+    if (!ehf_skip_tex_blob(ehf, body_end, pos)) return false;
+    if (pos + 8 > body_end) return false;
+
+    pos += 4;  // state float
+    const uint32_t count = ehf_be32(ehf, pos);
+    pos += 4;
+    if (count == 0 || count > 4096) return false;
+
+    out.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        if (pos + 16 > body_end) return false;
+        EhfRenderTileDesc t;
+        t.cell_w = ehf_be32(ehf, pos + 0);
+        t.cell_h = ehf_be32(ehf, pos + 4);
+        t.sub_w  = ehf_be32(ehf, pos + 8);
+        t.sub_h  = ehf_be32(ehf, pos + 12);
+        pos += 16;
+        if (t.cell_w == 0 || t.cell_h == 0 ||
+            t.sub_w == 0 || t.sub_h == 0 ||
+            t.sub_w > 1024 || t.sub_h > 1024)
+        {
+            return false;
+        }
+        const size_t grid_bytes =
+            size_t(t.sub_w) * size_t(t.sub_h) * 160u + 24u;
+        if (pos + grid_bytes > body_end) return false;
+        pos += grid_bytes;
+        out.push_back(t);
+    }
+
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t row_h = 0;
+    for (EhfRenderTileDesc& t : out) {
+        if (terrain_cells_w > 0 &&
+            x > 0 &&
+            x + t.cell_w > terrain_cells_w)
+        {
+            y += row_h;
+            x = 0;
+            row_h = 0;
+        }
+        t.cell_x = x;
+        t.cell_y = y;
+        x += t.cell_w;
+        row_h = std::max(row_h, t.cell_h);
+        if (terrain_cells_w > 0 && x >= terrain_cells_w) {
+            y += row_h;
+            x = 0;
+            row_h = 0;
+        }
+    }
+    return true;
+}
+
+static std::vector<EhfEmbeddedBc1Mip>
+collect_ehf_embedded_bc1_primaries(const std::vector<uint8_t>& ehf)
+{
+    std::vector<EhfEmbeddedBc1Mip> all;
+    if (ehf.size() < 63) return all;
+    const uint32_t body_off  = ehf_be32(ehf, 55);
+    const uint32_t body_size = ehf_be32(ehf, 59);
+    const size_t body_end = size_t(body_off) + size_t(body_size);
+    if (body_end > ehf.size()) return all;
+
+    for (size_t i = body_end; i + 0x60 < ehf.size(); ++i) {
+        if (ehf[i] != 0xFF || ehf[i + 1] != 0xFF ||
+            ehf[i + 2] != 0xFF || ehf[i + 3] != 0xFE) continue;
+        const uint32_t w  = ehf_be32(ehf, i + 0x10);
+        const uint32_t h  = ehf_be32(ehf, i + 0x14);
+        const uint32_t pf = ehf_be32(ehf, i + 0x18);
+        const uint32_t mt = ehf_be32(ehf, i + 0x20);
+        if (pf != 35u || w == 0 || h == 0 ||
+            w > 8192 || h > 8192 ||
+            mt < 0x54 || mt > 0x200) {
+            continue;
+        }
+        const size_t table = i + mt;
+        if (table + 8 > ehf.size()) continue;
+        const uint32_t raw_size  = ehf_be32(ehf, table);
+        const uint32_t comp_size = ehf_be32(ehf, table + 4);
+        const size_t zlib_at = table + 8;
+        if (comp_size < 2 || zlib_at + size_t(comp_size) > ehf.size()) continue;
+        if (ehf[zlib_at] != 0x78) continue;
+        all.push_back({i, w, h, raw_size, comp_size});
+    }
+
+    std::vector<EhfEmbeddedBc1Mip> primaries;
+    for (size_t i = 0; i < all.size();) {
+        if (i + 2 < all.size() &&
+            all[i + 1].header_w * 2u == all[i].header_w &&
+            all[i + 2].header_w * 4u == all[i].header_w)
+        {
+            primaries.push_back(all[i]);
+            i += 3;
+        } else {
+            ++i;
+        }
+    }
+    return primaries;
+}
+
+static bool decode_ehf_embedded_bc1(const std::vector<uint8_t>& ehf,
+                                    const EhfEmbeddedBc1Mip& mip,
+                                    std::vector<uint8_t>& rgba,
+                                    int& w,
+                                    int& h)
+{
+    rgba.clear();
+    w = 0;
+    h = 0;
+    const uint32_t mt = ehf_be32(ehf, mip.offset + 0x20);
+    const size_t table = mip.offset + mt;
+    const size_t zlib_at = table + 8;
+    if (zlib_at + size_t(mip.comp_size) > ehf.size()) return false;
+
+    std::vector<uint8_t> body(mip.raw_size);
+    z_stream zs{};
+    zs.next_in   = const_cast<Bytef*>(ehf.data() + zlib_at);
+    zs.avail_in  = (uInt)mip.comp_size;
+    zs.next_out  = body.data();
+    zs.avail_out = (uInt)mip.raw_size;
+    const int rc_init = inflateInit2(&zs, 15);
+    const int rc = (rc_init == Z_OK) ? inflate(&zs, Z_FINISH) : Z_ERRNO;
+    const size_t produced = size_t(mip.raw_size) - size_t(zs.avail_out);
+    inflateEnd(&zs);
+    if (rc_init != Z_OK || rc != Z_STREAM_END || produced != mip.raw_size) {
+        return false;
+    }
+
+    std::vector<uint8_t> bc1;
+    std::string err;
+    if (!lh_decode_compressed_mip(body.data(), body.size(),
+                                  w, h, bc1, &err,
+                                  false)) {
+        return false;
+    }
+    return TextureAtlas::DecodeRawBc1ToRgba(bc1.data(), bc1.size(),
+                                            w, h, rgba);
+}
+
+static void blit_resampled_rgba(const std::vector<uint8_t>& src,
+                                int src_w,
+                                int src_h,
+                                std::vector<uint8_t>& dst,
+                                int dst_w,
+                                int dst_h,
+                                int dst_x,
+                                int dst_y,
+                                int copy_w,
+                                int copy_h)
+{
+    if (src.empty() || src_w <= 0 || src_h <= 0 ||
+        dst.empty() || dst_w <= 0 || dst_h <= 0 ||
+        copy_w <= 0 || copy_h <= 0) return;
+
+    const int clipped_w = std::min(copy_w, dst_w - dst_x);
+    const int clipped_h = std::min(copy_h, dst_h - dst_y);
+    if (dst_x < 0 || dst_y < 0 || clipped_w <= 0 || clipped_h <= 0) return;
+
+    for (int y = 0; y < clipped_h; ++y) {
+        const float sy = (float(y) + 0.5f) * float(src_h) / float(copy_h) - 0.5f;
+        const int y0 = std::clamp(int(std::floor(sy)), 0, src_h - 1);
+        const int y1 = std::min(y0 + 1, src_h - 1);
+        const float fy = std::clamp(sy - float(y0), 0.0f, 1.0f);
+        for (int x = 0; x < clipped_w; ++x) {
+            const float sx = (float(x) + 0.5f) * float(src_w) / float(copy_w) - 0.5f;
+            const int x0 = std::clamp(int(std::floor(sx)), 0, src_w - 1);
+            const int x1 = std::min(x0 + 1, src_w - 1);
+            const float fx = std::clamp(sx - float(x0), 0.0f, 1.0f);
+
+            const uint8_t* p00 = src.data() + (size_t(y0) * src_w + x0) * 4;
+            const uint8_t* p10 = src.data() + (size_t(y0) * src_w + x1) * 4;
+            const uint8_t* p01 = src.data() + (size_t(y1) * src_w + x0) * 4;
+            const uint8_t* p11 = src.data() + (size_t(y1) * src_w + x1) * 4;
+            uint8_t* out = dst.data() + (size_t(dst_y + y) * dst_w + (dst_x + x)) * 4;
+            const float w00 = (1.0f - fx) * (1.0f - fy);
+            const float w10 = fx * (1.0f - fy);
+            const float w01 = (1.0f - fx) * fy;
+            const float w11 = fx * fy;
+            for (int c = 0; c < 4; ++c) {
+                out[c] = uint8_t(std::clamp(
+                    w00 * p00[c] + w10 * p10[c] +
+                    w01 * p01[c] + w11 * p11[c],
+                    0.0f, 255.0f));
+            }
+        }
+    }
+}
+
+static bool DecodeEhfEmbeddedTileComposite(const std::vector<uint8_t>& ehf,
+                                           uint32_t terrain_vertices_w,
+                                           uint32_t terrain_vertices_h,
+                                           std::vector<uint8_t>& out_rgba,
+                                           int& out_w,
+                                           int& out_h)
+{
+    out_rgba.clear();
+    out_w = 0;
+    out_h = 0;
+    const uint32_t cells_w =
+        terrain_vertices_w > 1 ? terrain_vertices_w - 1 : terrain_vertices_w;
+    const uint32_t cells_h =
+        terrain_vertices_h > 1 ? terrain_vertices_h - 1 : terrain_vertices_h;
+    if (cells_w == 0 || cells_h == 0) return false;
+
+    std::vector<EhfRenderTileDesc> tiles;
+    if (!parse_ehf_render_tiles(ehf, cells_w, tiles) || tiles.empty()) {
+        return false;
+    }
+    std::vector<EhfEmbeddedBc1Mip> primaries =
+        collect_ehf_embedded_bc1_primaries(ehf);
+    if (primaries.size() < tiles.size()) return false;
+
+    struct DecodedTile {
+        bool ok = false;
+        std::vector<uint8_t> rgba;
+        int w = 0;
+        int h = 0;
+    };
+    std::vector<DecodedTile> decoded(tiles.size());
+    std::vector<float> ratios_x;
+    std::vector<float> ratios_y;
+    size_t ok_count = 0;
+    for (size_t i = 0; i < tiles.size(); ++i) {
+        DecodedTile dt;
+        if (!decode_ehf_embedded_bc1(ehf, primaries[i], dt.rgba, dt.w, dt.h)) {
+            decoded[i] = std::move(dt);
+            continue;
+        }
+        dt.ok = true;
+        if (tiles[i].cell_w > 0 && tiles[i].cell_h > 0) {
+            ratios_x.push_back(float(dt.w) / float(tiles[i].cell_w));
+            ratios_y.push_back(float(dt.h) / float(tiles[i].cell_h));
+        }
+        decoded[i] = std::move(dt);
+        ++ok_count;
+    }
+    if (ok_count < std::max<size_t>(4, tiles.size() / 4)) return false;
+
+    auto median_ratio = [](std::vector<float>& v) -> float {
+        if (v.empty()) return 1.0f;
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    };
+    const int scale_x = std::clamp(int(std::lround(median_ratio(ratios_x))),
+                                   1, 8);
+    const int scale_y = std::clamp(int(std::lround(median_ratio(ratios_y))),
+                                   1, 8);
+
+    out_w = int(cells_w) * scale_x;
+    out_h = int(cells_h) * scale_y;
+    if (out_w <= 0 || out_h <= 0 || out_w > 8192 || out_h > 8192) {
+        return false;
+    }
+    out_rgba.assign(size_t(out_w) * size_t(out_h) * 4, 0);
+    for (size_t i = 3; i < out_rgba.size(); i += 4) {
+        out_rgba[i] = 0xFF;
+    }
+
+    for (size_t i = 0; i < tiles.size(); ++i) {
+        const DecodedTile& dt = decoded[i];
+        if (!dt.ok) continue;
+        const EhfRenderTileDesc& t = tiles[i];
+        const int dx = int(t.cell_x) * scale_x;
+        const int dy = int(t.cell_y) * scale_y;
+        const int dw = int(t.cell_w) * scale_x;
+        const int dh = int(t.cell_h) * scale_y;
+        blit_resampled_rgba(dt.rgba, dt.w, dt.h,
+                            out_rgba, out_w, out_h,
+                            dx, dy, dw, dh);
+    }
+
+    std::ostringstream os;
+    os << "ehf: embedded tile composite " << out_w << "x" << out_h
+       << " from " << ok_count << "/" << tiles.size()
+       << " tile texture pages (scale=" << scale_x << "x" << scale_y << ")";
+    OutputLog::success(os.str());
+    return true;
+}
+
+}  // namespace
 
 bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
                                      uint32_t              cells_w,
@@ -1022,16 +2137,11 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
     out_h = 0;
     if (ehf.empty() || cells_w == 0 || cells_h == 0) return false;
 
-    /* NEW PATH: the `.ehf` is actually a CONTAINER of embedded `.tex`
-       files (same `0xFFFFFFFE` magic header layout as `.texture_atlas`).
-       Each header describes the texture that follows: W × H in
-       pixels, PixelFormat (35=BC1, 39=BC3, 40=BC5), mip_table_offset
-       at +0x20 pointing at [u32 raw][u32 comp][zlib stream].
+    if (DecodeEhfEmbeddedTileComposite(ehf, cells_w, cells_h,
+                                       out_rgba, out_w, out_h)) {
+        return true;
+    }
 
-       Walk every 0xFFFFFFFE we find, pick the LARGEST-area BC1
-       header — that's the per-cell baked albedo for the terrain.
-       Feed the (header + data) blob through TextureAtlas::DecodeAtlas
-       which already knows this exact layout.                       */
     const uint8_t* eh_d = ehf.data();
     const size_t   eh_n = ehf.size();
     size_t  best_off = SIZE_MAX;
@@ -1055,14 +2165,6 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
         if (PF != 35u) continue;     
         if (mip_off != 0x54) continue;
 
-        /* Read the actual raw_size from the embedded mip table — that's
-           the PADDED storage size which is the most reliable measure of
-           "biggest texture" (logical W×H from header can lie about size
-           — some entries have logical 256×256 but raw_size = 32768 = the
-           same 256×256, while LOD entries have logical 624×648 but raw
-           size = 245760 = 640×768 padded.  Sorting by raw bytes picks
-           the densest baked-albedo entry per .ehf, which is what we
-           actually want for highest visual fidelity).                */
         if (i + mip_off + 4 > eh_n) continue;
         const uint32_t raw_size = u32_at(i + mip_off);
         if (raw_size > best_raw) {
@@ -1073,16 +2175,6 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
     }
 
     if (best_off != SIZE_MAX) {
-        /* The embedded .tex's mip-table offset is at +0x20, and
-           points at [u32 raw_size][u32 comp_size][zlib stream].
-           The zlib INFLATED bytes are NOT raw BC1 — they're the
-           game's Huffman-coded BC1 bitstream (decoded by IDA-named
-           `tex_decode_BC1_compressed` @ 0x82B8C1C8), which we have
-           a working port of in `lh_decode_compressed_mip` (used by
-           the regular `.tex` path when CompFlag == 1).
-
-           Pipeline: zlib inflate → lh_decode_compressed_mip →
-           raw row-major BC1 blocks → DecodeRawBc1ToRgba → RGBA. */
         auto u32 = [&](size_t off) -> uint32_t {
             return (uint32_t(eh_d[off  ]) << 24) | (uint32_t(eh_d[off+1]) << 16) |
                    (uint32_t(eh_d[off+2]) <<  8) |  uint32_t(eh_d[off+3]);
@@ -1095,8 +2187,6 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
             const size_t   zlib_at   = mip_at + 8;
 
             if (zlib_at + comp_size <= eh_n) {
-                /* zlib inflate to raw_size bytes — that's the Huffman
-                   bitstream the game's BC1 codec consumes. */
                 std::vector<uint8_t> body(raw_size);
                 z_stream zs{};
                 zs.next_in   = const_cast<Bytef*>(eh_d + zlib_at);
@@ -1109,32 +2199,46 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
                 inflateEnd(&zs);
 
                 if (rc_init == Z_OK && produced == raw_size) {
-                    /* lh_decode_compressed_mip reads W/H from the
-                       bitstream itself (first 32 bits = W|H as
-                       16-bit each).  We pass the inflated body in
-                       full and trust its declared dimensions. */
                     std::vector<uint8_t> bc1;
                     int dec_w = 0, dec_h = 0;
                     std::string err;
                     if (lh_decode_compressed_mip(body.data(), body.size(),
                                                  dec_w, dec_h, bc1, &err,
-                                                 /*comp11_layout=*/false))
+                                                 false))
                     {
                         std::vector<uint8_t> rgba;
                         if (TextureAtlas::DecodeRawBc1ToRgba(
                                 bc1.data(), bc1.size(),
                                 dec_w, dec_h, rgba))
                         {
-                            out_rgba = std::move(rgba);
-                            out_w    = dec_w;
-                            out_h    = dec_h;
-                            std::ostringstream os;
-                            os << "ehf: huffman BC1 baked albedo @0x"
-                               << std::hex << best_off << std::dec
-                               << "  header=" << best_W << "x" << best_H
-                               << "  decoded=" << dec_w << "x" << dec_h;
-                            OutputLog::success(os.str());
-                            return true;
+                            const uint32_t terrain_cells_w =
+                                cells_w > 1 ? cells_w - 1 : cells_w;
+                            const uint32_t terrain_cells_h =
+                                cells_h > 1 ? cells_h - 1 : cells_h;
+                            const size_t terrain_area =
+                                size_t(terrain_cells_w) *
+                                size_t(terrain_cells_h);
+                            const size_t decoded_area =
+                                size_t(dec_w) * size_t(dec_h);
+                            if (decoded_area < terrain_area / 2) {
+                                std::ostringstream os;
+                                os << "ehf: embedded BC1 page @0x"
+                                   << std::hex << best_off << std::dec
+                                   << " decoded as " << dec_w << "x" << dec_h
+                                   << ", too small for full terrain";
+                                OutputLog::info(os.str());
+                            } else {
+                                out_rgba = std::move(rgba);
+                                out_w    = dec_w;
+                                out_h    = dec_h;
+                                std::ostringstream os;
+                                os << "ehf: huffman BC1 baked albedo @0x"
+                                   << std::hex << best_off << std::dec
+                                   << "  header=" << best_W << "x" << best_H
+                                   << "  decoded=" << dec_w << "x" << dec_h;
+                                OutputLog::success(os.str());
+                                return true;
+                            }
                         }
                     } else {
                         OutputLog::warn("ehf: lh_decode_compressed_mip failed: "
@@ -1149,24 +2253,13 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
             }
         }
     }
-    /* Fall through to the old "scan zlib sections by raw_size match"
-       logic below — kept as a safety net for any .ehf that doesn't
-       have the standard embedded-.tex layout we just learned.    */
 
-    /* The baked terrain albedo isn't always sized to "cells rounded
-       down to a multiple of 4" — Bloodstone defaultscenario IS, but
-       the other Albion levels store the page at a power-of-2 size
-       like 1024×1024.  Build a ranked candidate list (largest first)
-       and pick the first one that actually exists in the .ehf.    */
     auto round_up_pow2 = [](uint32_t n) {
         uint32_t p = 1; while (p < n) p <<= 1; return p;
     };
     const uint32_t pow2_W = round_up_pow2(cells_w);
     const uint32_t pow2_H = round_up_pow2(cells_h);
 
-    /* Each pair (W, H) → BC1 byte count.  Ordered roughly by total
-       pixels descending so the FIRST match in the .ehf is the
-       highest-resolution page.  We dedupe further down. */
     struct Cand { uint32_t W, H; size_t bytes; };
     std::vector<Cand> cands;
     auto add = [&](uint32_t w, uint32_t h) {
@@ -1174,11 +2267,8 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
         if ((w & 3u) != 0 || (h & 3u) != 0) return;       
         cands.push_back({w, h, (size_t)w * h / 2});
     };
-    /* Power-of-2 ≥ cells (the most common case across Albion). */
     add(pow2_W, pow2_H);
-    /* Cells rounded DOWN to 4 (Bloodstone defaultscenario uses this). */
     add(cells_w & ~3u, cells_h & ~3u);
-    /* Common 1024-aligned aspect ratios as fallbacks. */
     add(1024, 1024);
     add(1024,  768);
     add( 768, 1024);
@@ -1187,7 +2277,6 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
     add( 768,  768);
     add( 512,  512);
     add( 256,  256);
-    /* Sort by area desc, dedupe, drop anything wildly off-aspect.   */
     const float terrain_aspect = (float)cells_w / (float)cells_h;
     std::sort(cands.begin(), cands.end(),
               [](const Cand& a, const Cand& b){ return a.bytes > b.bytes; });
@@ -1196,16 +2285,9 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
             return a.W == b.W && a.H == b.H; }), cands.end());
     auto aspect_ok = [&](uint32_t w, uint32_t h) -> bool {
         float a = (float)w / (float)h;
-        /* Allow up to 4× aspect deviation — terrain-shaped pages and
-           streaming/normal pages have different proportions.        */
         return a > terrain_aspect * 0.25f && a < terrain_aspect * 4.0f;
     };
 
-    /* Walk every zlib section.  Each section is preceded by an
-       8-byte header `[u32 BE raw_size][u32 BE comp_size]`, then a
-       zlib stream (78 DA / 78 9C / 78 01 / 78 5E).  Collect every
-       offset whose raw_size matches one of our BC1 candidates, then
-       decode the largest one.                                       */
     const size_t n = ehf.size();
     const uint8_t* d = ehf.data();
     auto u32be = [](const uint8_t* p) -> uint32_t {
@@ -1242,16 +2324,10 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
                         std::to_string(n) + "-byte .ehf");
         return false;
     }
-    /* Pick the LARGEST hit — that's the highest-resolution mip. */
     std::sort(hits.begin(), hits.end(),
               [](const Hit& a, const Hit& b){ return a.bytes > b.bytes; });
     const Hit& best = hits.front();
 
-    /* Only return success for pages large enough to be per-cell
-       baked albedo (≥ half the cells*0.5 byte-count).  Smaller
-       pages are material-atlas sub-tiles whose per-cell index
-       mapping we haven't decoded yet; falling back to the
-       `.texture_atlas` with tiled UVs is the safer visual.       */
     const size_t per_cell_bytes = (size_t)(cells_w & ~3u) *
                                   (size_t)(cells_h & ~3u) / 2;
     {
@@ -1293,9 +2369,6 @@ bool DecodeEhfTerrainAlbedo(const FlatAssetEntry& level_entry,
     out_w = 0;
     out_h = 0;
 
-    /* Fast path: PendingLoads has already extracted the .ehf during
-       the mesh build and parked the bytes in `g_pending_terrain_ehf_bytes`.
-       Use that if it matches the level we were asked about. */
     if (!g_pending_terrain_ehf_bytes.empty() &&
         g_pending_terrain_level_entry.full_path == level_entry.full_path)
     {
@@ -1304,10 +2377,6 @@ bool DecodeEhfTerrainAlbedo(const FlatAssetEntry& level_entry,
             cells_w, cells_h, out_rgba, out_w, out_h);
     }
 
-    /* Slow path: walk every heightfield file in the global index
-       looking for a `.ehf` whose basename matches one of the level's
-       references.  The .ehf is inside a BNK; the entry's
-       `full_path` is its in-BNK path, NOT a disk path.              */
     for (const auto& fe : S.all_heightfield_files) {
         std::string nlow = fe.name;
         std::transform(nlow.begin(), nlow.end(), nlow.begin(),
@@ -1348,11 +2417,6 @@ bool DecodeEhfPaletteFirstDiffuse(const std::vector<uint8_t>& ehf,
         return false;
     }
 
-    /* Walk the palette in order; for each entry try to locate the
-       diffuse .tex by basename in any loaded BNK.  First successful
-       decode wins.  Palette entries are usually ordered with the
-       "primary" terrain material first (e.g. grass for Bloodstone /
-       Bowerlake, brightwood_earth for Brightwood). */
     auto basename_lower = [](const std::string& path) {
         std::string base = std::filesystem::path(path).filename().string();
         std::transform(base.begin(), base.end(), base.begin(),
@@ -1371,11 +2435,6 @@ bool DecodeEhfPaletteFirstDiffuse(const std::vector<uint8_t>& ehf,
         const std::string want = basename_lower(e.diffuse_path);
         if (want.empty()) continue;
 
-        /* Walk the global indexed list S.all_tex_files (already
-           populated by TreeBuilder from every loaded BNK).  Match
-           by lowercased basename — much faster than reopening
-           BNKReaders per entry, and the index is guaranteed to
-           cover everything the user mounted.                     */
         const FlatAssetEntry* hit = nullptr;
         for (const auto& tex : S.all_tex_files) {
             std::string nm = std::filesystem::path(tex.name)
@@ -1404,7 +2463,6 @@ bool DecodeEhfPaletteFirstDiffuse(const std::vector<uint8_t>& ehf,
             continue;
         }
 
-        /* Decode via the existing .tex pipeline. */
         std::vector<unsigned char> blob_uc(blob.begin(), blob.end());
         std::vector<uint8_t> rgba;
         bool has_alpha = false;
@@ -1445,7 +2503,7 @@ bool BakeEhfTerrainComposite(const std::vector<uint8_t>& ehf,
                              int&                   out_h,
                              std::string&           out_picked_name)
 {
-    return BakeEhfTerrainCompositeWithBnk(ehf, /*preferred_bnk=*/{},
+    return BakeEhfTerrainCompositeWithBnk(ehf, {},
                                           out_rgba, out_w, out_h,
                                           out_picked_name);
 }
@@ -1464,9 +2522,6 @@ bool BakeEhfTerrainCompositeAndSplatDebug(
     std::vector<uint8_t>& out_splat_rgba,
     int& out_splat_w, int& out_splat_h)
 {
-    /* Hook the (otherwise discarded) splat visualisation pointer into
-       the bake so it can stash a copy alongside the composite.  Single-
-       threaded — bake is called from the renderer thread only.       */
     g_capture_splat_debug = true;
     g_splat_debug_rgba    = &out_splat_rgba;
     g_splat_debug_w       = &out_splat_w;
@@ -1494,15 +2549,8 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
     out_picked_name.clear();
     if (ehf.empty()) return false;
 
-    /* 1) Parse the 63-byte header — that gives us the body offset + size,
-       which name the PF=24 lightmap blob.  Refusing to bake without a
-       valid header keeps us from emitting a "composite" that's just the
-       stretched material with no lightmap modulation.                 */
     HeightfieldHeader hdr;
     {
-        /* Re-use the local helper by reaching into the parser.  We
-           duplicate a few lines here rather than expose `parse_ehf_header`
-           publicly — the file is anyway tightly coupled to this TU.   */
         static constexpr char   kMagic[]   = "HeightFieldGraphicsFile";
         static constexpr size_t kMagicLen  = sizeof(kMagic) - 1;
         static constexpr size_t kHeaderLen = 63;
@@ -1525,10 +2573,13 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
         return false;
     }
 
-    /* 2) Decode the PF=24 lightmap from the body slice.
-       TextureAtlas::DecodeAtlas now handles PF=24 by emitting RGBA
-       with R = high byte (smooth baked AO/lightmap), G = low byte
-       (detail / dither), B = 0, A = 255.                            */
+    if (DecodeEhfTerrainAlbedoFromBytes(ehf, hdr.u0, hdr.u1,
+                                        out_rgba, out_w, out_h))
+    {
+        out_picked_name = "embedded_tile_albedo";
+        return true;
+    }
+
     std::vector<uint8_t> lm_rgba;
     int lm_w = 0, lm_h = 0;
     {
@@ -1545,10 +2596,6 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
         lm_h    = dec.height;
     }
 
-    /* 3) Parse the full .ehf body to extract the LOD vector (palette
-       materials) and the chunk grid (per-region material indices +
-       blends).  Validated by tools/ehf_body_walker.py against
-       Bloodstone chapter3 (final offset == body_end exactly).      */
     EhfParsedBody parsed;
     if (!ParseEhfBody(ehf, parsed)) {
         OutputLog::warn("bake composite: chunk parse failed: " + parsed.error);
@@ -1564,12 +2611,6 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
         OutputLog::success(pos.str());
     }
 
-    /* Publish the LOD palette (diffuse+normal pairs per material) so
-       the Materials & Textures window can list them.  These strings
-       are the per-material .tex paths embedded in the .ehf body —
-       e.g. LOD[0] = grass_diffuse.tex + grass_normal.tex.  Each LOD
-       entry has 6 strings; strs[0..2] = BaseLayer (diffuse, normal,
-       blank), strs[3..5] = DetailLayer (diffuse, normal, blank). */
     {
         std::vector<TerrainTextureRegistry::LodPaletteEntry> pe;
         pe.reserve(parsed.lods.size());
@@ -1591,21 +2632,6 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
         return base;
     };
 
-    /* 4) Decode each LOD's PRIMARY diffuse texture (LOD strs[0]).
-       The chunk grid's per-layer `texture_idx` references the LOD
-       vector, so we need one diffuse per LOD slot.  Materials that
-       fail to decode fall back to the first successful one.
-
-       Each LOD has a corresponding palette tile_scale (from
-       EhfPalette).  LOD[N] → palette[N*2] for the primary diffuse,
-       since each LOD bundles 2 (BaseLayer, DetailLayer) pairs.    */
-    /* Decoded LOD diffuse.  The composite uses simple bilinear
-       sampling.  The texture's tile rate (the per-material
-       tile_scale, typically 0.125 = 8 wu/repeat) is high enough that
-       at this composite resolution we're inherently undersampling —
-       proper anti-aliasing requires either (a) much higher composite
-       resolution or (b) GPU-side mipmap filtering on the live mesh.
-       Don't pretend to fix that here. */
     struct Mat {
         bool                 decoded = false;
         std::vector<uint8_t> rgba;
@@ -1654,11 +2680,6 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
         mats[li].w       = w;
         mats[li].h       = h;
         mats[li].name    = want;
-        /* Pick the palette entry whose diffuse path matches.  The
-           20-LOD vector and 40-entry palette typically pair up as
-           LOD[N] ↔ palette[N*2] (BaseLayer) + palette[N*2+1]
-           (DetailLayer), but rather than rely on that alignment we
-           match by basename. */
         for (const auto& pe : pal.entries) {
             std::string pn = std::filesystem::path(pe.diffuse_path)
                                  .filename().string();
@@ -1677,7 +2698,6 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
         return false;
     }
 
-    /* Log which LOD materials decoded. */
     {
         int n = 0;
         for (auto& m : mats) if (m.decoded) ++n;
@@ -1695,49 +2715,40 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
         + std::to_string(parsed.chunk_h) + " × "
         + std::to_string(mats.size()) + " LODs]";
 
-    /* No more splat-debug output. */
     if (g_capture_splat_debug && g_splat_debug_rgba) {
         g_splat_debug_rgba->clear();
         if (g_splat_debug_w) *g_splat_debug_w = 0;
         if (g_splat_debug_h) *g_splat_debug_h = 0;
     }
 
-    /* 5) Bake.  Composite is sized to the LIGHTMAP (= heightfield grid).
-       The textures tile so heavily (e.g. 1/0.125 = 8 wu/repeat over a
-       2500 wu map = 300+ repeats across 769 lightmap-pixels) that a
-       single bilinear sample per output pixel gives severe aliasing
-       which reads as both "tiling pattern" and "low detail".
-
-       The fix is mipmapped sampling: at bake time we pre-build a small
-       box-filter mip pyramid for each LOD diffuse, and at sample time
-       we pick the right mip for the texel footprint (texels-of-source-
-       per-output-pixel) and trilinearly blend two adjacent levels.
-
-       For each composite texel:
-         - map to a chunk index: (cx, cy) = (x / cell_per_chunk_x, ...)
-         - get the chunk's layer stack and alpha-stack each layer
-         - sample LODs[layer.texture_idx[corner]] at per-material tile
-         - multiply by lightmap's R-channel AO
-
-       The chunks form a regular W×H grid covering the heightfield.    */
     const size_t pix = size_t(lm_w) * size_t(lm_h);
     out_rgba.assign(pix * 4, 0);
     out_w = lm_w;
     out_h = lm_h;
 
-    /* Heightfield-cell → chunk-grid mapping: just proportional. */
-    const float chunk_per_texel_x = float(parsed.chunk_w) / float(lm_w);
-    const float chunk_per_texel_y = float(parsed.chunk_h) / float(lm_h);
+    float world_min_x =  1e30f;
+    float world_min_z =  1e30f;
+    float world_max_x = -1e30f;
+    float world_max_z = -1e30f;
+    for (const auto& c : parsed.chunks) {
+        world_min_x = std::min(world_min_x, c.origin[0]);
+        world_min_z = std::min(world_min_z, c.origin[1]);
+        world_max_x = std::max(world_max_x, c.extent[0]);
+        world_max_z = std::max(world_max_z, c.extent[1]);
+    }
+    const float world_span_x = std::max(1e-6f, world_max_x - world_min_x);
+    const float world_span_z = std::max(1e-6f, world_max_z - world_min_z);
+    const float chunk_size_x = world_span_x / std::max(1u, parsed.chunk_w);
+    const float chunk_size_z = world_span_z / std::max(1u, parsed.chunk_h);
+    {
+        std::ostringstream os;
+        os << "ehf chunk world bounds: x=[" << world_min_x << ".."
+           << world_max_x << "] z=[" << world_min_z << ".."
+           << world_max_z << "] chunk=(" << chunk_size_x << ","
+           << chunk_size_z << ")";
+        OutputLog::info(os.str());
+    }
 
-    /* Bilinear-sampled material lookup.  Given a LOD index and
-       world-space coords, return the diffuse colour at that point.
-
-       This is INTENTIONALLY a single bilinear sample.  The composite
-       is too small to anti-alias the texture's heavy tile rate via
-       supersampling/mipmapping in any meaningful way without much
-       higher resolution — that's a separate problem.  Use the per-
-       material tile_scale from the EhfPalette (e.g. 0.125 = 8 world
-       units per texture repeat in chapter3). */
     auto sample_mat = [&](int idx, float u_world, float v_world,
                           uint8_t out_rgb[3])
     {
@@ -1774,21 +2785,20 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
 
     constexpr float kBlendMax     = 3.0f;  
 
-    /* Multi-layer per-chunk bake.  For each composite texel:
-         1. Find the chunk + bilinear position within it (4 corner weights).
-         2. Walk the chunk's layers, alpha-stacking each one:
-            - Sample 4 corner textures at the layer's tile_uv (each
-              corner may use a different LOD index).
-            - Bilinear-mix the 4 sampled colours by the corner weights.
-            - Bilinear-mix the 4 corner blend amounts → per-pixel alpha.
-            - Alpha-over composite onto the running accumulator.
-         3. Multiply final colour by the baked lightmap AO.            */
     for (int y = 0; y < lm_h; ++y) {
-        const float fy_chunk = float(y) * chunk_per_texel_y;
+        const float v_norm = (lm_h > 1)
+            ? float(y) / float(lm_h - 1)
+            : 0.0f;
+        const float world_z = world_min_z + v_norm * world_span_z;
+        const float fy_chunk = (world_z - world_min_z) / chunk_size_z;
         const int   cy       = std::min<int>(parsed.chunk_h - 1, int(fy_chunk));
         const float fy_in    = std::clamp(fy_chunk - float(cy), 0.f, 1.f);
         for (int x = 0; x < lm_w; ++x) {
-            const float fx_chunk = float(x) * chunk_per_texel_x;
+            const float u_norm = (lm_w > 1)
+                ? float(x) / float(lm_w - 1)
+                : 0.0f;
+            const float world_x = world_min_x + u_norm * world_span_x;
+            const float fx_chunk = (world_x - world_min_x) / chunk_size_x;
             const int   cx       = std::min<int>(parsed.chunk_w - 1, int(fx_chunk));
             const float fx_in    = std::clamp(fx_chunk - float(cx), 0.f, 1.f);
 
@@ -1803,8 +2813,8 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
             float accum_r = 0.f, accum_g = 0.f, accum_b = 0.f;
             float accum_a = 0.f;
 
-            const float wu = float(x);
-            const float wv = float(y);
+            const float wu = world_x;
+            const float wv = world_z;
 
             for (const auto& L : chunk.layers) {
                 const float blend_px =
@@ -1835,18 +2845,12 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
                                    accum_a + alpha * (1.f - accum_a));
             }
 
-            /* Fall back to LOD[first_decoded] if all layers were
-               transparent (shouldn't happen in practice but keep a
-               safety net).                                          */
             if (accum_a < 0.05f) {
                 uint8_t base[3];
                 sample_mat(first_decoded, wu, wv, base);
                 accum_r = base[0]; accum_g = base[1]; accum_b = base[2];
             }
 
-            /* AO modulation with a higher floor (0.45) than before so
-               deep-shadow regions stay readable instead of going to
-               near-black.                                              */
             const uint8_t ao = lm_rgba[(size_t(y) * lm_w + x) * 4 + 0];
             const float k  = (ao / 255.0f) * 0.55f + 0.45f;
             uint8_t* dst = out_rgba.data() + (size_t(y) * lm_w + x) * 4;

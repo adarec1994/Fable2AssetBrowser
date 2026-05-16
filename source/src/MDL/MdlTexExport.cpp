@@ -90,7 +90,7 @@ bool encode_largest_mip(const std::vector<unsigned char>& tex_buf,
     std::vector<uint8_t> rgba;
     int w = 0, h = 0;
     bool has_alpha = false;
-    if (!decode_tex_to_rgba(tex_buf, rgba, w, h, &has_alpha, /*mip=*/-1) ||
+    if (!decode_tex_to_rgba(tex_buf, rgba, w, h, &has_alpha, -1) ||
         rgba.empty() || w <= 0 || h <= 0) {
         return false;
     }

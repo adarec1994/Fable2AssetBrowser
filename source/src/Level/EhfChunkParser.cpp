@@ -23,8 +23,6 @@ inline float be_f32(const uint8_t* p) {
     return f;
 }
 
-/* The body is a stream we walk forwards through.  Tracks position +
-   provides typed reads with bounds checks.                          */
 struct Walker {
     const uint8_t* p;
     size_t         n;
@@ -74,9 +72,6 @@ struct Walker {
     }
 };
 
-/* Skip past a .tex blob in the stream.  Handles both zlib-compressed
-   blobs (PF=24/35/39/40/99 — header 92B + comp_size zlib bytes) and
-   uncompressed blobs (PF=98 — header 88B + raw_size raw bytes).     */
 bool skip_tex_blob(Walker& w) {
     const size_t tex_start = w.pos;
     if (!w.need(0x60)) return false;
@@ -145,17 +140,12 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
     w.p = ehf.data() + body_off;
     w.n = body_size;
 
-    /* Step 1: 2 textures (lightmap + BC5 normal). */
     if (!skip_tex_blob(w)) { out.error = "tex[0]: " + w.err; return false; }
     if (!skip_tex_blob(w)) { out.error = "tex[1]: " + w.err; return false; }
 
-    /* Step 2: 1 float → state[+176]. */
     float dummy_f;
     if (!w.f32(dummy_f)) { out.error = "float: " + w.err; return false; }
 
-    /* Step 3: sub_82A850A0 vector — count + N entries.  Each entry:
-       4 × u32 reads (f_a, f_b, w_sub, h_sub), then w_sub*h_sub*160 grid
-       stream, then 24B trailer.                                       */
     {
         uint32_t cnt;
         if (!w.u32(cnt)) { out.error = "850A0 count: " + w.err; return false; }
@@ -180,7 +170,6 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
         }
     }
 
-    /* Step 4: sub_82A860E8 — 1 float + count + N × 18B entries. */
     {
         float f;
         uint32_t cnt;
@@ -191,15 +180,10 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
             out.error = "860E8 entries: " + w.err;
             return false;
         }
-        /* Stash count so the final pass below knows how many sub-vectors. */
         out.bytes_consumed = cnt;  
     }
     const uint32_t cnt_860e8 = uint32_t(out.bytes_consumed);
 
-    /* Step 5: jump past textures[2..3] via the ANCHOR — search forwards
-       in the body for the first "art\\" and read the u32 just before.
-       That bypasses the textures[2..3] section which has variable byte
-       budgets we haven't fully decoded.                              */
     size_t anchor = SIZE_MAX;
     for (size_t i = w.pos; i + 4 < w.n; ++i) {
         if (w.p[i] == 'a' && w.p[i+1] == 'r' &&
@@ -220,7 +204,6 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
     }
     w.pos = anchor - 4;
 
-    /* Step 6: LOD vector — count + N × (3 strings + 12B + 3 strings + 12B). */
     uint32_t lc;
     if (!w.u32(lc) || lc != lod_count) { out.error = "LOD count read"; return false; }
     out.lods.resize(lc);
@@ -243,7 +226,6 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
         if (!w.skip(12)) { out.error = "LOD trailing floats"; return false; }
     }
 
-    /* Step 7: sub_82A85DB0 — count + N textures. */
     uint32_t db0_cnt;
     if (!w.u32(db0_cnt)) { out.error = "85DB0 count"; return false; }
     if (db0_cnt > 32) { out.error = "85DB0 count implausible"; return false; }
@@ -254,7 +236,6 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
         }
     }
 
-    /* Step 8: u32 W, u32 H. */
     if (!w.u32(out.chunk_w) || !w.u32(out.chunk_h)) {
         out.error = "chunk grid W/H: " + w.err;
         return false;
@@ -268,7 +249,6 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
         return false;
     }
 
-    /* Step 9: W × H chunks. */
     const size_t total_chunks =
         size_t(out.chunk_w) * size_t(out.chunk_h);
     out.chunks.resize(total_chunks);
@@ -298,12 +278,6 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
             if (!w.u32(L.name_idx))   { out.error = "layer name_idx"; return false; }
             if (!w.f32(L.tile_uv[0])) { out.error = "layer uv0"; return false; }
             if (!w.f32(L.tile_uv[1])) { out.error = "layer uv1"; return false; }
-            /* 4 pairs of (u8 idx, u8 blend) — INTERLEAVED in stream.
-               Per IDA's sub_82B25930 loop, the stream reads as:
-                 idx[0], blend[0], idx[1], blend[1], ...
-               Each pair represents a CORNER of the chunk (4 corners).
-               Different corners can have different texture indices,
-               enabling material gradients within a single chunk.    */
             for (int i = 0; i < 4; ++i) {
                 if (!w.u8(L.texture_idx[i])) { out.error = "layer idx"; return false; }
                 if (!w.u8(L.blend[i])) { out.error = "layer blend"; return false; }
@@ -312,7 +286,6 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
         }
     }
 
-    /* Step 10: final pass — u8 flag + cnt_860e8 × (u32 sub_count + 8B each). */
     uint8_t flag;
     if (!w.u8(flag)) { out.error = "final flag"; return false; }
     for (uint32_t k = 0; k < cnt_860e8; ++k) {

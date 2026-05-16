@@ -14,7 +14,6 @@ namespace Level {
 
 namespace {
 
-/* Big-endian read helpers. */
 uint32_t be_u32(const uint8_t* p) {
     return  (uint32_t(p[0]) << 24)
           | (uint32_t(p[1]) << 16)
@@ -28,8 +27,6 @@ float be_f32(const uint8_t* p) {
     return f;
 }
 
-/* String→lower + backslash→forward-slash, matches the lookup keys
-   BnkCache::find_index expects.  Cheap, allocates once. */
 std::string normalize_key(const std::string& s) {
     std::string out = s;
     std::transform(out.begin(), out.end(), out.begin(),
@@ -38,10 +35,6 @@ std::string normalize_key(const std::string& s) {
     return out;
 }
 
-/* gunzip a Fable 2 .ghf / .lmp blob into a flat vector.  The files
-   start with the standard gzip magic (1F 8B 08 08 …) and contain
-   the payload inside.  zlib's inflateInit2(.., 15+32) auto-detects
-   gzip vs. zlib stream framing. */
 bool gunzip(const std::vector<uint8_t>& in,
             std::vector<uint8_t>&       out,
             std::string&                err)
@@ -55,7 +48,6 @@ bool gunzip(const std::vector<uint8_t>& in,
     z_stream zs{};
     zs.next_in   = const_cast<Bytef*>(in.data());
     zs.avail_in  = static_cast<uInt>(in.size());
-    /* 15 = max window bits, +32 = auto-detect gzip OR zlib. */
     if (inflateInit2(&zs, 15 + 32) != Z_OK) {
         err = "inflateInit2 failed";
         return false;
@@ -70,7 +62,6 @@ bool gunzip(const std::vector<uint8_t>& in,
         produced = out.size() - zs.avail_out;
         if (rc == Z_STREAM_END) break;
         if (rc == Z_OK) {
-            /* Buffer too small — grow and retry. */
             if (zs.avail_out == 0) out.resize(out.size() * 2);
             continue;
         }
@@ -91,8 +82,6 @@ bool extract_bnk_file_by_relpath(const std::string&     relative_path,
     out_bytes.clear();
     const std::string key = normalize_key(relative_path);
 
-    /* First try the index built up in TreeBuilder — it gives us
-       the BNK path + file index in O(1), no per-BNK iteration. */
     for (const auto& fe : S.all_heightfield_files) {
         if (normalize_key(fe.full_path) != key) continue;
         try {
@@ -105,9 +94,6 @@ bool extract_bnk_file_by_relpath(const std::string&     relative_path,
         }
     }
 
-    /* Not in the heightfield index — try a generic BNK scan as a
-       last resort.  We don't have a global file→BNK reverse index
-       yet, so walk the loaded BNK list. */
     for (const auto& bnk_path : S.bnk_paths) {
         int idx = BnkCache::find_index(bnk_path, key);
         if (idx < 0) continue;
@@ -128,11 +114,6 @@ void parse_ehf_header(const std::vector<uint8_t>& bytes,
                       HeightfieldHeader&          out)
 {
     out = {};
-    /* Full header is 63 bytes — see the docstring on HeightfieldHeader
-       for the IDA-validated layout (`sub_82A855A8` opens the .ehf as a
-       bundle and issues `bundle::read(buf, 0, 63)` once to grab the
-       header, then a second `bundle::read(buf, body_offset, body_size)`
-       to pull the body blob).                                          */
     static constexpr char   kMagic[]   = "HeightFieldGraphicsFile";
     static constexpr size_t kMagicLen  = sizeof(kMagic) - 1;       
     static constexpr size_t kHeaderLen = 63;
@@ -169,15 +150,14 @@ const FlatAssetEntry* FindHeightfieldByPath(const std::string& relative_path)
 
 bool LoadHeightfieldFiles(const std::string& ehf_path,
                           const std::string& ghf_path,
-                          const std::string& /*hdb_path*/,
-                          const std::string& /*genv_path*/,
+                          const std::string& ,
+                          const std::string& ,
                           HeightfieldFiles&  out)
 {
     out = {};
 
     std::string err;
 
-    /* .ehf — load raw, parse header. */
     if (!ehf_path.empty()) {
         if (!extract_bnk_file_by_relpath(ehf_path, out.ehf_bytes, err)) {
             out.error = ".ehf load failed: " + err;
@@ -190,7 +170,6 @@ bool LoadHeightfieldFiles(const std::string& ehf_path,
         }
     }
 
-    /* .ghf — load raw, gunzip into ghf_bytes_raw. */
     if (!ghf_path.empty()) {
         if (!extract_bnk_file_by_relpath(ghf_path, out.ghf_bytes_compressed, err)) {
             out.error = ".ghf load failed: " + err;
@@ -202,10 +181,6 @@ bool LoadHeightfieldFiles(const std::string& ehf_path,
         }
     }
 
-    /* .hdb / .genv intentionally not loaded yet — first milestone is
-       just the heightfield mesh + texture mapping, which lives in
-       .ehf + .ghf.  The other two files become relevant when we add
-       prop placement and per-cell lighting respectively. */
 
     out.ok = true;
     return true;
@@ -220,7 +195,6 @@ bool DecodeGhfHeights(const std::vector<uint8_t>& bytes, GhfHeights& out)
     }
 
     out.tile_size = be_f32(bytes.data() + 0x00);
-    /* offset 0x04..0x0B is zero padding in our sample; skip it. */
     out.width  = be_u32(bytes.data() + 0x0C);
     out.height = be_u32(bytes.data() + 0x10);
 
@@ -268,7 +242,7 @@ bool BuildTerrainMesh(const GhfHeights& hg, TerrainMesh& out)
 
     const uint32_t W = hg.width;
     const uint32_t H = hg.height;
-    const float    tile = hg.tile_size > 0.f ? hg.tile_size : 1.f;
+    const float    tile = hg.tile_size > 0.f ? hg.tile_size : 0.5f;
     const size_t   N    = size_t(W) * size_t(H);
     const size_t   tris = size_t(W - 1) * size_t(H - 1) * 2;
 
@@ -282,49 +256,19 @@ bool BuildTerrainMesh(const GhfHeights& hg, TerrainMesh& out)
     out.uvs.resize      (N * 2);
     out.indices.resize  (tris * 3);
 
-    /* Centre the terrain at (0, 0, 0) so the model preview's auto-
-       framing picks a sensible camera distance.  X spans columns,
-       Z spans rows, Y is the height (up). */
-    const float cx = (float(W) - 1.f) * 0.5f * tile;
-    const float cz = (float(H) - 1.f) * 0.5f * tile;
 
-    /* Pass 1 — positions and texcoords.
-
-       UVs cover [0, 1] across the whole heightmap so the baked
-       terrain-albedo BC1 page from `.ehf` (which is sized to ~1
-       texel per heightfield cell) lands each cell on its own
-       pixel.  Earlier we had to tile the texture_atlas N times
-       to get any visible detail because the atlas is a *source*
-       material page, not the baked terrain — but now that
-       Level::DecodeEhfTerrainAlbedo gives us the actual baked
-       albedo, the trivial mapping is what we want.                */
-    /* UVs are scaled to WORLD-SPACE / texture-repeat-size so detail
-       textures bound with a REPEAT sampler tile naturally and the
-       GPU can pick the right mip level based on screen-space
-       derivatives.  This replaces the old trivial [0,1] mapping
-       (which stretched a single composite across the whole map).
-
-       0.125 repeats per world unit ≈ 8 world units per texture
-       repeat — matches the EhfPalette tile_scale=0.125 default
-       observed in chapter3.  Callers that want a 1:1 composite-
-       sized lookup can divide back out in their shader.            */
     constexpr float kUvRepeatsPerWu = 0.125f;
     for (uint32_t y = 0; y < H; ++y) {
         for (uint32_t x = 0; x < W; ++x) {
             const size_t i = size_t(y) * W + x;
-            out.positions[i * 3 + 0] = float(x) * tile - cx;
+            out.positions[i * 3 + 0] = float(x) * tile;
             out.positions[i * 3 + 1] = hg.heights[i];
-            out.positions[i * 3 + 2] = float(y) * tile - cz;
+            out.positions[i * 3 + 2] = float(y) * tile;
             out.uvs[i * 2 + 0]       = float(x) * tile * kUvRepeatsPerWu;
             out.uvs[i * 2 + 1]       = float(y) * tile * kUvRepeatsPerWu;
         }
     }
 
-    /* Pass 2 — normals from finite-differenced height gradient.
-       For an interior vertex, ∂h/∂x ≈ (h[x+1,y] - h[x-1,y]) / (2·tile)
-       and ∂h/∂z ≈ (h[x,y+1] - h[x,y-1]) / (2·tile).  Normal of the
-       tangent plane is (-∂h/∂x, 1, -∂h/∂z), normalized.  Edges are
-       handled with one-sided differences. */
     auto h_at = [&](int xi, int yi) -> float {
         if (xi < 0) xi = 0; else if (xi >= int(W)) xi = int(W) - 1;
         if (yi < 0) yi = 0; else if (yi >= int(H)) yi = int(H) - 1;
@@ -349,8 +293,6 @@ bool BuildTerrainMesh(const GhfHeights& hg, TerrainMesh& out)
         }
     }
 
-    /* Pass 3 — triangle indices.  Two tris per quad, CCW when
-       viewed from +Y (so the up-facing terrain faces the camera). */
     size_t k = 0;
     for (uint32_t y = 0; y + 1 < H; ++y) {
         for (uint32_t x = 0; x + 1 < W; ++x) {

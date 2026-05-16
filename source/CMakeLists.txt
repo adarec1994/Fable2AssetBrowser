@@ -74,6 +74,12 @@ set(APP_SOURCES
         src/Level/TerrainSplat.h
         src/Level/TerrainEdit.cpp
         src/Level/TerrainEdit.h
+        src/Level/VfsConfig.cpp
+        src/Level/VfsConfig.h
+        src/Level/GdbParser.cpp
+        src/Level/GdbParser.h
+        src/Havok/HavokPackfileReader.cpp
+        src/Havok/HavokPackfileReader.h
         src/BNKCore.cpp
         src/Audio/AudioPlayer.cpp
         src/Audio/XmaDecoder.cpp

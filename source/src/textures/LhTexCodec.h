@@ -15,7 +15,7 @@ inline bool lh_decode_compressed_mip_v11(const uint8_t* body, size_t body_size,
                                          std::vector<uint8_t>& out_bc1,
                                          std::string* err = nullptr) {
     return lh_decode_compressed_mip(body, body_size, out_width, out_height,
-                                    out_bc1, err, /*comp11_layout=*/true);
+                                    out_bc1, err, true);
 }
 
 bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,

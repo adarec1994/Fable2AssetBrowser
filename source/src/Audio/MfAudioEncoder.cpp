@@ -211,7 +211,7 @@ bool encode_pcm_to_mp3(const std::vector<int16_t>& pcm,
                        const std::string& out_path_utf8,
                        std::string* err) {
 
-    const int target_rate = pick_target_rate(sample_rate, /*aac=*/false);
+    const int target_rate = pick_target_rate(sample_rate, false);
     const std::vector<int16_t>* effective = &pcm;
     std::vector<int16_t> resampled;
     if (target_rate != sample_rate) {
@@ -243,7 +243,7 @@ bool encode_pcm_to_aac(const std::vector<int16_t>& pcm,
                        const std::string& out_path_utf8,
                        std::string* err) {
 
-    const int target_rate = pick_target_rate(sample_rate, /*aac=*/true);
+    const int target_rate = pick_target_rate(sample_rate, true);
     const std::vector<int16_t>* effective = &pcm;
     std::vector<int16_t> resampled;
     if (target_rate != sample_rate) {

@@ -28,7 +28,6 @@ State& storage() {
     return s;
 }
 
-/* Rebuild positions[i*3+1] from heights_current[] then mark dirty. */
 void sync_positions_y() {
     auto& s = storage();
     const size_t n = size_t(s.width) * size_t(s.height);
@@ -57,12 +56,7 @@ void Init(int width, int height, float tile_size,
 
     s.width            = width;
     s.height           = height;
-    /* Match BuildTerrainMesh's fallback: many .ghf files report
-       tile_size = 0 (e.g. chapter3, defaultscenario).  When that
-       happens BuildTerrainMesh uses tile = 1, so we MUST do the
-       same here or the brush math (radius / tile_size, world →
-       grid translation) collapses to inf/NaN and nothing applies. */
-    s.tile_size        = (tile_size > 0.f) ? tile_size : 1.f;
+    s.tile_size        = (tile_size > 0.f) ? tile_size : 0.5f;
     s.center_x         = center_x;
     s.center_z         = center_z;
     s.heights_original = heights;
@@ -76,8 +70,6 @@ void Init(int width, int height, float tile_size,
     s.ghf_bnk_entry_on_disk_size = ghf_bnk_entry_on_disk_size;
     s.ghf_bnk_entry_is_compressed= ghf_bnk_entry_is_compressed;
 
-    /* Compute mesh bounds (in mesh-space, centered).  Used by the
-       brush picker once that's wired up. */
     s.min_x =  std::numeric_limits<float>::infinity();
     s.max_x = -std::numeric_limits<float>::infinity();
     s.min_z =  std::numeric_limits<float>::infinity();
@@ -178,13 +170,10 @@ bool Raycast(float ox, float oy, float oz,
 {
     auto& s = storage();
     if (!s.loaded) return false;
-    /* Normalize direction. */
     const float dl = std::sqrt(dx * dx + dy * dy + dz * dz);
     if (dl < 1e-6f) return false;
     dx /= dl; dy /= dl; dz /= dl;
 
-    /* Ray-march in steps proportional to tile_size.  Cap total
-       distance to avoid infinite loops if ray misses entirely.    */
     const float step = std::max(0.5f, s.tile_size * 0.5f);
     const float max_dist = std::max(
         (s.max_x - s.min_x) + (s.max_z - s.min_z),
@@ -196,7 +185,6 @@ bool Raycast(float ox, float oy, float oz,
         const float wy = oy + dy * t;
         const float wz = oz + dz * t;
 
-        /* Bail if outside terrain bounds. */
         if (wx < s.min_x - step || wx > s.max_x + step ||
             wz < s.min_z - step || wz > s.max_z + step) {
             prev_t = t; prev_dh = wy - SampleHeightAtWorldXZ(wx, wz);
@@ -205,8 +193,6 @@ bool Raycast(float ox, float oy, float oz,
         const float th = SampleHeightAtWorldXZ(wx, wz);
         const float dh = wy - th;
         if (dh <= 0.f && prev_dh > 0.f) {
-            /* Crossed the surface in [prev_t, t].  Bisect for a few
-               iterations to refine the hit point.                  */
             float lo = prev_t, hi = t;
             for (int it = 0; it < 16; ++it) {
                 const float mid = (lo + hi) * 0.5f;
@@ -237,7 +223,6 @@ void ApplyBrush(BrushTool tool,
     if (!s.loaded || tool == BrushTool::None) return;
     if (radius <= 0.f) return;
 
-    /* Map world XZ to grid coords. */
     const float gx_c = (wx + s.center_x) / s.tile_size;
     const float gz_c = (wz + s.center_z) / s.tile_size;
     const float gr   = radius / s.tile_size;
@@ -248,8 +233,6 @@ void ApplyBrush(BrushTool tool,
     const int zmax = std::min(s.height - 1,      int(std::ceil (gz_c + gr)));
     if (xmin > xmax || zmin > zmax) return;
 
-    /* Precompute current heights view + a smoothed copy for Smooth
-       tool so we don't double-blur on overlapping passes. */
     std::vector<float> smoothed;
     if (tool == BrushTool::Smooth) {
         smoothed.assign(s.heights_current.size(), 0.f);
@@ -276,7 +259,6 @@ void ApplyBrush(BrushTool tool,
             const float dzg = float(z) - gz_c;
             const float dist = std::sqrt(dxg * dxg + dzg * dzg);
             if (dist >= gr) continue;
-            /* Smoothstep falloff from edge → centre. */
             const float t = 1.f - (dist / gr);
             const float w = t * t * (3.f - 2.f * t);
 
@@ -314,27 +296,9 @@ void ApplyToGpu(ID3D11Device* device, void* mesh_v) {
     auto& s = storage();
     if (!s.loaded || !device || !mesh_v) return;
 
-    /* Use the GLOBAL ::MPPerMesh from ModelPreview.h — qualifying
-       avoids accidentally resolving to a TerrainEdit-namespaced
-       forward decl. */
     auto* mesh = static_cast<::MPPerMesh*>(mesh_v);
     if (!mesh->vb || mesh->index_count == 0) return;
 
-    /* The terrain VB was built as IMMUTABLE in MP_Build, so we can't
-       Map/UpdateSubresource it.  Recreate from scratch with the
-       updated positions baked into the existing MPVertex layout.
-
-       Vertex layout (see g_vs):
-         float3 p   (0..12)
-         float3 n   (12..24)
-         float2 t   (24..32)
-         u8 x4 bid  (32..36)
-         float4 bw  (36..52)
-       Total: 52 bytes per vertex.
-
-       We re-read the existing buffer contents via a STAGING copy so
-       we preserve normals / UVs / weights, then patch the position
-       slot and create a new IMMUTABLE buffer. */
     const size_t vert_count = size_t(s.width) * size_t(s.height);
     const UINT   vstride    = sizeof(MPVertex);
     const size_t need_bytes = vert_count * vstride;
@@ -343,7 +307,6 @@ void ApplyToGpu(ID3D11Device* device, void* mesh_v) {
     mesh->vb->GetDesc(&vd);
     if (vd.ByteWidth != need_bytes) return;   
 
-    /* 1) Stage the existing buffer for readback. */
     D3D11_BUFFER_DESC sd = vd;
     sd.Usage          = D3D11_USAGE_STAGING;
     sd.BindFlags      = 0;
@@ -356,7 +319,6 @@ void ApplyToGpu(ID3D11Device* device, void* mesh_v) {
     device->GetImmediateContext(&ctx);
     ctx->CopyResource(staging, mesh->vb);
 
-    /* 2) Map → patch positions → unmap into a CPU buffer. */
     std::vector<uint8_t> cpu_verts(need_bytes);
     D3D11_MAPPED_SUBRESOURCE map{};
     if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
@@ -366,8 +328,6 @@ void ApplyToGpu(ID3D11Device* device, void* mesh_v) {
     ctx->Unmap(staging, 0);
     staging->Release();
 
-    /* Position is the first 12 bytes of each vertex.  Replace those
-       3 floats with our CPU-side positions[] entries. */
     for (size_t i = 0; i < vert_count; ++i) {
         float* p = reinterpret_cast<float*>(
             cpu_verts.data() + i * vstride);
@@ -376,7 +336,6 @@ void ApplyToGpu(ID3D11Device* device, void* mesh_v) {
         p[2] = s.positions[i * 3 + 2];
     }
 
-    /* 3) Recreate the VB with the patched contents. */
     D3D11_BUFFER_DESC nd = vd;
     nd.Usage          = D3D11_USAGE_IMMUTABLE;
     nd.CPUAccessFlags = 0;
@@ -394,8 +353,6 @@ void ApplyToGpu(ID3D11Device* device, void* mesh_v) {
 
 namespace {
 
-/* Build a gzipped buffer from `payload` using zlib's deflate with
-   the gzip wrapper (windowBits = 15 + 16).                         */
 bool gzip_compress(const std::vector<uint8_t>& payload,
                    std::vector<uint8_t>&       out)
 {
@@ -441,9 +398,6 @@ bool Save(std::string& out_path_or_error) {
         out_path_or_error = "No .ghf payload snapshot; cannot save.";
         return false;
     }
-    /* Patch heights into a copy of the original payload.  Header is
-       0x14 bytes, then W*H cells of 14 bytes each, with the f32-BE
-       height at offset 0 of each cell.                              */
     constexpr size_t kHdrLen   = 0x14;
     constexpr size_t kCellSize = 14;
     const size_t cells = size_t(s.width) * size_t(s.height);
@@ -463,26 +417,17 @@ bool Save(std::string& out_path_or_error) {
         p[3] = uint8_t(bits      );
     }
 
-    /* Gzip-compress so the result is drop-in compatible with the
-       original .ghf format (which is itself a gzip stream).        */
     std::vector<uint8_t> gz;
     if (!gzip_compress(payload, gz)) {
         out_path_or_error = "gzip compression failed.";
         return false;
     }
 
-    /* === Step 1: ALWAYS write the sibling backup file first.  Even
-       on a successful ISO splice we keep this around as an audit
-       trail / safety copy.                                          */
     std::filesystem::path basename =
         std::filesystem::path(s.ghf_full_path).filename();
     if (basename.empty()) basename = "terrain.ghf";
     std::filesystem::path out_dir;
     {
-        /* S.root_dir may point at either a directory or the .iso file
-           itself.  Take its parent in the latter case so the output
-           lands next to the ISO rather than treating the .iso path
-           as a directory.                                            */
         std::filesystem::path root_p(S.root_dir);
         std::error_code rec;
         if (!S.root_dir.empty()) {
@@ -512,13 +457,6 @@ bool Save(std::string& out_path_or_error) {
         + sibling_path.string()
         + " (" + std::to_string(gz.size()) + " bytes)");
 
-    /* === Step 2: in-place ISO splice ==============================
-       Conditions for in-place patching:
-         - BNK path is an iso:// virtual path
-         - BNK entry is_compressed == false (so its bytes ARE the
-           gzip stream — no inner-BNK chunked-zlib wrapper to recreate)
-         - new gzipped size <= the original entry's on-disk size
-       If any of those fail, leave the sibling file as the result. */
     const bool is_iso = ISO::IsoMount::is_iso_path(s.ghf_bnk_path);
     if (!is_iso) {
         out_path_or_error =
@@ -552,9 +490,6 @@ bool Save(std::string& out_path_or_error) {
         return true;
     }
 
-    /* All checks passed.  Build a padded buffer of exactly the
-       original slot size (gzip is self-terminating so trailing
-       zeros are harmless to the decoder).                          */
     std::vector<uint8_t> padded(s.ghf_bnk_entry_on_disk_size, 0);
     std::memcpy(padded.data(), gz.data(), gz.size());
 

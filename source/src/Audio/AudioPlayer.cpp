@@ -144,14 +144,14 @@ bool decode_pcm_wav(const std::vector<uint8_t>& buf,
         size_t data_end = data_start + sz;
         if (data_end > buf.size()) data_end = buf.size();
 
-        if (id == 0x20746d66 /* 'fmt ' */) {
+        if (id == 0x20746d66 ) {
             if (sz >= 16) {
                 format = rd_u16_le(&buf[data_start + 0]);
                 ch     = rd_u16_le(&buf[data_start + 2]);
                 rate   = (int)rd_u32_le(&buf[data_start + 4]);
                 bits   = rd_u16_le(&buf[data_start + 14]);
             }
-        } else if (id == 0x61746164 /* 'data' */) {
+        } else if (id == 0x61746164 ) {
             data_ptr = &buf[data_start];
             data_size = data_end - data_start;
             break;
@@ -249,7 +249,7 @@ void shutdown() {
     try {
         ma_device_stop(&S.device);
         ma_device_uninit(&S.device);
-    } catch (...) { /* swallow — process is exiting */ }
+    } catch (...) {  }
 
     S.pcm.clear();
     S.wf_low.clear();

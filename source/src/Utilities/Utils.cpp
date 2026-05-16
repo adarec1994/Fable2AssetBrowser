@@ -1,7 +1,27 @@
 #include "Utils.h"
 #include "State.h"
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
+
+static std::string normalize_bnk_lookup_path(std::string s) {
+    std::replace(s.begin(), s.end(), '\\', '/');
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    while (s.rfind("./", 0) == 0) {
+        s.erase(0, 2);
+    }
+    return s;
+}
+
+static bool bnk_virtual_path_matches(const std::string& candidate,
+                                     const std::string& wanted) {
+    if (candidate == wanted) return true;
+    if (candidate.size() <= wanted.size()) return false;
+    const size_t off = candidate.size() - wanted.size();
+    if (candidate.compare(off, wanted.size(), wanted) != 0) return false;
+    return candidate[off - 1] == '/';
+}
 
 bool is_audio_file(const std::string &n) {
     std::string s = n;
@@ -133,5 +153,26 @@ std::optional<std::string> find_bnk_by_filename(const std::string &fname_lower) 
     for (auto &p: S.nested_bnk_paths) {
         if (leaf_lower(p) == wanted) return p;
     }
+    return std::nullopt;
+}
+
+std::optional<std::string> find_bnk_by_virtual_path(const std::string &vpath) {
+    const std::string wanted = normalize_bnk_lookup_path(vpath);
+    if (wanted.empty()) return std::nullopt;
+
+    for (const auto& p : S.bnk_paths) {
+        const std::string candidate = normalize_bnk_lookup_path(p);
+        if (bnk_virtual_path_matches(candidate, wanted)) {
+            return p;
+        }
+    }
+
+    for (const auto& kv : S.nested_bnk_virtual_paths) {
+        const std::string candidate = normalize_bnk_lookup_path(kv.second);
+        if (bnk_virtual_path_matches(candidate, wanted)) {
+            return kv.first;
+        }
+    }
+
     return std::nullopt;
 }

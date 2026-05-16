@@ -128,12 +128,12 @@ static bool g_sparkles_initialized = false;
 
 static void handle_flycam_input(float dt) {
     ImGuiIO& io = ImGui::GetIO();
-    bool w_pressed = ImGui::IsKeyDown(ImGuiKey_W);
-    bool s_pressed = ImGui::IsKeyDown(ImGuiKey_S);
-    bool a_pressed = ImGui::IsKeyDown(ImGuiKey_A);
-    bool d_pressed = ImGui::IsKeyDown(ImGuiKey_D);
-    bool q_pressed = ImGui::IsKeyDown(ImGuiKey_Q);
-    bool e_pressed = ImGui::IsKeyDown(ImGuiKey_E);
+    bool w_pressed = ImGui::IsKeyDown(S.key_forward);
+    bool s_pressed = ImGui::IsKeyDown(S.key_back);
+    bool a_pressed = ImGui::IsKeyDown(S.key_left);
+    bool d_pressed = ImGui::IsKeyDown(S.key_right);
+    bool q_pressed = ImGui::IsKeyDown(S.key_down);
+    bool e_pressed = ImGui::IsKeyDown(S.key_up);
     float mouse_dx = 0.0f;
     float mouse_dy = 0.0f;
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
@@ -343,6 +343,94 @@ void draw_main(GLFWwindow* window) {
                         if (selected) ImGui::SetItemDefaultFocus();
                     }
                     ImGui::EndCombo();
+                }
+
+                ImGui::Separator();
+                ImGui::TextUnformatted("Flycam");
+                if (ImGui::Checkbox("Invert X (look)",
+                                    &S.cam_invert_x)) {
+                    settings_save();
+                }
+                if (ImGui::Checkbox("Invert Y (look)",
+                                    &S.cam_invert_y)) {
+                    settings_save();
+                }
+
+                ImGui::Separator();
+                if (ImGui::BeginMenu("Keybinds")) {
+                    struct KB { const char* label; ImGuiKey* k; };
+                    KB rows[] = {
+                        { "Move forward",   &S.key_forward       },
+                        { "Move back",      &S.key_back          },
+                        { "Move left",      &S.key_left          },
+                        { "Move right",     &S.key_right         },
+                        { "Move up",        &S.key_up            },
+                        { "Move down",      &S.key_down          },
+                        { "Bone rotate",    &S.key_rotate_mode   },
+                        { "Close preview",  &S.key_close_preview },
+                    };
+                    const int n = (int)(sizeof(rows) / sizeof(rows[0]));
+                    for (int i = 0; i < n; ++i) {
+                        ImGui::PushID(i);
+                        ImGui::TextUnformatted(rows[i].label);
+                        ImGui::SameLine(150);
+                        const bool capturing =
+                            (S.capturing_key_id == i);
+                        const char* keyname =
+                            ImGui::GetKeyName(*rows[i].k);
+                        std::string btn = capturing
+                            ? std::string("[press any key]")
+                            : (keyname && *keyname
+                                   ? std::string(keyname)
+                                   : std::string("<unset>"));
+                        if (ImGui::Button(btn.c_str(),
+                                          ImVec2(150, 0))) {
+                            S.capturing_key_id = i;
+                        }
+                        ImGui::PopID();
+                    }
+
+                    if (S.capturing_key_id >= 0 &&
+                        S.capturing_key_id < n)
+                    {
+                        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                            S.capturing_key_id = -1;
+                        } else {
+                            for (int k = ImGuiKey_NamedKey_BEGIN;
+                                 k < ImGuiKey_NamedKey_END; ++k)
+                            {
+                                ImGuiKey key = (ImGuiKey)k;
+                                if (key == ImGuiKey_LeftCtrl  ||
+                                    key == ImGuiKey_RightCtrl ||
+                                    key == ImGuiKey_LeftShift ||
+                                    key == ImGuiKey_RightShift||
+                                    key == ImGuiKey_LeftAlt   ||
+                                    key == ImGuiKey_RightAlt  ||
+                                    key == ImGuiKey_LeftSuper ||
+                                    key == ImGuiKey_RightSuper) continue;
+                                if (ImGui::IsKeyPressed(key)) {
+                                    *rows[S.capturing_key_id].k = key;
+                                    S.capturing_key_id = -1;
+                                    settings_save();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Reset to defaults")) {
+                        S.key_forward       = ImGuiKey_W;
+                        S.key_back          = ImGuiKey_S;
+                        S.key_left          = ImGuiKey_A;
+                        S.key_right         = ImGuiKey_D;
+                        S.key_up            = ImGuiKey_E;
+                        S.key_down          = ImGuiKey_Q;
+                        S.key_rotate_mode   = ImGuiKey_R;
+                        S.key_close_preview = ImGuiKey_Escape;
+                        settings_save();
+                    }
+                    ImGui::EndMenu();
                 }
 
                 ImGui::EndMenu();

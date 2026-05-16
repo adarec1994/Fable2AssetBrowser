@@ -136,6 +136,30 @@ void settings_load() {
         it != kv.end() && !it->second.empty()) {
         S.mdl_texture_export_format = it->second;
     }
+    if (auto it = kv.find("cam_invert_x"); it != kv.end()) {
+        S.cam_invert_x = (it->second == "1");
+    }
+    if (auto it = kv.find("cam_invert_y"); it != kv.end()) {
+        S.cam_invert_y = (it->second == "1");
+    }
+    auto load_key = [&](const char* name, ImGuiKey& dst) {
+        if (auto it = kv.find(name); it != kv.end()) {
+            try {
+                int v = std::stoi(it->second);
+                if (v >= ImGuiKey_NamedKey_BEGIN && v < ImGuiKey_NamedKey_END) {
+                    dst = (ImGuiKey)v;
+                }
+            } catch (...) {}
+        }
+    };
+    load_key("key_forward",       S.key_forward);
+    load_key("key_back",          S.key_back);
+    load_key("key_left",          S.key_left);
+    load_key("key_right",         S.key_right);
+    load_key("key_up",            S.key_up);
+    load_key("key_down",          S.key_down);
+    load_key("key_rotate_mode",   S.key_rotate_mode);
+    load_key("key_close_preview", S.key_close_preview);
 }
 
 void settings_save() {
@@ -147,6 +171,21 @@ void settings_save() {
     kv["font_size"] = buf;
     kv["export_dir"] = S.export_dir;
     kv["mdl_texture_export_format"] = S.mdl_texture_export_format;
+    kv["cam_invert_x"] = S.cam_invert_x ? "1" : "0";
+    kv["cam_invert_y"] = S.cam_invert_y ? "1" : "0";
+    auto save_key = [&](const char* name, ImGuiKey v) {
+        char b[32];
+        std::snprintf(b, sizeof(b), "%d", (int)v);
+        kv[name] = b;
+    };
+    save_key("key_forward",       S.key_forward);
+    save_key("key_back",          S.key_back);
+    save_key("key_left",          S.key_left);
+    save_key("key_right",         S.key_right);
+    save_key("key_up",            S.key_up);
+    save_key("key_down",          S.key_down);
+    save_key("key_rotate_mode",   S.key_rotate_mode);
+    save_key("key_close_preview", S.key_close_preview);
     write_config_kv(kv);
 }
 #ifdef _WIN32

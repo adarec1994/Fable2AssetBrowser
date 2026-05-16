@@ -1,4 +1,5 @@
 #include "../UI_Panels.h"
+#include "../OutputLog.h"
 #include "PanelInternal.h"
 #include "../../Utilities/Utils.h"
 #include "../../BNKCore.cpp"
@@ -6,6 +7,8 @@
 #include "imgui.h"
 #include <filesystem>
 #include <algorithm>
+#include <map>
+#include <sstream>
 #include <thread>
 #include <atomic>
 #include <unordered_map>
@@ -71,11 +74,12 @@ void start_tree_build_for_root(const std::string& root_dir,
 
     S.nested_bnk_paths.clear();
     S.nested_bnk_parents.clear();
+    S.nested_bnk_virtual_paths.clear();
 
     std::thread([bnk_snapshot = std::move(bnk_paths)]() mutable {
         try {
             build_unified_file_tree(g_tree_root, std::move(bnk_snapshot));
-        } catch (...) { /* swallow — UI shows empty tree on failure */ }
+        } catch (...) {  }
 
         g_tree_build_complete.store(true);
         g_tree_built.store(true);
@@ -194,9 +198,6 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
             e.from_nested = is_nested;
             S.all_anim_files.push_back(std::move(e));
         } else if (ends_with_ci(leaf, ".engine_level")) {
-            /* Every level has exactly one .engine_level — collecting
-               these gives us a clean per-level index for the Levels
-               tab.  See docs/level_format.md for the format. */
             FlatAssetEntry e;
             e.name = leaf;
             e.full_path = path;
@@ -213,9 +214,6 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
                    ends_with_ci(leaf, ".amm") ||
                    ends_with_ci(leaf, ".amr") ||
                    ends_with_ci(leaf, ".texture_atlas")) {
-            /* Heightfield sibling files + the level texture atlas —
-               kept in a separate vector so LevelLoader can resolve them
-               by name without scanning the whole asset graph. */
             FlatAssetEntry e;
             e.name = leaf;
             e.full_path = path;
@@ -350,6 +348,7 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
                         S.nested_bnk_paths.push_back(temp_bnk_path);
                     }
                     S.nested_bnk_parents[temp_bnk_path] = parent_bnk_path;
+                    S.nested_bnk_virtual_paths[temp_bnk_path] = nested_path;
                 }
 
                 size_t last_slash = nested_path.find_last_of('/');
@@ -385,6 +384,64 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
     std::sort(S.all_tex_files.begin(), S.all_tex_files.end(), cmp_ci);
     std::sort(S.all_wav_files.begin(), S.all_wav_files.end(), cmp_ci);
     std::sort(S.all_anim_files.begin(), S.all_anim_files.end(), cmp_ci);
+
+    {
+        std::ostringstream os;
+        os << "tree built: " << bnk_paths.size() << " parent BNKs + "
+           << S.nested_bnk_paths.size() << " nested BNKs indexed  →  "
+           << S.all_mdl_files.size() << " mdl, "
+           << S.all_tex_files.size() << " tex, "
+           << S.all_wav_files.size() << " wav, "
+           << S.all_anim_files.size() << " anim";
+        OutputLog::info(os.str());
+    }
+
+    {
+        static const char* kKeywords[] = {
+            "stall", "bridge", "vendor", "cart", "stand", "tent",
+            "barrel", "crate", "merchant", "awning", "canopy",
+            "fishstand", "produce", "lantern", "sign", "marketstall"
+        };
+        std::map<std::string, std::vector<const FlatAssetEntry*>> hits;
+        for (const auto& e : S.all_mdl_files) {
+            std::string lname = e.name;
+            std::transform(lname.begin(), lname.end(), lname.begin(),
+                           ::tolower);
+            for (const char* kw : kKeywords) {
+                if (lname.find(kw) != std::string::npos) {
+                    hits[kw].push_back(&e);
+                    break;
+                }
+            }
+        }
+        size_t total = 0;
+        for (auto& kv : hits) total += kv.second.size();
+        if (total > 0) {
+            OutputLog::info("market-keyword .mdl scan: " +
+                            std::to_string(total) + " matches");
+            for (auto& [kw, vec] : hits) {
+                std::ostringstream os;
+                os << "  [" << kw << "] " << vec.size() << ":";
+                OutputLog::info(os.str());
+                size_t shown = 0;
+                for (auto* e : vec) {
+                    if (shown++ >= 8) {
+                        OutputLog::info("    … +" +
+                                        std::to_string(vec.size() - 8) +
+                                        " more");
+                        break;
+                    }
+                    std::string bnk_leaf =
+                        std::filesystem::path(e->bnk_path).filename().string();
+                    OutputLog::info("    " + e->full_path + "  (in " +
+                                    bnk_leaf + ")");
+                }
+            }
+        } else {
+            OutputLog::info("market-keyword .mdl scan: 0 matches "
+                            "in entire indexed asset graph");
+        }
+    }
 
     set_tree_label("");
 }

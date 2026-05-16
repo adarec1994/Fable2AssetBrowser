@@ -85,12 +85,5 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out);
 bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const std::string& file_path);
 bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& info, std::vector<MDLMeshGeom>& out);
 
-/* Fallback: when parse_mdl_info returned successfully but every
-   MeshBuffers entry came back with VertexCount==0 (the standard walker
-   couldn't anchor on a mesh-buffer header — see RS_Golden_Acorn), scan
-   the raw blob for "polymsh\0\x01" markers and rebuild MeshBuffers
-   from those.  Leaves Meshes/Materials alone — those still come from
-   the original walker, which got the metadata right; this only fixes
-   the buffer-side lookup. */
 bool reparse_mdl_buffers_via_polymsh_scan(const std::vector<unsigned char>& data,
                                           MDLInfo& info);

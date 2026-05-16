@@ -218,8 +218,6 @@ void draw_left_panel() {
     ImGui::SameLine(0, 2);
     if (tab_button("File Tree", s_active_tab == 1))  s_active_tab = 1;
     ImGui::SameLine(0, 2);
-    /* Levels tab — listed right after File Tree, painted gold so it
-       stands out as "this loads a whole world, not just one asset". */
     const ImU32 kGoldLabel = IM_COL32(255, 215, 0, 255);
     if (tab_button("Levels", s_active_tab == 6, kGoldLabel)) s_active_tab = 6;
 
@@ -234,7 +232,7 @@ void draw_left_panel() {
 
     ImGui::Separator();
 
-    auto draw_flat_asset_tab = [](const char* /*label*/,
+    auto draw_flat_asset_tab = [](const char* ,
                                   std::vector<FlatAssetEntry>& entries,
                                   std::string& filter,
                                   const char* child_id,
@@ -248,12 +246,6 @@ void draw_left_panel() {
         std::string flow = filter;
         std::transform(flow.begin(), flow.end(), flow.begin(), ::tolower);
 
-        /* Per-tab cache so we don't rebuild + dedup the whole `vis`
-           list every frame — for large tabs (Textures, Animations:
-           often 10k+ entries) the per-frame hash work was visibly
-           lagging the UI.  Cache keyed on (entries-pointer-and-size,
-           filter, dedup flag) — invalidated whenever any of those
-           change (loading a new ROM, typing in the filter, etc.).  */
         struct CacheEntry {
             const void* entries_ptr = nullptr;
             size_t      entries_size = 0;
@@ -512,7 +504,7 @@ void draw_left_panel() {
                             } else {
 
                                 drill_open_bnk(g_bnk_drill, p,
-                                               /*from_nested=*/false);
+                                               false);
                             }
                         }
 
@@ -558,7 +550,7 @@ void draw_left_panel() {
                                 extract_one(p, nested_idx, tmp_nested.string());
                                 drill_open_bnk(g_bnk_drill,
                                                tmp_nested.string(),
-                                               /*from_nested=*/true);
+                                               true);
                             } catch (const std::exception& e) {
                                 OutputLog::error(std::string(
                                     "Failed to extract nested BNK ") +
@@ -831,8 +823,8 @@ void draw_left_panel() {
 
             const float footer_h = ImGui::GetFrameHeightWithSpacing();
             draw_flat_asset_tab("Models", S.all_mdl_files, S.mdl_filter,
-                                "models_list", /*kind=*/0, footer_h,
-                                /*dedup_by_name_size=*/true);
+                                "models_list", 0, footer_h,
+                                true);
 
             const bool has_any = !S.all_mdl_files.empty();
             if (!has_any) ImGui::BeginDisabled();
@@ -867,7 +859,7 @@ void draw_left_panel() {
 
             const float footer_h = ImGui::GetFrameHeightWithSpacing();
             draw_flat_asset_tab("Textures", S.all_tex_files, S.tex_filter,
-                                "textures_list", /*kind=*/1, footer_h);
+                                "textures_list", 1, footer_h);
 
             const bool has_any = !S.all_tex_files.empty();
             if (!has_any) ImGui::BeginDisabled();
@@ -909,7 +901,7 @@ void draw_left_panel() {
 
             const float footer_h = ImGui::GetFrameHeightWithSpacing();
             draw_flat_asset_tab("Audio", S.all_wav_files, S.wav_filter,
-                                "audio_list", /*kind=*/2, footer_h);
+                                "audio_list", 2, footer_h);
 
             const bool has_any = !S.all_wav_files.empty();
             if (!has_any) ImGui::BeginDisabled();
@@ -1018,10 +1010,6 @@ void draw_left_panel() {
         }
 
         if (s_active_tab == 6) {
-            /* Levels tab — discoverable .engine_level files from the
-               loaded BNKs, grouped under region headings with friendly
-               display names.  Mapping is by case-insensitive full_path
-               match; anything not in the table goes under "Other".  */
             struct LvlMap {
                 const char* path;     
                 const char* name;
@@ -1147,7 +1135,6 @@ void draw_left_panel() {
                 }},
             };
 
-            /* Normalize a path for matching: lowercase + backslashes. */
             auto norm = [](std::string s) -> std::string {
                 std::transform(s.begin(), s.end(), s.begin(),
                                [](unsigned char c){ return std::tolower(c); });
@@ -1155,8 +1142,6 @@ void draw_left_panel() {
                 return s;
             };
 
-            /* Build a path → friendly_name map for this frame, and
-               figure out which level entries are "uncategorized".    */
             std::unordered_map<std::string, std::string> path_to_name;
             for (const auto& g : kLevelGroups) {
                 for (const auto& m : g.entries) {
@@ -1181,7 +1166,6 @@ void draw_left_panel() {
                 ImGui::TextDisabled("No .engine_level files indexed yet.");
                 ImGui::TextDisabled("Open a Fable 2 root to populate the list.");
             } else {
-                /* Per-row drawer reused across groups. */
                 auto draw_entry = [&](const FlatAssetEntry& e,
                                       const std::string& friendly)
                 {
@@ -1225,20 +1209,13 @@ void draw_left_panel() {
                     ImGui::PopID();
                 };
 
-                /* Index entries by normalized path so we can resolve
-                   each mapping entry to its underlying FlatAssetEntry. */
                 std::unordered_map<std::string, const FlatAssetEntry*> by_path;
                 for (const auto& e : S.all_level_files) {
                     by_path[norm(e.full_path)] = &e;
                 }
 
-                /* Track which entries we've placed under a heading so
-                   leftovers can fall under a fallback "Uncategorized".  */
                 std::unordered_set<const FlatAssetEntry*> placed;
 
-                /* Filter helper: returns true if entry matches the
-                   user's filter (against either friendly name or
-                   full path, case-insensitive).                       */
                 auto matches_filter = [&](const std::string& friendly,
                                           const std::string& full_path) {
                     if (flow.empty()) return true;
@@ -1252,7 +1229,6 @@ void draw_left_panel() {
                 };
 
                 for (const auto& g : kLevelGroups) {
-                    /* Collect entries that match filter + exist on disk. */
                     std::vector<std::pair<const FlatAssetEntry*, std::string>> rows;
                     for (const auto& m : g.entries) {
                         auto it = by_path.find(norm(m.path));
@@ -1275,9 +1251,6 @@ void draw_left_panel() {
                     ImGui::Spacing();
                 }
 
-                /* Anything not in the mapping table — show under
-                   "Uncategorized" so it's still reachable.  Useful
-                   while the table is incomplete or for modded ROMs. */
                 std::vector<std::pair<const FlatAssetEntry*, std::string>> leftover;
                 for (const auto& e : S.all_level_files) {
                     if (placed.count(&e)) continue;

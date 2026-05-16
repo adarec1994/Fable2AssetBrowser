@@ -5,6 +5,7 @@
 #include "../../Level/TerrainTextureRegistry.h"
 #include "../../Level/EhfLodThumbnails.h"
 #include "../../Level/TerrainEdit.h"
+#include "../../Level/LevelLoader.h"
 #include "../../animations/AnimBank.h"
 #include "../../animations/AnimDataFile.h"
 #include "../../animations/AnimPlayer.h"
@@ -38,10 +39,6 @@ extern ModelPreview g_mp;
 extern bool g_mp_initialized;
 extern FlyCam g_flycam;
 
-/* Forward — defined in UI_Main.cpp at global scope; declared here so
-   the call inside the anonymous-namespaced draw_model_in_panel
-   resolves to the global symbol, not a (non-existent) one inside the
-   local namespace. */
 void render_panel_handle_flycam(float dt);
 
 bool g_skel_overlay_show = false;
@@ -61,10 +58,6 @@ int         g_tex_popout_mesh_idx = -1;
 
 bool        g_tex_popout_show_uvs = false;
 
-/* Edit Terrain overlay state.  File-scope so the brush-picker block
-   (which runs OUTSIDE the overlay window's draw scope) can read the
-   selected tool / brush size / strength while doing ray-casting on
-   the render area.                                                  */
 namespace {
 struct TerrainEditUI {
     int   tool             = 0;   
@@ -72,18 +65,12 @@ struct TerrainEditUI {
     float brush_strength   = 1.f;
     bool  has_changes      = false;
     bool  open_save_confirm= false;
-    /* Picking state mutable inside the picker block. */
     bool  hover_valid      = false;
     float hover_x = 0.f, hover_y = 0.f, hover_z = 0.f;
 };
 static TerrainEditUI g_te_ui;
 }  
 
-/* Heightmap popout — separate floating window, shown when the user
-   right-clicks a level row → "View Heightmap".  The RGBA buffer is
-   kept alive so the in-window right-click can re-export it through
-   tex_export_menu_rgba.  All populated from PendingLoads via the
-   g_pending_heightmap_view_load hand-off. */
 #ifdef _WIN32
 ID3D11ShaderResourceView* g_heightmap_popout_srv = nullptr;
 #endif
@@ -93,9 +80,6 @@ int                  g_heightmap_popout_h    = 0;
 bool                 g_heightmap_popout_open = false;
 std::vector<uint8_t> g_heightmap_popout_rgba;
 
-/* Hand-off from the click handler (no device) → PendingLoads (has
-   device) → the popout (uses SRV).  PendingLoads consumes the flag
-   on its tick, creates the SRV, then surfaces the window. */
 std::atomic<bool>    g_pending_heightmap_view_load{false};
 std::vector<uint8_t> g_pending_heightmap_view_rgba;
 int                  g_pending_heightmap_view_w = 0;
@@ -105,6 +89,393 @@ std::string          g_pending_heightmap_view_name;
 namespace UI {
 
 namespace {
+
+#ifdef _WIN32
+void flip_first_mesh_x(ID3D11Device* device);
+
+void rotate_first_mesh(ID3D11Device* device, int axis, float angle_rad,
+                       bool around_mesh_center = false)
+{
+    if (!device || !g_mp.has_model || g_mp.meshes.empty()) return;
+    MPPerMesh& mesh = g_mp.meshes[0];
+    if (!mesh.vb || mesh.index_count == 0) return;
+
+    D3D11_BUFFER_DESC vd{};
+    mesh.vb->GetDesc(&vd);
+    if (vd.ByteWidth == 0) return;
+
+    D3D11_BUFFER_DESC sd = vd;
+    sd.Usage          = D3D11_USAGE_STAGING;
+    sd.BindFlags      = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MiscFlags      = 0;
+    ID3D11Buffer* staging = nullptr;
+    if (FAILED(device->CreateBuffer(&sd, nullptr, &staging))) return;
+
+    ID3D11DeviceContext* ctx = nullptr;
+    device->GetImmediateContext(&ctx);
+    ctx->CopyResource(staging, mesh.vb);
+
+    std::vector<uint8_t> cpu(vd.ByteWidth);
+    D3D11_MAPPED_SUBRESOURCE map{};
+    if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
+        staging->Release(); ctx->Release(); return;
+    }
+    std::memcpy(cpu.data(), map.pData, vd.ByteWidth);
+    ctx->Unmap(staging, 0);
+    staging->Release();
+
+    const UINT stride = sizeof(MPVertex);
+    const size_t vcount = vd.ByteWidth / stride;
+
+    float pivot_x = 0.0f, pivot_y = 0.0f, pivot_z = 0.0f;
+    if (around_mesh_center) {
+        double sx = 0, sy = 0, sz = 0;
+        for (size_t i = 0; i < vcount; ++i) {
+            const float* p =
+                reinterpret_cast<const float*>(cpu.data() + i * stride);
+            sx += p[0]; sy += p[1]; sz += p[2];
+        }
+        if (vcount > 0) {
+            pivot_x = float(sx / double(vcount));
+            pivot_y = float(sy / double(vcount));
+            pivot_z = float(sz / double(vcount));
+        }
+    }
+
+    const float s = std::sin(angle_rad);
+    const float c = std::cos(angle_rad);
+    auto rotate_xyz = [&](float& x, float& y, float& z) {
+        switch (axis) {
+            case 0: {                          // X
+                const float ny = c * y - s * z;
+                const float nz = s * y + c * z;
+                y = ny; z = nz;
+                break;
+            }
+            case 1: {                          // Y
+                const float nx =  c * x + s * z;
+                const float nz = -s * x + c * z;
+                x = nx; z = nz;
+                break;
+            }
+            case 2: {                          // Z
+                const float nx = c * x - s * y;
+                const float ny = s * x + c * y;
+                x = nx; y = ny;
+                break;
+            }
+        }
+    };
+
+    for (size_t i = 0; i < vcount; ++i) {
+        float* p  = reinterpret_cast<float*>(cpu.data() + i * stride + 0);
+        float* nv = reinterpret_cast<float*>(cpu.data() + i * stride + 12);
+        p[0] -= pivot_x; p[1] -= pivot_y; p[2] -= pivot_z;
+        rotate_xyz(p[0],  p[1],  p[2]);
+        p[0] += pivot_x; p[1] += pivot_y; p[2] += pivot_z;
+        rotate_xyz(nv[0], nv[1], nv[2]);   // normal — direction only
+    }
+
+    D3D11_BUFFER_DESC nd = vd;
+    nd.Usage          = D3D11_USAGE_IMMUTABLE;
+    nd.CPUAccessFlags = 0;
+    D3D11_SUBRESOURCE_DATA isd{};
+    isd.pSysMem = cpu.data();
+    ID3D11Buffer* new_vb = nullptr;
+    if (SUCCEEDED(device->CreateBuffer(&nd, &isd, &new_vb))) {
+        mesh.vb->Release();
+        mesh.vb = new_vb;
+    }
+    ctx->Release();
+}
+
+void scale_first_mesh(ID3D11Device* device, float sx, float sy, float sz)
+{
+    if (!device || !g_mp.has_model || g_mp.meshes.empty()) return;
+    if (sx == 1.0f && sy == 1.0f && sz == 1.0f) return;
+    MPPerMesh& mesh = g_mp.meshes[0];
+    if (!mesh.vb || mesh.index_count == 0) return;
+
+    D3D11_BUFFER_DESC vd{};
+    mesh.vb->GetDesc(&vd);
+    if (vd.ByteWidth == 0) return;
+
+    D3D11_BUFFER_DESC sd = vd;
+    sd.Usage          = D3D11_USAGE_STAGING;
+    sd.BindFlags      = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MiscFlags      = 0;
+    ID3D11Buffer* staging = nullptr;
+    if (FAILED(device->CreateBuffer(&sd, nullptr, &staging))) return;
+
+    ID3D11DeviceContext* ctx = nullptr;
+    device->GetImmediateContext(&ctx);
+    ctx->CopyResource(staging, mesh.vb);
+
+    std::vector<uint8_t> cpu(vd.ByteWidth);
+    D3D11_MAPPED_SUBRESOURCE map{};
+    if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
+        staging->Release(); ctx->Release(); return;
+    }
+    std::memcpy(cpu.data(), map.pData, vd.ByteWidth);
+    ctx->Unmap(staging, 0);
+    staging->Release();
+
+    const UINT stride = sizeof(MPVertex);
+    const size_t vcount = vd.ByteWidth / stride;
+    for (size_t i = 0; i < vcount; ++i) {
+        float* p = reinterpret_cast<float*>(cpu.data() + i * stride + 0);
+        p[0] *= sx;
+        p[1] *= sy;
+        p[2] *= sz;
+    }
+
+    D3D11_BUFFER_DESC nd = vd;
+    nd.Usage          = D3D11_USAGE_IMMUTABLE;
+    nd.CPUAccessFlags = 0;
+    D3D11_SUBRESOURCE_DATA isd{};
+    isd.pSysMem = cpu.data();
+    ID3D11Buffer* new_vb = nullptr;
+    if (SUCCEEDED(device->CreateBuffer(&nd, &isd, &new_vb))) {
+        mesh.vb->Release();
+        mesh.vb = new_vb;
+    }
+    ctx->Release();
+}
+
+void translate_first_mesh(ID3D11Device* device, float dx, float dz)
+{
+    if (!device || !g_mp.has_model || g_mp.meshes.empty()) return;
+    if (dx == 0.0f && dz == 0.0f) return;
+    MPPerMesh& mesh = g_mp.meshes[0];
+    if (!mesh.vb || mesh.index_count == 0) return;
+
+    D3D11_BUFFER_DESC vd{};
+    mesh.vb->GetDesc(&vd);
+    if (vd.ByteWidth == 0) return;
+
+    D3D11_BUFFER_DESC sd = vd;
+    sd.Usage          = D3D11_USAGE_STAGING;
+    sd.BindFlags      = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MiscFlags      = 0;
+    ID3D11Buffer* staging = nullptr;
+    if (FAILED(device->CreateBuffer(&sd, nullptr, &staging))) return;
+
+    ID3D11DeviceContext* ctx = nullptr;
+    device->GetImmediateContext(&ctx);
+    ctx->CopyResource(staging, mesh.vb);
+
+    std::vector<uint8_t> cpu(vd.ByteWidth);
+    D3D11_MAPPED_SUBRESOURCE map{};
+    if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
+        staging->Release(); ctx->Release(); return;
+    }
+    std::memcpy(cpu.data(), map.pData, vd.ByteWidth);
+    ctx->Unmap(staging, 0);
+    staging->Release();
+
+    const UINT stride = sizeof(MPVertex);
+    const size_t vcount = vd.ByteWidth / stride;
+    for (size_t i = 0; i < vcount; ++i) {
+        float* p = reinterpret_cast<float*>(cpu.data() + i * stride + 0);
+        p[0] += dx;
+        p[2] += dz;
+    }
+
+    D3D11_BUFFER_DESC nd = vd;
+    nd.Usage          = D3D11_USAGE_IMMUTABLE;
+    nd.CPUAccessFlags = 0;
+    D3D11_SUBRESOURCE_DATA isd{};
+    isd.pSysMem = cpu.data();
+    ID3D11Buffer* new_vb = nullptr;
+    if (SUCCEEDED(device->CreateBuffer(&nd, &isd, &new_vb))) {
+        mesh.vb->Release();
+        mesh.vb = new_vb;
+    }
+    ctx->Release();
+}
+
+void flip_first_mesh_x(ID3D11Device* device)
+{
+    if (!device || !g_mp.has_model || g_mp.meshes.empty()) return;
+    MPPerMesh& mesh = g_mp.meshes[0];
+    if (!mesh.vb || mesh.index_count == 0) return;
+
+    D3D11_BUFFER_DESC vd{};
+    mesh.vb->GetDesc(&vd);
+    if (vd.ByteWidth == 0) return;
+
+    D3D11_BUFFER_DESC sd = vd;
+    sd.Usage          = D3D11_USAGE_STAGING;
+    sd.BindFlags      = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MiscFlags      = 0;
+    ID3D11Buffer* staging = nullptr;
+    if (FAILED(device->CreateBuffer(&sd, nullptr, &staging))) return;
+
+    ID3D11DeviceContext* ctx = nullptr;
+    device->GetImmediateContext(&ctx);
+    ctx->CopyResource(staging, mesh.vb);
+
+    std::vector<uint8_t> cpu(vd.ByteWidth);
+    D3D11_MAPPED_SUBRESOURCE map{};
+    if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
+        staging->Release(); ctx->Release(); return;
+    }
+    std::memcpy(cpu.data(), map.pData, vd.ByteWidth);
+    ctx->Unmap(staging, 0);
+    staging->Release();
+
+    const UINT stride = sizeof(MPVertex);
+    const size_t vcount = vd.ByteWidth / stride;
+    for (size_t i = 0; i < vcount; ++i) {
+        float* p  = reinterpret_cast<float*>(cpu.data() + i * stride + 0);
+        float* nv = reinterpret_cast<float*>(cpu.data() + i * stride + 12);
+        p[0]  = -p[0];
+        nv[0] = -nv[0];
+    }
+
+    D3D11_BUFFER_DESC nd = vd;
+    nd.Usage          = D3D11_USAGE_IMMUTABLE;
+    nd.CPUAccessFlags = 0;
+    D3D11_SUBRESOURCE_DATA isd{};
+    isd.pSysMem = cpu.data();
+    ID3D11Buffer* new_vb = nullptr;
+    if (SUCCEEDED(device->CreateBuffer(&nd, &isd, &new_vb))) {
+        mesh.vb->Release();
+        mesh.vb = new_vb;
+    }
+    ctx->Release();
+}
+
+void draw_terrain_rotate_overlay(ID3D11Device* device,
+                                 const ImVec2& origin,
+                                 const ImVec2& region,
+                                 float&        next_overlay_y)
+{
+    if (!g_mp.has_model || !g_mp.no_tilt) return;   // terrain mode only
+
+    const float kW = 220.0f;
+    const ImVec2 pos(origin.x + region.x - kW - 6.0f, next_overlay_y);
+    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(kW, 0), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.85f);
+
+    ImGuiWindowFlags fl = ImGuiWindowFlags_NoResize
+                        | ImGuiWindowFlags_NoCollapse
+                        | ImGuiWindowFlags_NoSavedSettings
+                        | ImGuiWindowFlags_AlwaysAutoResize;
+    if (ImGui::Begin("Rotate Terrain##rotate_terrain", nullptr, fl)) {
+        ImGui::TextDisabled("Probe rotation alignment");
+        ImGui::Separator();
+        static bool s_around_center = false;
+        ImGui::Checkbox("Around mesh center", &s_around_center);
+        const float kPi = 3.14159265f;
+        auto row = [&](const char* label, int axis) {
+            ImGui::TextUnformatted(label); ImGui::SameLine(40);
+            if (ImGui::Button((std::string("-90##") + label).c_str(),
+                              ImVec2(60, 0))) {
+                rotate_first_mesh(device, axis, -kPi * 0.5f,
+                                  s_around_center);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button((std::string("+90##") + label).c_str(),
+                              ImVec2(60, 0))) {
+                rotate_first_mesh(device, axis,  kPi * 0.5f,
+                                  s_around_center);
+            }
+        };
+        row("X", 0);
+        row("Y", 1);
+        row("Z", 2);
+        ImGui::Spacing();
+        if (ImGui::Button("Flip X (mirror)", ImVec2(-1, 0))) {
+            flip_first_mesh_x(device);
+        }
+        ImGui::Spacing();
+        if (s_around_center) {
+            ImGui::TextDisabled("Rotates around the terrain's");
+            ImGui::TextDisabled("own centroid; props don't move.");
+        } else {
+            ImGui::TextDisabled("Rotates around world (0,0,0).");
+            ImGui::TextDisabled("Props stay in place; only the");
+            ImGui::TextDisabled("terrain mesh moves.");
+        }
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Move terrain (engine X/Y, Z up)");
+        static float s_step = 50.0f;
+        ImGui::SetNextItemWidth(-1);
+        ImGui::DragFloat("##step", &s_step, 1.0f, 0.1f, 5000.0f,
+                         "step = %.1f");
+        auto move_row = [&](const char* label, float dx, float dz) {
+            ImGui::TextUnformatted(label); ImGui::SameLine(40);
+            if (ImGui::Button((std::string("-##") + label).c_str(),
+                              ImVec2(60, 0))) {
+                translate_first_mesh(device,
+                                     -dx * s_step,
+                                     -dz * s_step);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button((std::string("+##") + label).c_str(),
+                              ImVec2(60, 0))) {
+                translate_first_mesh(device,
+                                      dx * s_step,
+                                      dz * s_step);
+            }
+        };
+        move_row("X", 1.0f, 0.0f);   // engine X → renderer X
+        move_row("Y", 0.0f, 1.0f);   // engine Y → renderer Z
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Scale terrain (multiplicative)");
+        static float s_scale_step = 1.5f;
+        ImGui::SetNextItemWidth(-1);
+        ImGui::DragFloat("##scale_step", &s_scale_step, 0.01f, 1.01f, 10.0f,
+                         "factor = %.3f×");
+        auto scale_row = [&](const char* label, int axis) {
+            ImGui::TextUnformatted(label); ImGui::SameLine(40);
+            const float k = std::max(s_scale_step, 1.001f);
+            const float inv = 1.0f / k;
+            float sx = 1.0f, sy = 1.0f, sz = 1.0f;
+            if (axis == 0)      { sx = 1.0f; }
+            else if (axis == 1) { sy = 1.0f; }
+            else                { sz = 1.0f; }
+            if (ImGui::Button((std::string("÷##s") + label).c_str(),
+                              ImVec2(60, 0))) {
+                if (axis == 0) scale_first_mesh(device, inv, 1.0f, 1.0f);
+                if (axis == 1) scale_first_mesh(device, 1.0f, inv, 1.0f);
+                if (axis == 2) scale_first_mesh(device, 1.0f, 1.0f, inv);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button((std::string("×##s") + label).c_str(),
+                              ImVec2(60, 0))) {
+                if (axis == 0) scale_first_mesh(device, k, 1.0f, 1.0f);
+                if (axis == 1) scale_first_mesh(device, 1.0f, k, 1.0f);
+                if (axis == 2) scale_first_mesh(device, 1.0f, 1.0f, k);
+            }
+            (void)sx; (void)sy; (void)sz;
+        };
+        scale_row("X",      0);   // renderer X = engine X (horizontal)
+        scale_row("Y(h)",   1);   // renderer Y = height
+        scale_row("Z",      2);   // renderer Z = engine Y (horizontal)
+        ImGui::Spacing();
+        if (ImGui::Button("Uniform XZ ×", ImVec2(-1, 0))) {
+            const float k = std::max(s_scale_step, 1.001f);
+            scale_first_mesh(device, k, 1.0f, k);
+        }
+        if (ImGui::Button("Uniform XZ ÷", ImVec2(-1, 0))) {
+            const float k = std::max(s_scale_step, 1.001f);
+            scale_first_mesh(device, 1.0f / k, 1.0f, 1.0f / k);
+        }
+        ImGui::TextDisabled("Scales around world (0,0,0).");
+    }
+    next_overlay_y = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y + 4.0f;
+    ImGui::End();
+}
+#endif
 
 void draw_placeholder() {
 
@@ -178,8 +549,8 @@ void ensure_point_sampler(ID3D11Device* device) {
     device->CreateSamplerState(&desc, &g_tex_point_sampler);
 }
 
-void bind_point_sampler_cb(const ImDrawList* /*dl*/,
-                           const ImDrawCmd*  /*cmd*/) {
+void bind_point_sampler_cb(const ImDrawList* ,
+                           const ImDrawCmd*  ) {
     if (g_tex_preview_ctx && g_tex_point_sampler) {
         g_tex_preview_ctx->PSSetSamplers(0, 1, &g_tex_point_sampler);
     }
@@ -385,6 +756,86 @@ static void project_bones_to_screen(
     }
 }
 
+#ifdef _WIN32
+static void draw_gdb_placements_overlay(const ImVec2& origin,
+                                        const ImVec2& region)
+{
+    using namespace DirectX;
+    if (g_level_gdb_placements.empty()) return;
+    if (!S.show_gdb_placements) return;
+
+    float cy = cosf(g_flycam.yaw);
+    float sy = sinf(g_flycam.yaw);
+    float cp = cosf(g_flycam.pitch);
+    float sp = sinf(g_flycam.pitch);
+    XMVECTOR eye = XMVectorSet(g_flycam.pos[0], g_flycam.pos[1], g_flycam.pos[2], 1);
+    XMVECTOR at  = XMVectorSet(g_flycam.pos[0] + sy * cp,
+                               g_flycam.pos[1] + sp,
+                               g_flycam.pos[2] + cy * cp, 1);
+    XMVECTOR up  = XMVectorSet(0, 1, 0, 0);
+    XMMATRIX V = XMMatrixLookAtLH(eye, at, up);
+    float fov = XMConvertToRadians(60.0f);
+    float aspect = region.x / std::max(1.0f, region.y);
+    float far_plane = std::max(g_mp.radius * 100.0f, 1000.0f);
+    XMMATRIX P = XMMatrixPerspectiveFovLH(fov, aspect, 0.05f, far_plane);
+    XMMATRIX VP = V * P;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 col_fixed = IM_COL32(255, 80, 80, 230);   
+    const ImU32 col_var   = IM_COL32(120, 220, 255, 180); 
+
+    const int   gw = g_pending_terrain_ghf_width;
+    const int   gh = g_pending_terrain_ghf_height;
+    const float tile = g_pending_terrain_ghf_tile_size > 0.0f
+                         ? g_pending_terrain_ghf_tile_size : 0.5f;
+    const auto& heights = g_pending_terrain_ghf_heights;
+    const bool  have_terrain = (gw > 0 && gh > 0 &&
+                                heights.size() == size_t(gw) * size_t(gh));
+    auto sample_height = [&](float wx, float wy) -> float {
+        if (!have_terrain) return 0.0f;
+        const float gx = wx / tile;
+        const float gy = wy / tile;
+        int ix = int(gx); int iy = int(gy);
+        if (ix < 0) ix = 0; else if (ix >= gw) ix = gw - 1;
+        if (iy < 0) iy = 0; else if (iy >= gh) iy = gh - 1;
+        return heights[size_t(iy) * size_t(gw) + size_t(ix)];
+    };
+
+    size_t drawn = 0;
+    for (const auto& gp : g_level_gdb_placements) {
+        const float rx = gp.x;
+        const float ry = sample_height(gp.x, gp.y) + 1.0f;
+        const float rz = gp.y;
+        XMVECTOR clip = XMVector4Transform(XMVectorSet(rx, ry, rz, 1.0f), VP);
+        float w = XMVectorGetW(clip);
+        if (w <= 0.05f) continue;
+        float ndcx = XMVectorGetX(clip) / w;
+        float ndcy = XMVectorGetY(clip) / w;
+        if (ndcx < -1.2f || ndcx > 1.2f) continue;
+        if (ndcy < -1.2f || ndcy > 1.2f) continue;
+        ImVec2 sp_screen;
+        sp_screen.x = origin.x + (ndcx * 0.5f + 0.5f) * region.x;
+        sp_screen.y = origin.y + (1.0f - (ndcy * 0.5f + 0.5f)) * region.y;
+
+        const bool fixed = (gp.marker == 0x00004B40);
+        const ImU32 col  = fixed ? col_fixed : col_var;
+        const float r    = fixed ? 4.0f : 2.5f;
+        dl->AddCircleFilled(sp_screen, r, col);
+        if (fixed) {
+            dl->AddCircle(sp_screen, r + 1.0f, IM_COL32(0, 0, 0, 200), 12, 1.0f);
+        }
+        ++drawn;
+    }
+
+    char buf[96];
+    std::snprintf(buf, sizeof(buf),
+                  "gdb placements: %zu shown / %zu total",
+                  drawn, g_level_gdb_placements.size());
+    dl->AddText(ImVec2(origin.x + 14, origin.y + region.y - 22),
+                IM_COL32(220, 220, 220, 200), buf);
+}
+#endif
+
 void draw_skeleton_overlay(const ImVec2& origin, const ImVec2& region) {
     if (g_mp.bone_count == 0) return;
 
@@ -550,14 +1001,10 @@ void draw_model_in_panel(ID3D11Device* device) {
     if (skel_visible && !rotate_active && hovered &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         ImVec2 mp = ImGui::GetIO().MousePos;
-        int picked = pick_bone_at(mp, origin, region, /*radius_px=*/12.0f);
+        int picked = pick_bone_at(mp, origin, region, 12.0f);
         S.selected_bone = picked;
     }
 
-    /* Terrain (heightfield) preview uses the flycam.  No left-drag
-       orbit, no wheel-zoom of the orbit radius — WASD / Q-E to move,
-       right-click + drag for mouse-look.  Routed through the same
-       flycam handler the rest of the app uses. */
     if (S.terrain_mode) {
         const float dt = ImGui::GetIO().DeltaTime;
         if (hovered || g_flycam.is_looking) {
@@ -585,7 +1032,7 @@ void draw_model_in_panel(ID3D11Device* device) {
         }
     }
 
-    if (skel_visible && hovered && ImGui::IsKeyPressed(ImGuiKey_R)) {
+    if (skel_visible && hovered && ImGui::IsKeyPressed(S.key_rotate_mode)) {
         if (S.selected_bone >= 0 && S.selected_bone < (int)g_mp.bone_count &&
             (size_t)S.selected_bone * 4 + 4 <= S.bone_rot_deltas.size()) {
             if (!S.bone_rotate_mode) {
@@ -608,9 +1055,6 @@ void draw_model_in_panel(ID3D11Device* device) {
         g_mp.meshes[i].isolated  = ((int)i == ::g_isolate_mesh_idx);
     }
 
-    /* In terrain (flycam) mode, the flycam input handler is the
-       sole source of g_flycam state — don't overwrite it with the
-       orbit→flycam conversion. */
     if (!S.terrain_mode) apply_orbit_to_flycam();
     MP_Render(device, g_mp, g_flycam);
 
@@ -621,7 +1065,13 @@ void draw_model_in_panel(ID3D11Device* device) {
                      ImVec2(origin.x + region.x, origin.y + region.y));
     }
 
-    if (hovered && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+#ifdef _WIN32
+    if (S.terrain_mode) {
+        draw_gdb_placements_overlay(origin, region);
+    }
+#endif
+
+    if (hovered && ImGui::IsKeyPressed(S.key_close_preview)) {
         if (S.bone_rotate_mode) {
             cancel_rotate();
         } else {
@@ -645,6 +1095,11 @@ void draw_model_in_panel(ID3D11Device* device) {
     ImGui::TextDisabled("Wheel  zoom  /  ESC  close");
 
     float next_overlay_y = origin.y + 76.0f;
+
+#ifdef _WIN32
+    float rotate_overlay_top = origin.y + 6.0f;
+    draw_terrain_rotate_overlay(device, origin, region, rotate_overlay_top);
+#endif
 
     bool has_skeleton = g_mp.has_model && g_mp.bone_count > 0;
     if (has_skeleton) {
@@ -746,9 +1201,6 @@ void draw_model_in_panel(ID3D11Device* device) {
         ImGui::PopStyleVar();
     }
 
-    /* LOD switcher — only shown when the model has more than one
-       LOD group (V2's walker tags each mesh's name with a "|lod<N>"
-       suffix that MP_Build parses into MPPerMesh.lod_index). */
     if (g_mp.has_model && g_mp.lod_count > 1) {
         static float s_lod_alpha = 0.30f;
         const float kIdleAlpha   = 0.30f;
@@ -778,10 +1230,9 @@ void draw_model_in_panel(ID3D11Device* device) {
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "LOD");
 
             const int lod_count = (int)g_mp.lod_count;
-            int current = g_mp.selected_lod;        /* -1 = All */
+            int current = g_mp.selected_lod;        
             if (current < -1 || current >= lod_count) current = 0;
 
-            /* "All" radio shows every LOD overlaid (legacy behavior). */
             if (ImGui::RadioButton("All", current == -1)) {
                 g_mp.selected_lod = -1;
             }
@@ -839,9 +1290,6 @@ void draw_model_in_panel(ID3D11Device* device) {
             for (size_t mi = 0; mi < g_mp.meshes.size(); ++mi) {
                 auto& mesh = g_mp.meshes[mi];
 
-                /* Only list submeshes that belong to the currently
-                   selected LOD.  When selected_lod is -1 ("All") we
-                   list every submesh, mirroring the render filter. */
                 if (g_mp.selected_lod >= 0 &&
                     mesh.lod_index != (uint32_t)g_mp.selected_lod) {
                     continue;
@@ -911,15 +1359,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                     }
 
                     if (ImGui::BeginPopupContextItem()) {
-                        /* Terrain-generated textures (lightmap, BC5
-                           normal, baked composite) don't live in any
-                           BNK — they're decoded from a `.ehf` and
-                           registered by name in
-                           TerrainTextureRegistry.  Check there first;
-                           on a hit, export from the cached RGBA
-                           buffer directly.  Otherwise fall through to
-                           the BNK-lookup path used for ordinary `.tex`
-                           textures.                                   */
                         const auto* terrain_tex =
                             TerrainTextureRegistry::Find(*t.name);
                         if (terrain_tex) {
@@ -934,7 +1373,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                                     ? S.selected_nested_temp_path
                                     : S.selected_bnk;
                             tex_export_menu_named(*t.name, *t.name,
-                                                  preferred_bnk, /*mip=*/0);
+                                                  preferred_bnk, 0);
                         }
                         ImGui::EndPopup();
                     }
@@ -958,10 +1397,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                 ImGui::PopID();
             }
 
-            /* .ehf LOD palette — one row per material the .ehf
-               references.  These DON'T affect the rendered mesh; they
-               just let you see every detail texture the chunk-grid
-               can paint, and click-export any of them.              */
             {
                 const auto& lod = EhfLodThumbnails::Get();
                 if (!lod.empty()) {
@@ -1004,7 +1439,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                                         ? S.selected_nested_temp_path
                                         : S.selected_bnk;
                                 tex_export_menu_named(path, path,
-                                                      preferred_bnk, /*mip=*/0);
+                                                      preferred_bnk, 0);
                                 ImGui::EndPopup();
                             }
                             if (ImGui::IsItemHovered()) {
@@ -1063,20 +1498,6 @@ void draw_model_in_panel(ID3D11Device* device) {
         ::g_tex_popout_mesh_idx = -1;
     }
 
-    /* ===========================================================
-       Edit Terrain — floating overlay anchored TOP-RIGHT, only
-       visible while a level is loaded (we use g_mp.no_tilt as the
-       terrain marker since it's set true only for terrain meshes).
-
-       Phase 1: UI scaffolding + Save confirmation dialog.  The
-       editing tools and the actual .ghf → .bnk → .iso write are
-       wired separately and at this point are stubs that log
-       what they would do.  Per user direction we install the
-       SAVE button + confirmation BEFORE any destructive editing
-       is wired up.                                                */
-    /* Terrain editing — dev-mode-only.  The Edit Terrain overlay,
-       brush picker, and save-to-ISO are gated behind S.dev_mode so
-       regular users can't accidentally mutate their source ISO.   */
     if (S.dev_mode && g_mp.has_model && g_mp.no_tilt) {
         enum TerrainTool {
             TT_NONE = 0,
@@ -1091,10 +1512,6 @@ void draw_model_in_panel(ID3D11Device* device) {
         bool&  s_has_changes   = g_te_ui.has_changes;
         bool&  s_open_save_confirm = g_te_ui.open_save_confirm;
 
-        /* Shared helper — pushes new positions to the GPU buffer and
-           syncs the dirty flag.  Hoisted to OUTER block scope so both
-           the Edit Terrain window's buttons AND the brush picker
-           (which runs after ImGui::End()) can call it. */
         auto upload_after_edit = [&]() {
             if (!g_mp.meshes.empty()) {
                 TerrainEdit::ApplyToGpu(device, &g_mp.meshes[0]);
@@ -1121,9 +1538,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                           "  Edit Terrain###edit_terrain").c_str(),
                          nullptr, fl))
         {
-            /* ---- Save section (FIRST, before any edit tool, per
-                    user request — the destructive write needs to be
-                    in place before tools can apply changes). ---- */
             ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f),
                 "%s  Save", ICON_FA_FLOPPY_DISK);
             ImGui::Separator();
@@ -1177,10 +1591,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                                   + "  Save Anyway").c_str(),
                                   ImVec2(160, 0)))
                 {
-                    /* Phase 2: write the modified .ghf alongside the
-                       loaded ISO (BNK repack + ISO splice are still
-                       pending, so for now the user gets a sibling
-                       .ghf gzip file they can inject externally).  */
                     std::string msg;
                     if (TerrainEdit::Save(msg)) {
                         OutputLog::success(
@@ -1200,7 +1610,6 @@ void draw_model_in_panel(ID3D11Device* device) {
             ImGui::Spacing();
             ImGui::Spacing();
 
-            /* ---- Tools palette ---- */
             ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f),
                 "%s  Tools", ICON_FA_PAINTBRUSH);
             ImGui::Separator();
@@ -1208,8 +1617,6 @@ void draw_model_in_panel(ID3D11Device* device) {
             const bool edit_ready = TerrainEdit::IsLoaded();
             ImGui::BeginDisabled(!edit_ready);
 
-            /* Radio-style tool selector — picks the active brush
-               tool.  Click on the 3D terrain to apply.              */
             auto tool_btn = [&](const char* label, int tool_id,
                                 const ImVec2& sz)
             {
@@ -1257,7 +1664,6 @@ void draw_model_in_panel(ID3D11Device* device) {
             ImGui::Spacing();
             ImGui::Spacing();
 
-            /* ---- Brush settings ---- */
             ImGui::TextColored(ImVec4(0.8f, 0.9f, 1.0f, 1.0f),
                 "%s  Brush", ICON_FA_BRUSH);
             ImGui::Separator();
@@ -1275,8 +1681,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                     "Click + drag on terrain to apply.");
             }
 
-            /* "Apply to ALL" — runs the selected tool over every cell
-               regardless of brush position. */
             ImGui::BeginDisabled(!edit_ready || s_tool == TT_NONE);
             if (ImGui::Button((std::string(ICON_FA_ARROWS_UP_DOWN_LEFT_RIGHT)
                 + "  Apply to ALL").c_str(),
@@ -1303,29 +1707,17 @@ void draw_model_in_panel(ID3D11Device* device) {
         }
         ImGui::End();
 
-        /* ------------- Brush picker (ray-cast on render image) -------------
-           When a tool is active and the mouse is over the rendered terrain,
-           unproject the cursor into a world ray, find where it hits the
-           heightfield, and (on left-click) apply the brush.  Also draws a
-           ring on the terrain at the hit point so the user can see where
-           the brush will land.                                            */
         if (TerrainEdit::IsLoaded() && s_tool != TT_NONE) {
             ImVec2 mp_pos  = ImGui::GetIO().MousePos;
             const bool over_view =
                 mp_pos.x >= origin.x   && mp_pos.x < origin.x + region.x &&
                 mp_pos.y >= origin.y   && mp_pos.y < origin.y + region.y;
-            /* The ring should ALWAYS track the cursor over the 3D
-               view, regardless of whether an ImGui panel overlaps
-               (the user wants to see where the brush would land).
-               We only gate brush APPLY on WantCaptureMouse below,
-               so dragging an ImGui slider doesn't also paint.       */
             const bool imgui_captured = ImGui::GetIO().WantCaptureMouse;
 
             g_te_ui.hover_valid = false;
             if (over_view && g_mp.width > 0 && g_mp.height > 0) {
                 using namespace DirectX;
 
-                /* Same V / P math as MP_Render for terrain (no_tilt). */
                 const float cy = cosf(g_flycam.yaw);
                 const float sy = sinf(g_flycam.yaw);
                 const float cp = cosf(g_flycam.pitch);
@@ -1347,7 +1739,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                 XMVECTOR det;
                 XMMATRIX inv_VP = XMMatrixInverse(&det, VP);
 
-                /* Mouse → NDC.  Y is flipped in D3D NDC. */
                 const float u = (mp_pos.x - origin.x) / region.x;
                 const float v = (mp_pos.y - origin.y) / region.y;
                 const float ndc_x =  u * 2.f - 1.f;
@@ -1377,8 +1768,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                     g_te_ui.hover_y = hy;
                     g_te_ui.hover_z = hz;
 
-                    /* Draw brush ring as 32-segment polyline projected
-                       to screen.  Uses V*P with the same maths above. */
                     const int kSeg = 48;
                     ImVec2 last_screen{};
                     ImDrawList* dlay = ImGui::GetForegroundDrawList();
@@ -1405,7 +1794,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                         }
                         last_screen = sc;
                     }
-                    /* Centre crosshair. */
                     XMVECTOR cpt = XMVector4Transform(
                         XMVectorSet(hx, hy, hz, 1.f), VP);
                     const float cw = XMVectorGetW(cpt);
@@ -1420,9 +1808,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                             IM_COL32(255, 215, 0, 255));
                     }
 
-                    /* Mouse-held → apply brush (every frame while down).
-                       Skip apply when ImGui is using the mouse for one
-                       of its widgets so panel interactions don't paint. */
                     if (!imgui_captured &&
                         ImGui::IsMouseDown(ImGuiMouseButton_Left))
                     {
@@ -1728,7 +2113,7 @@ void draw_model_in_panel(ID3D11Device* device) {
 
                         Anim::global_player().play(
                             &S.anim_clips[(size_t)vis[(size_t)row]],
-                            /*loop=*/Anim::global_player().is_loop());
+                            Anim::global_player().is_loop());
                     }
                     if (!S.hide_tooltips && ImGui::IsItemHovered()) {
                         ImGui::BeginTooltip();
@@ -1793,7 +2178,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                                 : S.selected_bnk;
                         tex_export_menu_named(::g_tex_popout_name,
                                               ::g_tex_popout_name,
-                                              preferred_bnk, /*mip=*/0);
+                                              preferred_bnk, 0);
                         ImGui::EndPopup();
                     }
                 }
@@ -1846,19 +2231,12 @@ void draw_model_in_panel(ID3D11Device* device) {
     }
 }
 
-/* Heightmap popout — floating window with the level's height grid
-   rendered as a grayscale image.  Always called from draw_render_panel
-   so it shows over models, textures, or the placeholder.  Right-click
-   inside exports via tex_export_menu_rgba. */
 void draw_heightmap_popout() {
     if (::g_heightmap_popout_open && ::g_heightmap_popout_srv) {
         const int hw = ::g_heightmap_popout_w;
         const int hh = ::g_heightmap_popout_h;
 
         if (hw > 0 && hh > 0) {
-            /* Auto-scale: don't open as huge as the source if it's
-               bigger than ~80% of the workspace.  Floats so the
-               max-clamp doesn't round to zero on tiny images. */
             ImGuiViewport* vp = ImGui::GetMainViewport();
             const float vw = vp->WorkSize.x;
             const float vh = vp->WorkSize.y;
@@ -1880,7 +2258,6 @@ void draw_heightmap_popout() {
                 ImGui::Image((ImTextureID)::g_heightmap_popout_srv,
                              ImVec2(dw, dh));
 
-                /* Right-click → export menu. */
                 ImVec2 img_min = ImGui::GetItemRectMin();
                 ImGui::SetCursorScreenPos(img_min);
                 ImGui::InvisibleButton("##hmap_popout_hit",
@@ -1924,8 +2301,6 @@ void draw_render_panel(ID3D11Device* device) {
         draw_placeholder();
     }
 
-    /* Float the heightmap popout on top regardless of which mode the
-       main render panel is in. */
     draw_heightmap_popout();
 }
 #else
@@ -2239,7 +2614,7 @@ void draw_model_in_panel_gl() {
                      ImVec2(1.0f, 0.0f));
     }
 
-    if (hovered && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+    if (hovered && ImGui::IsKeyPressed(S.key_close_preview)) {
         MP_Release(g_mp);
         g_mp.has_model = false;
         g_mp_initialized = false;

@@ -22,9 +22,25 @@ bool build_mdl_buffer_for_name_with_body(const std::string& mdl_name,
 {
     out.clear();
 
-    std::string key = mdl_name;
-    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-    std::replace(key.begin(), key.end(), '\\', '/');
+    std::string full_key = mdl_name;
+    std::transform(full_key.begin(), full_key.end(),
+                   full_key.begin(), ::tolower);
+    std::replace(full_key.begin(), full_key.end(), '\\', '/');
+
+    std::string base_key = full_key;
+    {
+        size_t sl = base_key.find_last_of('/');
+        if (sl != std::string::npos) base_key = base_key.substr(sl + 1);
+    }
+
+    auto find_with_fallback = [&](const std::string& bnk) -> int {
+        int idx = BnkCache::find_index(bnk, full_key);
+        if (idx >= 0) return idx;
+        if (base_key != full_key) {
+            idx = BnkCache::find_index(bnk, base_key);
+        }
+        return idx;
+    };
 
     std::vector<std::string> header_candidates;
     std::vector<std::string> body_candidates;
@@ -61,10 +77,10 @@ bool build_mdl_buffer_for_name_with_body(const std::string& mdl_name,
     add_unique(body_candidates, find_bnk_by_filename("globals_models.bnk"));
 
     for (const auto& header_bnk : header_candidates) {
-        const int hidx = BnkCache::find_index(header_bnk, key);
+        const int hidx = find_with_fallback(header_bnk);
         if (hidx < 0) continue;
         for (const auto& body_bnk : body_candidates) {
-            const int ridx = BnkCache::find_index(body_bnk, key);
+            const int ridx = find_with_fallback(body_bnk);
             if (ridx < 0) continue;
             try {
                 auto vh = BnkCache::extract_bytes(header_bnk, hidx);
@@ -80,13 +96,105 @@ bool build_mdl_buffer_for_name_with_body(const std::string& mdl_name,
     }
 
     for (const auto& body_bnk : body_candidates) {
-        const int ridx = BnkCache::find_index(body_bnk, key);
+        const int ridx = find_with_fallback(body_bnk);
         if (ridx < 0) continue;
         try {
             out = BnkCache::extract_bytes(body_bnk, ridx);
             if (!out.empty()) return true;
         } catch (...) {
             out.clear();
+        }
+    }
+
+    {
+        const FlatAssetEntry* hit = nullptr;
+        for (const auto& e : S.all_mdl_files) {
+            std::string np = e.full_path;
+            std::transform(np.begin(), np.end(), np.begin(), ::tolower);
+            std::replace(np.begin(), np.end(), '\\', '/');
+            if (np == full_key) { hit = &e; break; }
+        }
+        if (!hit && !base_key.empty()) {
+            for (const auto& e : S.all_mdl_files) {
+                std::string nm = e.name;
+                std::transform(nm.begin(), nm.end(), nm.begin(), ::tolower);
+                if (nm == base_key) { hit = &e; break; }
+            }
+        }
+
+        if (hit) {
+            try {
+                auto vr = BnkCache::extract_bytes(hit->bnk_path, hit->file_index);
+                if (!vr.empty()) {
+                    std::vector<std::string> dyn_header_candidates;
+                    {
+                        std::string body_path = hit->bnk_path;
+                        std::string body_leaf =
+                            std::filesystem::path(body_path).filename().string();
+                        std::string lower = body_leaf;
+                        std::transform(lower.begin(), lower.end(),
+                                       lower.begin(), ::tolower);
+                        const std::string suf = "_models.bnk";
+                        if (lower.size() > suf.size() &&
+                            lower.compare(lower.size() - suf.size(),
+                                          suf.size(), suf) == 0)
+                        {
+                            std::string sibling_leaf =
+                                body_leaf.substr(0, body_leaf.size() - suf.size())
+                                + "_model_headers.bnk";
+                            std::filesystem::path sib_path(body_path);
+                            sib_path.replace_filename(sibling_leaf);
+                            dyn_header_candidates.push_back(sib_path.string());
+                        }
+                    }
+                    {
+                        auto it = S.nested_bnk_parents.find(hit->bnk_path);
+                        if (it != S.nested_bnk_parents.end()) {
+                            const std::string& parent = it->second;
+                            for (const auto& sib : S.nested_bnk_paths) {
+                                auto sib_it = S.nested_bnk_parents.find(sib);
+                                if (sib_it == S.nested_bnk_parents.end()) continue;
+                                if (sib_it->second != parent) continue;
+                                std::string sib_leaf =
+                                    std::filesystem::path(sib).filename().string();
+                                std::transform(sib_leaf.begin(), sib_leaf.end(),
+                                               sib_leaf.begin(), ::tolower);
+                                if (sib_leaf.find("header") != std::string::npos &&
+                                    sib_leaf.find("model")  != std::string::npos)
+                                {
+                                    add_unique(dyn_header_candidates, sib);
+                                }
+                            }
+                        }
+                    }
+
+                    std::vector<uint8_t> vh;
+                    for (const auto& hdr : dyn_header_candidates) {
+                        const int hidx = find_with_fallback(hdr);
+                        if (hidx < 0) continue;
+                        try {
+                            vh = BnkCache::extract_bytes(hdr, hidx);
+                            if (!vh.empty()) break;
+                        } catch (...) { vh.clear(); }
+                    }
+                    if (vh.empty()) {
+                        for (const auto& header_bnk : header_candidates) {
+                            const int hidx = find_with_fallback(header_bnk);
+                            if (hidx < 0) continue;
+                            try {
+                                vh = BnkCache::extract_bytes(header_bnk, hidx);
+                                if (!vh.empty()) break;
+                            } catch (...) { vh.clear(); }
+                        }
+                    }
+                    out.reserve(vh.size() + vr.size());
+                    out.insert(out.end(), vh.begin(), vh.end());
+                    out.insert(out.end(), vr.begin(), vr.end());
+                    return !out.empty();
+                }
+            } catch (...) {
+                out.clear();
+            }
         }
     }
 
@@ -151,27 +259,6 @@ static void compute_smooth_normals(size_t vcount, const std::vector<uint32_t>& i
         float l=std::sqrt(x*x+y*y+z*z); if(l>1e-6f){ out_n[v*3+0]=x/l; out_n[v*3+1]=y/l; out_n[v*3+2]=z/l; } else { out_n[v*3+0]=0; out_n[v*3+1]=1; out_n[v*3+2]=0; }
     }
 
-    /* Inverted-winding fixup.
-     *
-     * Some MDL assets (ESA_Wheatsheaves and friends) have face indices
-     * ordered such that the cross-product `u × v` we just summed points
-     * INTO the mesh's interior rather than out of it.  Since the
-     * shader's diffuse term uses abs(dot(N,L)) the surface still gets
-     * lit, but the normal-map perturbation and specular reflection are
-     * mirrored across the surface and the model reads "wrong" — the
-     * sheaf appears lit from the inside-out.
-     *
-     * Heuristic: take the mesh centroid (mean of vertex positions), and
-     * for each vertex with a non-zero normal sample the sign of
-     * dot(normal, vertex - centroid).  For a closed/quasi-closed mesh
-     * with consistent outward-pointing normals this dot is positive on
-     * the overwhelming majority of vertices; if it's negative on the
-     * overwhelming majority, the winding is reversed and we flip every
-     * normal in-place.
-     *
-     * Done as a strict majority vote (>= 80% inward) so working models
-     * — including hollow shells and concave shapes where some normals
-     * legitimately point in — are never touched. */
     if (vcount >= 8) {
         double cx_acc = 0, cy_acc = 0, cz_acc = 0;
         for (size_t v = 0; v < vcount; ++v) {
@@ -622,16 +709,6 @@ if(is_foliage){
         if(sub>0 && sub<65535u){
             for(uint32_t s=0;s<sub;s++){
                 uint32_t marker; if(!r.u32be(marker)) return false;
-                /* The 4-byte field after the marker is the MATERIAL
-                   index (low byte populated, upper bytes zero).  The
-                   following 1-byte field is a per-submesh flag
-                   (always 0x01 in the assets I've inspected) — NOT
-                   the material index.  The old parser had these two
-                   fields swapped, which silently worked for any mesh
-                   with matCount<=1 (the geometry decoder clamps an
-                   out-of-range matIdx to 0) but broke meshes with
-                   multiple submeshes mapped to different materials
-                   (e.g. BL_Lamp_Post's "lantern" + "post"). */
                 uint32_t matIdxRaw; if(!r.u32be(matIdxRaw)) return false;
                 uint8_t subFlag; if(!r.u8(subFlag)) return false;
                 (void)subFlag;
@@ -705,9 +782,6 @@ if(is_foliage){
             if(subn>0 && subn<65535u){
                 for(uint32_t s=0;s<subn;s++){
                     uint32_t marker; if(!r.u32be(marker)) return false;
-                    /* See note above: 4-byte field after marker is
-                       the material index, the 1-byte field after
-                       that is a flag. */
                     uint32_t matIdxRaw; if(!r.u32be(matIdxRaw)) return false;
                     uint8_t subFlag; if(!r.u8(subFlag)) return false;
                     (void)subFlag;
@@ -753,13 +827,6 @@ if(is_foliage){
         return true;
     }
 
-    /* Save r.i BEFORE the optional-string probe.  This is only used
-       by the else-branch's mi=0 bufferID search below: if the probe
-       advances r.i past a valid bufferID header (which can happen when
-       garbage at the end of the mesh-metadata section happens to start
-       with a printable byte), we want to be able to scan back to the
-       original offset.  We DO NOT rewind r.i directly here — that would
-       change behaviour for models that worked under the old rule. */
     const size_t mesh_buf_search_anchor = r.i;
     bool wasStringFound = false;
     if(r.i < r.n){
@@ -856,16 +923,6 @@ if(is_foliage){
             std::vector<MDLSubMeshInfo> submeshes;
             for(uint32_t s=0; s<final_submesh_count; s++){
                 uint32_t marker; if(!r.u32be(marker)) return false;
-                /* The 4-byte field after the marker is the MATERIAL
-                   index (low byte populated, upper bytes zero).  The
-                   following 1-byte field is a per-submesh flag
-                   (always 0x01 in the assets I've inspected) — NOT
-                   the material index.  The old parser had these two
-                   fields swapped, which silently worked for any mesh
-                   with matCount<=1 (the geometry decoder clamps an
-                   out-of-range matIdx to 0) but broke meshes with
-                   multiple submeshes mapped to different materials
-                   (e.g. BL_Lamp_Post's "lantern" + "post"). */
                 uint32_t matIdxRaw; if(!r.u32be(matIdxRaw)) return false;
                 uint8_t subFlag; if(!r.u8(subFlag)) return false;
                 (void)subFlag;
@@ -894,26 +951,6 @@ if(is_foliage){
                 if(!r.skip(fsz)) return false;
             }
 
-            /* MDL prop variants encountered so far differ in what
-               (if anything) sits between the index buffer and the
-               next mesh header:
-
-                 layout A (BS_Cemetary, BL_Lamp):
-                     [index buffer] [4-byte zero pad] [next mesh]
-
-                 layout B (BO_Lamp_Post):
-                     [index buffer] [secondary 16-byte/vert buffer]
-                                    [4-byte zero pad] [next mesh]
-
-                 layout C (rare / hypothetical):
-                     [index buffer] [next mesh — no pad]
-
-               Probe: a real next-mesh header is a printable ASCII
-               string (1..32 chars), null, then 0x01.  Walk the
-               candidate offsets in order and use the first that
-               matches.  Layout B's secondary block is recorded so
-               the geometry decoder has the option to read UVs from
-               it later. */
             auto looks_like_mesh_header = [&](size_t at) -> bool {
                 if (at >= r.n) return false;
                 uint8_t b0 = r.p[at];
@@ -926,7 +963,7 @@ if(is_foliage){
                     ++p;
                 }
                 if (p >= lim || r.p[p] != 0) return false;
-                if (p == at) return false;          /* empty string */
+                if (p == at) return false;          
                 if (p - at > 32) return false;
                 if (p + 1 >= r.n) return false;
                 return r.p[p + 1] == 0x01;
@@ -939,54 +976,22 @@ if(is_foliage){
                 const bool is_skinned = (out.BoneCount > 0);
 
                 if (is_skinned) {
-                    /* Skinned meshes (e.g. NeutralWolf) carry their UVs
-                       in a SECONDARY buffer of 16 bytes per vertex
-                       that lives immediately after the index buffer.
-                       The UV pair lives in bytes 0-7 as two BE floats;
-                       bytes 8-15 hold a second attribute (likely
-                       tangent / second UV set / normal pair) that the
-                       renderer doesn't currently use.
-
-                       The primary 20-byte vertex holds position +
-                       bone weights for skinned models, so the offset-12
-                       half-pair the geometry decoder normally reads
-                       comes out as (0, 0) — which is why textures
-                       appear solid-colour on unfixed skinned models.
-
-                       Record the offset+stride so parse_mdl_geometry
-                       can sample from it; do NOT advance r.i, because
-                       the next-mesh scan in the next iteration walks
-                       byte-by-byte and lands on the right header
-                       regardless of what's between. */
                     if (r.i + (size_t)vtx * 16 <= r.n) {
                         uv_off    = r.i;
                         uv_stride = 16;
                     }
                 } else if (!last_mesh) {
                     if (looks_like_mesh_header(r.i)) {
-                        /* Layout C — nothing between index buffer
-                           and next mesh.  Leave r.i alone. */
                     } else if (r.i + skip_pad_only <= r.n
                             && looks_like_mesh_header(r.i + skip_pad_only)) {
-                        /* Layout A — 4-byte pad only. */
                         if (!r.skip(skip_pad_only)) return false;
                     } else if (r.i + skip_secondary <= r.n
                             && looks_like_mesh_header(r.i + skip_secondary)) {
-                        /* Layout B — secondary buffer + 4-byte pad. */
                         uv_off    = r.i;
                         uv_stride = 16;
                         if (!r.skip(skip_secondary)) return false;
                     }
-                    /* None of the probes matched: fall through and let
-                       the existing scan-forward in the next iteration
-                       try to recover.  Don't guess. */
                 } else {
-                    /* Last mesh, non-skinned.  We can't probe against
-                       a successor, so only record a secondary block
-                       when the layout-B size fits the remaining file.
-                       Otherwise leave uv_off=0 — the geometry decoder
-                       will fall back to reading UVs from the primary
-                       20-byte vertex (which is correct for layout A & C). */
                     if (r.i + skip_secondary <= r.n) {
                         uv_off    = r.i;
                         uv_stride = 16;
@@ -1009,13 +1014,6 @@ if(is_foliage){
 
         } else {
             bool found = false;
-            /* On the FIRST mesh-buffer iteration only, allow the
-               search to scan backwards a few bytes — the optional
-               wasStringFound probe at the top of the mesh-buffer
-               section can have advanced r.i past a valid bufferID
-               header when it ate a chunk of garbage (e.g.
-               NeutralDog).  For mi>0 we keep the original
-               behaviour (search forward from r.i). */
             size_t searchStart = (mi == 0 && mesh_buf_search_anchor < r.i)
                                    ? mesh_buf_search_anchor
                                    : r.i;
@@ -1050,16 +1048,6 @@ if(is_foliage){
             }
 
             if(!found) {
-                /* No bufferID==mi header anywhere in the file — this
-                   slot corresponds to a metadata-only mesh (e.g.
-                   NeutralDog's "Scene_Material") OR the slot is
-                   beyond the actual buffer count (header MeshCount
-                   was inflated).  Either way, push an empty buffer
-                   so MeshBuffers stays 1:1 with Meshes (the
-                   geometry decoder requires that) and the user
-                   simply sees nothing for that mesh.  This path
-                   only fires when the old code would have returned
-                   false outright, so working models are unaffected. */
                 MDLMeshBufferInfo mb;
                 mb.MeshIndex = mi;
                 out.MeshBuffers.push_back(mb);
@@ -1078,9 +1066,6 @@ if(is_foliage){
             if(sub2>0 && sub2<65535u){
                 for(uint32_t s=0;s<sub2;s++){
                     uint32_t marker; if(!r.u32be(marker)) return false;
-                    /* See note above: 4-byte field after marker is
-                       the material index, the 1-byte field after
-                       that is a flag. */
                     uint32_t matIdxRaw; if(!r.u32be(matIdxRaw)) return false;
                     uint8_t subFlag; if(!r.u8(subFlag)) return false;
                     (void)subFlag;
@@ -1373,17 +1358,6 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
                 all_bone_weights[v*4+3] = 0.0f;
             }
 
-            /* Skinned meshes (info.BoneCount > 0) carry UVs in a
-               SECONDARY buffer of 16 bytes per vertex, with the UV
-               pair as 2 BE floats in bytes 0-7 of each record.  The
-               primary 20-byte vertex on those meshes holds position +
-               bone weights — no UV at byte +12 — so the offset-12
-               half-pair read below would give (0,0).
-
-               UvBufferStride == 16 with a non-zero offset is the
-               signal that parse_mdl_info detected this layout (it
-               only does so when BoneCount > 0).  Non-skinned models
-               keep the original behaviour. */
             size_t uv_offset = mb.IsAltPath ? 12 : 20;
             uint16_t uu=(uint16_t(p[uv_offset+0])<<8)|p[uv_offset+1];
             uint16_t vv=(uint16_t(p[uv_offset+2])<<8)|p[uv_offset+3];
@@ -1527,36 +1501,11 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
     return true;
 }
 
-/* -----------------------------------------------------------------------
- * polymsh-marker fallback.
- *
- * Some MDL assets (e.g. RS_Golden_Acorn) have a leaf-style material whose
- * texture layout the standard material-list walker can't traverse — there
- * are empty mt/extra string slots followed by an additional translucency
- * texture path that the existing strz(5) + 3*u32 + peek schema doesn't
- * account for.  The walker over-runs the metadata section, lands inside
- * the translucency path, the optional-string probe at the top of the
- * mesh-buffer section then mis-anchors, the per-mesh `bufferID == mi`
- * scan never finds a valid anchor in the file (these models use the
- * `polymsh\0\x01` wasStringFound layout, not the integer-prefixed
- * bufferID layout the else-branch searches for), and we end up with
- * three empty buffer records.
- *
- * This fallback runs after parse_mdl_info when every populated mesh has
- * VertexCount == 0.  It walks the buffer scanning for the canonical
- * `polymsh\0\x01` marker, decodes a wasStringFound-style buffer at each
- * hit, and writes the recovered records back into info.MeshBuffers
- * 1:1 with the existing Meshes (which the original walker parsed
- * correctly — only the buffer-side anchor was off).
- *
- * Strictly additive: the function only mutates info when called, and is
- * gated by the all-empty check at the call site. */
 bool reparse_mdl_buffers_via_polymsh_scan(const std::vector<unsigned char>& data,
                                           MDLInfo& info)
 {
     if (data.size() < 16) return false;
 
-    /* Walk every "polymsh\0\x01" run in the file. */
     static const unsigned char kMagic[9] = {
         'p','o','l','y','m','s','h','\0','\x01'
     };
@@ -1567,22 +1516,6 @@ bool reparse_mdl_buffers_via_polymsh_scan(const std::vector<unsigned char>& data
     for (size_t scan = 0; scan + sizeof(kMagic) <= data.size(); ++scan) {
         if (std::memcmp(data.data() + scan, kMagic, sizeof(kMagic)) != 0) continue;
 
-        /* Header layout matches parse_mdl_info's `wasStringFound` branch:
-             "polymsh\0\x01"  (9 bytes)
-             u32 mesh_id
-             u32 mesh_id_copy
-             u32 someCount1
-             u32 tlen        (face-index count)
-             u32 vtx         (vertex count)
-             u8[40]          (unknown — bbox / radius etc.)
-             u32 submesh_count
-             u32 next_value  (== 0xFFFFFFFF for a real submesh marker)
-             ... per-submesh records (marker u32, matIdx u32, flag u8,
-                                      faceCount u32, startIdx u32,
-                                      6 f32s)
-             u8[vtx*20]      (vertex buffer)
-             u8[tlen*2]      (16-bit index buffer)
-        */
         r.i = scan + sizeof(kMagic);
         uint32_t mesh_id = 0, mesh_id_copy = 0;
         if (!r.u32be(mesh_id))      continue;
@@ -1606,9 +1539,6 @@ bool reparse_mdl_buffers_via_polymsh_scan(const std::vector<unsigned char>& data
             final_submesh_count = submesh_count;
         }
 
-        /* Locate the 0xFFFFFFFF submesh-start marker — same forward
-           probe the main parser uses, capped at 1 KB so a malformed
-           header bails fast instead of scanning the rest of the file. */
         bool markerFound = false;
         for (size_t sp = r.i; sp + 4 <= r.n && sp < r.i + 1024; ++sp) {
             uint32_t m = (uint32_t(r.p[sp])<<24) | (uint32_t(r.p[sp+1])<<16) |
@@ -1660,19 +1590,11 @@ bool reparse_mdl_buffers_via_polymsh_scan(const std::vector<unsigned char>& data
         mb.MeshIndex     = (uint32_t)recovered.size();
         recovered.push_back(std::move(mb));
 
-        /* Skip past this body so the loop doesn't re-scan into the
-           vertex/index data we just consumed. */
         scan = r.i - 1;
     }
 
     if (recovered.empty()) return false;
 
-    /* Align the recovered buffers 1:1 with whatever Meshes the original
-       walker produced — parse_mdl_geometry asserts MeshBuffers.size()
-       == Meshes.size() and bails otherwise.  If we recovered more
-       buffers than the metadata declared, trim; if fewer, leave any
-       trailing slots as zero-filled (the geometry decoder already
-       tolerates that). */
     info.MeshBuffers.clear();
     info.MeshBuffers.reserve(info.Meshes.size());
     for (size_t mi = 0; mi < info.Meshes.size(); ++mi) {

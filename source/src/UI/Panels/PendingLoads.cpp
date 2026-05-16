@@ -38,12 +38,25 @@ std::string g_pending_mdl_full_path;
 std::atomic<bool> g_pending_tex_load{false};
 int g_pending_tex_index = -1;
 
-namespace {
+// Global extern declarations to resolve MSVC internal linkage error (C7631)
+extern ModelPreview g_mp;
+extern bool         g_mp_initialized;
+extern FlyCam       g_flycam;
+
+    namespace {
 
 struct CachedPropModel {
     bool loaded = false;
     MDLInfo info;
     std::vector<MDLMeshGeom> geoms;
+};
+
+struct GeneratedTerrainTexture {
+    size_t               mesh_index = 0;
+    std::string          label;
+    std::vector<uint8_t> rgba;
+    int                  width = 0;
+    int                  height = 0;
 };
 
 static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
@@ -52,85 +65,68 @@ static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
                                          float terrain_cx,
                                          float terrain_cz);
 
+static void normalize_grid_uvs(MDLMeshGeom& geom, uint32_t width, uint32_t height)
+{
+    if (width < 2 || height < 2) return;
+    const size_t vertex_count = size_t(width) * size_t(height);
+    if (geom.uvs.size() < vertex_count * 2) return;
+
+    for (uint32_t y = 0; y < height; ++y) {
+        const float v = float(y) / float(height - 1);
+        for (uint32_t x = 0; x < width; ++x) {
+            const size_t i = size_t(y) * width + x;
+            geom.uvs[i * 2 + 0] = float(x) / float(width - 1);
+            geom.uvs[i * 2 + 1] = v;
+        }
+    }
+}
+
 #ifdef _WIN32
 struct LevelPropStreamState {
-    bool active = false;
-    std::vector<Level::PropBlock> blocks;
-    std::string model_body_bnk;
-    std::vector<MDLMeshGeom> geoms;
-    MDLInfo info;
-    std::unordered_map<std::string, CachedPropModel> cache;
-    size_t block_index = 0;
-    size_t instance_index = 0;
-    size_t instances_loaded = 0;
-    size_t total_instances = 0;
-    size_t model_misses = 0;
-    float terrain_tile_size = 1.0f;
-    int terrain_width = 0;
-    int terrain_height = 0;
+    std::atomic<int>            phase{0};
+    std::atomic<size_t>         instances_loaded{0};
+    size_t                      total_instances = 0;
+    size_t                      model_misses    = 0;
+    std::vector<MDLMeshGeom>    geoms;     // terrain + transformed props (worker writes, main reads after phase==2)
+    MDLInfo                     info;
+    std::thread                 worker;
+    std::vector<GeneratedTerrainTexture> terrain_textures;
+
+    std::vector<Level::PropBlock>  blocks;
+    std::string                    model_body_bnk;
+    float                          terrain_tile_size = 1.0f;
+    int                            terrain_width  = 0;
+    int                            terrain_height = 0;
 };
 
 static LevelPropStreamState g_level_prop_stream;
 
-static void start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
-                                    MDLInfo info)
+static void prop_worker_run(LevelPropStreamState* s)
 {
-    g_level_prop_stream = LevelPropStreamState{};
-    g_level_prop_stream.blocks = g_pending_level_prop_blocks;
-    g_level_prop_stream.model_body_bnk = g_pending_level_model_body_bnk;
-    g_level_prop_stream.geoms = std::move(geoms);
-    g_level_prop_stream.info = std::move(info);
-    g_level_prop_stream.terrain_tile_size = g_pending_terrain_ghf_tile_size;
-    g_level_prop_stream.terrain_width = g_pending_terrain_ghf_width;
-    g_level_prop_stream.terrain_height = g_pending_terrain_ghf_height;
-    for (const auto& b : g_level_prop_stream.blocks) {
-        g_level_prop_stream.total_instances += b.instances.size();
-    }
-    g_level_prop_stream.total_instances =
-        std::min<size_t>(g_level_prop_stream.total_instances, 256);
-    g_level_prop_stream.active = g_level_prop_stream.total_instances > 0;
-}
-
-static bool stream_level_prop_batch(ID3D11Device* device)
-{
-    if (!g_level_prop_stream.active) return false;
-
-    constexpr size_t kBatchInstances = 8;
     const float terrain_cx =
-        (float(g_level_prop_stream.terrain_width) - 1.0f) * 0.5f *
-        g_level_prop_stream.terrain_tile_size;
+        (float(s->terrain_width) - 1.0f) * 0.5f * s->terrain_tile_size;
     const float terrain_cz =
-        (float(g_level_prop_stream.terrain_height) - 1.0f) * 0.5f *
-        g_level_prop_stream.terrain_tile_size;
+        (float(s->terrain_height) - 1.0f) * 0.5f * s->terrain_tile_size;
 
-    size_t added_this_frame = 0;
-    while (added_this_frame < kBatchInstances &&
-           g_level_prop_stream.instances_loaded <
-               g_level_prop_stream.total_instances &&
-           g_level_prop_stream.block_index < g_level_prop_stream.blocks.size())
-    {
-        auto& block = g_level_prop_stream.blocks[g_level_prop_stream.block_index];
-        if (block.model_path.empty() ||
-            g_level_prop_stream.instance_index >= block.instances.size())
-        {
-            ++g_level_prop_stream.block_index;
-            g_level_prop_stream.instance_index = 0;
+    std::unordered_map<std::string, CachedPropModel> cache;
+
+    for (const auto& block : s->blocks) {
+        if (block.model_path.empty()) {
+            s->instances_loaded.fetch_add(block.instances.size(),
+                                          std::memory_order_relaxed);
             continue;
         }
 
-        auto& cached = g_level_prop_stream.cache[block.model_path];
+        auto& cached = cache[block.model_path];
         if (!cached.loaded) {
             std::vector<unsigned char> buf;
             if (build_mdl_buffer_for_name_with_body(block.model_path,
-                                                    g_level_prop_stream.model_body_bnk,
-                                                    buf) &&
-                parse_mdl_info(buf, cached.info, block.model_path)) {
+                                                    s->model_body_bnk, buf) &&
+                parse_mdl_info(buf, cached.info, block.model_path))
+            {
                 bool all_empty = !cached.info.MeshBuffers.empty();
                 for (const auto& mb : cached.info.MeshBuffers) {
-                    if (mb.VertexCount > 0) {
-                        all_empty = false;
-                        break;
-                    }
+                    if (mb.VertexCount > 0) { all_empty = false; break; }
                 }
                 if (all_empty) {
                     reparse_mdl_buffers_via_polymsh_scan(buf, cached.info);
@@ -139,30 +135,141 @@ static bool stream_level_prop_batch(ID3D11Device* device)
             }
             cached.loaded = true;
             if (cached.geoms.empty()) {
-                ++g_level_prop_stream.model_misses;
+                ++s->model_misses;
+                OutputLog::warn("level props: model load miss " +
+                                block.model_path);
+
+                std::string want = block.model_path;
+                size_t sl = want.find_last_of("/\\");
+                std::string want_base = (sl == std::string::npos)
+                                           ? want : want.substr(sl + 1);
+                std::string stem = want_base;
+                size_t dot = stem.find_last_of('.');
+                if (dot != std::string::npos) stem.resize(dot);
+                std::transform(stem.begin(), stem.end(), stem.begin(),
+                               ::tolower);
+
+                int shown = 0;
+                for (const auto& e : S.all_mdl_files) {
+                    if (shown >= 5) break;
+                    std::string lname = e.name;
+                    std::transform(lname.begin(), lname.end(),
+                                   lname.begin(), ::tolower);
+                    if (lname.find(stem) == std::string::npos) continue;
+                    std::string bnk_leaf =
+                        std::filesystem::path(e.bnk_path).filename().string();
+                    OutputLog::info("  near-match: " + e.full_path +
+                                    "  (in " + bnk_leaf + ")");
+                    ++shown;
+                }
+                if (shown == 0) {
+                    OutputLog::info("  no near-matches in " +
+                                    std::to_string(S.all_mdl_files.size()) +
+                                    "-entry global .mdl index");
+                }
             }
         }
 
-        if (!cached.geoms.empty()) {
-            const auto& inst = block.instances[g_level_prop_stream.instance_index];
+        if (cached.geoms.empty()) {
+            s->instances_loaded.fetch_add(block.instances.size(),
+                                          std::memory_order_relaxed);
+            continue;
+        }
+
+        for (const auto& inst : block.instances) {
             for (const auto& src : cached.geoms) {
                 if (!src.positions.empty() && !src.indices.empty()) {
-                    append_transformed_prop_geom(g_level_prop_stream.geoms,
-                                                 src, inst,
+                    append_transformed_prop_geom(s->geoms, src, inst,
                                                  terrain_cx, terrain_cz);
                 }
             }
-            ++added_this_frame;
+            s->instances_loaded.fetch_add(1, std::memory_order_relaxed);
         }
-
-        ++g_level_prop_stream.instance_index;
-        ++g_level_prop_stream.instances_loaded;
     }
 
-    if (added_this_frame > 0) {
-        extern ModelPreview g_mp;
-        extern bool         g_mp_initialized;
-        extern FlyCam       g_flycam;
+    s->phase.store(2, std::memory_order_release);   // done — render thread will pick up
+}
+
+static void start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
+                                    MDLInfo info)
+{
+    if (g_level_prop_stream.worker.joinable()) {
+        g_level_prop_stream.worker.join();
+    }
+    g_level_prop_stream.phase.store(0);
+    g_level_prop_stream.instances_loaded.store(0);
+    g_level_prop_stream.total_instances = 0;
+    g_level_prop_stream.model_misses    = 0;
+    g_level_prop_stream.terrain_textures.clear();
+    g_level_prop_stream.geoms           = std::move(geoms);
+    g_level_prop_stream.info            = std::move(info);
+    g_level_prop_stream.blocks          = g_pending_level_prop_blocks;
+    g_level_prop_stream.model_body_bnk  = g_pending_level_model_body_bnk;
+    g_level_prop_stream.terrain_tile_size = g_pending_terrain_ghf_tile_size;
+    g_level_prop_stream.terrain_width   = g_pending_terrain_ghf_width;
+    g_level_prop_stream.terrain_height  = g_pending_terrain_ghf_height;
+
+    for (const auto& b : g_level_prop_stream.blocks) {
+        g_level_prop_stream.total_instances += b.instances.size();
+    }
+    if (g_level_prop_stream.total_instances == 0) return;
+
+
+    progress_open((int)g_level_prop_stream.total_instances,
+                  "Loading props...");
+
+    g_level_prop_stream.phase.store(1);
+    g_level_prop_stream.worker = std::thread(prop_worker_run,
+                                             &g_level_prop_stream);
+}
+
+static void bind_generated_terrain_textures(
+    ID3D11Device* device,
+    const std::vector<GeneratedTerrainTexture>& textures,
+    const char* log_prefix)
+{
+    if (!device || textures.empty() || g_mp.meshes.empty()) return;
+
+    for (const GeneratedTerrainTexture& t : textures) {
+        if (t.rgba.empty() || t.width <= 0 || t.height <= 0) continue;
+        if (t.mesh_index >= g_mp.meshes.size()) continue;
+
+        ID3D11ShaderResourceView* srv =
+            create_srv_from_rgba(device, t.width, t.height, t.rgba);
+        if (!srv) continue;
+
+        MPPerMesh& m = g_mp.meshes[t.mesh_index];
+        if (m.srv_diffuse) m.srv_diffuse->Release();
+        m.srv_diffuse      = srv;
+        m.diffuse_visible  = true;
+        m.diffuse_tex_name = t.label;
+
+        TerrainTextureRegistry::Register(t.label, t.rgba, t.width, t.height);
+        OutputLog::success(std::string(log_prefix) + ": " + t.label +
+                           " (" + std::to_string(t.width) + "x" +
+                           std::to_string(t.height) + ")");
+    }
+}
+
+static bool stream_level_prop_batch(ID3D11Device* device)
+{
+    const int phase = g_level_prop_stream.phase.load(std::memory_order_acquire);
+    if (phase == 0 || phase == 3) return false;
+
+    const size_t loaded =
+        g_level_prop_stream.instances_loaded.load(std::memory_order_relaxed);
+    const size_t total = g_level_prop_stream.total_instances;
+    progress_update((int)loaded, (int)std::max<size_t>(total, 1),
+                    "Loading props " + std::to_string(loaded) + "/" +
+                    std::to_string(total));
+
+    if (phase != 2) return true;   // still working — just keep showing progress
+
+    if (g_level_prop_stream.worker.joinable()) {
+        g_level_prop_stream.worker.join();
+    }
+
+    if (!g_level_prop_stream.geoms.empty()) {
         FlyCam saved_cam = g_flycam;
         if (!g_mp_initialized) {
             MP_Init(device, g_mp, 800, 600);
@@ -170,35 +277,30 @@ static bool stream_level_prop_batch(ID3D11Device* device)
         }
         MP_Build(device, g_level_prop_stream.geoms,
                  g_level_prop_stream.info, g_mp);
+        bind_generated_terrain_textures(
+            device,
+            g_level_prop_stream.terrain_textures,
+            "terrain texture rebound after prop upload");
         g_mp.no_tilt = true;
         S.terrain_mode = true;
         g_flycam = saved_cam;
     }
 
-    const int pct = 75 + (int)(
-        (20.0 * double(g_level_prop_stream.instances_loaded)) /
-        double(std::max<size_t>(g_level_prop_stream.total_instances, 1)));
-    progress_update(pct, 100,
-                    "Loading props " +
-                    std::to_string(g_level_prop_stream.instances_loaded) +
-                    "/" +
-                    std::to_string(g_level_prop_stream.total_instances));
+    OutputLog::info("level props: streamed " + std::to_string(loaded) +
+                    " prop instances" +
+                    (g_level_prop_stream.model_misses
+                        ? " (" + std::to_string(g_level_prop_stream.model_misses) +
+                          " model load misses)"
+                        : std::string()));
+    progress_done();
 
-    if (g_level_prop_stream.instances_loaded >=
-            g_level_prop_stream.total_instances ||
-        g_level_prop_stream.block_index >= g_level_prop_stream.blocks.size())
-    {
-        OutputLog::info("level props: streamed " +
-                        std::to_string(g_level_prop_stream.instances_loaded) +
-                        " type-2 instances" +
-                        (g_level_prop_stream.model_misses
-                            ? " (" + std::to_string(g_level_prop_stream.model_misses) +
-                              " model load misses)"
-                            : std::string()));
-        g_level_prop_stream = LevelPropStreamState{};
-        progress_done();
-    }
-
+    g_level_prop_stream.geoms.clear();
+    g_level_prop_stream.geoms.shrink_to_fit();
+    g_level_prop_stream.blocks.clear();
+    g_level_prop_stream.blocks.shrink_to_fit();
+    g_level_prop_stream.terrain_textures.clear();
+    g_level_prop_stream.terrain_textures.shrink_to_fit();
+    g_level_prop_stream.phase.store(3);
     return true;
 }
 #endif
@@ -206,23 +308,24 @@ static bool stream_level_prop_batch(ID3D11Device* device)
 static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
                                          const MDLMeshGeom& src,
                                          const Level::PropInstance& inst,
-                                         float terrain_cx,
-                                         float terrain_cz)
+                                         float ,
+                                         float )
 {
     MDLMeshGeom dst = src;
-    const float px = inst.values[0] - terrain_cx;
+
+    const float px = inst.values[0];
     const float py = inst.values[2];
-    const float pz = inst.values[1] - terrain_cz;
-    const float s = inst.values[6];
-    const float c = inst.values[7];
-    const float sx = inst.values[9] == 0.0f ? 1.0f : inst.values[9];
-    const float sy = inst.values[10] == 0.0f ? sx : inst.values[10];
-    const float sz = inst.values[11] == 0.0f ? sx : inst.values[11];
+    const float pz = inst.values[1];
+    const float s  = inst.values[6];
+    const float c  = inst.values[7];
+    const float sx = inst.values[9]  == 0.0f ? 1.0f : inst.values[9];
+    const float sy = inst.values[10] == 0.0f ? sx   : inst.values[10];
+    const float sz = inst.values[11] == 0.0f ? sx   : inst.values[11];
 
     for (size_t i = 0; i + 2 < dst.positions.size(); i += 3) {
         const float lx = src.positions[i + 0] * sx;
-        const float ly = src.positions[i + 2] * sy;
-        const float lz = -src.positions[i + 1] * sz;
+        const float ly = src.positions[i + 2] * sz;
+        const float lz = src.positions[i + 1] * sy;
         dst.positions[i + 0] = px + lx * c + lz * s;
         dst.positions[i + 1] = py + ly;
         dst.positions[i + 2] = pz - lx * s + lz * c;
@@ -232,7 +335,7 @@ static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
         for (size_t i = 0; i + 2 < dst.normals.size(); i += 3) {
             const float lx = src.normals[i + 0];
             const float ly = src.normals[i + 2];
-            const float lz = -src.normals[i + 1];
+            const float lz = src.normals[i + 1];
             dst.normals[i + 0] = lx * c + lz * s;
             dst.normals[i + 1] = ly;
             dst.normals[i + 2] = -lx * s + lz * c;
@@ -249,7 +352,6 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
 {
     if (g_pending_level_prop_blocks.empty()) return;
 
-    constexpr size_t kMaxInstances = 256;
     const float terrain_cx =
         (float(g_pending_terrain_ghf_width) - 1.0f) * 0.5f *
         g_pending_terrain_ghf_tile_size;
@@ -306,7 +408,6 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
 
         if (cached.geoms.empty()) continue;
         for (const auto& inst : block.instances) {
-            if (instances_seen >= kMaxInstances) break;
             ++instances_seen;
             for (const auto& src : cached.geoms) {
                 if (!src.positions.empty() && !src.indices.empty()) {
@@ -316,7 +417,6 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
             }
             ++instances_loaded;
         }
-        if (instances_seen >= kMaxInstances) break;
     }
 
     OutputLog::info("level props: appended " +
@@ -329,7 +429,7 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
                         }
                         return n;
                     }()) +
-                    " type-2 instances" +
+                    " prop instances" +
                     (models_failed ? " (" + std::to_string(models_failed) +
                                       " model load misses)" : std::string()));
 }
@@ -385,7 +485,6 @@ void process_pending_loads() {
         S.show_preview_popup    = false;
         S.preview_mip_index     = -1;
 
-        extern ModelPreview g_mp;
         if (g_mp.has_model) g_mp.has_model = false;
         S.mdl_info_ok        = false;
         S.show_model_preview = false;
@@ -420,17 +519,6 @@ void process_pending_loads() {
 
         if (!bnk_to_use.empty()) {
 
-            /* No progress dialog for model loads: with the BNK cache +
-               in-memory extracts + SRV cache, loads are typically
-               sub-frame.  A dialog that flashes for one frame feels
-               worse than no dialog at all.  Run the load synchronously
-               on the UI thread — one stall is cheaper than the cost of
-               spawning a thread and double-buffering state.
-
-               (The first cold load after app start can still take a
-                moment because the BNKReader has to decompress its file
-                table.  If that becomes the new bottleneck we'll prime
-                the cache during boot.) */
             std::vector<unsigned char> buf;
             bool ok = false;
             try {
@@ -440,9 +528,6 @@ void process_pending_loads() {
                     ok = build_mdl_buffer_for_name(name, buf);
                 }
                 if (!ok) {
-                    /* Last-resort fallback: raw extract straight from
-                       the BNK.  Uses the cache so this is also
-                       in-memory. */
                     try {
                         buf = BnkCache::extract_bytes(bnk_to_use, item.index);
                         ok  = !buf.empty();
@@ -461,11 +546,6 @@ void process_pending_loads() {
                     OutputLog::error("MDL: parse_mdl_info FAILED for '" + name +
                                      "' (buf=" + std::to_string(buf.size()) + " bytes)");
                 } else {
-                    /* Echo the parsed structure so we can tell from the log
-                       whether a blank preview is a parse-time failure
-                       (e.g. RS_Golden_Acorn — metadata walker falls into
-                       garbage) or a geometry-time one (mesh-buffer search
-                       can't recover after a bad anchor). */
                     OutputLog::info("MDL: parsed '" + name + "' meshes=" +
                                     std::to_string(S.mdl_info.MeshCount) +
                                     " buffers=" + std::to_string(S.mdl_info.MeshBuffers.size()));
@@ -481,14 +561,6 @@ void process_pending_loads() {
                                         ") alt=" + std::to_string(mb.IsAltPath ? 1 : 0) +
                                         " foliage=" + std::to_string(mb.IsFoliagePath ? 1 : 0));
                     }
-                    /* Empty-buffer recovery: if every parsed mesh buffer
-                       came back with no vertices the standard walker
-                       lost the anchor (e.g. RS_Golden_Acorn — its leaf
-                       material has a trailing translucency texture that
-                       desyncs the mesh-buffer scan).  Re-anchor by
-                       scanning the file for "polymsh\0\x01" markers and
-                       rebuild MeshBuffers from those, then continue with
-                       the same geometry decoder. */
                     if (!S.mdl_info.MeshBuffers.empty()) {
                         bool all_empty = true;
                         for (const auto& mb : S.mdl_info.MeshBuffers) {
@@ -518,17 +590,14 @@ void process_pending_loads() {
                 }
                 if (S.mdl_info_ok) {
 #ifdef _WIN32
-                    extern ModelPreview g_mp;
-                    extern bool         g_mp_initialized;
                     if (!g_mp_initialized) {
                         MP_Init(device, g_mp, 800, 600);
                         g_mp_initialized = true;
                     }
                     MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
 
-                    /* MDL loaded — leave terrain mode if we were in it. */
                     S.terrain_mode = false;
-                    g_mp.no_tilt   = false;   /* restore MDL X-axis tilt */
+                    g_mp.no_tilt   = false;   
 
                     S.cam_yaw = 3.14159265f;
                     S.cam_pitch = 0.2f;
@@ -574,21 +643,12 @@ void process_pending_loads() {
             }
 
             S.tex_info_ok = parse_tex_info(tex_buf, S.tex_info);
-            /* Pick the LARGEST mip by area for the initial display.
-               Fable 2's assembled blob has the small mips (1..N) inline
-               in the header BNK first, with the full-resolution mip 0
-               appended afterwards from `1024mip0_textures.bnk`.  That
-               means `Mips[0]` is the smallest, not the largest — using
-               mip_index=0 here was effectively forcing the lowest LOD
-               and producing the "pixelated" preview the user was seeing.
-               mip_index=-1 lets decode_tex_to_rgba scan all mips and
-               pick the one with the largest area. */
             S.texture_mip_index = -1;
             std::vector<uint8_t> rgba;
             int w = 0, h = 0;
             bool has_alpha = false;
             if (!decode_tex_to_rgba(tex_buf, rgba, w, h, &has_alpha,
-                                    /*mip_index=*/-1)) {
+                                    -1)) {
                 extern const std::string& mp_last_decode_fail_reason();
                 extern const std::string& mp_last_decode_info();
                 OutputLog::error("Texture preview: decode failed for '" + name +
@@ -612,8 +672,6 @@ void process_pending_loads() {
             S.texture_blob = std::move(tex_buf);
 
 #ifdef _WIN32
-            extern ModelPreview g_mp;
-            extern bool g_mp_initialized;
             if (g_mp.has_model) {
                 MP_Release(g_mp);
                 g_mp.has_model = false;
@@ -632,9 +690,6 @@ void process_pending_loads() {
 #ifndef _WIN32
     if (S.pending_preview_build) {
         S.pending_preview_build = false;
-        extern ModelPreview g_mp;
-        extern FlyCam g_flycam;
-        extern bool g_mp_initialized;
         MP_Release(g_mp);
         g_mp_initialized = MP_Init(g_mp, 800, 600);
         if (g_mp_initialized) {
@@ -652,10 +707,6 @@ void process_pending_loads() {
 #endif
 
 #ifdef _WIN32
-    /* Pending "View Heightmap" hand-off — populated by the click in
-       the Levels tab (no device), consumed here to build a D3D SRV
-       from the grayscale RGBA buffer and surface the floating popout
-       window from RenderPanel.cpp. */
     {
         extern std::atomic<bool>    g_pending_heightmap_view_load;
         extern std::vector<uint8_t> g_pending_heightmap_view_rgba;
@@ -708,34 +759,21 @@ void process_pending_loads() {
         }
     }
 
-    /* Pending terrain (heightfield-as-mesh) hand-off — populated by
-       Level::Open on the UI thread, consumed here on the renderer
-       thread so MP_Build sees a live ID3D11Device. */
     if (g_pending_terrain_load.exchange(false)) {
         progress_update(72, 100, "Uploading terrain...");
         const Level::TerrainMesh& tm = g_pending_terrain_mesh;
         if (!tm.ok || tm.indices.empty()) {
             OutputLog::error("pending terrain mesh is empty - skipped");
         } else {
-            /* Drop any RGBA buffers we cached for the previous
-               level's terrain.  They're keyed by name (e.g.
-               "ehf_lightmap") which would collide with this load. */
             TerrainTextureRegistry::Clear();
             EhfLodThumbnails::Clear();
             TerrainSplat::Clear();
             TerrainEdit::Clear();
-            extern ModelPreview g_mp;
-            extern bool         g_mp_initialized;
             if (!g_mp_initialized) {
                 MP_Init(device, g_mp, 800, 600);
                 g_mp_initialized = true;
             }
 
-            /* Adapt the TerrainMesh into the MDLMeshGeom + MDLInfo
-               shape MP_Build wants.  Single submesh, no bones, one
-               diffuse-texture slot we leave empty for now (the
-               terrain will render with the default checker until we
-               wire texture-atlas sampling next). */
             MDLMeshGeom g;
             g.positions    = tm.positions;
             g.normals      = tm.normals;
@@ -743,8 +781,6 @@ void process_pending_loads() {
             g.indices      = tm.indices;
             g.bone_ids.assign(tm.positions.size() / 3 * 4, 0);
             g.bone_weights.assign(tm.positions.size() / 3 * 4, 0.f);
-            /* Bind everything to bone 0 with full weight so the
-               skinning vertex shader leaves positions alone. */
             for (size_t v = 0; v < tm.positions.size() / 3; ++v) {
                 g.bone_weights[v * 4 + 0] = 1.0f;
             }
@@ -762,29 +798,12 @@ void process_pending_loads() {
             mb.SubMeshCount = 1;
             info.MeshBuffers.push_back(mb);
 
-            /* Decide the terrain texture BEFORE we upload UVs to the
-               GPU — different texture types want different UV scales:
-
-                 - `.ehf` baked albedo  : 1 texel per cell, UVs span [0, 1]
-                                          across the whole terrain
-                 - `.texture_atlas`     : source-material library (wood /
-                                          grass / brick / …), per-cell tile
-                                          selection unknown — tile the
-                                          atlas N times across the terrain
-                                          so something legible shows up. */
             std::vector<uint8_t> picked_rgba;
             int picked_w = 0, picked_h = 0;
             std::string picked_label;
             float uv_scale = 1.0f;
+            std::vector<GeneratedTerrainTexture> generated_terrain_textures;
 
-            /* Preferred path: bake a composite from the .ehf body's
-               PF=24 lightmap × the first palette diffuse, sized to
-               the lightmap (so terrain UVs = [0,1] across the
-               heightfield with no further tiling).  This gives the
-               terrain proper baked AO/shadows over a real ground
-               material — dramatically better than a stretched plain
-               material.  Falls through to the older paths if the
-               composite bake fails for any reason.                 */
             std::string composite_name;
             std::vector<uint8_t> splat_dbg_rgba;
             int splat_dbg_w = 0, splat_dbg_h = 0;
@@ -795,11 +814,10 @@ void process_pending_loads() {
                     composite_name,
                     splat_dbg_rgba, splat_dbg_w, splat_dbg_h))
             {
-                picked_label = "ehf_composite[" + composite_name
-                             + " * lightmap]";
+                picked_label = (composite_name == "embedded_tile_albedo")
+                    ? std::string("ehf_embedded_tile_albedo")
+                    : "ehf_composite[" + composite_name + " * lightmap]";
                 uv_scale     = 1.0f;
-                /* Stash the splat-map debug RGBA — it gets bound to
-                   mesh.srv_specular below after the mesh is built. */
             } else if (Level::DecodeEhfTerrainAlbedoFromBytes(
                     g_pending_terrain_ehf_bytes,
                     g_pending_terrain_mesh.width,
@@ -809,14 +827,6 @@ void process_pending_loads() {
                 picked_label = "ehf_baked_albedo";
                 uv_scale     = 1.0f;
             } else {
-                /* Try the ground-texture PALETTE next.  Each .ehf
-                   carries a list of (diffuse, normal) ground-texture
-                   .tex path pairs + per-entry metadata.  Bind the
-                   first diffuse we can locate as the terrain texture,
-                   tiled by the palette entry's tile_scale.  Visually
-                   far more representative than texture_atlas — you
-                   see actual grass / dirt / brightwood_earth etc.
-                   instead of source-material source-page tiles. */
                 std::vector<uint8_t> pal_rgba;
                 int pal_w = 0, pal_h = 0;
                 float pal_tile_scale = 0.125f;
@@ -830,20 +840,8 @@ void process_pending_loads() {
                     picked_w     = pal_w;
                     picked_h     = pal_h;
                     picked_label = "ehf_palette[" + pal_name + "]";
-                    /* For visual purposes pick a moderate tile
-                       factor — `dim * pal_tile_scale` gives ~100
-                       repeats for a 769-cell terrain which makes the
-                       texture look like pixel noise.  16 repeats is
-                       enough to show the material clearly while
-                       still feeling like ground texture.  Once we
-                       have proper per-cell sampling this becomes
-                       irrelevant — for now use a fixed sensible
-                       repeat count.                                */
                     uv_scale = 16.0f;
                 } else {
-                    /* Last resort: the source-material .texture_atlas
-                       tiled × 32.  Same visual as before any of the
-                       per-cell work. */
                     std::vector<uint8_t> atlas_rgba;
                     int atlas_w = 0, atlas_h = 0;
                     if (Level::DecodeLevelTextureAtlas(
@@ -859,13 +857,47 @@ void process_pending_loads() {
                 }
             }
 
-            /* Apply the UV scale to the mesh geometry before upload. */
-            if (uv_scale != 1.0f) {
+            if (!picked_rgba.empty() && picked_w > 0 && picked_h > 0) {
+                GeneratedTerrainTexture gt;
+                gt.mesh_index = 0;
+                gt.label      = picked_label;
+                gt.rgba       = picked_rgba;
+                gt.width      = picked_w;
+                gt.height     = picked_h;
+                generated_terrain_textures.push_back(std::move(gt));
+            }
+
+            const bool terrain_space_texture =
+                picked_label.rfind("ehf_composite[", 0) == 0 ||
+                picked_label == "ehf_embedded_tile_albedo" ||
+                picked_label == "ehf_baked_albedo";
+            if (terrain_space_texture) {
+                normalize_grid_uvs(g, tm.width, tm.height);
+            } else if (uv_scale != 1.0f) {
                 for (float& uv : g.uvs) uv *= uv_scale;
             }
 
             std::vector<MDLMeshGeom> geoms;
             geoms.push_back(std::move(g));
+            for (const auto& adj : g_pending_adjacent_terrain_meshes) {
+                const Level::TerrainMesh& am = adj.mesh;
+                if (!am.ok || am.indices.empty()) continue;
+                MDLMeshGeom ag;
+                ag.positions = am.positions;
+                ag.normals   = am.normals;
+                ag.uvs       = am.uvs;
+                ag.indices   = am.indices;
+                normalize_grid_uvs(ag, am.width, am.height);
+                ag.bone_ids.assign(am.positions.size() / 3 * 4, 0);
+                ag.bone_weights.assign(am.positions.size() / 3 * 4, 0.f);
+                for (size_t v = 0; v < am.positions.size() / 3; ++v) {
+                    ag.bone_weights[v * 4 + 0] = 1.0f;
+                }
+                ag.name = adj.label.empty()
+                    ? std::string("adjacent terrain")
+                    : std::string("adjacent terrain: ") + adj.label;
+                geoms.push_back(std::move(ag));
+            }
             start_level_prop_stream(geoms, info);
 
             if (g_mp.has_model) {
@@ -876,58 +908,44 @@ void process_pending_loads() {
                 g_mp_initialized = true;
             }
             MP_Build(device, geoms, info, g_mp);
-            /* Terrain is Y-up natively — skip the engine's MDL tilt. */
             g_mp.no_tilt = true;
 
-            /* Switch the render panel into terrain / flycam mode. */
             S.terrain_mode = true;
 
-            /* Measure the terrain's world-space extent so we can
-               place the flycam at a useful distance + give its
-               movement speed sensible units.  Skipping the global
-               tilt also means we can think in straight world axes:
-               X across columns, Y up, Z across rows. */
-            float ax = 0.f, ay_max = 0.f, az = 0.f;
+            float minx = 1e30f, miny = 1e30f, minz = 1e30f;
+            float maxx = -1e30f, maxy = -1e30f, maxz = -1e30f;
             for (size_t v = 0; v + 2 < geoms[0].positions.size(); v += 3) {
-                ax     = std::max(ax,     std::abs(geoms[0].positions[v]));
-                ay_max = std::max(ay_max, std::abs(geoms[0].positions[v + 1]));
-                az     = std::max(az,     std::abs(geoms[0].positions[v + 2]));
+                const float x = geoms[0].positions[v];
+                const float y = geoms[0].positions[v + 1];
+                const float z = geoms[0].positions[v + 2];
+                if (x < minx) minx = x;  if (x > maxx) maxx = x;
+                if (y < miny) miny = y;  if (y > maxy) maxy = y;
+                if (z < minz) minz = z;  if (z > maxz) maxz = z;
             }
-            const float diag = std::sqrt(ax * ax + az * az);
+            const float cx_mesh = 0.5f * (minx + maxx);
+            const float cy_mesh = 0.5f * (miny + maxy);
+            const float cz_mesh = 0.5f * (minz + maxz);
+            const float ext_x   = (maxx - minx);
+            const float ext_z   = (maxz - minz);
+            const float diag    = std::sqrt(ext_x * ext_x + ext_z * ext_z) * 0.5f;
 
-            extern FlyCam g_flycam;
-            g_flycam.pos[0] = 0.0f;
-            g_flycam.pos[1] = ay_max + diag * 0.7f;
-            g_flycam.pos[2] = -diag * 1.0f;
-            g_flycam.yaw    = 0.0f;          /* look toward +Z */
-            g_flycam.pitch  = -0.6f;         /* angled down ~34° */
+            g_flycam.pos[0] = cx_mesh;
+            g_flycam.pos[1] = maxy + diag * 0.7f;
+            g_flycam.pos[2] = cz_mesh - diag * 1.0f;
+            g_flycam.yaw    = 0.0f;          
+            g_flycam.pitch  = -0.6f;         
             g_flycam.is_looking = false;
-            /* Movement speed: enough to traverse the terrain in
-               ~10 s of sustained forward.  Bloodstone's terrain is
-               ~41 000 world units across so the default move_speed
-               (set from MDL radius * 2) would feel glacial. */
             g_flycam.move_speed = std::max(diag * 0.2f, 50.0f);
 
-            /* Push the far clip out so the whole landscape fits in
-               the view frustum — MP_Render uses g_mp.radius * 100
-               for the far plane.  Stash a generous radius here. */
-            g_mp.radius   = std::max(g_mp.radius, diag);
-            g_mp.center[0] = 0.0f;
-            g_mp.center[1] = 0.0f;
-            g_mp.center[2] = 0.0f;
+            g_mp.radius   = std::max(g_mp.radius, diag * 2.0f);
+            g_mp.center[0] = cx_mesh;
+            g_mp.center[1] = cy_mesh;
+            g_mp.center[2] = cz_mesh;
 
-            /* Hand the .ghf heights + positions to TerrainEdit so the
-               user can mutate them through the Edit Terrain overlay.
-               We pass a COPY of positions[] because BuildTerrainMesh
-               owns them and we want TerrainEdit to keep a snapshot
-               that survives the upcoming buffer release.            */
             if (!g_pending_terrain_ghf_heights.empty() &&
                 g_pending_terrain_ghf_width > 0 &&
                 g_pending_terrain_ghf_height > 0)
             {
-                /* Resolve the .ghf BNK entry's on-disk location +
-                   size + compression flag so TerrainEdit::Save can
-                   patch the source ISO in place.                  */
                 uint64_t bnk_entry_offset = 0;
                 uint32_t bnk_entry_size   = 0;
                 bool     bnk_entry_compressed = false;
@@ -949,8 +967,6 @@ void process_pending_loads() {
                                 bc.reader->entry_is_compressed(idx);
                         }
                     } catch (...) {
-                        /* leave defaults — save will fall back to
-                           the sibling backup file. */
                     }
                 }
 
@@ -958,8 +974,8 @@ void process_pending_loads() {
                     g_pending_terrain_ghf_width,
                     g_pending_terrain_ghf_height,
                     g_pending_terrain_ghf_tile_size,
-                    /*center_x*/ ax,
-                    /*center_z*/ az,
+                     0.0f,
+                     0.0f,
                     g_pending_terrain_ghf_heights,
                     geoms[0].positions,
                     g_pending_terrain_ghf_payload,
@@ -981,16 +997,11 @@ void process_pending_loads() {
                 OutputLog::info(tos.str());
             }
 
-            /* Create + bind the terrain SRV using the `picked_rgba`
-               buffer chosen by the texture-pick block ABOVE (which
-               picks: .ehf baked albedo → .ehf palette diffuse →
-               .texture_atlas fallback, in that order). */
-            /* Texturing temporarily disabled — render terrain plain so
-               we can sort out the splat pipeline separately.  The LOD
-               palette materials still get decoded and listed in the
-               Materials overlay; we just don't bind them here. */
             ID3D11ShaderResourceView* terrain_srv = nullptr;
-            (void)picked_rgba; (void)picked_w; (void)picked_h;
+            if (!picked_rgba.empty() && picked_w > 0 && picked_h > 0) {
+                terrain_srv = create_srv_from_rgba(device, picked_w,
+                                                   picked_h, picked_rgba);
+            }
             if (terrain_srv && !g_mp.meshes.empty()) {
                 MPPerMesh& m = g_mp.meshes[0];
                 if (m.srv_diffuse) m.srv_diffuse->Release();
@@ -998,11 +1009,6 @@ void process_pending_loads() {
                 m.diffuse_visible  = true;
                 m.diffuse_tex_name = picked_label;
 
-                /* Also register the composite RGBA in the terrain
-                   texture registry so the material thumbnail's
-                   right-click "Export to" menu can export this
-                   generated texture (it isn't backed by any BNK
-                   file).                                            */
                 TerrainTextureRegistry::Register(picked_label,
                                                  picked_rgba,
                                                  picked_w, picked_h);
@@ -1017,21 +1023,48 @@ void process_pending_loads() {
                                 "(.ehf and .texture_atlas both failed)");
             }
 
-            /* Decode the .ehf body's lightmap (PF=24) and normal
-               map (PF=40) and bind them as ADDITIONAL thumbnails on
-               the terrain mesh, so the material panel shows clickable
-               "lightmap" / "normal" entries the user can pop out or
-               export from the right-click menu.
+            for (size_t ai = 0; ai < g_pending_adjacent_terrain_meshes.size(); ++ai) {
+                const size_t mesh_idx = ai + 1;
+                if (mesh_idx >= g_mp.meshes.size()) break;
+                const auto& adj = g_pending_adjacent_terrain_meshes[ai];
+                std::vector<uint8_t> adj_rgba;
+                int adj_w = 0, adj_h = 0;
+                std::string adj_name;
+                if (!Level::BakeEhfTerrainCompositeWithBnk(
+                        adj.ehf_bytes, adj.preferred_bnk,
+                        adj_rgba, adj_w, adj_h, adj_name)) {
+                    continue;
+                }
+                ID3D11ShaderResourceView* adj_srv =
+                    create_srv_from_rgba(device, adj_w, adj_h, adj_rgba);
+                if (!adj_srv) continue;
+                MPPerMesh& m = g_mp.meshes[mesh_idx];
+                if (m.srv_diffuse) m.srv_diffuse->Release();
+                m.srv_diffuse = adj_srv;
+                m.diffuse_visible = true;
+                m.diffuse_tex_name = "ehf_composite[" + adj_name + "]";
 
-               The MPPerMesh has five fixed thumbnail slots: diffuse,
-               normal, specular, metallic, extra.  We use:
-                 - normal  = .ehf BC5 normal map (RGBA with B
-                             reconstructed from XY by our decoder)
-                 - extra   = .ehf lightmap (16-bpp; export as RGBA
-                             where R = the actual lightmap channel,
-                             G = the secondary detail channel)       */
+                GeneratedTerrainTexture gt;
+                gt.mesh_index = mesh_idx;
+                gt.label      = m.diffuse_tex_name;
+                gt.rgba       = adj_rgba;
+                gt.width      = adj_w;
+                gt.height     = adj_h;
+                generated_terrain_textures.push_back(std::move(gt));
+
+                OutputLog::success("adjacent terrain texture bound: " +
+                    m.diffuse_tex_name + " (" + std::to_string(adj_w) +
+                    "x" + std::to_string(adj_h) + ")");
+            }
+
+            if (!generated_terrain_textures.empty() &&
+                g_level_prop_stream.phase.load(std::memory_order_acquire) != 0)
+            {
+                g_level_prop_stream.terrain_textures =
+                    std::move(generated_terrain_textures);
+            }
+
             if (!g_mp.meshes.empty() && !g_pending_terrain_ehf_bytes.empty()) {
-                /* Parse the 63-byte .ehf header to get body slice. */
                 const auto& ehf = g_pending_terrain_ehf_bytes;
                 static constexpr char   kMagic[]   = "HeightFieldGraphicsFile";
                 static constexpr size_t kMagicLen  = sizeof(kMagic) - 1;
@@ -1056,7 +1089,6 @@ void process_pending_loads() {
                         ehf.data() + body_off,
                         ehf.data() + body_off + body_size);
 
-                    /* (1) Lightmap (the body's FIRST .tex blob). */
                     auto lm = TextureAtlas::DecodeAtlas(body_slice);
                     if (lm.ok && lm.pixel_format == 24u && !lm.rgba.empty()) {
                         MPPerMesh& m = g_mp.meshes[0];
@@ -1066,7 +1098,7 @@ void process_pending_loads() {
                         if (lm_srv) {
                             if (m.srv_extra) m.srv_extra->Release();
                             m.srv_extra      = lm_srv;
-                            m.extra_visible  = false;  
+                            m.extra_visible  = false;
                             m.extra_tex_name = "ehf_lightmap";
                             TerrainTextureRegistry::Register(
                                 "ehf_lightmap", lm.rgba, lm.width, lm.height);
@@ -1076,7 +1108,6 @@ void process_pending_loads() {
                         }
                     }
 
-                    /* (2) Normal map: scan body for first PF=40 .tex. */
                     const size_t bn = body_slice.size();
                     for (size_t i = 4; i + 0x60 < bn; ++i) {
                         if (body_slice[i]   != 0xFF ||
@@ -1100,7 +1131,7 @@ void process_pending_loads() {
                             if (nm_srv) {
                                 if (m.srv_normal) m.srv_normal->Release();
                                 m.srv_normal      = nm_srv;
-                                m.normal_visible  = false;  
+                                m.normal_visible  = false;
                                 m.normal_tex_name = "ehf_normal";
                                 TerrainTextureRegistry::Register(
                                     "ehf_normal", nm.rgba, nm.width, nm.height);
@@ -1114,18 +1145,8 @@ void process_pending_loads() {
                 }
             }
 
-            /* Splat-map debug thumbnail intentionally skipped — the
-               PF=99 blob isn't actually a per-cell splat map (see
-               docs/level_format.md § 9b.12 for the corrected reading).
-               When the per-chunk parser is wired up we'll bind the
-               real per-chunk material map here instead.              */
             (void)splat_dbg_rgba; (void)splat_dbg_w; (void)splat_dbg_h;
 
-            /* Build per-LOD-material thumbnails from the .ehf LOD
-               palette.  Each entry references a BaseLayer + DetailLayer
-               pair of (diffuse, normal) .tex files.  We decode each one
-               from its BNK and make an SRV, so the Materials overlay
-               can show one row of thumbnails per LOD index. */
             {
                 const std::string& preferred_bnk =
                     g_pending_terrain_level_entry.bnk_path;
@@ -1134,9 +1155,6 @@ void process_pending_loads() {
                 std::vector<EhfLodThumbnails::Entry> thumbs;
                 thumbs.reserve(palette.size());
 
-                /* Decode + SRV-create one .tex path.  Returns true and
-                   fills out_srv/w/h on success; on failure leaves them
-                   null and the caller renders a placeholder. */
                 auto decode_one = [&](const std::string& path,
                                       ID3D11ShaderResourceView*& out_srv,
                                       int& out_w, int& out_h)
@@ -1204,17 +1222,10 @@ void process_pending_loads() {
                     + std::to_string(decoded_count) + "/"
                     + std::to_string(palette.size() * 4) + " maps OK");
 
-                /* Splat shader currently disabled per user request —
-                   we keep the LOD palette decoded so the Materials
-                   overlay shows the per-LOD thumbnails, but we do NOT
-                   build the splat resources or mark the mesh as
-                   is_terrain, so the terrain renders untextured.   */
                 Level::EhfParsedBody splat_parsed;
                 if (false &&
                     Level::ParseEhfBody(g_pending_terrain_ehf_bytes,
                                         splat_parsed)) {
-                    /* Lightmap RGBA — pull from the registry where the
-                       lightmap binding step above registered it.    */
                     std::vector<uint8_t> lm_rgba;
                     int lm_w = 0, lm_h = 0;
                     const auto* lm_entry =
@@ -1225,16 +1236,10 @@ void process_pending_loads() {
                         lm_h    = lm_entry->height;
                     }
                     const auto& fresh = EhfLodThumbnails::Get();
-                    /* The .ghf-derived mesh is centered at world origin,
-                       so the bounding-box half-extents (ax, az) computed
-                       above are exactly the mesh→world offset needed by
-                       the splat shader to look up chunks correctly. */
                     if (TerrainSplat::Build(device, splat_parsed, fresh,
                                             lm_rgba, lm_w, lm_h,
-                                            ax, az))
+                                            0.0f, 0.0f))
                     {
-                        /* Mark mesh[0] as terrain so MP_Render uses the
-                           splat shader for it. */
                         if (!g_mp.meshes.empty()) {
                             g_mp.meshes[0].is_terrain = true;
                             g_mp.meshes[0].diffuse_tex_name =
@@ -1256,23 +1261,18 @@ void process_pending_loads() {
                                "' built (" +
                                std::to_string(geoms[0].positions.size()/3) +
                                " verts)");
-            if (!g_level_prop_stream.active) {
+            if (g_level_prop_stream.phase.load() == 0) {
                 progress_done();
             }
         }
 
-        /* Release the heap memory the pending mesh + the .ehf
-           bytes the level loader parked here for the texture
-           decode step.  Both are large and we no longer need
-           them once the terrain has been built and textured. */
         g_pending_terrain_mesh = Level::TerrainMesh{};
         g_pending_terrain_label.clear();
         g_pending_terrain_ehf_bytes.clear();
         g_pending_terrain_ehf_bytes.shrink_to_fit();
+        g_pending_adjacent_terrain_meshes.clear();
+        g_pending_adjacent_terrain_meshes.shrink_to_fit();
 
-        /* TerrainEdit took its own copies — drop the pending .ghf
-           buffers to free heap.  TerrainEdit::Clear() runs separately
-           when the user navigates away from this level.            */
         g_pending_terrain_ghf_payload.clear();
         g_pending_terrain_ghf_payload.shrink_to_fit();
         g_pending_terrain_ghf_heights.clear();
@@ -1335,7 +1335,9 @@ void process_pending_loads() {
                     picked_rgba, picked_w, picked_h,
                     composite_name,
                     splat_dbg_rgba, splat_dbg_w, splat_dbg_h)) {
-                picked_label = "ehf_composite[" + composite_name + " * lightmap]";
+                picked_label = (composite_name == "embedded_tile_albedo")
+                    ? std::string("ehf_embedded_tile_albedo")
+                    : "ehf_composite[" + composite_name + " * lightmap]";
                 uv_scale = 1.0f;
             } else if (Level::DecodeEhfTerrainAlbedoFromBytes(
                     g_pending_terrain_ehf_bytes,
@@ -1375,17 +1377,39 @@ void process_pending_loads() {
                 }
             }
 
-            if (uv_scale != 1.0f) {
+            const bool terrain_space_texture =
+                picked_label.rfind("ehf_composite[", 0) == 0 ||
+                picked_label == "ehf_embedded_tile_albedo" ||
+                picked_label == "ehf_baked_albedo";
+            if (terrain_space_texture) {
+                normalize_grid_uvs(g, tm.width, tm.height);
+            } else if (uv_scale != 1.0f) {
                 for (float& uv : g.uvs) uv *= uv_scale;
             }
 
             std::vector<MDLMeshGeom> geoms;
             geoms.push_back(std::move(g));
+            for (const auto& adj : g_pending_adjacent_terrain_meshes) {
+                const Level::TerrainMesh& am = adj.mesh;
+                if (!am.ok || am.indices.empty()) continue;
+                MDLMeshGeom ag;
+                ag.positions = am.positions;
+                ag.normals = am.normals;
+                ag.uvs = am.uvs;
+                ag.indices = am.indices;
+                normalize_grid_uvs(ag, am.width, am.height);
+                ag.bone_ids.assign(am.positions.size() / 3 * 4, 0);
+                ag.bone_weights.assign(am.positions.size() / 3 * 4, 0.f);
+                for (size_t v = 0; v < am.positions.size() / 3; ++v) {
+                    ag.bone_weights[v * 4 + 0] = 1.0f;
+                }
+                ag.name = adj.label.empty()
+                    ? std::string("adjacent terrain")
+                    : std::string("adjacent terrain: ") + adj.label;
+                geoms.push_back(std::move(ag));
+            }
             append_level_props_to_geoms(geoms);
 
-            extern ModelPreview g_mp;
-            extern bool g_mp_initialized;
-            extern FlyCam g_flycam;
             MP_Release(g_mp);
             g_mp_initialized = false;
             g_mp_initialized = MP_Init(g_mp, 800, 600);
@@ -1397,29 +1421,36 @@ void process_pending_loads() {
                 S.model_preview_open = true;
                 S.model_materials_open = true;
 
-                float ax = 0.f;
-                float ay_max = 0.f;
-                float az = 0.f;
+                float minx = 1e30f, miny = 1e30f, minz = 1e30f;
+                float maxx = -1e30f, maxy = -1e30f, maxz = -1e30f;
                 for (size_t v = 0; v + 2 < geoms[0].positions.size(); v += 3) {
-                    ax = std::max(ax, std::abs(geoms[0].positions[v]));
-                    ay_max = std::max(ay_max, std::abs(geoms[0].positions[v + 1]));
-                    az = std::max(az, std::abs(geoms[0].positions[v + 2]));
+                    const float x = geoms[0].positions[v];
+                    const float y = geoms[0].positions[v + 1];
+                    const float z = geoms[0].positions[v + 2];
+                    if (x < minx) minx = x;  if (x > maxx) maxx = x;
+                    if (y < miny) miny = y;  if (y > maxy) maxy = y;
+                    if (z < minz) minz = z;  if (z > maxz) maxz = z;
                 }
-                const float diag = std::sqrt(ax * ax + az * az);
-                g_flycam.pos[0] = 0.0f;
-                g_flycam.pos[1] = ay_max + diag * 0.7f;
-                g_flycam.pos[2] = -diag * 1.0f;
+                const float cx_mesh = 0.5f * (minx + maxx);
+                const float cy_mesh = 0.5f * (miny + maxy);
+                const float cz_mesh = 0.5f * (minz + maxz);
+                const float ext_x   = (maxx - minx);
+                const float ext_z   = (maxz - minz);
+                const float diag    = std::sqrt(ext_x * ext_x + ext_z * ext_z) * 0.5f;
+                g_flycam.pos[0] = cx_mesh;
+                g_flycam.pos[1] = maxy + diag * 0.7f;
+                g_flycam.pos[2] = cz_mesh - diag * 1.0f;
                 g_flycam.yaw = 0.0f;
                 g_flycam.pitch = -0.6f;
                 g_flycam.is_looking = false;
                 g_flycam.move_speed = std::max(diag * 0.2f, 50.0f);
-                g_mp.radius = std::max(g_mp.radius, diag);
-                g_mp.center[0] = 0.0f;
-                g_mp.center[1] = 0.0f;
-                g_mp.center[2] = 0.0f;
+                g_mp.radius = std::max(g_mp.radius, diag * 2.0f);
+                g_mp.center[0] = cx_mesh;
+                g_mp.center[1] = cy_mesh;
+                g_mp.center[2] = cz_mesh;
 
-                if (!picked_rgba.empty() && picked_w > 0 && picked_h > 0 &&
-                    !g_mp.meshes.empty()) {
+            if (!picked_rgba.empty() && picked_w > 0 && picked_h > 0 &&
+                !g_mp.meshes.empty()) {
                     unsigned int terrain_tex =
                         create_gl_texture_from_rgba(picked_w, picked_h,
                                                     picked_rgba.data());
@@ -1454,6 +1485,8 @@ void process_pending_loads() {
         g_pending_terrain_label.clear();
         g_pending_terrain_ehf_bytes.clear();
         g_pending_terrain_ehf_bytes.shrink_to_fit();
+        g_pending_adjacent_terrain_meshes.clear();
+        g_pending_adjacent_terrain_meshes.shrink_to_fit();
         g_pending_terrain_ghf_payload.clear();
         g_pending_terrain_ghf_payload.shrink_to_fit();
         g_pending_terrain_ghf_heights.clear();

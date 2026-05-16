@@ -757,12 +757,12 @@ void draw_hex_window() {
 #endif
             }
 
-            bool kw = ImGui::IsKeyDown(ImGuiKey_W);
-            bool ks = ImGui::IsKeyDown(ImGuiKey_S);
-            bool ka = ImGui::IsKeyDown(ImGuiKey_A);
-            bool kd = ImGui::IsKeyDown(ImGuiKey_D);
-            bool kq = ImGui::IsKeyDown(ImGuiKey_Q);
-            bool ke = ImGui::IsKeyDown(ImGuiKey_E);
+            bool kw = ImGui::IsKeyDown(S.key_forward);
+            bool ks = ImGui::IsKeyDown(S.key_back);
+            bool ka = ImGui::IsKeyDown(S.key_left);
+            bool kd = ImGui::IsKeyDown(S.key_right);
+            bool kq = ImGui::IsKeyDown(S.key_down);
+            bool ke = ImGui::IsKeyDown(S.key_up);
 
             FlyCam_Update(g_flycam, dt, kw, ks, ka, kd, kq, ke, mdx, mdy);
 
@@ -923,11 +923,6 @@ void draw_hex_window() {
                 ImGui::TextDisabled("(no model loaded)");
             }
 
-            /* Terrain LOD palette from .ehf.  Shown whenever a level
-               has been loaded — the strings are pulled straight out
-               of the .ehf body's LOD vector (validated parser; see
-               EhfChunkParser.cpp).  Each entry pairs a BaseLayer
-               diffuse + normal with an optional DetailLayer pair. */
             {
                 const auto& palette = TerrainTextureRegistry::GetLodPalette();
                 if (!palette.empty()) {
@@ -948,7 +943,6 @@ void draw_hex_window() {
                                     ? s : s.substr(pos + 1);
                             };
                             ImGui::PushID(int(i));
-                            /* One header line per LOD index. */
                             if (ImGui::TreeNodeEx((void*)i,
                                 ImGuiTreeNodeFlags_DefaultOpen,
                                 "[%zu] %s", i,

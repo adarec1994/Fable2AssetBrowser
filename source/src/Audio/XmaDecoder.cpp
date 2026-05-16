@@ -368,10 +368,10 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
 
 #else
 
-bool decode_xma_to_pcm(const std::vector<uint8_t>& /*wav_bytes*/,
-                      std::vector<int16_t>& /*pcm_out*/,
-                      int& /*sample_rate*/,
-                      int& /*channels*/,
+bool decode_xma_to_pcm(const std::vector<uint8_t>& ,
+                      std::vector<int16_t>& ,
+                      int& ,
+                      int& ,
                       std::string* err_out) {
     if (err_out) {
         *err_out = "XMA2 decoder not available — drop FFmpeg prebuilts (libavcodec/avformat/avutil/swresample) "

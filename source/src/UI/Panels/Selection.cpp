@@ -376,7 +376,7 @@ void extract_single_bnk_contents(const std::string& bnk_path) {
                 try {
 
                     extract_file_one(bnk_path, it, export_root,
-                                     /*convert_audio=*/true);
+                                     true);
                     ok = true;
                 } catch (const std::exception& e) {
                     OutputLog::error(std::string("Extract failed (") +
@@ -565,7 +565,7 @@ static void asset_export_audio_raw_xma(const std::string& bnk_path,
 static void asset_export_audio_encoded(const std::string& bnk_path,
                                        int file_index,
                                        const std::string& file_name,
-                                       bool aac /*false = mp3*/)
+                                       bool aac )
 {
     const char* fmt_label = aac ? "AAC"  : "MP3";
     const char* fmt_ext   = aac ? ".m4a" : ".mp3";
@@ -638,7 +638,7 @@ static void asset_export_audio_encoded(const std::string& bnk_path,
 }
 
 static void asset_export_to_export_dir(const std::string& bnk_path,
-                                       int file_index, bool /*is_nested*/,
+                                       int file_index, bool ,
                                        const std::string& file_name,
                                        bool convert_audio = true)
 {
@@ -736,7 +736,7 @@ void file_hex_context_menu(const std::string& bnk_path,
         if (is_tex) {
 
             tex_export_menu_named(file_name, file_name, bnk_path,
-                                  /*mip_index=*/0);
+                                  0);
         } else if (is_mdl_file(file_name)) {
 
             if (ImGui::BeginMenu("Export to")) {
@@ -763,16 +763,16 @@ void file_hex_context_menu(const std::string& bnk_path,
             if (ImGui::BeginMenu("Export to")) {
                 if (ImGui::MenuItem("MP3")) {
                     asset_export_audio_encoded(bnk_path, file_index,
-                                               file_name, /*aac=*/false);
+                                               file_name, false);
                 }
                 if (ImGui::MenuItem("M4A")) {
                     asset_export_audio_encoded(bnk_path, file_index,
-                                               file_name, /*aac=*/true);
+                                               file_name, true);
                 }
                 if (ImGui::MenuItem("WAV")) {
                     asset_export_to_export_dir(bnk_path, file_index,
                                                is_nested, file_name,
-                                               /*convert_audio=*/true);
+                                               true);
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem(".xma (raw)")) {

@@ -78,6 +78,7 @@ struct State {
     std::vector<std::string> nested_bnk_paths;
 
     std::map<std::string, std::string> nested_bnk_parents;
+    std::map<std::string, std::string> nested_bnk_virtual_paths;
     std::vector<std::string> adb_paths;
     std::vector<LuaFileUI> lua_files;
     std::string bnk_filter;
@@ -97,22 +98,10 @@ struct State {
     std::vector<FlatAssetEntry> all_wav_files;
 
     std::vector<FlatAssetEntry> all_anim_files;
-    /* One entry per `.engine_level` we find in any loaded BNK.
-       Each represents a discoverable level (world / region / scenario
-       combo).  Same FlatAssetEntry shape as the other asset lists so
-       it slots into the same UI helpers. */
     std::vector<FlatAssetEntry> all_level_files;
-    /* Loose-format heightfield siblings of a `.engine_level` — the
-       terrain mesh (`.ehf`), gzipped raw heights (`.ghf`), heightfield
-       database (`.hdb`), environment table (`.genv`) and the three
-       `ADMP` variants (`.ama` / `.amm` / `.amr`).  Indexed for the
-       Levels tab + the terrain pipeline to find them by BNK lookup. */
     std::vector<FlatAssetEntry> all_heightfield_files;
-    /* True while the render panel is showing a terrain (heightfield
-       mesh) instead of a regular MDL.  When set, the render panel
-       routes input through the flycam (WASD + Q/E + right-drag look)
-       and skips the orbit-on-left-drag logic. */
     bool terrain_mode = false;
+    bool show_gdb_placements = false;
     std::string mdl_filter;
     std::string tex_filter;
     std::string wav_filter;
@@ -127,6 +116,19 @@ struct State {
     float pending_font_size   = 17.0f;
     bool  font_size_dirty     = false;
     bool  show_settings       = false;
+
+    bool  cam_invert_x = false;
+    bool  cam_invert_y = false;
+
+    ImGuiKey key_forward       = ImGuiKey_W;
+    ImGuiKey key_back          = ImGuiKey_S;
+    ImGuiKey key_left          = ImGuiKey_A;
+    ImGuiKey key_right         = ImGuiKey_D;
+    ImGuiKey key_up            = ImGuiKey_E;
+    ImGuiKey key_down          = ImGuiKey_Q;
+    ImGuiKey key_rotate_mode   = ImGuiKey_R;
+    ImGuiKey key_close_preview = ImGuiKey_Escape;
+    int      capturing_key_id  = -1;
 
     std::string export_dir;
 

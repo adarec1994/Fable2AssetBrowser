@@ -281,10 +281,6 @@ uint64_t IsoMount::abs_offset_of(const std::string& virtual_path,
 bool IsoMount::write_at(const std::string& virtual_path,
                         uint64_t off, const void* src, size_t n)
 {
-    /* DESTRUCTIVE — writes bytes directly into the user's source ISO
-       at the absolute offset of `virtual_path` + `off`.  Callers must
-       have explicit user consent (e.g. the Edit Terrain save
-       confirmation popup) before invoking this. */
     const MountedFile* mf = find(virtual_path);
     if (!mf) return false;
     if ((uint64_t)off + n > (uint64_t)mf->size) return false;
@@ -292,9 +288,6 @@ bool IsoMount::write_at(const std::string& virtual_path,
 
     std::lock_guard<std::mutex> lock(read_mutex_);
 
-    /* On Windows std::fopen opens with deny-write sharing by default,
-       so our own read fp_ blocks a concurrent r+b open of the same
-       ISO.  Close it temporarily, do the write, then reopen.        */
     const std::string saved_iso_path = iso_path_;
     if (fp_) { std::fclose(fp_); fp_ = nullptr; }
 
@@ -305,7 +298,6 @@ bool IsoMount::write_at(const std::string& virtual_path,
     wf = std::fopen(saved_iso_path.c_str(), "r+b");
 #endif
     if (!wf) {
-        /* Reopen read handle so subsequent reads don't break. */
 #ifdef _WIN32
         fopen_s(&fp_, saved_iso_path.c_str(), "rb");
 #else
@@ -332,15 +324,12 @@ bool IsoMount::write_at(const std::string& virtual_path,
     std::fflush(wf);
     std::fclose(wf);
 
-    /* Reopen the read handle for subsequent IsoMount reads. */
 #ifdef _WIN32
     fopen_s(&fp_, saved_iso_path.c_str(), "rb");
 #else
     fp_ = std::fopen(saved_iso_path.c_str(), "rb");
 #endif
 
-    /* Invalidate the in-memory cache for this virtual file so any
-       subsequent read sees the new bytes.                          */
     {
         std::string key = lower(virtual_path);
         auto it = cache_index_.find(key);

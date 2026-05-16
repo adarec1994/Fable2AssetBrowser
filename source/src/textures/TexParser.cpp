@@ -2,6 +2,7 @@
 #include "Utilities/Files.h"
 #include "Utilities/Utils.h"
 #include "BNKCore.cpp"
+#include "Level/LevelLoader.h"
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -134,27 +135,6 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
         return true;
     }
 
-    /* "Size-prefixed mip0" layout variant.  Observed on assets where:
-         - only MipMapOffset[0] is non-zero, the rest are 0
-         - the u32 BE at that offset is the size of the raw mip0 body
-           in bytes (W*H*4 for ARGB8, W*H/2 for BC1, W*H for BC3, etc.)
-         - the bytes immediately after the size prefix are the mip0
-           payload — Xbox 360 tiled and (for BC) endian-swapped.
-
-       Concretely we've seen this variant for:
-         - PixelFormat=2 (raw ARGB8)        — lanternrusticglass.tex
-         - PixelFormat=4 (raw ?RGB/single)  — lanternrusticglass_spec.tex
-         - PixelFormat=35 (BC1 / DXT1)      — defaultscenario.texture_atlas
-         - PixelFormat=39 (BC3 / DXT5)      — other texture-atlas variants
-
-       Standard parse_tex_info below would interpret the size prefix
-       as a MipDef::CompFlag and walk into garbage; detect this layout
-       up front and push a single hand-crafted MipDef instead.
-
-       Sentinel CompFlag values steer decode_tex_to_rgba:
-         99 → raw ARGB8 (PF=2 diffuse-like, A in byte 0)
-        100 → raw ?RGB  (PF=4 spec/normal, byte 0 unused → force A=255)
-         7 → raw BC block (existing comp=7 BC1/BC3 untile path)        */
     {
         bool single_offset = (!out.MipMapOffset.empty()) && (out.MipMapOffset[0] != 0);
         for (size_t j = 1; j < out.MipMapOffset.size() && single_offset; ++j) {
@@ -168,23 +148,12 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
                                    rd32be(d, tmp_off, size_prefix) &&
                                    (size_t)mo + 4 + size_prefix <= d.size();
 
-            /* Match the prefix against the byte-count of each plausible
-               raw layout for this texture's W/H. */
             const size_t W = (size_t)out.TextureWidth;
             const size_t H = (size_t)out.TextureHeight;
             const size_t sz_argb8  = W * H * 4;
             const size_t sz_bc1    = W * H / 2;        
             const size_t sz_bc3    = W * H * 1;        
 
-            /* Xbox 360 tile pads each storage dimension up to a 32-texel
-               boundary (BC blocks count as one "texel" for this purpose,
-               i.e. a 4×4 chunk is one tile-grid cell).  Small textures
-               whose unpadded body is < a 4 KB page get rounded up to the
-               nearest page anyway; lots of selfillum / glow / spec maps
-               in globals_textures.bnk land here.  Without these padded
-               buckets the size-prefix wouldn't match anything and we'd
-               fall into the standard MipDef walker, which reads padding
-               zeros as a bogus CompFlag and produces an empty mip. */
             const size_t pW_argb = (W + 31) & ~size_t(31);
             const size_t pH_argb = (H + 31) & ~size_t(31);
             const size_t sz_argb8_padded = pW_argb * pH_argb * 4;
@@ -201,46 +170,34 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
             size_t   body_size   = 0;
 
             if (prefix_ok && (size_t)size_prefix == sz_argb8) {
-                /* Raw ARGB8 — diffuse / mask variants. */
                 comp_tag  = (out.PixelFormat == 2) ? 99u : 100u;
                 body_size = sz_argb8;
                 matched   = true;
             } else if (prefix_ok && (size_t)size_prefix == sz_argb8_padded &&
                        sz_argb8_padded != sz_argb8 &&
                        (out.PixelFormat == 2 || out.PixelFormat == 4)) {
-                /* Tile-padded raw ARGB8 — small selfillum maps where
-                   the body got rounded up to a 4 KB page in storage.
-                   The CompFlag=99/100 decode path already untiles via
-                   padded_W/padded_H, so it consumes the full padded
-                   body and only emits pixels within the logical W/H. */
                 comp_tag  = (out.PixelFormat == 2) ? 99u : 100u;
                 body_size = sz_argb8_padded;
                 matched   = true;
             } else if (prefix_ok && (size_t)size_prefix == sz_bc1 &&
                        (out.PixelFormat == 35)) {
-                /* BC1 / DXT1 — texture atlases.  Goes through the
-                   existing CompFlag==7 BC1 untile path in
-                   decode_tex_to_rgba. */
                 comp_tag  = 7u;
                 body_size = sz_bc1;
                 matched   = true;
             } else if (prefix_ok && (size_t)size_prefix == sz_bc1_padded &&
                        sz_bc1_padded != sz_bc1 &&
                        (out.PixelFormat == 35)) {
-                /* Tile-padded BC1 — same idea as the ARGB8 case above. */
                 comp_tag  = 7u;
                 body_size = sz_bc1_padded;
                 matched   = true;
             } else if (prefix_ok && (size_t)size_prefix == sz_bc3 &&
                        (out.PixelFormat == 39)) {
-                /* BC3 / DXT5 — atlases with alpha.  Same comp=7 path. */
                 comp_tag  = 7u;
                 body_size = sz_bc3;
                 matched   = true;
             } else if (prefix_ok && (size_t)size_prefix == sz_bc3_padded &&
                        sz_bc3_padded != sz_bc3 &&
                        (out.PixelFormat == 39)) {
-                /* Tile-padded BC3 — same idea as the ARGB8 case above. */
                 comp_tag  = 7u;
                 body_size = sz_bc3_padded;
                 matched   = true;
@@ -261,18 +218,6 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
                 return true;
             }
 
-            /* Alternate "size-prefixed + zlib-deflated" layout, used by
-               level texture atlases (defaultscenario.texture_atlas):
-                 +0  u32 raw_mip0_size  (matches sz_argb8 / sz_bc1 / sz_bc3
-                                         for the texture's W/H/PF)
-                 +4  u32 compressed_size_hint  (length the rest of the
-                                                page occupies, roughly)
-                 +8  zlib stream (header 78 DA / 78 9C / 78 01) that
-                     inflates to raw_mip0_size bytes of BC1 / BC3 / ARGB8.
-               The bytes the size prefix advertises live AFTER zlib
-               inflation — we tag the MipDef with comp_tag=200..203 so
-               decode_tex_to_rgba knows to inflate before handing the
-               buffer to the existing BC / ARGB blit path. */
             if (prefix_ok && mo + 10 <= d.size()) {
                 const uint8_t* z = d.data() + mo + 8;
                 const bool zlib_magic =
@@ -306,10 +251,6 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
                     md.MipWidth          = (uint16_t)out.TextureWidth;
                     md.MipHeight         = (uint16_t)out.TextureHeight;
                     md.MipDataOffset     = mo + 8;
-                    /* MipDataSizeParsed = bytes of *compressed* data
-                       available in the blob.  The expected raw size
-                       lives in Unknown_3 so the decoder can cap zlib
-                       inflate output without overrunning the buffer. */
                     md.MipDataSizeParsed = d.size() - (mo + 8);
                     md.DataSize          = (uint32_t)md.MipDataSizeParsed;
                     md.Unknown_3         = (uint32_t)expected_raw;
@@ -320,29 +261,6 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
         }
     }
 
-    /* Parse the MipRecord chain.
-     *
-     * The merged extraction layout (header BNK + 1024mip0 BNK + rest BNK)
-     * makes the file-header MipMapOffsets unreliable past index 0: the
-     * 1024mip0 body gets concatenated immediately after the file header
-     * but BEFORE the original smaller-mip records, so offsets [1..N]
-     * which the engine computed pre-merge end up landing inside MipRecord
-     * [0]'s bitstream (where the bytes are 0xFFFFFFFF garbage).
-     *
-     * Per docs/TEX_FORMAT.md the canonical structure is a CHAIN of
-     * (48-byte header + body) records.  We walk that chain starting from
-     * MipMapOffset[0] (the only file-header offset we trust) and follow
-     * the size fields forward — that recovers the real chain regardless
-     * of whether a 1024mip0 chunk was inserted.
-     *
-     * For dng_walls_detail_01_spec.tex the chain in the merged file is:
-     *   0x0054  CF=11, body=41444  → "1024x1024" empty placeholder
-     *   0xa268  CF=1,  body=2452   → real 128x128 LH-BC1
-     *   0xac2c  CF=1,  body=976    → 64x64 LH-BC1
-     *   0xb02c  CF=7,  body=512    → 32x32 raw BC1
-     *   0xb25c  CF=7,  body=128    → 16x16 raw BC1
-     * The standard MipMapOffsets [0xa18, 0xe18, 0x1048] all fall inside
-     * MipRecord[0]'s body — only chain-walking finds the real records. */
     auto parse_one_mip = [&](size_t mo, TexInfo::MipDef& md, size_t& body_end) -> bool {
         if (mo + 48 > d.size()) return false;
         size_t k = mo;
@@ -357,9 +275,6 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
               rd(md.Unknown_6) && rd(md.Unknown_7) && rd(md.Unknown_8) &&
               rd(md.Unknown_9) && rd(md.Unknown_10) && rd(md.Unknown_11))) return false;
 
-        /* Invariants enforced by parse_bare_chain (matching the game's
-           tex_decode_mip dispatcher): CompFlag <= 24 (12+ traps but 24
-           is observed once and filtered upstream), DataOffset == 48. */
         if (md.CompFlag > 24u || md.DataOffset != 48u) return false;
 
         md.HasWH = false;
@@ -369,7 +284,6 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
         md.MipDataSizeParsed = 0;
 
         if (md.CompFlag == 7) {
-            /* Raw BC blocks, no extra header. */
             size_t start = k;
             size_t max_sz = (start < d.size()) ? (d.size() - start) : 0;
             size_t want = (size_t) md.DataSize;
@@ -411,8 +325,6 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
         size_t body_end = 0;
         if (!parse_one_mip(walk_off, md, body_end)) break;
         out.Mips.push_back(md);
-        /* Advance past this record's declared body.  If DataSize would
-           push us off the end (or back), stop — that's the terminator. */
         if (body_end <= walk_off || body_end > d.size()) break;
         walk_off = body_end;
     }
@@ -648,8 +560,6 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
         if (is_header)  return 1;
         if (is_mip0)    return 2;
         if (is_texbody) return 3;
-        /* Fallback body candidate: any .bnk that isn't a texture/header/mip0
-           variant and isn't a manifest. */
         if (n.find(".manifest") != std::string::npos) return 0;
         if (n.size() < 4 || n.compare(n.size() - 4, 4, ".bnk") != 0) return 0;
         return 4;
@@ -741,12 +651,76 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
 
     if (header_idx < 0) return false;
 
-    /* Body fallback: any .bnk that wasn't a texture/header/mip0 BNK. */
+
+    if (body_idx < 0 && !g_level_vfs_texture_body_bnks.empty()) {
+        std::vector<std::string> resolved_vfs_paths;
+        resolved_vfs_paths.reserve(g_level_vfs_texture_body_bnks.size());
+        for (const auto& p : g_level_vfs_texture_body_bnks) {
+            if (auto resolved = find_bnk_by_virtual_path(p)) {
+                if (std::find(resolved_vfs_paths.begin(),
+                              resolved_vfs_paths.end(),
+                              *resolved) == resolved_vfs_paths.end()) {
+                    resolved_vfs_paths.push_back(*resolved);
+                }
+            }
+        }
+        for (const auto& bnk_path : resolved_vfs_paths) {
+            int idx = find_tex_index(bnk_path);
+            if (idx >= 0) { body_idx = idx; body_bnk_path = bnk_path; break; }
+        }
+    }
+
+    if (body_idx < 0 && !g_level_vfs_texture_body_bnks.empty()) {
+        auto leaf_lower = [](const std::string& p) {
+            std::string s = std::filesystem::path(p).filename().string();
+            std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+            return s;
+        };
+        std::vector<std::string> wanted_leaves;
+        wanted_leaves.reserve(g_level_vfs_texture_body_bnks.size());
+        for (const auto& p : g_level_vfs_texture_body_bnks) {
+            wanted_leaves.push_back(leaf_lower(p));
+        }
+        for (const auto& bnk_path : search_paths) {
+            const std::string leaf = leaf_lower(bnk_path);
+            bool match = false;
+            for (const auto& w : wanted_leaves) {
+                if (w == leaf) { match = true; break; }
+            }
+            if (!match) continue;
+            int idx = find_tex_index(bnk_path);
+            if (idx >= 0) { body_idx = idx; body_bnk_path = bnk_path; break; }
+        }
+    }
+
     if (body_idx < 0) {
         for (const auto& bnk_path : search_paths) {
             if (classify(bnk_path) != 4) continue;
             int idx = find_tex_index(bnk_path);
             if (idx >= 0) { body_idx = idx; body_bnk_path = bnk_path; break; }
+        }
+    }
+    if (body_idx < 0) {
+        for (const auto& bnk_path : search_paths) {
+            if (bnk_path == header_bnk_path) continue;
+            if (mip0_idx >= 0 && bnk_path == mip0_bnk_path) continue;
+            int role = classify(bnk_path);
+            if (role == 0) continue;
+            int idx = find_tex_index(bnk_path);
+            if (idx >= 0) { body_idx = idx; body_bnk_path = bnk_path; break; }
+        }
+    }
+    if (body_idx < 0) {
+        for (const auto& e : S.all_tex_files) {
+            if (e.bnk_path == header_bnk_path) continue;
+            if (mip0_idx >= 0 && e.bnk_path == mip0_bnk_path) continue;
+            std::string e_full = normalize_lookup_key(e.full_path);
+            std::string e_base = normalize_lookup_key(e.name);
+            if (e_full != full_key && e_base != base_key) continue;
+            if (classify(e.bnk_path) == 1) continue;
+            body_idx = e.file_index;
+            body_bnk_path = e.bnk_path;
+            break;
         }
     }
 
@@ -757,6 +731,8 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
         std::vector<uint8_t> vm, vb;
         if (mip0_idx >= 0) vm = BnkCache::extract_bytes(mip0_bnk_path, mip0_idx);
         if (body_idx >= 0) vb = BnkCache::extract_bytes(body_bnk_path, body_idx);
+
+        if (vm.empty() && vb.empty()) return false;
 
         out.clear();
         out.reserve(vh.size() + vm.size() + vb.size());

@@ -479,7 +479,7 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
             if (bind.src.empty()) continue;
             std::vector<unsigned char> tex_buf;
             if (!build_any_tex_buffer_for_name(bind.src, tex_buf,
-                                               /*preferred_bnk=*/std::string())) {
+                                               std::string())) {
                 continue;
             }
             MdlTexExport::EncodedTex enc;

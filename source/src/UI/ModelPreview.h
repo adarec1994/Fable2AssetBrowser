@@ -64,15 +64,10 @@ struct MPPerMesh {
     bool highlight = false;
     bool isolated  = false;
 
-    /* Marks this mesh as the chunk-splat terrain.  When set, MP_Render
-       binds the TerrainSplat resources (LOD array + chunk LUTs) and
-       uses the terrain pixel shader instead of the standard one. */
     bool is_terrain = false;
 
     uint32_t source_mesh_idx = 0;
 
-    /* LOD index extracted from the mesh-name suffix "|lod<N>".
-       0 when no suffix was present (single-LOD or untagged). */
     uint32_t lod_index = 0;
 };
 struct ModelPreview {
@@ -87,10 +82,6 @@ struct ModelPreview {
     ID3D11InputLayout* layout = nullptr;
     ID3D11Buffer* cbuffer = nullptr;
     ID3D11SamplerState* sampler = nullptr;
-    /* Optional secondary pipeline for the chunk-splat terrain shader.
-       Compiled in create_pipeline alongside the standard one.  Same
-       input layout as the regular VS (we reuse `layout`) so we only
-       need new VS/PS objects + an extra constant buffer. */
     ID3D11VertexShader* vs_terrain = nullptr;
     ID3D11PixelShader*  ps_terrain = nullptr;
     ID3D11Buffer*       cbuffer_terrain = nullptr;
@@ -127,16 +118,8 @@ struct ModelPreview {
 
     bool wireframe = false;
 
-    /* When set, MP_Render skips the global -90° X-axis tilt it normally
-       applies to MDL geometry.  MDL files are Z-up and the engine
-       rotates them to display Y-up; terrain meshes we build ourselves
-       are already Y-up so they need this disabled to stay flat. */
     bool no_tilt = false;
 
-    /* LOD selection.  `lod_count` is the number of distinct LODs in
-       the loaded model (computed at build time from per-mesh
-       lod_index).  `selected_lod` is the index currently displayed;
-       -1 means "show all LODs" (no filter). */
     uint32_t lod_count    = 1;
     int32_t  selected_lod = -1;
 
@@ -168,10 +151,6 @@ unsigned int MP_GetTexture(ModelPreview& mp);
 void FlyCam_Reset(FlyCam& cam, float cx, float cy, float cz, float radius);
 void FlyCam_Update(FlyCam& cam, float dt, bool w, bool s, bool a, bool d, bool q, bool e, float mouse_dx, float mouse_dy);
 
-/* Release every SRV held by the global texture cache (decoded
-   textures shared across models).  Safe to call any time; cached SRVs
-   will be lazily re-decoded on the next model load that references
-   them. */
 void MP_TextureCache_Clear();
 
 bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,

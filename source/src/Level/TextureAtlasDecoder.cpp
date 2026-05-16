@@ -5,14 +5,6 @@
 #include <sstream>
 #include <zlib.h>
 
-/* ----- self-contained helpers ------------------------------------ */
-/* Everything this decoder needs is duplicated in this translation
-   unit on purpose — the original `static` helpers in
-   src/UI/ModelPreview.cpp live in an anonymous TU and the .tex
-   parser in src/textures/TexParser.cpp already has subtle bugs
-   that swallow our zlib variant.  Keeping the atlas pipeline
-   isolated means a future change to either of those files can't
-   break atlases by accident.                                       */
 
 namespace {
 
@@ -23,7 +15,6 @@ inline bool rd32be(const uint8_t* p, size_t n, size_t off, uint32_t& out) {
     return true;
 }
 
-/* BC1 / DXT1 block decode → 16 BGRA8 texels into `outRGBA`. */
 inline uint8_t ex5(uint16_t v){ return (uint8_t)((v<<3)|(v>>2)); }
 inline uint8_t ex6(uint16_t v){ return (uint8_t)((v<<2)|(v>>4)); }
 
@@ -79,8 +70,6 @@ void decode_bc3_block(const uint8_t* b, uint32_t* outRGBA) {
     }
 }
 
-/* Xbox 360 BC1: byte-swap endpoint pairs (c0/c1) BE→LE; also flip
-   the index byte order so the BC1 decoder sees it the way D3D does. */
 void swap_bc1_endian(uint8_t* data, size_t size) {
     for (size_t i = 0; i + 8 <= size; i += 8) {
         uint16_t c0 = (data[i+0] << 8) | data[i+1];
@@ -121,11 +110,6 @@ void swap_bc5_endian(uint8_t* data, size_t size) {
     }
 }
 
-/* Port of ReverseBox `xg_address_2d_tiled_x / y` (the source for
-   ImageHeat's "XBOX 360 (block_pixel_size, texel_byte_pitch)" modes).
-   Iterates sequential tiled-storage block offsets and scatters each
-   block to its logical (x, y) — works for any
-   (block_pixel_size, texel_byte_pitch) pair.  */
 uint32_t xg_address_2d_tiled_x(uint32_t block_offset,
                                uint32_t width_in_blocks,
                                uint32_t texel_byte_pitch)
@@ -170,23 +154,6 @@ uint32_t xg_address_2d_tiled_y(uint32_t block_offset,
     return macro + micro + ((off_tile & 0x10u) >> 4);
 }
 
-/* Simple "tile-major, linear-inside-tile" BC untile used by the
-   Fable 2 .ehf baked-terrain pages.  Layout the engine writes:
-
-     - image is split into 32×32-BC-block macro-tiles (= 128×128
-       pixels for BC1, 128×128 for BC3/BC5 as well — block-count
-       is what matters)
-     - macro-tiles are stored row-major in storage order
-     - WITHIN each macro-tile, blocks are stored row-major linearly,
-       no further swizzling
-
-   This is what the engine actually does for `.ehf` terrain pages
-   — confirmed against Bloodstone defaultscenario (640×768 baked
-   albedo) and Brightwood / Bowerlake (512×512 material atlas
-   pages).  Standard Xbox 360 XGAddress2DTiledOffset / ImageHeat
-   `xg_address_2d_tiled_*` formulas DON'T match this — they apply
-   an extra within-tile swizzle the .ehf doesn't.  Atlas / .tex
-   pages still need the full ImageHeat path (see below). */
 void untile_xbox360_tile_major(const uint8_t* tiled,
                                size_t tiled_size,
                                std::vector<uint8_t>& linear_out,
@@ -225,11 +192,6 @@ void untile_xbox360_tile_major(const uint8_t* tiled,
     }
 }
 
-/* ImageHeat-style untile.  Reorders a tiled block buffer into linear
-   row-major block order.  block_pixel_size=4, texel_byte_pitch=8 for
-   BC1; texel_byte_pitch=16 for BC3 / BC5; block_pixel_size=1,
-   texel_byte_pitch=4 for raw 32-bpp ARGB (not used here but the
-   formula handles it). */
 void untile_xbox360_imageheat(const uint8_t* tiled,
                               size_t tiled_size,
                               std::vector<uint8_t>& linear_out,
@@ -260,7 +222,6 @@ void untile_xbox360_imageheat(const uint8_t* tiled,
     }
 }
 
-/* Final BCn → RGBA8 blit. */
 template<int Bytes>
 void blit_bc_to_rgba(const uint8_t* src, int w, int h,
                      std::vector<uint8_t>& rgba,
@@ -361,7 +322,6 @@ DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob)
         return r;
     }
 
-    /* Parse header. */
     uint32_t magic     = 0;
     uint32_t W         = 0;
     uint32_t H         = 0;
@@ -396,10 +356,6 @@ DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob)
         return r;
     }
 
-    /* The mip_table field at 0x20 points to where the size-prefixed
-       payload begins.  In every atlas we've seen this is 0x54 with
-       all of 0x24..0x4F zero-padded; honour the field rather than
-       assuming.                                                     */
     const size_t mt = (size_t)mip_table;
     if (mt + 8 > n) {
         r.error = "atlas: mip table offset past EOF";
@@ -410,15 +366,6 @@ DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob)
     rd32be(d, n, mt + 0, raw_size);
     rd32be(d, n, mt + 4, comp_size);
 
-    /* Sanity-check raw_size against the format.
-       BC1 (PF=35): raw = W*H/2
-       BC3 (PF=39): raw = W*H
-       BC5 (PF=40): raw = W*H
-       L8A8 (PF=24, lightmap inside .ehf bodies): raw_size is the
-         file-stated PADDED storage size (W and H both rounded up to
-         32-texel boundaries, with an occasional +1 tile of padding
-         the engine adds for textures larger than 16K texels).
-         We trust the file's raw_size verbatim for PF=24.            */
     size_t   expected_raw = 0;
     uint32_t block_bytes  = 0;        
     if      (PF == 35u) { expected_raw = (size_t)W * H / 2; block_bytes = 8;  }
@@ -433,8 +380,6 @@ DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob)
         return r;
     }
 
-    /* The zlib stream starts at mt+8.  comp_size names how many bytes
-       it occupies; clamp it to what's actually in the blob. */
     const size_t zlib_off = mt + 8;
     if (zlib_off + 2 > n || d[zlib_off] != 0x78) {
         r.error = "atlas: no zlib magic at mip data offset";
@@ -443,45 +388,29 @@ DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob)
     size_t avail_comp = n - zlib_off;
     if ((size_t)comp_size > avail_comp) comp_size = (uint32_t)avail_comp;
 
-    /* Inflate. */
     std::vector<uint8_t> raw;
     if (!inflate_zlib(d + zlib_off, comp_size, raw, expected_raw)) {
         r.error = "atlas: zlib inflate failed";
         return r;
     }
 
-    /* Untile.  For PF=24 (L8A8 lightmap inside .ehf bodies) the
-       tiling is per-texel (block_pixel_size=1, texel_byte_pitch=2)
-       rather than per-BC-block (4, block_bytes).  Validated in
-       tools/ehf_body_decode.py against bl_chapter3 and autumn_1
-       — the resulting image shows a recognisable terrain lightmap
-       so the formulas are correct as-is.                              */
     std::vector<uint8_t> linear;
     if (PF == 24u) {
         untile_xbox360_imageheat(raw.data(), raw.size(), linear,
                                  (int)W, (int)H,
-                                 /*block_pixel_size=*/1,
-                                 /*texel_byte_pitch=*/2);
+                                 1,
+                                 2);
     } else {
         untile_xbox360_imageheat(raw.data(), raw.size(), linear,
                                  (int)W, (int)H,
-                                 /*block_pixel_size=*/4,
-                                 /*texel_byte_pitch=*/block_bytes);
+                                 4,
+                                 block_bytes);
     }
 
-    /* Endian-swap + BCn → RGBA, or for PF=24 just splat the two
-       channels into RGBA(R=high_byte, G=low_byte, B=0, A=255).      */
     r.width  = (int)W;
     r.height = (int)H;
     r.pixel_format = PF;
     if (PF == 24u) {
-        /* Each output pixel = 2 bytes of linear, stored as (R,G,0,255).
-           From the Python validation: ch0 (offset 0 inside each pair)
-           is the smooth high byte that visualises as a baked terrain
-           lightmap; ch1 (offset 1) is a noisier secondary channel
-           (detail / dither / vignette — TBD).  Preserving both into
-           R and G lets downstream code combine or pick whichever
-           channel it needs.                                          */
         const size_t pix = (size_t)W * (size_t)H;
         r.rgba.assign(pix * 4, 0);
         for (size_t i = 0; i < pix; ++i) {
@@ -501,7 +430,7 @@ DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob)
         swap_bc3_endian(linear.data(), linear.size());
         blit_bc_to_rgba<16>(linear.data(), (int)W, (int)H, r.rgba,
                             decode_bc3_block);
-    } else { /* PF == 40 */
+    } else { 
         swap_bc5_endian(linear.data(), linear.size());
         blit_bc5_to_rgba(linear.data(), (int)W, (int)H, r.rgba);
     }
@@ -509,11 +438,6 @@ DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob)
     return r;
 }
 
-/* Generic "decode a zlib-deflated tiled BC{1,3,5} page" helper used
-   by the .ehf baked-terrain-texture pipeline.  Same byte transforms
-   as DecodeAtlas but with the caller controlling W/H/format and
-   pointing directly at the deflate bitstream — no .texture_atlas
-   container header in the way.                                    */
 namespace {
 bool decode_zlib_bc_page_generic(const uint8_t* zlib_stream,
                                  size_t          comp_size,
@@ -521,7 +445,7 @@ bool decode_zlib_bc_page_generic(const uint8_t* zlib_stream,
                                  int             width_pixels,
                                  int             height_pixels,
                                  std::vector<uint8_t>& rgba,
-                                 int             which /* 1=BC1, 3=BC3, 5=BC5 */)
+                                 int             which )
 {
     if (!zlib_stream || comp_size < 2 ||
         width_pixels <= 0 || height_pixels <= 0 ||
@@ -533,17 +457,11 @@ bool decode_zlib_bc_page_generic(const uint8_t* zlib_stream,
 
     const uint32_t block_bytes = (which == 1) ? 8u : 16u;
 
-    /* The actual .ehf BC1 storage layout is NOT fully understood
-       yet — tile-major (32-block macro tiles, linear inside) gets
-       us closer than the full ImageHeat swizzle for non-Bloodstone
-       levels but still has tile-aligned black gaps on Bloodstone.
-       Until we crack it via IDA, use the ImageHeat path so at least
-       Bloodstone defaultscenario renders cleanly.                 */
     std::vector<uint8_t> linear;
     untile_xbox360_imageheat(raw.data(), raw.size(), linear,
                              width_pixels, height_pixels,
-                             /*block_pixel_size=*/4,
-                             /*texel_byte_pitch=*/block_bytes);
+                             4,
+                             block_bytes);
 
     if (which == 1) {
         swap_bc1_endian(linear.data(), linear.size());
@@ -553,7 +471,7 @@ bool decode_zlib_bc_page_generic(const uint8_t* zlib_stream,
         swap_bc3_endian(linear.data(), linear.size());
         blit_bc_to_rgba<16>(linear.data(), width_pixels, height_pixels,
                             rgba, decode_bc3_block);
-    } else { /* which == 5 */
+    } else { 
         swap_bc5_endian(linear.data(), linear.size());
         blit_bc5_to_rgba(linear.data(), width_pixels, height_pixels, rgba);
     }
@@ -566,21 +484,21 @@ bool DecodeZlibBc1Page(const uint8_t* zlib_stream, size_t comp_size,
                        std::vector<uint8_t>& rgba)
 {
     return decode_zlib_bc_page_generic(zlib_stream, comp_size, expected_raw,
-                                       w, h, rgba, /*which=*/1);
+                                       w, h, rgba, 1);
 }
 bool DecodeZlibBc3Page(const uint8_t* zlib_stream, size_t comp_size,
                        size_t expected_raw, int w, int h,
                        std::vector<uint8_t>& rgba)
 {
     return decode_zlib_bc_page_generic(zlib_stream, comp_size, expected_raw,
-                                       w, h, rgba, /*which=*/3);
+                                       w, h, rgba, 3);
 }
 bool DecodeZlibBc5Page(const uint8_t* zlib_stream, size_t comp_size,
                        size_t expected_raw, int w, int h,
                        std::vector<uint8_t>& rgba)
 {
     return decode_zlib_bc_page_generic(zlib_stream, comp_size, expected_raw,
-                                       w, h, rgba, /*which=*/5);
+                                       w, h, rgba, 5);
 }
 
 bool DecodeRawBc1ToRgba(const uint8_t* bc1, size_t bc1_size,
@@ -607,7 +525,6 @@ bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,
         return false;
     }
 
-    /* Parse .tex sub-header. */
     uint32_t magic = 0, W = 0, H = 0, PF = 0, mt = 0;
     if (!rd32be(pf99_blob, blob_size, 0x00, magic) ||
         !rd32be(pf99_blob, blob_size, 0x10, W) ||
@@ -646,17 +563,12 @@ bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,
     size_t avail_comp = blob_size - zlib_off;
     if ((size_t)comp_size > avail_comp) comp_size = (uint32_t)avail_comp;
 
-    /* Inflate to raw_size bytes.  Same lenient handling as DecodeAtlas. */
     std::vector<uint8_t> raw;
     if (!inflate_zlib(pf99_blob + zlib_off, comp_size, raw, raw_size)) {
         out_err = "splat: zlib inflate failed";
         return false;
     }
 
-    /* Derive padded block dimensions from raw_size.  raw_size =
-       blocks_w * blocks_h * 8.  Padded pixel dims = blocks * 4.
-       Search for plausible padding: padded_w must be a multiple of
-       128 (= 32 BC-block macro tile × 4 pixels) and padded_w >= W.  */
     const size_t total_blocks = (size_t)raw_size / 8;
     int padded_w = 0, padded_h = 0;
     for (int pad_step : {128, 64, 32, 16, 8, 4}) {
@@ -673,9 +585,6 @@ bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,
         return false;
     }
 
-    /* Untile: 32×32-block macro tiles, row-major between AND within.
-       Mirrors the tile_major formula confirmed by
-       tools/ehf_pf99_4bit.py.                                       */
     const int blocks_w = padded_w / 4;
     const int blocks_h = padded_h / 4;
     constexpr int TILE = 32;
@@ -703,9 +612,6 @@ bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,
         }
     }
 
-    /* Unpack each 8-byte block into a 4×4 patch of 4-bit indices.
-       HIGH nibble of byte[k] = pixel (k*2), LOW = pixel (k*2 + 1).
-       Pixels within the patch are row-major: pixel 0 = top-left.   */
     out_indices.assign((size_t)W * (size_t)H, 0);
     for (int by = 0; by < blocks_h; ++by) {
         for (int bx = 0; bx < blocks_w; ++bx) {

@@ -47,7 +47,7 @@ std::filesystem::path build_out_path(const std::string& virtual_path) {
     return root / rel;
 }
 
-bool stream_copy_one(int /*idx*/, int /*total*/,
+bool stream_copy_one(int , int ,
                      const MountedFile& mf,
                      const std::filesystem::path& out,
                      std::vector<uint8_t>& buf) {
@@ -594,7 +594,7 @@ void mdl_export_begin_named(MdlExportFormat fmt,
                             const std::string& bnk_path,
                             int file_index,
                             const std::string& display_path,
-                            bool /*from_nested*/)
+                            bool )
 {
     if (bnk_path.empty() || file_index < 0) {
         OutputLog::error("MDL export: missing bnk / index arg.");
@@ -608,7 +608,7 @@ void mdl_export_begin_named(MdlExportFormat fmt,
         if ((size_t)file_index < files.size()) {
             entry_name = files[file_index].name;
         }
-    } catch (...) { /* fall through — entry_name stays empty */ }
+    } catch (...) {  }
 
     std::string out_rel;
     if (!display_path.empty() && display_path.find('/') != std::string::npos) {
@@ -1026,7 +1026,7 @@ void dump_tex_files_as(TexExportFormat fmt) {
             try {
 
                 tex_export_begin_named(fmt, e.full_path, e.bnk_path,
-                                       /*mip_index=*/0);
+                                       0);
             } catch (const std::exception& ex) {
                 std::lock_guard<std::mutex> lk(fail_m);
                 failed.push_back(e.full_path);

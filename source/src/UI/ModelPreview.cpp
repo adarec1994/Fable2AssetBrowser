@@ -1174,7 +1174,7 @@ cbuffer TerrainCB : register(b2){
     /* x = chunk_w, y = chunk_h, z = lod_count, w = max blend (255 max in u8) */
     float4 chunk_grid_size;
     /* x = blend_scale  (u8 / blend_scale → [0..1])
-       y = reserved */
+       y = world-space material texture scale */
     float4 splat_params;
     /* Affine mesh→world transform for chunk lookup:
        world_xy = mesh_xy * mesh_xform.xy + mesh_xform.zw
@@ -1214,6 +1214,7 @@ float4 PS(VSOUT i) : SV_Target {
     float  CW       = chunk_grid_size.x;
     float  CH       = chunk_grid_size.y;
     float  max_lod  = chunk_grid_size.z;
+    float2 mat_uv   = world_xy * splat_params.y;
 
     /* Map world → chunk-grid coords [0, CW] × [0, CH]. */
     float2 chunk_co = (world_xy - origin) / extent;
@@ -1252,10 +1253,10 @@ float4 PS(VSOUT i) : SV_Target {
 
         /* Sample 4 corner textures.  Indices may legitimately equal
            each other; this is fine, the shader just does 4 samples. */
-        float3 c00 = sample_lod((int)idx255.x, i.t);
-        float3 c10 = sample_lod((int)idx255.y, i.t);
-        float3 c01 = sample_lod((int)idx255.z, i.t);
-        float3 c11 = sample_lod((int)idx255.w, i.t);
+        float3 c00 = sample_lod((int)idx255.x, mat_uv);
+        float3 c10 = sample_lod((int)idx255.y, mat_uv);
+        float3 c01 = sample_lod((int)idx255.z, mat_uv);
+        float3 c11 = sample_lod((int)idx255.w, mat_uv);
 
         /* Bilinear-blend the 4 corner samples by position weights. */
         float3 lc = c00 * w00 + c10 * w10 + c01 * w01 + c11 * w11;
@@ -1273,7 +1274,7 @@ float4 PS(VSOUT i) : SV_Target {
     /* Fallback: if no layer contributed (e.g. all blends zero), use
        LOD slice 0 directly so we never render black terrain.       */
     if (alpha_sum < 0.05) {
-        final = sample_lod(0, i.t);
+        final = sample_lod(0, mat_uv);
     }
 
     /* Lightmap AO modulation.  Lightmap is sized to the heightfield;
@@ -1967,7 +1968,8 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 t.grid_size[2] = (float)R.lod_count;
                 t.grid_size[3] = 255.f;
                 t.splat_params[0] = 3.0f;   
-                t.splat_params[1] = 0.0f;
+                t.splat_params[1] = (R.tile_scale > 0.0f)
+                    ? R.tile_scale : 0.125f;
                 t.splat_params[2] = 0.0f;
                 t.splat_params[3] = 0.0f;
                 t.mesh_xform[0] = 1.0f;

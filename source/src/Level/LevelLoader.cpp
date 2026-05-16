@@ -38,6 +38,8 @@ extern const std::string& mp_last_decode_info();
 #include <fstream>
 #include <thread>
 #include <iomanip>
+#include <climits>
+#include <limits>
 #include <sstream>
 #include <unordered_map>
 
@@ -1016,33 +1018,180 @@ bool Open(const FlatAssetEntry& entry)
                 }
                 if (!hit) continue;
 
-                auto& pb = blocks_by_path[hit->full_path];
-                if (pb.model_path.empty()) {
-                    pb.type = 0xB1;            
-                    pb.model_path = hit->full_path;
-                }
-                Level::PropInstance pi;
-                pi.values[0]  = p.x;
-                pi.values[1]  = p.y;
-                pi.values[2]  = p.z;
-                pi.values[6]  = std::sin(p.yaw);
-                pi.values[7]  = std::cos(p.yaw);
-                pi.values[9]  = pi.values[10] = pi.values[11] =
-                    (p.scale > 0.0f && p.scale < 1000.0f) ? p.scale : 1.0f;
-                pb.instances.push_back(pi);
+                (void)hit;
                 ++resolved;
-            }
-
-            for (auto& kv : blocks_by_path) {
-                g_pending_level_prop_blocks.push_back(std::move(kv.second));
             }
 
             std::ostringstream os3;
             os3 << "gdb-derived placements: "
-                << blocks_by_path.size() << " unique models / "
-                << resolved << " instances appended to prop pipeline";
-            if (resolved > 0) OutputLog::success(os3.str());
-            else              OutputLog::warn(os3.str());
+                << resolved << " entities matched a model (NOT emitted — "
+                << "position decode is still wrong, buildings clustered)";
+            OutputLog::warn(os3.str());
+
+            /* ---- Havok-scenario entity-position scan ----
+               The .havok_scenario file contains ~2400 entity hashes
+               from .save XML, each paired with a transform record.
+               The position vec3 sits ~36 bytes (= -0x24) before the
+               hash on most entity layouts.  We pick the vec3 with all
+               3 components meaningful (>0.5) in world bounds, then
+               build a synthetic PropBlock per resolved MDL.        */
+            std::vector<uint8_t> hk_scan_bytes;
+            const std::string hk_scan_path = sibling_with_ext(".havok_scenario");
+            if (load_text_sibling(hk_scan_path, hk_scan_bytes)) {
+                auto be_f32 = [&](size_t off) -> float {
+                    if (off + 4 > hk_scan_bytes.size())
+                        return std::numeric_limits<float>::quiet_NaN();
+                    uint32_t u =
+                        (uint32_t(hk_scan_bytes[off    ]) << 24) |
+                        (uint32_t(hk_scan_bytes[off + 1]) << 16) |
+                        (uint32_t(hk_scan_bytes[off + 2]) <<  8) |
+                         uint32_t(hk_scan_bytes[off + 3]);
+                    float f; std::memcpy(&f, &u, 4); return f;
+                };
+
+                /* Build a fast lookup: bytes-of-hash → entity name. */
+                std::unordered_map<uint32_t, std::string> hash_to_name;
+                hash_to_name.reserve(save_hash_to_name.size());
+                for (const auto& kv : save_hash_to_name) {
+                    hash_to_name.emplace(kv.first, kv.second);
+                }
+
+                /* Linear scan over hk bytes, looking for any 4-byte
+                   value that matches a save entity hash. */
+                size_t found = 0;
+                size_t resolved_hk = 0;
+                size_t in_terrain = 0;
+
+                auto looks_pos = [](float x, float y, float z) {
+                    if (!std::isfinite(x) || !std::isfinite(y) ||
+                        !std::isfinite(z)) return false;
+                    if (x < -100 || x > 500) return false;
+                    if (y < -100 || y > 500) return false;
+                    if (z < -100 || z > 500) return false;
+                    int nonzero = 0;
+                    if (std::fabs(x) > 0.5f) ++nonzero;
+                    if (std::fabs(y) > 0.5f) ++nonzero;
+                    if (std::fabs(z) > 0.5f) ++nonzero;
+                    return nonzero >= 3;
+                };
+                auto in_main_terrain = [](float x, float y, float z) {
+                    return (x >= 0 && x <= 290) &&
+                           (y >= 0 && y <= 390) &&
+                           (z >= -10 && z <= 250);
+                };
+
+                for (size_t i = 0; i + 4 <= hk_scan_bytes.size(); i += 4) {
+                    uint32_t v =
+                        (uint32_t(hk_scan_bytes[i    ]) << 24) |
+                        (uint32_t(hk_scan_bytes[i + 1]) << 16) |
+                        (uint32_t(hk_scan_bytes[i + 2]) <<  8) |
+                         uint32_t(hk_scan_bytes[i + 3]);
+                    auto it = hash_to_name.find(v);
+                    if (it == hash_to_name.end()) continue;
+                    ++found;
+
+                    /* Find best position vec3 in [-128, +64] around the
+                       hash; prefer in-terrain, then closest to hash.   */
+                    float best_x = 0, best_y = 0, best_z = 0;
+                    int   best_dist = INT_MAX;
+                    bool  best_in_terrain = false;
+                    bool  found_any = false;
+
+                    const size_t lo = (i >= 128) ? i - 128 : 0;
+                    const size_t hi = std::min(hk_scan_bytes.size() - 12, i + 64);
+                    for (size_t q = lo; q <= hi; q += 4) {
+                        float x = be_f32(q);
+                        float y = be_f32(q + 4);
+                        float z = be_f32(q + 8);
+                        if (!looks_pos(x, y, z)) continue;
+                        const bool inT = in_main_terrain(x, y, z);
+                        int dist = (int)(q > i ? q - i : i - q);
+                        bool better = false;
+                        if (!found_any) better = true;
+                        else if (inT && !best_in_terrain) better = true;
+                        else if (inT == best_in_terrain && dist < best_dist) {
+                            better = true;
+                        }
+                        if (better) {
+                            best_x = x; best_y = y; best_z = z;
+                            best_dist = dist;
+                            best_in_terrain = inT;
+                            found_any = true;
+                        }
+                    }
+                    if (!found_any) continue;
+                    ++resolved_hk;
+                    if (best_in_terrain) ++in_terrain;
+
+                    /* Fuzzy-match the entity name to an MDL. */
+                    std::string tok = canonicalize_for_match(it->second);
+                    if (tok.empty()) continue;
+                    const FlatAssetEntry* hit = nullptr;
+                    auto mit = mdl_by_token.find(tok);
+                    if (mit != mdl_by_token.end()) hit = mit->second;
+                    if (!hit) {
+                        size_t best_len = SIZE_MAX;
+                        for (const auto& kv : mdl_by_token) {
+                            const std::string& mk = kv.first;
+                            bool match =
+                                mk.find(tok) != std::string::npos ||
+                                tok.find(mk) != std::string::npos;
+                            if (!match) continue;
+                            if (mk.size() < best_len) {
+                                best_len = mk.size();
+                                hit = kv.second;
+                            }
+                        }
+                    }
+                    if (!hit) continue;
+
+                    /* Emit a synthetic PropBlock instance.  Engine
+                       convention: values[0..2] = (X, Y_horiz, Z_height).
+                       We assume havok stores positions in that order. */
+                    auto& pb = blocks_by_path[hit->full_path];
+                    if (pb.model_path.empty()) {
+                        pb.type = 0xB2;            /* havok-derived */
+                        pb.model_path = hit->full_path;
+                    }
+                    Level::PropInstance pi;
+                    pi.values[0]  = best_x;
+                    pi.values[1]  = best_y;
+                    pi.values[2]  = best_z;
+                    pi.values[6]  = 0.0f;          /* yaw sin */
+                    pi.values[7]  = 1.0f;          /* yaw cos = identity */
+                    pi.values[9]  = pi.values[10] = pi.values[11] = 1.0f;
+                    pb.instances.push_back(pi);
+                }
+
+                std::ostringstream hos;
+                hos << "havok entity-scan: " << found
+                    << " save hashes matched in havok_scenario, "
+                    << resolved_hk << " got positions ("
+                    << in_terrain << " in main terrain bounds)";
+                if (resolved_hk > 0) OutputLog::success(hos.str());
+                else                  OutputLog::warn(hos.str());
+
+                /* Flush all blocks_by_path entries into the global
+                   pending list.  These contain both GDB-attempted
+                   and havok-derived placements; only the havok ones
+                   actually have instances since the gdb branch above
+                   skips emission.                                      */
+                size_t hk_blocks = 0, hk_insts = 0;
+                for (auto& kv : blocks_by_path) {
+                    if (kv.second.instances.empty()) continue;
+                    ++hk_blocks;
+                    hk_insts += kv.second.instances.size();
+                    g_pending_level_prop_blocks.push_back(std::move(kv.second));
+                }
+                std::ostringstream eos;
+                eos << "havok-derived placements: "
+                    << hk_blocks << " unique models / "
+                    << hk_insts << " instances appended to prop pipeline";
+                if (hk_insts > 0) OutputLog::success(eos.str());
+                else              OutputLog::warn(eos.str());
+            } else {
+                OutputLog::warn("havok entity-scan skipped: no .havok_scenario");
+            }
         } else {
             OutputLog::warn("no .gdb sibling in BNK");
         }
@@ -2087,10 +2236,21 @@ static bool DecodeEhfEmbeddedTileComposite(const std::vector<uint8_t>& ehf,
         std::sort(v.begin(), v.end());
         return v[v.size() / 2];
     };
-    const int scale_x = std::clamp(int(std::lround(median_ratio(ratios_x))),
-                                   1, 8);
-    const int scale_y = std::clamp(int(std::lround(median_ratio(ratios_y))),
-                                   1, 8);
+    const float median_x = median_ratio(ratios_x);
+    const float median_y = median_ratio(ratios_y);
+    if (median_x < 0.5f || median_y < 0.5f ||
+        median_x > 8.0f || median_y > 8.0f)
+    {
+        std::ostringstream os;
+        os << "ehf: embedded BC1 tile pages look strip-like "
+           << "(median scale=" << median_x << "x" << median_y
+           << "), skipping as terrain albedo";
+        OutputLog::info(os.str());
+        return false;
+    }
+
+    const int scale_x = std::clamp(int(std::lround(median_x)), 1, 8);
+    const int scale_y = std::clamp(int(std::lround(median_y)), 1, 8);
 
     out_w = int(cells_w) * scale_x;
     out_h = int(cells_h) * scale_y;
@@ -2808,7 +2968,7 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
             const float w11 =        fx_in  *        fy_in;
 
             const EhfChunk& chunk =
-                parsed.chunks[size_t(cy) * parsed.chunk_w + cx];
+                parsed.chunks[size_t(cx) * parsed.chunk_h + cy];
 
             float accum_r = 0.f, accum_g = 0.f, accum_b = 0.f;
             float accum_a = 0.f;

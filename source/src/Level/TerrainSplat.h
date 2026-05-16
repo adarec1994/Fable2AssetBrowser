@@ -16,7 +16,7 @@ namespace EhfLodThumbnails { struct Entry; }
 
 namespace TerrainSplat {
 
-constexpr int kCommonLodSize = 512;   
+constexpr int kCommonLodSize = 1024;   
 constexpr int kMaxLayers     = 16;
 
 struct Resources {

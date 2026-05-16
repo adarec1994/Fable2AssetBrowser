@@ -9,6 +9,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace TerrainSplat {
@@ -89,15 +90,34 @@ void resize_rgba8(const std::vector<uint8_t>& src, int sw, int sh,
                   std::vector<uint8_t>& dst, int dw, int dh)
 {
     dst.assign(size_t(dw) * size_t(dh) * 4, 0);
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
     const float sx_scale = float(sw) / float(dw);
     const float sy_scale = float(sh) / float(dh);
     for (int y = 0; y < dh; ++y) {
-        const int sy0 = std::min(sh - 1, int(y * sy_scale));
+        const float sy = (float(y) + 0.5f) * sy_scale - 0.5f;
+        const int sy0 = std::clamp(int(std::floor(sy)), 0, sh - 1);
+        const int sy1 = std::min(sy0 + 1, sh - 1);
+        const float fy = std::clamp(sy - float(sy0), 0.0f, 1.0f);
         for (int x = 0; x < dw; ++x) {
-            const int sx0 = std::min(sw - 1, int(x * sx_scale));
-            const uint8_t* p = src.data() + (size_t(sy0) * sw + sx0) * 4;
+            const float sx = (float(x) + 0.5f) * sx_scale - 0.5f;
+            const int sx0 = std::clamp(int(std::floor(sx)), 0, sw - 1);
+            const int sx1 = std::min(sx0 + 1, sw - 1);
+            const float fx = std::clamp(sx - float(sx0), 0.0f, 1.0f);
+            const uint8_t* p00 = src.data() + (size_t(sy0) * sw + sx0) * 4;
+            const uint8_t* p10 = src.data() + (size_t(sy0) * sw + sx1) * 4;
+            const uint8_t* p01 = src.data() + (size_t(sy1) * sw + sx0) * 4;
+            const uint8_t* p11 = src.data() + (size_t(sy1) * sw + sx1) * 4;
             uint8_t* q = dst.data() + (size_t(y) * dw + x) * 4;
-            q[0] = p[0]; q[1] = p[1]; q[2] = p[2]; q[3] = p[3];
+            const float w00 = (1.0f - fx) * (1.0f - fy);
+            const float w10 = fx * (1.0f - fy);
+            const float w01 = (1.0f - fx) * fy;
+            const float w11 = fx * fy;
+            for (int c = 0; c < 4; ++c) {
+                q[c] = uint8_t(std::clamp(
+                    p00[c] * w00 + p10[c] * w10 +
+                    p01[c] * w01 + p11[c] * w11,
+                    0.0f, 255.0f));
+            }
         }
     }
 }
@@ -197,7 +217,9 @@ bool Build(ID3D11Device*                                       device,
         int seeded = 0;
         for (int s = 0; s < N; ++s) {
             ID3D11ShaderResourceView* src_srv =
-                lod_thumbs[s].srv_base_diffuse;
+                lod_thumbs[s].srv_base_diffuse
+                    ? lod_thumbs[s].srv_base_diffuse
+                    : lod_thumbs[s].srv_detail_diffuse;
             if (!src_srv) continue;
 
             std::vector<uint8_t> src_rgba;
@@ -253,7 +275,7 @@ bool Build(ID3D11Device*                                       device,
         for (int cy = 0; cy < CH; ++cy) {
             for (int cx = 0; cx < CW; ++cx) {
                 const auto& chunk =
-                    parsed.chunks[size_t(cy) * CW + cx];
+                    parsed.chunks[size_t(cx) * CH + cy];
                 const int layers = std::min((int)chunk.layers.size(), L);
                 for (int li = 0; li < layers; ++li) {
                     const auto& Lr = chunk.layers[li];

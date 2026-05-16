@@ -243,6 +243,10 @@ static void bind_generated_terrain_textures(
         m.srv_diffuse      = srv;
         m.diffuse_visible  = true;
         m.diffuse_tex_name = t.label;
+        if (t.mesh_index == 0 && TerrainSplat::Get().ok) {
+            m.is_terrain = true;
+            m.diffuse_tex_name = "ehf_splat_terrain";
+        }
 
         TerrainTextureRegistry::Register(t.label, t.rgba, t.width, t.height);
         OutputLog::success(std::string(log_prefix) + ": " + t.label +
@@ -1223,8 +1227,7 @@ void process_pending_loads() {
                     + std::to_string(palette.size() * 4) + " maps OK");
 
                 Level::EhfParsedBody splat_parsed;
-                if (false &&
-                    Level::ParseEhfBody(g_pending_terrain_ehf_bytes,
+                if (Level::ParseEhfBody(g_pending_terrain_ehf_bytes,
                                         splat_parsed)) {
                     std::vector<uint8_t> lm_rgba;
                     int lm_w = 0, lm_h = 0;

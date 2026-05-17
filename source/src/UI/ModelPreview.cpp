@@ -1312,6 +1312,7 @@ cbuffer TerrainCB : register(b2){
     float4 chunk_grid_size;
     float4 splat_params;
     float4 mesh_xform;
+    float4 weight_params;
     float4 material_params[32];
 }
 Texture2DArray  lod_array     : register(t0);
@@ -1321,6 +1322,7 @@ Texture2DArray  chunk_uv      : register(t3);
 Texture2D       splat_mask    : register(t4);
 Texture2D       lightmap      : register(t5);
 Texture2DArray  lod_detail_array : register(t6);
+Texture2DArray  material_weights : register(t7);
 SamplerState    smp_wrap      : register(s0);
 SamplerState    smp_point     : register(s1);
 
@@ -1352,48 +1354,25 @@ float4 PS(VSOUT i) : SV_Target {
     float2 extent   = chunk_origin_extent.zw;
     float  CW       = chunk_grid_size.x;
     float  CH       = chunk_grid_size.y;
-
-    float2 chunk_co = (world_xy - origin) / extent;
-    float2 chunk_clamped = clamp(chunk_co,
-                                 float2(0, 0),
-                                 float2(CW - 0.001, CH - 0.001));
-    int2   chunk_xy = int2(floor(chunk_clamped));
-    float2 corner_uv = frac(chunk_clamped);
-
-    float wx = corner_uv.x, wy = corner_uv.y;
-    float w00 = (1.0 - wx) * (1.0 - wy);
-    float w10 =        wx  * (1.0 - wy);
-    float w01 = (1.0 - wx) *        wy ;
-    float w11 =        wx  *        wy ;
     float slope_w = saturate((0.82 - abs(normalize(i.n).y)) / 0.35);
 
     float3 final = float3(0.0, 0.0, 0.0);
     float  weight_sum = 0.0;
 
+    float2 terrain_uv = saturate((world_xy - origin)
+        / (extent * float2(CW, CH)));
+    float2 weight_uv = (terrain_uv * (weight_params.xy - 1.0)
+        + 0.5) / weight_params.xy;
+    int material_count = min((int)chunk_grid_size.z, 32);
+
     [loop]
-    for (int layer = 0; layer < 16; ++layer) {
-        float4 idx_norm = chunk_idx.Load(int4(chunk_xy, layer, 0));
-        float4 idx255   = round(idx_norm * 255.0);
-        if (idx255.x > 254.5) break;
-
-        float4 bln_norm = chunk_blend.Load(int4(chunk_xy, layer, 0));
-        float2 mask_origin = chunk_uv.Load(int4(chunk_xy, layer, 0)).xy;
-        float4 bln = saturate((bln_norm * 255.0) / splat_params.x);
-        float2 mask_uv = mask_origin + corner_uv * splat_params.zw;
-        float mask_w = splat_mask.SampleLevel(smp_point, mask_uv, 0).r;
-        if (mask_w <= 0.001) continue;
-
-        float3 c00 = sample_material((int)idx255.x, world_xy, slope_w);
-        float3 c10 = sample_material((int)idx255.y, world_xy, slope_w);
-        float3 c01 = sample_material((int)idx255.z, world_xy, slope_w);
-        float3 c11 = sample_material((int)idx255.w, world_xy, slope_w);
-
-        float3 lc = c00 * w00 + c10 * w10 + c01 * w01 + c11 * w11;
-        float lw = mask_w * saturate(
-              bln.x * w00 + bln.y * w10
-            + bln.z * w01 + bln.w * w11);
-        final += lc * lw;
-        weight_sum += lw;
+    for (int material = 0; material < 32; ++material) {
+        if (material >= material_count) break;
+        float w = material_weights.SampleLevel(
+            smp_point, float3(weight_uv, material), 0).r;
+        if (w <= 0.001) continue;
+        final += sample_material(material, world_xy, slope_w) * w;
+        weight_sum += w;
     }
 
     if (weight_sum > 0.001) {
@@ -1513,7 +1492,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     {
         D3D11_BUFFER_DESC tcb{};
         tcb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        tcb.ByteWidth = 64 + 32 * 16;
+        tcb.ByteWidth = 80 + 32 * 16;
         tcb.Usage = D3D11_USAGE_DYNAMIC;
         tcb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         dev->CreateBuffer(&tcb, nullptr, &mp.cbuffer_terrain);
@@ -2060,7 +2039,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             m.is_terrain && R.ok &&
             R.lod_diffuse_array && R.lod_detail_array &&
             R.chunk_idx_array && R.chunk_blend_array && R.chunk_uv_array &&
-            R.splat_mask && R.lightmap &&
+            R.splat_mask && R.material_weight_array && R.lightmap &&
             mp.vs_terrain && mp.ps_terrain && mp.cbuffer_terrain;
 
         if (use_terrain_shader) {
@@ -2080,6 +2059,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                     float grid_size[4];
                     float splat_params[4];
                     float mesh_xform[4];
+                    float weight_params[4];
                     float material_params[32][4];
                 } t{};
                 t.origin_extent[0] = R.world_origin_x;
@@ -2101,6 +2081,10 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 t.mesh_xform[1] = 1.0f;
                 t.mesh_xform[2] = R.mesh_to_world_x;
                 t.mesh_xform[3] = R.mesh_to_world_z;
+                t.weight_params[0] = (float)R.weight_w;
+                t.weight_params[1] = (float)R.weight_h;
+                t.weight_params[2] = 0.0f;
+                t.weight_params[3] = 0.0f;
                 for (int mi = 0; mi < 32; ++mi) {
                     for (int mj = 0; mj < 4; ++mj) {
                         t.material_params[mi][mj] =
@@ -2116,23 +2100,25 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             ctx->VSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
             ctx->PSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
 
-            ID3D11ShaderResourceView* srvs[7] = {
+            ID3D11ShaderResourceView* srvs[8] = {
                 R.lod_diffuse_array,
                 R.chunk_idx_array,
                 R.chunk_blend_array,
                 R.chunk_uv_array,
                 R.splat_mask,
                 R.lightmap,
-                R.lod_detail_array
+                R.lod_detail_array,
+                R.material_weight_array
             };
-            ctx->PSSetShaderResources(0, 7, srvs);
+            ctx->PSSetShaderResources(0, 8, srvs);
 
             ctx->DrawIndexed(m.index_count, 0, 0);
 
-            ID3D11ShaderResourceView* nulls[7] = {
-                nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr
+            ID3D11ShaderResourceView* nulls[8] = {
+                nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                nullptr
             };
-            ctx->PSSetShaderResources(0, 7, nulls);
+            ctx->PSSetShaderResources(0, 8, nulls);
             ID3D11Buffer* null_cb = nullptr;
             ctx->VSSetConstantBuffers(2, 1, &null_cb);
             ctx->PSSetConstantBuffers(2, 1, &null_cb);

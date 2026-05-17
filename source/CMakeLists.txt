@@ -84,12 +84,6 @@ set(APP_SOURCES
         src/Audio/AudioPlayer.cpp
         src/Audio/XmaDecoder.cpp
         src/Audio/MfAudioEncoder.cpp
-        # Native C++ port of the FFmpeg XMA/WMA Pro decoder pipeline
-        # (src/Audio/Xma2Codec/). Currently parked work-in-progress:
-        # the files compile to catch drift, but XmaDecoder.cpp uses
-        # FFmpeg's prebuilt .libs at runtime via F2_HAVE_FFMPEG. The
-        # port can be re-wired as the runtime later once decode_coeffs
-        # bit-counting is correct vs FFmpeg reference output.
         src/Audio/Xma2Codec/XmaSupport.cpp
         src/Audio/Xma2Codec/XmaParser.cpp
         src/Audio/Xma2Codec/XmaWmaCore.cpp
@@ -211,37 +205,10 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(miniaudio)
 
-# FFmpeg (libavcodec) for XMA2 decoding. The Xbox 360 audio format in
-# Fable 2's BNKs is hardware-decoded on console; there is no software
-# decoder in the game binary. FFmpeg's libavcodec is the de-facto solution.
-#
-# On Windows we expect prebuilt MSVC libraries and headers under
-# include/ffmpeg/ (.lib + include/), shipped with the project. The user
-# can drop ShiftMediaProject prebuilts there. If absent, we fall back to
-# the legacy towav.exe path so the rest of the app still builds.
-set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/include/ffmpeg" CACHE PATH "FFmpeg prebuilt root")
-set(FFMPEG_AVAILABLE FALSE)
-if(EXISTS "${FFMPEG_ROOT}/include/libavcodec/avcodec.h")
-    # Prefer the static archives (libavcodec.lib) so we can link FFmpeg
-    # directly into the exe without shipping ~24 MB of DLLs alongside.
-    # The linker (/OPT:REF) drops every codec we don't reference, so the
-    # final exe footprint of the FFmpeg surface is roughly just the
-    # XMA2/WMA Pro decode path + math/transform helpers.
-    set(_FFMPEG_LIB_PATHS "${FFMPEG_ROOT}/lib" "${FFMPEG_ROOT}/lib/x86" "${FFMPEG_ROOT}/lib/x64")
-    find_library(AVCODEC_LIB    NAMES libavcodec    avcodec     PATHS ${_FFMPEG_LIB_PATHS} NO_DEFAULT_PATH)
-    find_library(AVUTIL_LIB     NAMES libavutil     avutil      PATHS ${_FFMPEG_LIB_PATHS} NO_DEFAULT_PATH)
-    find_library(SWRESAMPLE_LIB NAMES libswresample swresample  PATHS ${_FFMPEG_LIB_PATHS} NO_DEFAULT_PATH)
-    if(AVCODEC_LIB AND AVUTIL_LIB AND SWRESAMPLE_LIB)
-        set(FFMPEG_AVAILABLE TRUE)
-        message(STATUS "FFmpeg found at ${FFMPEG_ROOT} -- enabling XMA2 decoder (static link)")
-        message(STATUS "  avcodec    : ${AVCODEC_LIB}")
-        message(STATUS "  avutil     : ${AVUTIL_LIB}")
-        message(STATUS "  swresample : ${SWRESAMPLE_LIB}")
-    endif()
-endif()
-if(NOT FFMPEG_AVAILABLE)
-    message(STATUS "FFmpeg prebuilts not found at ${FFMPEG_ROOT} -- audio player will only play uncompressed PCM. Drop libavcodec/avutil/swresample (.lib + include/) under include/ffmpeg/ to enable XMA2 decoding.")
-endif()
+# XMA decoding is now handled entirely by the in-tree native C++ port
+# under src/Audio/Xma2Codec/ (~1700-line WMA Pro / XMA1 / XMA2 decoder
+# derived from FFmpeg's wmaprodec.c, LGPL 2.1+). No external FFmpeg
+# dependency is required at build or runtime.
 
 if(WIN32)
     FetchContent_Declare(
@@ -289,42 +256,10 @@ if(WIN32)
 
     # mfreadwrite gives us MFCreateSinkWriterFromURL, the entry point for
     # the PCM→MP3/AAC encode pipeline in MfAudioEncoder. mfplat / mfuuid
-    # were already linked further down via the FFmpeg dependency block;
-    # mfreadwrite is the missing piece to make the SinkWriter API
-    # resolve at link time.
+    # are Media Foundation system libs needed alongside it.
     target_link_libraries(Fable_2_Asset_Browser PRIVATE
-            d3d11 dxgi d3dcompiler dwmapi winmm mfreadwrite)
-
-    if(FFMPEG_AVAILABLE)
-        target_sources(Fable_2_Asset_Browser PRIVATE
-                # Minimal override of libavcodec/allcodecs.obj — defines codec_list
-                # with only XMA1/XMA2/WMAPro so the linker drops every other codec
-                # via /OPT:REF instead of dragging the full FFmpeg surface (~25MB)
-                # into the exe. See the file header for the link-order trick.
-                src/Audio/Xma2Codec/xma_codec_list.cpp)
-
-        target_compile_definitions(Fable_2_Asset_Browser PRIVATE F2_HAVE_FFMPEG=1)
-        target_include_directories(Fable_2_Asset_Browser PRIVATE "${FFMPEG_ROOT}/include")
-        target_link_libraries(Fable_2_Asset_Browser PRIVATE
-                "${AVCODEC_LIB}" "${AVUTIL_LIB}" "${SWRESAMPLE_LIB}"
-                # System libs that the static FFmpeg builds depend on.
-                bcrypt secur32 ws2_32 mfplat mfuuid strmiids)
-
-        # /OPT:REF drops every COMDAT (function/global) the linker can prove
-        # is unreachable from the entry point. /OPT:ICF folds identical
-        # COMDATs into one. With FFmpeg statically linked these are the
-        # whole game: avcodec.lib carries hundreds of codecs as static
-        # COMDATs and we only call the XMA2/WMA Pro path. Without these
-        # flags the exe ends up enormous; with them it's a few MB.
-        #
-        # /INCREMENTAL is the Debug default; it disables /OPT:REF/ICF
-        # because those rewrite already-laid-out sections. Force it off
-        # so the size optimizations actually take effect — we trade
-        # incremental-link speed for an exe that's an order of magnitude
-        # smaller.
-        target_link_options(Fable_2_Asset_Browser PRIVATE
-                "/INCREMENTAL:NO" "/OPT:REF" "/OPT:ICF")
-    endif()
+            d3d11 dxgi d3dcompiler dwmapi winmm
+            mfreadwrite mfplat mfuuid strmiids)
 else()
     find_package(OpenGL REQUIRED)
     find_package(glfw3 REQUIRED)

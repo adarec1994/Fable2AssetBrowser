@@ -11,13 +11,8 @@
 #include <wmcodecdsp.h>
 #include <wrl/client.h>
 
-extern "C" {
-
-#include <libswresample/swresample.h>
-#include <libavutil/channel_layout.h>
-#include <libavutil/mathematics.h>
-}
-
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <cstdio>
 
@@ -106,49 +101,60 @@ int pick_target_rate(int source_rate, bool aac) {
     return rates[count - 1];
 }
 
+// Linear-interpolation resampler. Good enough quality for re-encoding
+// to MP3/AAC (the codec resamples to its own internal rate anyway and
+// applies its own anti-alias filtering, so we'd lose any extra effort
+// of polyphase/sinc interpolation here). Replaces what was previously
+// a libswresample::swr_convert call — letting us drop FFmpeg entirely
+// now that XmaDecoder uses the in-tree port.
 bool resample_pcm_s16(const std::vector<int16_t>& pcm,
                       int in_rate, int channels, int target_rate,
                       std::vector<int16_t>& out,
                       std::string* err) {
+    if (channels <= 0 || in_rate <= 0 || target_rate <= 0) {
+        if (err) *err = "invalid resample parameters";
+        return false;
+    }
     if (in_rate == target_rate) {
         out = pcm;
         return true;
     }
-    AVChannelLayout layout;
-    av_channel_layout_default(&layout, channels);
-
-    SwrContext* swr = nullptr;
-    if (swr_alloc_set_opts2(
-            &swr,
-            &layout, AV_SAMPLE_FMT_S16, target_rate,
-            &layout, AV_SAMPLE_FMT_S16, in_rate,
-            0, nullptr) < 0 || swr_init(swr) < 0) {
-        if (swr) swr_free(&swr);
-        if (err) *err = "swresample setup failed";
-        return false;
+    const std::size_t in_frames = pcm.size() / std::size_t(channels);
+    if (in_frames < 2) {
+        out = pcm;
+        return true;
     }
+    // Output frame count rounded so the last input frame is reachable.
+    const std::size_t out_frames =
+        std::size_t((std::int64_t(in_frames - 1) * target_rate + in_rate - 1) / in_rate) + 1;
+    out.assign(out_frames * std::size_t(channels), 0);
 
-    const int64_t in_samples = (int64_t)pcm.size() / channels;
+    // Q32.32 fixed-point step so we don't drift on long clips. step =
+    // in_rate / target_rate, in 32.32 fixed-point.
+    const std::uint64_t step =
+        (std::uint64_t(in_rate) << 32) / std::uint64_t(target_rate);
+    std::uint64_t pos = 0;  // input-frame index, 32.32 fixed-point.
 
-    const int64_t out_samples_max = av_rescale_rnd(
-        swr_get_delay(swr, in_rate) + in_samples,
-        target_rate, in_rate, AV_ROUND_UP);
-    out.assign((size_t)(out_samples_max * channels), 0);
-
-    const uint8_t* in_data[1]  = { (const uint8_t*)pcm.data() };
-    uint8_t*       out_data[1] = { (uint8_t*)out.data() };
-    const int got = swr_convert(
-        swr,
-        out_data, (int)out_samples_max,
-        in_data,  (int)in_samples);
-
-    swr_free(&swr);
-    if (got < 0) {
-        out.clear();
-        if (err) *err = "swr_convert failed";
-        return false;
+    const std::size_t last_in = in_frames - 1;
+    for (std::size_t i = 0; i < out_frames; ++i) {
+        const std::size_t idx = std::size_t(pos >> 32);
+        const std::uint32_t frac = std::uint32_t(pos & 0xFFFFFFFFu);
+        const std::size_t lo = std::min(idx, last_in);
+        const std::size_t hi = std::min(idx + 1, last_in);
+        for (int c = 0; c < channels; ++c) {
+            const int s_lo = pcm[lo * std::size_t(channels) + std::size_t(c)];
+            const int s_hi = pcm[hi * std::size_t(channels) + std::size_t(c)];
+            // Lerp: s_lo + (s_hi - s_lo) * frac / 2^32, in int64 to avoid overflow.
+            const std::int64_t mix =
+                std::int64_t(s_lo) +
+                ((std::int64_t(s_hi - s_lo) * std::int64_t(frac)) >> 32);
+            out[i * std::size_t(channels) + std::size_t(c)] = std::int16_t(
+                std::max<std::int64_t>(-32768,
+                std::min<std::int64_t>(32767, mix)));
+        }
+        pos += step;
     }
-    out.resize((size_t)got * (size_t)channels);
+    (void)err;
     return true;
 }
 

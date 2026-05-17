@@ -151,6 +151,11 @@ struct BeReader {
         if (exp_h == 0) {
             if (mant == 0) {
                 bits = sign;
+                if (!save_physics_placements.empty()) {
+                    OutputLog::info("save: " +
+                                    std::to_string(save_physics_placements.size()) +
+                                    " PhysicsData transform(s)");
+                }
             } else {
                 uint32_t e = 127 - 14;
                 uint32_t m = mant;
@@ -861,12 +866,75 @@ bool Open(const FlatAssetEntry& entry)
     g_level_gdb_placements.clear();
     {
         std::vector<std::pair<uint32_t, std::string>> save_hash_to_name;
+        struct SavePhysicsPlacement {
+            uint32_t hash = 0;
+            std::string entity_name;
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            float qx = 0.0f, qy = 0.0f, qz = 0.0f, qw = 1.0f;
+        };
+        std::vector<SavePhysicsPlacement> save_physics_placements;
         {
             std::vector<uint8_t> save_bytes;
             const std::string save_path = sibling_with_ext(".save");
             if (load_text_sibling(save_path, save_bytes)) {
                 std::string xml(reinterpret_cast<const char*>(save_bytes.data()),
                                 save_bytes.size());
+                auto tag_payload = [](const std::string& s,
+                                      const char* tag,
+                                      std::string& out) -> bool {
+                    const std::string open = std::string("<") + tag;
+                    const std::string close = std::string("</") + tag + ">";
+                    size_t a = s.find(open);
+                    if (a == std::string::npos) return false;
+                    a = s.find('>', a);
+                    if (a == std::string::npos) return false;
+                    size_t b = s.find(close, a + 1);
+                    if (b == std::string::npos) return false;
+                    out = s.substr(a + 1, b - (a + 1));
+                    return true;
+                };
+                auto parse_float_text = [](const std::string& s,
+                                           float& out) -> bool {
+                    const char* p = s.c_str();
+                    char* end = nullptr;
+                    float v = std::strtof(p, &end);
+                    if (end == p || !std::isfinite(v)) return false;
+                    out = v;
+                    return true;
+                };
+                auto read_float_tag = [&](const std::string& s,
+                                          const char* tag,
+                                          float& out) -> bool {
+                    std::string payload;
+                    return tag_payload(s, tag, payload) &&
+                           parse_float_text(payload, out);
+                };
+                auto read_vec3_tag = [&](const std::string& s,
+                                         const char* tag,
+                                         float& x,
+                                         float& y,
+                                         float& z) -> bool {
+                    std::string payload;
+                    return tag_payload(s, tag, payload) &&
+                           read_float_tag(payload, "X", x) &&
+                           read_float_tag(payload, "Y", y) &&
+                           read_float_tag(payload, "Z", z);
+                };
+                auto read_quat_tag = [&](const std::string& s,
+                                         const char* tag,
+                                         float& x,
+                                         float& y,
+                                         float& z,
+                                         float& w) -> bool {
+                    std::string payload;
+                    if (!tag_payload(s, tag, payload)) return false;
+                    bool ok = read_float_tag(payload, "X", x) &&
+                              read_float_tag(payload, "Y", y) &&
+                              read_float_tag(payload, "Z", z);
+                    float rw = 1.0f;
+                    if (read_float_tag(payload, "W", rw)) w = rw;
+                    return ok;
+                };
                 const std::string tag_open  = "<Entity name=\"";
                 const std::string tag_close = "</Entity>";
                 size_t pos = 0;
@@ -882,6 +950,8 @@ bool Open(const FlatAssetEntry& entry)
                     size_t hash_end = xml.find('<', hash_start);
                     if (hash_end == std::string::npos) break;
                     std::string hex = xml.substr(hash_start + 2, hash_end - hash_start - 2);
+                    size_t entity_close = xml.find(tag_close, hash_end);
+                    if (entity_close == std::string::npos) break;
                     uint32_t h = 0;
                     for (char c : hex) {
                         h <<= 4;
@@ -889,8 +959,20 @@ bool Open(const FlatAssetEntry& entry)
                         else if (c >= 'A' && c <= 'F') h |= (c - 'A' + 10);
                         else if (c >= 'a' && c <= 'f') h |= (c - 'a' + 10);
                     }
+                    std::string entity_xml =
+                        xml.substr(name_end + 1, entity_close - (name_end + 1));
+                    std::string physics_xml;
+                    SavePhysicsPlacement sp;
+                    sp.hash = h;
+                    sp.entity_name = name;
+                    if (tag_payload(entity_xml, "PhysicsData", physics_xml) &&
+                        read_vec3_tag(physics_xml, "Position", sp.x, sp.y, sp.z)) {
+                        read_quat_tag(physics_xml, "Orientation",
+                                      sp.qx, sp.qy, sp.qz, sp.qw);
+                        save_physics_placements.push_back(std::move(sp));
+                    }
                     save_hash_to_name.emplace_back(h, std::move(name));
-                    pos = hash_end;
+                    pos = entity_close + tag_close.size();
                 }
                 OutputLog::info("save: " + std::to_string(save_hash_to_name.size())
                                 + " entity hash→name mappings");
@@ -992,6 +1074,73 @@ bool Open(const FlatAssetEntry& entry)
             }
 
             std::unordered_map<std::string, Level::PropBlock> blocks_by_path;
+            size_t save_physics_instances_emitted = 0;
+            for (const auto& p : save_physics_placements) {
+                if (p.entity_name.empty()) continue;
+                std::string tok = canonicalize_for_match(p.entity_name);
+                if (tok.empty()) continue;
+
+                const FlatAssetEntry* hit = nullptr;
+                auto it = mdl_by_token.find(tok);
+                if (it != mdl_by_token.end()) hit = it->second;
+
+                if (!hit) {
+                    size_t best_len = SIZE_MAX;
+                    for (const auto& kv : mdl_by_token) {
+                        const std::string& mk = kv.first;
+                        bool match =
+                            mk.find(tok) != std::string::npos ||
+                            tok.find(mk) != std::string::npos;
+                        if (!match) continue;
+                        if (mk.size() < best_len) {
+                            best_len = mk.size();
+                            hit = kv.second;
+                        }
+                    }
+                }
+                if (!hit) continue;
+
+                auto& pb = blocks_by_path[hit->full_path];
+                if (pb.model_path.empty()) {
+                    pb.type = 0xB2;
+                    pb.model_path = hit->full_path;
+                }
+
+                Level::PropInstance pi;
+                pi.hash = p.hash;
+                pi.values[0] = p.x;
+                pi.values[1] = p.y;
+                pi.values[2] = p.z;
+                float qx = p.qx, qy = p.qy, qz = p.qz, qw = p.qw;
+                const float qmag =
+                    std::sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+                if (std::isfinite(qmag) && qmag > 1e-6f) {
+                    qx /= qmag; qy /= qmag; qz /= qmag; qw /= qmag;
+                    const float num = 2.0f * (qw * qz + qx * qy);
+                    const float den = 1.0f - 2.0f * (qy * qy + qz * qz);
+                    const float mag = std::sqrt(num * num + den * den);
+                    if (std::isfinite(mag) && mag > 1e-6f) {
+                        pi.values[6] = num / mag;
+                        pi.values[7] = den / mag;
+                    } else {
+                        pi.values[6] = 0.0f;
+                        pi.values[7] = 1.0f;
+                    }
+                } else {
+                    pi.values[6] = 0.0f;
+                    pi.values[7] = 1.0f;
+                }
+                pi.values[9] = pi.values[10] = pi.values[11] = 1.0f;
+                pb.instances.push_back(pi);
+                ++save_physics_instances_emitted;
+            }
+            if (save_physics_instances_emitted > 0) {
+                OutputLog::success(
+                    "save-derived placements: " +
+                    std::to_string(save_physics_instances_emitted) +
+                    " PhysicsData instance(s) appended to prop pipeline");
+            }
+
             size_t resolved = 0;
             for (const auto& p : info.placements) {
                 if (p.entity_name.empty()) continue;
@@ -1037,7 +1186,10 @@ bool Open(const FlatAssetEntry& entry)
                build a synthetic PropBlock per resolved MDL.        */
             std::vector<uint8_t> hk_scan_bytes;
             const std::string hk_scan_path = sibling_with_ext(".havok_scenario");
-            if (load_text_sibling(hk_scan_path, hk_scan_bytes)) {
+            if (save_physics_instances_emitted > 0) {
+                OutputLog::info(
+                    "havok entity-scan: skipped render placement fallback; using .save PhysicsData transforms");
+            } else if (load_text_sibling(hk_scan_path, hk_scan_bytes)) {
                 auto be_f32 = [&](size_t off) -> float {
                     if (off + 4 > hk_scan_bytes.size())
                         return std::numeric_limits<float>::quiet_NaN();

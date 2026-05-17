@@ -145,6 +145,16 @@ int Vlc::init_from_lengths(int nb_bits, int nb_codes,
     struct Entry { int len; int sym; int order; uint32_t code; };
     std::vector<Entry> entries;
     entries.reserve(std::size_t(nb_codes));
+
+    // FFmpeg's ff_vlc_init_from_lengths algorithm: walk entries in
+    // ORIGINAL INDEX ORDER (do not sort by length first), accumulating
+    // an MSB-aligned 32-bit `code` counter via code += 1 << (32-len).
+    // Each entry's actual `len`-bit code is `code >> (32-len)`. This
+    // is what FFmpeg's wmaprodata.h tables are tuned to. Sorting by
+    // length first ("classical canonical Huffman") produces a valid
+    // prefix code but with different code values, which decodes the
+    // FFmpeg-encoded XMA bitstream to wrong symbols.
+    uint64_t code = 0;
     for (int i = 0; i < nb_codes; ++i) {
         const int len = int(lens[i * lens_stride]);
         if (len <= 0) continue;
@@ -153,27 +163,20 @@ int Vlc::init_from_lengths(int nb_bits, int nb_codes,
             sym = read_symbol(symbols, symbols_stride, symbols_elem_size, i, flags)
                   + offset;
         }
-        entries.push_back({len, sym, i, 0});
+        const uint32_t actual_code = uint32_t(code >> (32 - len));
+        entries.push_back({len, sym, i, actual_code});
+        code += uint64_t(1) << (32 - len);
+        if (code > (uint64_t(1) << 32)) return -1;  // Kraft overflow
     }
 
+    // Sort by length now so the per-prefix max-leaf pass and the
+    // root-table fill below see entries grouped by length. The
+    // canonical code values (e.code) were already assigned above.
     std::stable_sort(entries.begin(), entries.end(),
                      [](const Entry& a, const Entry& b) {
                          if (a.len != b.len) return a.len < b.len;
                          return a.order < b.order;
                      });
-
-    {
-        uint32_t code = 0;
-        int      prev_len = 0;
-        for (auto& e : entries) {
-            if (prev_len != 0 && e.len > prev_len) {
-                code <<= (e.len - prev_len);
-            }
-            prev_len = e.len;
-            e.code = code;
-            code  += 1;
-        }
-    }
 
     // Per-prefix max residual: each prefix that has any multi-level
     // entry needs a sub-table sized for the widest residual under it.

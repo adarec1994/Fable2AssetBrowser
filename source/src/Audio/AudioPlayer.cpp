@@ -1,6 +1,7 @@
 #include "AudioPlayer.h"
 #include "XmaDecoder.h"
 #include "../Utilities/Files.h"
+#include "../UI/OutputLog.h"
 
 #include <algorithm>
 #include <atomic>
@@ -369,6 +370,7 @@ void start_load_bytes_async(std::vector<uint8_t> bytes,
     S.cursor_frames.store(0);
     S.playing.store(false);
 
+    OutputLog::info("Decoding " + display_name);
     std::thread([bytes = std::move(bytes),
                  display_name,
                  my_gen]() mutable {
@@ -376,7 +378,12 @@ void start_load_bytes_async(std::vector<uint8_t> bytes,
         std::string err;
         const bool ok = load_wav_bytes(bytes, display_name, &err);
         if (T.load_generation.load() == my_gen) {
-            if (ok) play();
+            if (ok) {
+                OutputLog::success("Decoded " + display_name);
+                play();
+            } else {
+                OutputLog::error("Audio decode failed: " + err);
+            }
             T.loading.store(false);
         }
     }).detach();

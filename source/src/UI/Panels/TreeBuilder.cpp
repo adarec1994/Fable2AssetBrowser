@@ -396,52 +396,5 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
         OutputLog::info(os.str());
     }
 
-    {
-        static const char* kKeywords[] = {
-            "stall", "bridge", "vendor", "cart", "stand", "tent",
-            "barrel", "crate", "merchant", "awning", "canopy",
-            "fishstand", "produce", "lantern", "sign", "marketstall"
-        };
-        std::map<std::string, std::vector<const FlatAssetEntry*>> hits;
-        for (const auto& e : S.all_mdl_files) {
-            std::string lname = e.name;
-            std::transform(lname.begin(), lname.end(), lname.begin(),
-                           ::tolower);
-            for (const char* kw : kKeywords) {
-                if (lname.find(kw) != std::string::npos) {
-                    hits[kw].push_back(&e);
-                    break;
-                }
-            }
-        }
-        size_t total = 0;
-        for (auto& kv : hits) total += kv.second.size();
-        if (total > 0) {
-            OutputLog::info("market-keyword .mdl scan: " +
-                            std::to_string(total) + " matches");
-            for (auto& [kw, vec] : hits) {
-                std::ostringstream os;
-                os << "  [" << kw << "] " << vec.size() << ":";
-                OutputLog::info(os.str());
-                size_t shown = 0;
-                for (auto* e : vec) {
-                    if (shown++ >= 8) {
-                        OutputLog::info("    … +" +
-                                        std::to_string(vec.size() - 8) +
-                                        " more");
-                        break;
-                    }
-                    std::string bnk_leaf =
-                        std::filesystem::path(e->bnk_path).filename().string();
-                    OutputLog::info("    " + e->full_path + "  (in " +
-                                    bnk_leaf + ")");
-                }
-            }
-        } else {
-            OutputLog::info("market-keyword .mdl scan: 0 matches "
-                            "in entire indexed asset graph");
-        }
-    }
-
     set_tree_label("");
 }

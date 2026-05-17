@@ -117,20 +117,11 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     sample_rate = 0;
     channels = 0;
 
-    Xma::log_reset();
-    Xma::log_msg("decode_xma_to_pcm: input %zu bytes", wav_bytes.size());
-    if (!wav_bytes.empty()) {
-        Xma::log_hexdump("first 32 bytes", wav_bytes.data(),
-                         std::min<std::size_t>(32, wav_bytes.size()));
-    }
-
     const int riff_off = locate_riff(wav_bytes);
     if (riff_off < 0) {
-        Xma::log_msg("ERROR: no RIFF/WAVE header found");
         if (err_out) *err_out = "no RIFF/WAVE header";
         return false;
     }
-    Xma::log_msg("RIFF found at offset %d", riff_off);
     const auto chunks = parse_chunks(wav_bytes, (size_t)riff_off + 12);
 
     const Chunk* fmt = nullptr;
@@ -142,7 +133,6 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
         else if (c.id == 0x32414d58) xma2 = &c;
     }
     if (!fmt || !data) {
-        Xma::log_msg("ERROR: missing fmt or data chunk");
         if (err_out) *err_out = "missing fmt or data chunk";
         return false;
     }
@@ -165,11 +155,6 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     const uint16_t fmt_channels = rd_u16_le(fmt_p + 2);
     const uint32_t fmt_rate     = xbox_endian ? fmt_rate_be : fmt_rate_le;
 
-    Xma::log_msg("fmt: tag=0x%04X channels=%u rate=%u (xbox_endian=%d) fmt_size=%zu",
-                 format_tag, fmt_channels, fmt_rate, int(xbox_endian), fmt->data_size);
-    Xma::log_msg("chunks found: fmt=yes data=yes(size=%zu) xma2=%s",
-                 data->data_size, xma2 ? "yes" : "no");
-
     Xma::CodecId codec_id = Xma::CodecId::None;
     if      (format_tag == 0x0166) codec_id = Xma::CodecId::Xma2;
     else if (format_tag == 0x0165) codec_id = Xma::CodecId::Xma1;
@@ -179,16 +164,12 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
         else if (sub == 0x0165) codec_id = Xma::CodecId::Xma1;
     }
     if (codec_id == Xma::CodecId::None) {
-        Xma::log_msg("ERROR: format tag 0x%04X is not XMA1/XMA2", format_tag);
         if (err_out) {
             char b[96]; std::snprintf(b, sizeof(b), "format tag 0x%04X is not XMA1/XMA2", format_tag);
             *err_out = b;
         }
         return false;
     }
-    Xma::log_msg("codec_id resolved: %s",
-                 codec_id == Xma::CodecId::Xma2 ? "XMA2" :
-                 codec_id == Xma::CodecId::Xma1 ? "XMA1" : "WmaPro");
 
     Xma::CodecContext ctx;
     ctx.codec_id    = codec_id;
@@ -208,19 +189,15 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     }
     synth_in.data_size = data->data_size;
     if (!Xma::xma_synthesize_extradata(synth_in, synth)) {
-        Xma::log_msg("ERROR: extradata synthesis failed");
         if (err_out) *err_out = "failed to synthesize extradata";
         return false;
     }
-    Xma::log_hexdump("synth extradata (34B)", synth.data(), 34);
     ctx.extradata.assign(synth.begin(), synth.end());
     ctx.extradata.resize(ctx.extradata.size() + 64, 0);
     ctx.extradata_size = 34;
 
     Xma::WmaProDecoder dec;
     const int init_rc = dec.init(ctx);
-    Xma::log_msg("WmaProDecoder::init -> %d (ctx.sample_rate=%d ch_layout.nb_channels=%d)",
-                 init_rc, ctx.sample_rate, ctx.ch_layout.nb_channels);
     if (init_rc < 0) {
         if (err_out) *err_out = "Xma::WmaProDecoder::init failed";
         return false;
@@ -236,8 +213,6 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     try {
         pcm_out.reserve(reserve_samples);
     } catch (const std::bad_alloc&) {
-        Xma::log_msg("pcm_out.reserve(%zu) failed; continuing without reserve",
-                     reserve_samples);
     }
     const std::size_t pcm_hard_cap = std::size_t(48000) * 32 * std::size_t(60 * 60);
 
@@ -277,7 +252,6 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
         const int     pkt_total     = pkt_remaining;
         ++pkt_count;
         int inner = 0;
-        const bool log_pkt = (pkt_count <= 4 || (pkt_count % 256) == 0);
         while (true) {
             Xma::Packet pkt{};
             pkt.data = base + (pkt_total - pkt_remaining);
@@ -285,13 +259,6 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
             bool got = false;
             const int rc = dec.decode_packet(pkt, frame, got);
             ++inner;
-            if (log_pkt && inner <= 4) {
-                Xma::log_msg("pkt[%d.%d] off=0x%zx (sub=%d) size=%d rc=%d got=%d nb_samples=%d done=%d loss=%d",
-                             pkt_count - 1, inner - 1, pos,
-                             pkt_total - pkt_remaining, pkt.size, rc, int(got),
-                             got ? frame.nb_samples : 0,
-                             int(dec.packet_done()), int(dec.packet_loss()));
-            }
             if (got) { emit_frame(frame); ++got_count; }
             if (rc < 0) break;
             if (dec.packet_done() || dec.packet_loss()) break;
@@ -307,24 +274,8 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     if (got) { emit_frame(frame); ++got_count; }
     dec.flush(frame, got);
     if (got) { emit_frame(frame); ++got_count; }
-    Xma::log_msg("decode done: %d packets in, %d frames out, %zu PCM samples (channels=%d rate=%d)",
-                 pkt_count, got_count, pcm_out.size(), channels, sample_rate);
-
-    if (!pcm_out.empty()) {
-        int16_t pcm_min = pcm_out[0], pcm_max = pcm_out[0];
-        int abs_max = 0;
-        int nonzero = 0;
-        for (auto v : pcm_out) {
-            if (v < pcm_min) pcm_min = v;
-            if (v > pcm_max) pcm_max = v;
-            const int a = v < 0 ? -int(v) : int(v);
-            if (a > abs_max) abs_max = a;
-            if (v != 0) ++nonzero;
-        }
-        Xma::log_msg("pcm stats: min=%d max=%d abs_max=%d nonzero=%d / %zu (%.1f%%)",
-                     int(pcm_min), int(pcm_max), abs_max, nonzero, pcm_out.size(),
-                     100.0 * double(nonzero) / double(pcm_out.size()));
-    }
+    (void)pkt_count;
+    (void)got_count;
 
     if (!channels)    channels    = ctx.ch_layout.nb_channels;
     if (!sample_rate) sample_rate = ctx.sample_rate;

@@ -265,9 +265,6 @@ int decode_init_stream(WmaProState* s, CodecContext* avctx, int num_stream) {
 
     const uint8_t* edata_ptr = avctx->extradata.data();
     unsigned int channel_mask = 0;
-    log_msg("decode_init_stream[%d]: codec_id=%d extradata_size=%d ch=%d rate=%d block_align=%d",
-            num_stream, int(avctx->codec_id), avctx->extradata_size,
-            avctx->ch_layout.nb_channels, avctx->sample_rate, avctx->block_align);
 
     if (avctx->codec_id == CodecId::Xma2 && avctx->extradata_size == 34) {
         s->decode_flags    = 0x10d6;
@@ -304,9 +301,6 @@ int decode_init_stream(WmaProState* s, CodecContext* avctx, int num_stream) {
     s->skip_frame  = 1;
     s->packet_loss = 1;
     s->len_prefix  = (s->decode_flags & 0x40) ? 1 : 0;
-    log_msg("  decode_flags=0x%x bits_per_sample=%d nb_channels=%d channel_mask=0x%x log2_frame_size=%d len_prefix=%d",
-            s->decode_flags, s->bits_per_sample, s->nb_channels, channel_mask,
-            s->log2_frame_size, s->len_prefix);
 
     int bits = 0;
     if (avctx->codec_id == CodecId::WmaPro) {
@@ -316,7 +310,6 @@ int decode_init_stream(WmaProState* s, CodecContext* avctx, int num_stream) {
     } else {
         s->samples_per_frame = 512;
     }
-    log_msg("  samples_per_frame=%u", s->samples_per_frame);
 
     const int log2_max_num_subframes = (s->decode_flags & 0x38) >> 3;
     s->max_num_subframes = uint8_t(1 << log2_max_num_subframes);
@@ -804,9 +797,6 @@ int decode_subframe(WmaProState* s) {
     int total_samples   = s->samples_per_frame * s->nb_channels;
     int transmit_coeffs = 0;
     int cur_subwoofer_cutoff;
-
-    const bool log_sub = g_log_subframe_budget > 0;
-    if (log_sub) --g_log_subframe_budget;
     const int subframe_log_start_bits = s->gb.tell();
 
     s->subframe_offset = s->gb.tell();
@@ -832,13 +822,6 @@ int decode_subframe(WmaProState* s) {
         }
     }
     if (!total_samples) s->parsed_all_subframes = 1;
-
-    if (log_sub) {
-        log_msg("decode_subframe enter: bits=%d subframe_len=%d offset=%d ch_for_cur=%d total_samples=%d",
-                subframe_log_start_bits, subframe_len, offset,
-                s->channels_for_cur_subframe, total_samples);
-    }
-
     if (subframe_len <= 0 || subframe_len > s->samples_per_frame) return -1;
     {
         const int log2_idx = av_log2(s->samples_per_frame / subframe_len);
@@ -873,28 +856,16 @@ int decode_subframe(WmaProState* s) {
     }
 
     if (s->gb.read_1()) {
-        log_msg("  FAIL: reserved bit set (bits=%d, frame=%u, num_saved=%d)",
-                s->gb.tell(), s->frame_num, s->num_saved_bits);
         return -1;
     }
-    if (log_sub) log_msg("  step: after-reserved (bits=%d)", s->gb.tell());
-
     if (decode_channel_transform(s) < 0) {
-        log_msg("  FAIL: decode_channel_transform (bits=%d, frame=%u)",
-                s->gb.tell(), s->frame_num);
         return -1;
     }
-    if (log_sub) log_msg("  step: after-channel-transform (bits=%d num_chgroups=%u)",
-                          s->gb.tell(), s->num_chgroups);
-
     for (int i = 0; i < s->channels_for_cur_subframe; ++i) {
         const int c = s->channel_indexes_for_cur_subframe[i];
         s->channel[c].transmit_coefs = uint8_t(s->gb.read_1());
         if (s->channel[c].transmit_coefs) transmit_coeffs = 1;
     }
-    if (log_sub) log_msg("  step: after-transmit-coefs (bits=%d transmit=%d)",
-                          s->gb.tell(), transmit_coeffs);
-
     if (transmit_coeffs) {
         int step;
         int quant_step = 90 * s->bits_per_sample >> 4;
@@ -905,8 +876,6 @@ int decode_subframe(WmaProState* s) {
                 const int c = s->channel_indexes_for_cur_subframe[i];
                 const int num_vec_coeffs = int(s->gb.read(num_bits)) << 2;
                 if (num_vec_coeffs > s->subframe_len) {
-                    log_msg("  FAIL: num_vec_coeffs=%d > subframe_len=%d (frame=%u)",
-                            num_vec_coeffs, s->subframe_len, s->frame_num);
                     return -1;
                 }
                 s->channel[c].num_vec_coeffs = uint16_t(num_vec_coeffs);
@@ -945,21 +914,14 @@ int decode_subframe(WmaProState* s) {
             }
         }
         if (decode_scale_factors(s) < 0) {
-            log_msg("  FAIL: decode_scale_factors (bits=%d, frame=%u)",
-                    s->gb.tell(), s->frame_num);
             return -1;
         }
-        if (log_sub) log_msg("  step: after-scale-factors (bits=%d)", s->gb.tell());
     }
 
     for (int i = 0; i < s->channels_for_cur_subframe; ++i) {
         const int c = s->channel_indexes_for_cur_subframe[i];
         if (s->channel[c].transmit_coefs && s->gb.tell() < s->num_saved_bits) {
-            if (log_sub) log_msg("  step: decode_coeffs(c=%d) start (bits=%d num_vec_coeffs=%u)",
-                                  c, s->gb.tell(), s->channel[c].num_vec_coeffs);
             const int crc = decode_coeffs(s, c);
-            if (log_sub) log_msg("  step: decode_coeffs(c=%d) done rc=%d (bits=%d)",
-                                  c, crc, s->gb.tell());
         } else {
             std::memset(s->channel[c].coeffs, 0, sizeof(float) * std::size_t(subframe_len));
         }
@@ -995,50 +957,33 @@ int decode_subframe(WmaProState* s) {
     for (int i = 0; i < s->channels_for_cur_subframe; ++i) {
         const int c = s->channel_indexes_for_cur_subframe[i];
         if (s->channel[c].cur_subframe >= s->channel[c].num_subframes) {
-            log_msg("  FAIL: cur_subframe=%d >= num_subframes=%d on c=%d (frame=%u)",
-                    s->channel[c].cur_subframe,
-                    s->channel[c].num_subframes, c, s->frame_num);
             return -1;
         }
         ++s->channel[c].cur_subframe;
     }
-    if (log_sub) log_msg("  decode_subframe OK: bits_used=%d transmit=%d",
-                          s->gb.tell() - subframe_log_start_bits, transmit_coeffs);
     return 0;
 }
 
 int decode_frame(WmaProState* s, Frame& frame, bool& got_frame) {
     GetBits& gb = s->gb;
     int len = 0;
-    const bool log_this = g_log_frame_budget > 0;
-    if (log_this) --g_log_frame_budget;
     if (s->len_prefix) len = int(gb.read(s->log2_frame_size));
-    if (log_this) {
-        log_msg("decode_frame[%u]: bits_pos=%d len=%d num_saved_bits=%d",
-                s->frame_num, gb.tell(), len, s->num_saved_bits);
-    }
     if (decode_tilehdr(s) != 0) {
-        log_msg("ERROR: decode_tilehdr failed at bits_pos=%d", gb.tell());
         s->packet_loss = 1;
         return 0;
     }
-    if (log_this) log_msg("  after-tilehdr bits=%d", gb.tell());
     if (s->nb_channels > 1 && gb.read_1()) {
         if (gb.read_1()) {
             for (int i = 0; i < s->nb_channels * s->nb_channels; ++i) gb.skip(4);
         }
     }
     if (s->dynamic_range_compression) s->drc_gain = uint8_t(gb.read(8));
-    if (log_this) log_msg("  after-drc bits=%d drc_gain=%u", gb.tell(), s->drc_gain);
     if (gb.read_1()) {
         if (gb.read_1()) s->trim_start = uint16_t(gb.read(av_log2(s->samples_per_frame * 2)));
         if (gb.read_1()) s->trim_end   = uint16_t(gb.read(av_log2(s->samples_per_frame * 2)));
     } else {
         s->trim_start = s->trim_end = 0;
     }
-    if (log_this) log_msg("  after-trim bits=%d trim_start=%u trim_end=%u",
-                          gb.tell(), s->trim_start, s->trim_end);
-
     s->parsed_all_subframes = 0;
     for (int i = 0; i < s->nb_channels; ++i) {
         s->channel[i].decoded_samples = 0;
@@ -1048,8 +993,6 @@ int decode_frame(WmaProState* s, Frame& frame, bool& got_frame) {
     int subf_iter = 0;
     while (!s->parsed_all_subframes) {
         if (decode_subframe(s) < 0) {
-            log_msg("ERROR: decode_subframe failed at iter=%d frame=%u",
-                    subf_iter, s->frame_num);
             s->packet_loss = 1;
             return 0;
         }
@@ -1072,16 +1015,6 @@ int decode_frame(WmaProState* s, Frame& frame, bool& got_frame) {
                      (sizeof(float) * std::size_t(s->samples_per_frame)) >> 1);
     }
     frame.nb_samples = s->samples_per_frame;
-    if (log_this) {
-        for (int ch = 0; ch < s->nb_channels; ++ch) {
-            const float* p = frame.planes[ch].data();
-            float mn = 0, mx = 0, abs_max = 0;
-            int nan_count = 0, nonzero = 0;
-            if (s->samples_per_frame > 0) {
-                mn = mx = p[0];
-                for (int j = 0; j < s->samples_per_frame; ++j) {
-                    const float v = p[j];
-                    if (v != v) { ++nan_count; continue; }
                     if (v < mn) mn = v;
                     if (v > mx) mx = v;
                     const float av = v < 0 ? -v : v;
@@ -1089,9 +1022,6 @@ int decode_frame(WmaProState* s, Frame& frame, bool& got_frame) {
                     if (v != 0.0f) ++nonzero;
                 }
             }
-            log_msg("  frame[%u] ch%d: min=%g max=%g abs_max=%g nonzero=%d/%d nan=%d (first 4: %g %g %g %g)",
-                    s->frame_num, ch, mn, mx, abs_max, nonzero, s->samples_per_frame, nan_count,
-                    p[0], p[1], p[2], p[3]);
         }
     }
 
@@ -1106,10 +1036,6 @@ int decode_frame(WmaProState* s, Frame& frame, bool& got_frame) {
         const int actual = gb.tell() - s->frame_offset;
         const int expected = len - 2;
         if (actual != expected) {
-            if (log_this) {
-                log_msg("WARN: frame[%u] len mismatch: len=%d expected_bits=%d actual_bits=%d (diff=%d)",
-                        s->frame_num, len, expected, actual, actual - expected);
-            }
             const int target = s->frame_offset + len - 1;
             if (target > gb.tell()) gb.skip(target - gb.tell());
             else                    s->packet_loss = 1;
@@ -1177,17 +1103,7 @@ int decode_packet_stream(WmaProState* s, const Packet& avpkt,
     const uint8_t* buf = avpkt.data;
     int buf_size = avpkt.size;
     got_frame = false;
-    const bool log_this = g_log_packet_budget > 0;
-    if (log_this) --g_log_packet_budget;
     const bool entering_new = (s->packet_done || s->packet_loss);
-    if (log_this) {
-        log_msg("decode_packet_stream: buf_size=%d packet_done=%u packet_loss=%u num_saved_bits=%d log2_frame_size=%u entering_%s",
-                buf_size, s->packet_done, s->packet_loss,
-                s->num_saved_bits, s->log2_frame_size,
-                entering_new ? "NEW" : "CONTINUE");
-        if (buf_size > 0) log_hexdump("  pkt[0..32]", buf, std::min(32, buf_size));
-    }
-
     if (!buf_size) {
         s->packet_done = 0;
         if (s->eof_done) return 0;
@@ -1235,11 +1151,6 @@ int decode_packet_stream(WmaProState* s, const Packet& avpkt,
         if (s->avctx->codec_id != CodecId::WmaPro) {
             gb.skip(3);
             s->skip_packets = uint8_t(gb.read(8));
-        }
-        if (log_this) {
-            log_msg("  new-pkt header: num_frames=%d seq=%d num_bits_prev=%d skip_packets=%u (gb.tell=%d)",
-                    dbg_num_frames, packet_sequence_number,
-                    num_bits_prev_frame, s->skip_packets, gb.tell());
         }
         if (s->avctx->codec_id == CodecId::WmaPro && !s->packet_loss &&
             ((s->packet_sequence_number + 1) & 0xF) != packet_sequence_number) {

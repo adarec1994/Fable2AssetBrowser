@@ -144,6 +144,7 @@ void Clear() {
     release_srv(s.chunk_uv_array);
     release_srv(s.splat_mask);
     release_srv(s.lightmap);
+    release_srv(s.material_weight_array);
     s = Resources{};
 #endif
 }
@@ -616,6 +617,195 @@ bool Build(ID3D11Device*                                       device,
         } else {
             OutputLog::warn("TerrainSplat: no PF99 layer mask atlas");
         }
+    }
+
+    {
+        const int material_count =
+            std::clamp(R.lod_count, 1, kMaxMaterials);
+        R.weight_w = std::max(1, R.chunk_w * 32 + 1);
+        R.weight_h = std::max(1, R.chunk_h * 32 + 1);
+
+        const bool has_pf99 =
+            !parsed.splat_indices.empty() &&
+            parsed.splat_w > 0 && parsed.splat_h > 0 &&
+            parsed.splat_indices.size() ==
+                size_t(parsed.splat_w) * size_t(parsed.splat_h);
+
+        auto sample_mask = [&](const Level::EhfChunkLayer& L,
+                               float local_x,
+                               float local_z) -> float
+        {
+            if (!has_pf99) {
+                return 1.0f;
+            }
+
+            const float u = L.tile_uv[0]
+                + std::clamp(local_x, 0.0f, 1.0f)
+                * (32.0f / float(parsed.splat_w));
+            const float v = L.tile_uv[1]
+                + std::clamp(local_z, 0.0f, 1.0f)
+                * (32.0f / float(parsed.splat_h));
+
+            float px = u * float(parsed.splat_w) - 0.5f;
+            float py = v * float(parsed.splat_h) - 0.5f;
+            px = std::clamp(px, 0.0f, float(parsed.splat_w - 1));
+            py = std::clamp(py, 0.0f, float(parsed.splat_h - 1));
+
+            const int x0 = int(px);
+            const int y0 = int(py);
+            const int x1 = std::min<int>(x0 + 1, int(parsed.splat_w) - 1);
+            const int y1 = std::min<int>(y0 + 1, int(parsed.splat_h) - 1);
+            const float dx = px - float(x0);
+            const float dy = py - float(y0);
+            auto at = [&](int x, int y) -> float {
+                return parsed.splat_indices[
+                    size_t(y) * size_t(parsed.splat_w) + size_t(x)] / 255.0f;
+            };
+            const float w00 = (1.0f - dx) * (1.0f - dy);
+            const float w10 =         dx  * (1.0f - dy);
+            const float w01 = (1.0f - dx) *         dy;
+            const float w11 =         dx  *         dy;
+            return std::clamp(at(x0, y0) * w00 + at(x1, y0) * w10
+                            + at(x0, y1) * w01 + at(x1, y1) * w11,
+                              0.0f, 1.0f);
+        };
+
+        std::vector<uint8_t> weight_data(
+            size_t(material_count) * size_t(R.weight_w) * size_t(R.weight_h),
+            0);
+
+        constexpr float kBlendMax = 3.0f;
+        const size_t expected_chunks =
+            size_t(R.chunk_w) * size_t(R.chunk_h);
+
+        for (int y = 0; y < R.weight_h; ++y) {
+            const float v_norm = (R.weight_h > 1)
+                ? float(y) / float(R.weight_h - 1)
+                : 0.0f;
+            const float fy_chunk = v_norm * float(R.chunk_h);
+            const int cy = std::min<int>(R.chunk_h - 1, int(fy_chunk));
+            const float fy_in = std::clamp(fy_chunk - float(cy), 0.0f, 1.0f);
+
+            for (int x = 0; x < R.weight_w; ++x) {
+                const float u_norm = (R.weight_w > 1)
+                    ? float(x) / float(R.weight_w - 1)
+                    : 0.0f;
+                const float fx_chunk = u_norm * float(R.chunk_w);
+                const int cx = std::min<int>(R.chunk_w - 1, int(fx_chunk));
+                const float fx_in =
+                    std::clamp(fx_chunk - float(cx), 0.0f, 1.0f);
+
+                const size_t chunk_idx =
+                    size_t(cx) * size_t(R.chunk_h) + size_t(cy);
+                if (chunk_idx >= parsed.chunks.size() ||
+                    chunk_idx >= expected_chunks)
+                {
+                    weight_data[size_t(y) * size_t(R.weight_w) + size_t(x)] =
+                        255;
+                    continue;
+                }
+
+                const float w00 = (1.0f - fx_in) * (1.0f - fy_in);
+                const float w10 =         fx_in  * (1.0f - fy_in);
+                const float w01 = (1.0f - fx_in) *         fy_in;
+                const float w11 =         fx_in  *         fy_in;
+
+                float weights[kMaxMaterials] = {};
+                float weight_sum = 0.0f;
+                int first_material = 0;
+                bool found_material = false;
+
+                const auto& chunk = parsed.chunks[chunk_idx];
+                for (const auto& L : chunk.layers) {
+                    const int material =
+                        (L.material_idx < uint32_t(material_count))
+                            ? int(L.material_idx)
+                            : -1;
+                    if (material < 0) {
+                        continue;
+                    }
+                    if (!found_material) {
+                        first_material = material;
+                        found_material = true;
+                    }
+                    const float blend_px =
+                        w00 * float(L.blend[0]) + w10 * float(L.blend[1]) +
+                        w01 * float(L.blend[2]) + w11 * float(L.blend[3]);
+                    const float w =
+                        std::clamp(blend_px / kBlendMax, 0.0f, 1.0f)
+                        * sample_mask(L, fx_in, fy_in);
+                    if (w <= 0.0f) {
+                        continue;
+                    }
+                    weights[material] += w;
+                    weight_sum += w;
+                }
+
+                if (weight_sum <= 1e-6f) {
+                    weights[first_material] = 1.0f;
+                    weight_sum = 1.0f;
+                }
+
+                const size_t texel =
+                    size_t(y) * size_t(R.weight_w) + size_t(x);
+                for (int m = 0; m < material_count; ++m) {
+                    const float n = std::clamp(weights[m] / weight_sum,
+                                               0.0f, 1.0f);
+                    weight_data[size_t(m) * size_t(R.weight_w) *
+                                size_t(R.weight_h) + texel] =
+                        uint8_t(std::clamp(int(std::round(n * 255.0f)),
+                                           0, 255));
+                }
+            }
+        }
+
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width            = UINT(R.weight_w);
+        td.Height           = UINT(R.weight_h);
+        td.MipLevels        = 1;
+        td.ArraySize        = UINT(material_count);
+        td.Format           = DXGI_FORMAT_R8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage            = D3D11_USAGE_DEFAULT;
+        td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+
+        std::vector<D3D11_SUBRESOURCE_DATA> subs(
+            static_cast<size_t>(material_count));
+        for (int m = 0; m < material_count; ++m) {
+            subs[size_t(m)].pSysMem =
+                weight_data.data() + size_t(m) * size_t(R.weight_w) *
+                                     size_t(R.weight_h);
+            subs[size_t(m)].SysMemPitch = UINT(R.weight_w);
+            subs[size_t(m)].SysMemSlicePitch = 0;
+        }
+
+        ID3D11Texture2D* tex = nullptr;
+        if (FAILED(device->CreateTexture2D(&td, subs.data(), &tex))) {
+            OutputLog::warn("TerrainSplat: failed to create material weights");
+            return false;
+        }
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = DXGI_FORMAT_R8_UNORM;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        sd.Texture2DArray.MostDetailedMip = 0;
+        sd.Texture2DArray.MipLevels = 1;
+        sd.Texture2DArray.FirstArraySlice = 0;
+        sd.Texture2DArray.ArraySize = UINT(material_count);
+
+        if (FAILED(device->CreateShaderResourceView(
+                tex, &sd, &R.material_weight_array))) {
+            tex->Release();
+            OutputLog::warn(
+                "TerrainSplat: failed to create material weight SRV");
+            return false;
+        }
+        tex->Release();
+
+        OutputLog::info("TerrainSplat: global material weights "
+            + std::to_string(R.weight_w) + "x"
+            + std::to_string(R.weight_h) + " x "
+            + std::to_string(material_count) + " materials");
     }
 
     if (!lightmap_rgba.empty() && lightmap_w > 0 && lightmap_h > 0) {

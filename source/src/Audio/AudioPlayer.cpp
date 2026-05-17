@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #define MINIAUDIO_IMPLEMENTATION
@@ -34,6 +35,9 @@ struct PlayerState {
     std::atomic<bool> playing{false};
     std::atomic<bool> loop{false};
     std::atomic<float> volume{0.85f};
+
+    std::atomic<bool> loading{false};
+    std::atomic<int>  load_generation{0};
 };
 
 PlayerState& state() {
@@ -347,6 +351,38 @@ bool load_wav_path(const std::string& path, std::string* err_out) {
                           std::filesystem::path(path).filename().string(),
                           err_out);
 }
+
+void start_load_bytes_async(std::vector<uint8_t> bytes,
+                            std::string display_name) {
+    auto& S = state();
+    const int my_gen = S.load_generation.fetch_add(1) + 1;
+    S.loading.store(true);
+    {
+        std::lock_guard<std::mutex> lk(S.source_mutex);
+        S.pcm.clear();
+        S.sample_rate  = 0;
+        S.channels     = 0;
+        S.display_name = display_name;
+        S.wf_low.clear();
+        S.wf_high.clear();
+    }
+    S.cursor_frames.store(0);
+    S.playing.store(false);
+
+    std::thread([bytes = std::move(bytes),
+                 display_name,
+                 my_gen]() mutable {
+        auto& T = state();
+        std::string err;
+        const bool ok = load_wav_bytes(bytes, display_name, &err);
+        if (T.load_generation.load() == my_gen) {
+            if (ok) play();
+            T.loading.store(false);
+        }
+    }).detach();
+}
+
+bool is_loading() { return state().loading.load(); }
 
 bool has_source() {
     auto& S = state();

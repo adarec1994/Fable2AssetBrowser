@@ -91,13 +91,4 @@ inline uint32_t read_u32le(const void* p) {
            (uint32_t(b[2]) << 16) | (uint32_t(b[3]) << 24);
 }
 
-void log_msg(const char* fmt, ...);
-void log_hexdump(const char* label, const void* data, std::size_t n);
-void log_flush();
-void log_reset();
-
-extern int g_log_packet_budget;
-extern int g_log_frame_budget;
-extern int g_log_subframe_budget;
-
 }

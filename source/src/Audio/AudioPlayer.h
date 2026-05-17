@@ -22,6 +22,11 @@ bool load_wav_bytes(const std::vector<uint8_t>& bytes,
 bool load_wav_path(const std::string& path,
                    std::string* err_out = nullptr);
 
+void start_load_bytes_async(std::vector<uint8_t> bytes,
+                            std::string display_name);
+
+bool is_loading();
+
 bool has_source();
 
 void play();

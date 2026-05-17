@@ -144,20 +144,16 @@ void draw_volume_control(float total_w) {
 
 bool open_audio_player_for(const std::string& display_name,
                            const std::vector<unsigned char>& bytes) {
-    std::vector<uint8_t> in(bytes.begin(), bytes.end());
-    std::string err;
-    if (!AudioPlayer::load_wav_bytes(in, display_name, &err)) {
-        show_error_box("Audio player: " + err);
-        return false;
-    }
+    AudioPlayer::start_load_bytes_async(
+        std::vector<uint8_t>(bytes.begin(), bytes.end()),
+        display_name);
     g_window_visible = true;
-    AudioPlayer::play();
     return true;
 }
 
 void draw_audio_player_window() {
     if (!g_window_visible) return;
-    if (!AudioPlayer::has_source()) {
+    if (!AudioPlayer::has_source() && !AudioPlayer::is_loading()) {
         g_window_visible = false;
         return;
     }
@@ -185,8 +181,12 @@ void draw_audio_player_window() {
         int ch = AudioPlayer::get_channels();
         const char* ch_label = (ch == 1) ? "mono" : (ch == 2 ? "stereo" : "");
         ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(140, 150, 165, 255));
-        ImGui::Text("%d Hz · %s%s%d ch · XMA2",
-                    sr, ch_label, ch_label[0] ? " · " : "", ch);
+        if (AudioPlayer::is_loading() && !AudioPlayer::has_source()) {
+            ImGui::TextUnformatted("Decoding XMA \xe2\x80\xa6");
+        } else {
+            ImGui::Text("%d Hz \xc2\xb7 %s%s%d ch \xc2\xb7 XMA2",
+                        sr, ch_label, ch_label[0] ? " \xc2\xb7 " : "", ch);
+        }
         ImGui::PopStyleColor();
 
         ImGui::Dummy(ImVec2(0, 6));

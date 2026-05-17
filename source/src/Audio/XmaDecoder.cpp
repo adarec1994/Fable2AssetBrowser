@@ -229,18 +229,39 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     const uint8_t* data_ptr = &wav_bytes[data->data_off];
     const size_t   data_size = data->data_size;
 
-    pcm_out.reserve(data_size * 8);
+    const std::size_t reserve_ratio = std::size_t(fmt_channels > 0 ? fmt_channels : 1) * 4u;
+    const std::size_t reserve_cap   = std::size_t(1) << 28;
+    std::size_t reserve_samples     = data_size * reserve_ratio;
+    if (reserve_samples > reserve_cap) reserve_samples = reserve_cap;
+    try {
+        pcm_out.reserve(reserve_samples);
+    } catch (const std::bad_alloc&) {
+        Xma::log_msg("pcm_out.reserve(%zu) failed; continuing without reserve",
+                     reserve_samples);
+    }
+    const std::size_t pcm_hard_cap = std::size_t(48000) * 32 * std::size_t(60 * 60);
 
+    bool reached_cap = false;
     auto emit_frame = [&](Xma::Frame& f) {
         const int n = f.nb_samples;
         const int c = f.nb_channels;
         if (n <= 0 || c <= 0) return;
-        const std::size_t base = pcm_out.size();
-        pcm_out.resize(base + std::size_t(n) * std::size_t(c));
-        std::array<const float*, 16> planes_ptr{};
-        for (int ci = 0; ci < c && ci < int(planes_ptr.size()); ++ci)
-            planes_ptr[ci] = f.planes[ci].data();
-        Xma::fltp_to_s16_interleaved(planes_ptr.data(), &pcm_out[base], n, c);
+        const std::size_t add = std::size_t(n) * std::size_t(c);
+        if (pcm_out.size() + add > pcm_hard_cap) {
+            reached_cap = true;
+            return;
+        }
+        try {
+            const std::size_t base = pcm_out.size();
+            pcm_out.resize(base + add);
+            std::array<const float*, 16> planes_ptr{};
+            for (int ci = 0; ci < c && ci < int(planes_ptr.size()); ++ci)
+                planes_ptr[ci] = f.planes[ci].data();
+            Xma::fltp_to_s16_interleaved(planes_ptr.data(), &pcm_out[base], n, c);
+        } catch (const std::bad_alloc&) {
+            reached_cap = true;
+            return;
+        }
         if (!sample_rate) sample_rate = f.sample_rate;
         if (!channels)    channels    = c;
     };
@@ -249,7 +270,7 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     Xma::Frame frame;
     int pkt_count = 0;
     int got_count = 0;
-    for (size_t pos = 0; pos < data_size; pos += kPktSize) {
+    for (size_t pos = 0; pos < data_size && !reached_cap; pos += kPktSize) {
 
         const uint8_t* base = data_ptr + pos;
         int           pkt_remaining = int(std::min(kPktSize, data_size - pos));

@@ -795,36 +795,8 @@ bool Open(const FlatAssetEntry& entry)
         }
     }
 
-    {
-        std::vector<uint8_t> hk_bytes;
-        const std::string hk_path = sibling_with_ext(".havok_scenario");
-        if (load_text_sibling(hk_path, hk_bytes)) {
-            auto pf = Havok::LoadPackFileFromBytes(std::move(hk_bytes), hk_path);
-            if (pf) {
-                Havok::LogPackFileSummary(*pf);
-                Havok::ApplyLocalFixups(*pf);
-                auto meshes = Havok::ExtractCollisionMeshes(*pf);
-                g_level_havok_collision.clear();
-                g_level_havok_collision.reserve(meshes.size());
-                size_t total_verts = 0;
-                size_t total_tris  = 0;
-                for (auto& m : meshes) {
-                    total_verts += m.vertices.size() / 3;
-                    total_tris  += (m.indices16.size() + m.indices32.size()) / 3;
-                    HavokCollisionMesh hm;
-                    hm.vertices  = std::move(m.vertices);
-                    hm.indices16 = std::move(m.indices16);
-                    hm.indices32 = std::move(m.indices32);
-                    g_level_havok_collision.push_back(std::move(hm));
-                }
-                std::ostringstream os;
-                os << "havok collision: " << g_level_havok_collision.size()
-                   << " subparts, " << total_verts << " verts, "
-                   << total_tris << " tris extracted";
-                OutputLog::success(os.str());
-            }
-        }
-    }
+    g_level_havok_collision.clear();
+    OutputLog::info("havok_scenario loading disabled");
 
     g_level_vfs_texture_body_bnks.clear();
     g_level_vfs_model_bnks.clear();
@@ -1073,66 +1045,69 @@ bool Open(const FlatAssetEntry& entry)
                 mdl_by_token.emplace(lc, &m);
             }
 
+            constexpr bool emit_derived_render_placements = false;
             std::unordered_map<std::string, Level::PropBlock> blocks_by_path;
             size_t save_physics_instances_emitted = 0;
-            for (const auto& p : save_physics_placements) {
-                if (p.entity_name.empty()) continue;
-                std::string tok = canonicalize_for_match(p.entity_name);
-                if (tok.empty()) continue;
+            if (emit_derived_render_placements) {
+                for (const auto& p : save_physics_placements) {
+                    if (p.entity_name.empty()) continue;
+                    std::string tok = canonicalize_for_match(p.entity_name);
+                    if (tok.empty()) continue;
 
-                const FlatAssetEntry* hit = nullptr;
-                auto it = mdl_by_token.find(tok);
-                if (it != mdl_by_token.end()) hit = it->second;
+                    const FlatAssetEntry* hit = nullptr;
+                    auto it = mdl_by_token.find(tok);
+                    if (it != mdl_by_token.end()) hit = it->second;
 
-                if (!hit) {
-                    size_t best_len = SIZE_MAX;
-                    for (const auto& kv : mdl_by_token) {
-                        const std::string& mk = kv.first;
-                        bool match =
-                            mk.find(tok) != std::string::npos ||
-                            tok.find(mk) != std::string::npos;
-                        if (!match) continue;
-                        if (mk.size() < best_len) {
-                            best_len = mk.size();
-                            hit = kv.second;
+                    if (!hit) {
+                        size_t best_len = SIZE_MAX;
+                        for (const auto& kv : mdl_by_token) {
+                            const std::string& mk = kv.first;
+                            bool match =
+                                mk.find(tok) != std::string::npos ||
+                                tok.find(mk) != std::string::npos;
+                            if (!match) continue;
+                            if (mk.size() < best_len) {
+                                best_len = mk.size();
+                                hit = kv.second;
+                            }
                         }
                     }
-                }
-                if (!hit) continue;
+                    if (!hit) continue;
 
-                auto& pb = blocks_by_path[hit->full_path];
-                if (pb.model_path.empty()) {
-                    pb.type = 0xB2;
-                    pb.model_path = hit->full_path;
-                }
+                    auto& pb = blocks_by_path[hit->full_path];
+                    if (pb.model_path.empty()) {
+                        pb.type = 0xB2;
+                        pb.model_path = hit->full_path;
+                    }
 
-                Level::PropInstance pi;
-                pi.hash = p.hash;
-                pi.values[0] = p.x;
-                pi.values[1] = p.y;
-                pi.values[2] = p.z;
-                float qx = p.qx, qy = p.qy, qz = p.qz, qw = p.qw;
-                const float qmag =
-                    std::sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
-                if (std::isfinite(qmag) && qmag > 1e-6f) {
-                    qx /= qmag; qy /= qmag; qz /= qmag; qw /= qmag;
-                    const float num = 2.0f * (qw * qz + qx * qy);
-                    const float den = 1.0f - 2.0f * (qy * qy + qz * qz);
-                    const float mag = std::sqrt(num * num + den * den);
-                    if (std::isfinite(mag) && mag > 1e-6f) {
-                        pi.values[6] = num / mag;
-                        pi.values[7] = den / mag;
+                    Level::PropInstance pi;
+                    pi.hash = p.hash;
+                    pi.values[0] = p.x;
+                    pi.values[1] = p.y;
+                    pi.values[2] = p.z;
+                    float qx = p.qx, qy = p.qy, qz = p.qz, qw = p.qw;
+                    const float qmag =
+                        std::sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+                    if (std::isfinite(qmag) && qmag > 1e-6f) {
+                        qx /= qmag; qy /= qmag; qz /= qmag; qw /= qmag;
+                        const float num = 2.0f * (qw * qz + qx * qy);
+                        const float den = 1.0f - 2.0f * (qy * qy + qz * qz);
+                        const float mag = std::sqrt(num * num + den * den);
+                        if (std::isfinite(mag) && mag > 1e-6f) {
+                            pi.values[6] = num / mag;
+                            pi.values[7] = den / mag;
+                        } else {
+                            pi.values[6] = 0.0f;
+                            pi.values[7] = 1.0f;
+                        }
                     } else {
                         pi.values[6] = 0.0f;
                         pi.values[7] = 1.0f;
                     }
-                } else {
-                    pi.values[6] = 0.0f;
-                    pi.values[7] = 1.0f;
+                    pi.values[9] = pi.values[10] = pi.values[11] = 1.0f;
+                    pb.instances.push_back(pi);
+                    ++save_physics_instances_emitted;
                 }
-                pi.values[9] = pi.values[10] = pi.values[11] = 1.0f;
-                pb.instances.push_back(pi);
-                ++save_physics_instances_emitted;
             }
             if (save_physics_instances_emitted > 0) {
                 OutputLog::success(
@@ -1179,7 +1154,10 @@ bool Open(const FlatAssetEntry& entry)
 
             std::vector<uint8_t> hk_scan_bytes;
             const std::string hk_scan_path = sibling_with_ext(".havok_scenario");
-            if (save_physics_instances_emitted > 0) {
+            if (!emit_derived_render_placements) {
+                OutputLog::info(
+                    "derived render placements disabled");
+            } else if (save_physics_instances_emitted > 0) {
                 OutputLog::info(
                     "havok entity-scan: skipped render placement fallback; using .save PhysicsData transforms");
             } else if (load_text_sibling(hk_scan_path, hk_scan_bytes)) {

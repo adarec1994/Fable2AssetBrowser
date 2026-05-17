@@ -839,7 +839,12 @@ int decode_subframe(WmaProState* s) {
                 s->channels_for_cur_subframe, total_samples);
     }
 
-    s->table_idx       = uint8_t(av_log2(s->samples_per_frame / subframe_len));
+    if (subframe_len <= 0 || subframe_len > s->samples_per_frame) return -1;
+    {
+        const int log2_idx = av_log2(s->samples_per_frame / subframe_len);
+        if (log2_idx < 0 || log2_idx >= WMAPRO_BLOCK_SIZES) return -1;
+        s->table_idx = uint8_t(log2_idx);
+    }
     s->num_bands       = s->num_sfb[s->table_idx];
     s->cur_sfb_offsets = s->sfb_offsets[s->table_idx];
     cur_subwoofer_cutoff = s->subwoofer_cutoffs[s->table_idx];

@@ -79,6 +79,7 @@ void fltp_to_s16_interleaved(const float* const* planes,
     for (int i = 0; i < nb_samples; ++i) {
         for (int c = 0; c < nb_channels; ++c) {
             float v = planes[c][i] * kScale;
+            if (!(v == v) || v > 1e9f || v < -1e9f) v = 0.0f;
             v = std::max(-32768.0f, std::min(32767.0f, v));
             dst[i * nb_channels + c] = int16_t(v);
         }

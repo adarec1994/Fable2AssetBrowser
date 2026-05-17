@@ -229,6 +229,8 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     const uint8_t* data_ptr = &wav_bytes[data->data_off];
     const size_t   data_size = data->data_size;
 
+    pcm_out.reserve(data_size * 8);
+
     auto emit_frame = [&](Xma::Frame& f) {
         const int n = f.nb_samples;
         const int c = f.nb_channels;

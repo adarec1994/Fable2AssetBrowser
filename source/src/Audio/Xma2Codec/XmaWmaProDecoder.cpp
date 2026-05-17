@@ -21,7 +21,7 @@ namespace Xma {
 
 namespace {
 
-#include "../../../Archive/audio/libavcodec/wmaprodata.h"
+#include "wmaprodata.h"
 
 constexpr int MAX_SUBFRAMES = 32;
 constexpr int MAX_BANDS     = 29;

@@ -37,8 +37,11 @@ struct PlayerState {
     std::atomic<bool> loop{false};
     std::atomic<float> volume{0.85f};
 
-    std::atomic<bool> loading{false};
-    std::atomic<int>  load_generation{0};
+    std::atomic<bool>     loading{false};
+    std::atomic<int>      load_generation{0};
+    std::atomic<uint64_t> total_frames_known{0};
+    std::atomic<uint64_t> decoded_watermark_frames{0};
+    std::atomic<bool>     decode_done{true};
 };
 
 PlayerState& state() {
@@ -57,23 +60,37 @@ void audio_data_callback(ma_device* dev, void* output, const void* input, ma_uin
     if (!S.playing.load(std::memory_order_relaxed)) return;
 
     std::lock_guard<std::mutex> lk(S.source_mutex);
-    if (S.pcm.empty() || S.channels <= 0 || S.sample_rate <= 0) return;
+    if (S.channels <= 0 || S.sample_rate <= 0) return;
 
     const int src_ch = S.channels;
-    const uint64_t total_frames = (uint64_t)(S.pcm.size() / (size_t)src_ch);
+    const uint64_t pcm_frames = (uint64_t)(S.pcm.size() / (size_t)src_ch);
+    const uint64_t watermark  = S.decoded_watermark_frames.load(std::memory_order_relaxed);
+    const uint64_t available  = std::min(pcm_frames, watermark);
+
+    uint64_t total_frames = S.total_frames_known.load(std::memory_order_relaxed);
+    if (total_frames == 0) total_frames = available;
     if (total_frames == 0) return;
 
     uint64_t cursor = S.cursor_frames.load(std::memory_order_relaxed);
-    const float gain = S.volume.load(std::memory_order_relaxed);
+    const float gain         = S.volume.load(std::memory_order_relaxed);
+    const bool  decode_done  = S.decode_done.load(std::memory_order_relaxed);
+    const bool  looping      = S.loop.load(std::memory_order_relaxed);
 
     for (ma_uint32 i = 0; i < frame_count; ++i) {
         if (cursor >= total_frames) {
-            if (S.loop.load(std::memory_order_relaxed)) {
-                cursor = 0;
+            if (decode_done) {
+                if (looping) {
+                    cursor = 0;
+                } else {
+                    S.playing.store(false, std::memory_order_relaxed);
+                    break;
+                }
             } else {
-                S.playing.store(false, std::memory_order_relaxed);
                 break;
             }
+        }
+        if (cursor >= available) {
+            break;
         }
         const int16_t* src = &S.pcm[(size_t)(cursor * (uint64_t)src_ch)];
         int16_t* dst = &out[(size_t)i * (size_t)channels];
@@ -91,14 +108,12 @@ void audio_data_callback(ma_device* dev, void* output, const void* input, ma_uin
             if (v < -32768) v = -32768;
             for (int c = 0; c < channels; ++c) dst[c] = (int16_t)v;
         } else if (src_ch >= 2 && channels == 1) {
-
             int v = ((int)src[0] + (int)src[1]) / 2;
             v = (int)((float)v * gain);
             if (v >  32767) v =  32767;
             if (v < -32768) v = -32768;
             dst[0] = (int16_t)v;
         } else {
-
             const int ncopy = std::min(src_ch, channels);
             for (int c = 0; c < ncopy; ++c) {
                 int v = (int)((float)src[c] * gain);
@@ -220,6 +235,48 @@ bool decode_pcm_wav(const std::vector<uint8_t>& buf,
     return false;
 }
 
+bool reconfigure_device(int rate, int ch) {
+    auto& S = state();
+    if (!S.initialized.load()) return false;
+    if ((int)S.device.sampleRate == rate) return true;
+    ma_device_uninit(&S.device);
+    ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
+    cfg.playback.format   = ma_format_s16;
+    cfg.playback.channels = (ch >= 2) ? 2u : 1u;
+    cfg.sampleRate        = (ma_uint32)rate;
+    cfg.dataCallback      = audio_data_callback;
+    if (ma_device_init(nullptr, &cfg, &S.device) != MA_SUCCESS) {
+        S.initialized.store(false);
+        return false;
+    }
+    return ma_device_start(&S.device) == MA_SUCCESS;
+}
+
+void build_waveform_locked(PlayerState& S) {
+    S.wf_low.assign(PlayerState::kWaveformSlots, 0.0f);
+    S.wf_high.assign(PlayerState::kWaveformSlots, 0.0f);
+    if (S.pcm.empty() || S.channels <= 0) return;
+    size_t total_frames = S.pcm.size() / (size_t)S.channels;
+    if (total_frames == 0) return;
+    const int ch = S.channels;
+    for (int slot = 0; slot < PlayerState::kWaveformSlots; ++slot) {
+        size_t s0 = (size_t)((uint64_t)slot * total_frames / PlayerState::kWaveformSlots);
+        size_t s1 = (size_t)((uint64_t)(slot + 1) * total_frames / PlayerState::kWaveformSlots);
+        if (s1 <= s0) s1 = s0 + 1;
+        if (s1 > total_frames) s1 = total_frames;
+        int16_t lo = 0, hi = 0;
+        for (size_t f = s0; f < s1; ++f) {
+            int sum = 0;
+            for (int c = 0; c < ch; ++c) sum += S.pcm[f * (size_t)ch + (size_t)c];
+            int v = sum / ch;
+            if (v < lo) lo = (int16_t)v;
+            if (v > hi) hi = (int16_t)v;
+        }
+        S.wf_low[slot]  = (float)lo / 32768.0f;
+        S.wf_high[slot] = (float)hi / 32767.0f;
+    }
+}
+
 }
 
 bool ensure_initialized() {
@@ -262,6 +319,9 @@ void shutdown() {
     S.sample_rate = 0;
     S.channels = 0;
     S.display_name.clear();
+    S.total_frames_known.store(0);
+    S.decoded_watermark_frames.store(0);
+    S.decode_done.store(true);
 }
 
 bool load_wav_bytes(const std::vector<uint8_t>& bytes,
@@ -276,7 +336,6 @@ bool load_wav_bytes(const std::vector<uint8_t>& bytes,
     int rate = 0, ch = 0;
 
     if (!decode_pcm_wav(bytes, pcm, rate, ch)) {
-
         std::string xma_err;
         if (!XmaDecoder::decode_xma_to_pcm(bytes, pcm, rate, ch, &xma_err)) {
             if (err_out) {
@@ -287,31 +346,6 @@ bool load_wav_bytes(const std::vector<uint8_t>& bytes,
         }
     }
 
-    std::vector<float> wf_low(PlayerState::kWaveformSlots, 0.0f);
-    std::vector<float> wf_high(PlayerState::kWaveformSlots, 0.0f);
-    if (!pcm.empty() && ch > 0) {
-        size_t total_frames = pcm.size() / (size_t)ch;
-        if (total_frames > 0) {
-            for (int slot = 0; slot < PlayerState::kWaveformSlots; ++slot) {
-                size_t s0 = (size_t)((uint64_t)slot * total_frames / PlayerState::kWaveformSlots);
-                size_t s1 = (size_t)((uint64_t)(slot + 1) * total_frames / PlayerState::kWaveformSlots);
-                if (s1 <= s0) s1 = s0 + 1;
-                if (s1 > total_frames) s1 = total_frames;
-                int16_t lo = 0, hi = 0;
-                for (size_t f = s0; f < s1; ++f) {
-
-                    int sum = 0;
-                    for (int c = 0; c < ch; ++c) sum += pcm[f * (size_t)ch + (size_t)c];
-                    int v = sum / ch;
-                    if (v < lo) lo = (int16_t)v;
-                    if (v > hi) hi = (int16_t)v;
-                }
-                wf_low[slot]  = (float)lo / 32768.0f;
-                wf_high[slot] = (float)hi / 32767.0f;
-            }
-        }
-    }
-
     auto& S = state();
     {
         std::lock_guard<std::mutex> lk(S.source_mutex);
@@ -319,25 +353,18 @@ bool load_wav_bytes(const std::vector<uint8_t>& bytes,
         S.sample_rate = rate;
         S.channels = ch;
         S.display_name = display_name;
-        S.wf_low = std::move(wf_low);
-        S.wf_high = std::move(wf_high);
+        build_waveform_locked(S);
     }
+    const uint64_t total_frames = (ch > 0) ? (uint64_t)(S.pcm.size() / (size_t)ch) : 0;
+    S.total_frames_known.store(total_frames);
+    S.decoded_watermark_frames.store(total_frames);
+    S.decode_done.store(true);
     S.cursor_frames.store(0);
     S.playing.store(false);
 
-    if ((int)S.device.sampleRate != rate) {
-        ma_device_uninit(&S.device);
-        ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
-        cfg.playback.format   = ma_format_s16;
-        cfg.playback.channels = (ch >= 2) ? 2u : 1u;
-        cfg.sampleRate        = (ma_uint32)rate;
-        cfg.dataCallback      = audio_data_callback;
-        if (ma_device_init(nullptr, &cfg, &S.device) != MA_SUCCESS) {
-            S.initialized.store(false);
-            if (err_out) *err_out = "device reinit failed";
-            return false;
-        }
-        ma_device_start(&S.device);
+    if (!reconfigure_device(rate, ch)) {
+        if (err_out) *err_out = "device reinit failed";
+        return false;
     }
     return true;
 }
@@ -358,6 +385,7 @@ void start_load_bytes_async(std::vector<uint8_t> bytes,
     auto& S = state();
     const int my_gen = S.load_generation.fetch_add(1) + 1;
     S.loading.store(true);
+    S.decode_done.store(false);
     {
         std::lock_guard<std::mutex> lk(S.source_mutex);
         S.pcm.clear();
@@ -369,39 +397,203 @@ void start_load_bytes_async(std::vector<uint8_t> bytes,
     }
     S.cursor_frames.store(0);
     S.playing.store(false);
+    S.total_frames_known.store(0);
+    S.decoded_watermark_frames.store(0);
 
-    OutputLog::info("Decoding " + display_name);
+    OutputLog::info("Loading " + display_name);
+
     std::thread([bytes = std::move(bytes),
                  display_name,
                  my_gen]() mutable {
         auto& T = state();
-        std::string err;
-        const bool ok = load_wav_bytes(bytes, display_name, &err);
-        if (T.load_generation.load() == my_gen) {
-            if (ok) {
-                OutputLog::success("Decoded " + display_name);
-                play();
-            } else {
-                OutputLog::error("Audio decode failed: " + err);
+
+        auto finish_this_generation = [&]() {
+            if (T.load_generation.load() == my_gen) {
+                T.loading.store(false);
+                T.decode_done.store(true);
             }
-            T.loading.store(false);
+        };
+
+        if (!ensure_initialized()) {
+            OutputLog::error("Audio device init failed");
+            finish_this_generation();
+            return;
         }
+
+        {
+            std::vector<int16_t> pcm_full;
+            int rate = 0, ch = 0;
+            if (decode_pcm_wav(bytes, pcm_full, rate, ch)) {
+                if (T.load_generation.load() != my_gen) {
+                    finish_this_generation();
+                    return;
+                }
+                {
+                    std::lock_guard<std::mutex> lk(T.source_mutex);
+                    T.pcm = std::move(pcm_full);
+                    T.sample_rate = rate;
+                    T.channels = ch;
+                    T.display_name = display_name;
+                    build_waveform_locked(T);
+                }
+                const uint64_t total_frames = (ch > 0) ? (uint64_t)(T.pcm.size() / (size_t)ch) : 0;
+                T.total_frames_known.store(total_frames);
+                T.decoded_watermark_frames.store(total_frames);
+                T.cursor_frames.store(0);
+                if (!reconfigure_device(rate, ch)) {
+                    OutputLog::error("Audio device reinit failed");
+                }
+                finish_this_generation();
+                play();
+                OutputLog::success("Loaded " + display_name);
+                return;
+            }
+        }
+
+        XmaDecoder::StreamDecoder sd;
+        std::string err;
+        if (!sd.open(bytes, &err)) {
+            OutputLog::error("Audio decode failed: " + err);
+            finish_this_generation();
+            return;
+        }
+
+        const int      rate         = sd.sample_rate();
+        const int      ch           = sd.channels();
+        const uint64_t total_frames = sd.total_frames();
+
+        if (T.load_generation.load() != my_gen) {
+            finish_this_generation();
+            return;
+        }
+
+        if (!reconfigure_device(rate, ch)) {
+            OutputLog::error("Audio device reinit failed");
+            finish_this_generation();
+            return;
+        }
+
+        const size_t reserve_cap     = size_t(1) << 28;
+        size_t       reserve_samples = 0;
+        if (total_frames > 0 && ch > 0) {
+            const uint64_t want = total_frames * uint64_t(ch);
+            reserve_samples = size_t(std::min<uint64_t>(want, uint64_t(reserve_cap)));
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(T.source_mutex);
+            T.pcm.clear();
+            if (reserve_samples > 0) {
+                try { T.pcm.reserve(reserve_samples); } catch (const std::bad_alloc&) {}
+            }
+            T.sample_rate  = rate;
+            T.channels     = ch;
+            T.display_name = display_name;
+        }
+        T.total_frames_known.store(total_frames);
+        T.decoded_watermark_frames.store(0);
+
+        const uint64_t play_threshold_frames = uint64_t(rate / 2);
+        bool playback_started = false;
+
+        std::vector<int16_t> tmp;
+        tmp.reserve(8192);
+
+        bool more = true;
+        while (more) {
+            if (T.load_generation.load() != my_gen) {
+                finish_this_generation();
+                return;
+            }
+
+            tmp.clear();
+            more = sd.decode_chunk(tmp);
+
+            if (!tmp.empty()) {
+                std::lock_guard<std::mutex> lk(T.source_mutex);
+                T.pcm.insert(T.pcm.end(), tmp.begin(), tmp.end());
+                const uint64_t new_mark = (ch > 0) ? (uint64_t)(T.pcm.size() / (size_t)ch) : 0;
+                T.decoded_watermark_frames.store(new_mark, std::memory_order_release);
+            }
+
+            if (!playback_started &&
+                T.decoded_watermark_frames.load() >= play_threshold_frames) {
+                playback_started = true;
+                play();
+            }
+        }
+
+        if (T.load_generation.load() != my_gen) {
+            finish_this_generation();
+            return;
+        }
+
+        const uint64_t final_frames = T.decoded_watermark_frames.load();
+        if (final_frames == 0) {
+            {
+                std::lock_guard<std::mutex> lk(T.source_mutex);
+                T.sample_rate = 0;
+                T.channels    = 0;
+            }
+            T.total_frames_known.store(0);
+            OutputLog::error("Audio decode produced no samples");
+            finish_this_generation();
+            return;
+        }
+
+        T.total_frames_known.store(final_frames);
+
+        {
+            std::lock_guard<std::mutex> lk(T.source_mutex);
+            build_waveform_locked(T);
+        }
+
+        if (!playback_started) {
+            play();
+        }
+
+        finish_this_generation();
+        OutputLog::success("Decoded " + display_name);
     }).detach();
 }
 
 bool is_loading() { return state().loading.load(); }
 
+bool is_buffering() {
+    auto& S = state();
+    if (S.decode_done.load()) return false;
+    const uint64_t total  = S.total_frames_known.load();
+    if (total == 0) return false;
+    const uint64_t cursor = S.cursor_frames.load();
+    const uint64_t mark   = S.decoded_watermark_frames.load();
+    return cursor >= mark && cursor < total;
+}
+
+float decode_progress() {
+    auto& S = state();
+    if (S.decode_done.load()) return 1.0f;
+    const uint64_t total = S.total_frames_known.load();
+    const uint64_t mark  = S.decoded_watermark_frames.load();
+    if (total == 0) return 0.0f;
+    if (mark >= total) return 1.0f;
+    return float(double(mark) / double(total));
+}
+
 bool has_source() {
     auto& S = state();
     std::lock_guard<std::mutex> lk(S.source_mutex);
-    return !S.pcm.empty() && S.sample_rate > 0 && S.channels > 0;
+    return S.sample_rate > 0 && S.channels > 0;
 }
 
 static void rewind_if_finished() {
     auto& S = state();
-    std::lock_guard<std::mutex> lk(S.source_mutex);
-    if (S.channels <= 0 || S.pcm.empty()) return;
-    uint64_t total = (uint64_t)(S.pcm.size() / (size_t)S.channels);
+    uint64_t total = S.total_frames_known.load();
+    if (total == 0) {
+        std::lock_guard<std::mutex> lk(S.source_mutex);
+        if (S.channels <= 0 || S.pcm.empty()) return;
+        total = (uint64_t)(S.pcm.size() / (size_t)S.channels);
+    }
+    if (total == 0) return;
     if (S.cursor_frames.load() >= total) {
         S.cursor_frames.store(0);
     }
@@ -436,9 +628,13 @@ void seek_fraction(float t) {
     auto& S = state();
     if (t < 0.f) t = 0.f;
     if (t > 1.f) t = 1.f;
-    std::lock_guard<std::mutex> lk(S.source_mutex);
-    if (S.channels <= 0 || S.pcm.empty()) return;
-    uint64_t total = (uint64_t)(S.pcm.size() / (size_t)S.channels);
+    uint64_t total = S.total_frames_known.load();
+    if (total == 0) {
+        std::lock_guard<std::mutex> lk(S.source_mutex);
+        if (S.channels <= 0 || S.pcm.empty()) return;
+        total = (uint64_t)(S.pcm.size() / (size_t)S.channels);
+    }
+    if (total == 0) return;
     S.cursor_frames.store((uint64_t)((double)t * (double)total));
 }
 
@@ -456,17 +652,30 @@ bool is_playing() { return state().playing.load(); }
 
 double get_time_sec() {
     auto& S = state();
-    std::lock_guard<std::mutex> lk(S.source_mutex);
-    if (S.sample_rate <= 0) return 0.0;
-    return (double)S.cursor_frames.load() / (double)S.sample_rate;
+    int rate;
+    {
+        std::lock_guard<std::mutex> lk(S.source_mutex);
+        rate = S.sample_rate;
+    }
+    if (rate <= 0) return 0.0;
+    return (double)S.cursor_frames.load() / (double)rate;
 }
 
 double get_duration_sec() {
     auto& S = state();
-    std::lock_guard<std::mutex> lk(S.source_mutex);
-    if (S.sample_rate <= 0 || S.channels <= 0 || S.pcm.empty()) return 0.0;
-    uint64_t total = (uint64_t)(S.pcm.size() / (size_t)S.channels);
-    return (double)total / (double)S.sample_rate;
+    int rate;
+    {
+        std::lock_guard<std::mutex> lk(S.source_mutex);
+        rate = S.sample_rate;
+    }
+    if (rate <= 0) return 0.0;
+    uint64_t total = S.total_frames_known.load();
+    if (total == 0) {
+        std::lock_guard<std::mutex> lk(S.source_mutex);
+        if (S.channels <= 0 || S.pcm.empty()) return 0.0;
+        total = (uint64_t)(S.pcm.size() / (size_t)S.channels);
+    }
+    return (double)total / (double)rate;
 }
 
 std::string get_display_name() {

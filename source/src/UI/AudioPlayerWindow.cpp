@@ -41,6 +41,14 @@ void draw_waveform(ImVec2 size, float progress) {
 
     dl->AddRectFilled(rmin, rmax, IM_COL32(20, 22, 28, 255), 6.0f);
 
+    const float buf_frac = AudioPlayer::decode_progress();
+    if (buf_frac > 0.0f && buf_frac < 1.0f) {
+        float w   = rmax.x - rmin.x;
+        float bx  = rmin.x + w * buf_frac;
+        dl->AddRectFilled(rmin, ImVec2(bx, rmax.y),
+                          IM_COL32(36, 40, 50, 255), 6.0f, ImDrawFlags_RoundCornersLeft);
+    }
+
     static thread_local std::vector<float> lo, hi;
     lo.resize(1024);
     hi.resize(1024);
@@ -92,8 +100,17 @@ float draw_seek_bar(float frac, float width) {
     float bar_y = rmin.y + (row_h - bar_h) * 0.5f;
     ImVec2 bar_min(rmin.x, bar_y);
     ImVec2 bar_max(rmax.x, bar_y + bar_h);
-    float fill_x = rmin.x + (rmax.x - rmin.x) * frac;
+    float bar_w = rmax.x - rmin.x;
+    float fill_x = rmin.x + bar_w * frac;
+    float buf_frac = AudioPlayer::decode_progress();
+    if (buf_frac > 1.0f) buf_frac = 1.0f;
+    if (buf_frac < 0.0f) buf_frac = 0.0f;
+    float buf_x   = rmin.x + bar_w * buf_frac;
     dl->AddRectFilled(bar_min, bar_max, IM_COL32(50, 55, 65, 255), 3.0f);
+    if (buf_frac > 0.0f && buf_frac < 1.0f) {
+        dl->AddRectFilled(bar_min, ImVec2(buf_x, bar_max.y),
+                          IM_COL32(95, 105, 125, 255), 3.0f);
+    }
     dl->AddRectFilled(bar_min, ImVec2(fill_x, bar_max.y),
                       IM_COL32(120, 200, 255, 255), 3.0f);
     if (hovered || active) {
@@ -180,9 +197,21 @@ void draw_audio_player_window() {
         int sr = AudioPlayer::get_sample_rate();
         int ch = AudioPlayer::get_channels();
         const char* ch_label = (ch == 1) ? "mono" : (ch == 2 ? "stereo" : "");
-        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(140, 150, 165, 255));
+        const bool buffering = AudioPlayer::is_buffering();
+        if (buffering) {
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(250, 200, 100, 255));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(140, 150, 165, 255));
+        }
         if (AudioPlayer::is_loading() && !AudioPlayer::has_source()) {
             ImGui::TextUnformatted("Decoding XMA \xe2\x80\xa6");
+        } else if (buffering) {
+            ImGui::Text("Buffering \xe2\x80\xa6  (%d%% decoded)",
+                        (int)(AudioPlayer::decode_progress() * 100.0f + 0.5f));
+        } else if (AudioPlayer::is_loading()) {
+            ImGui::Text("%d Hz \xc2\xb7 %s%s%d ch \xc2\xb7 XMA2  \xc2\xb7  decoding %d%%",
+                        sr, ch_label, ch_label[0] ? " \xc2\xb7 " : "", ch,
+                        (int)(AudioPlayer::decode_progress() * 100.0f + 0.5f));
         } else {
             ImGui::Text("%d Hz \xc2\xb7 %s%s%d ch \xc2\xb7 XMA2",
                         sr, ch_label, ch_label[0] ? " \xc2\xb7 " : "", ch);

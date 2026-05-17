@@ -25,9 +25,10 @@ bool load_wav_path(const std::string& path,
 void start_load_bytes_async(std::vector<uint8_t> bytes,
                             std::string display_name);
 
-bool is_loading();
-
-bool has_source();
+bool  is_loading();
+bool  has_source();
+bool  is_buffering();
+float decode_progress();
 
 void play();
 void pause();

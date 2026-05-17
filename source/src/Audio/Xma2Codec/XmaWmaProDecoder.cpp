@@ -1015,15 +1015,6 @@ int decode_frame(WmaProState* s, Frame& frame, bool& got_frame) {
                      (sizeof(float) * std::size_t(s->samples_per_frame)) >> 1);
     }
     frame.nb_samples = s->samples_per_frame;
-                    if (v < mn) mn = v;
-                    if (v > mx) mx = v;
-                    const float av = v < 0 ? -v : v;
-                    if (av > abs_max) abs_max = av;
-                    if (v != 0.0f) ++nonzero;
-                }
-            }
-        }
-    }
 
     if (s->skip_frame) {
         s->skip_frame = 0;

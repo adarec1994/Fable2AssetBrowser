@@ -1154,7 +1154,7 @@ struct VSOUT{
 VSOUT VS(VSIN i){
     VSOUT o;
     o.p  = mul(float4(i.p, 1.0), mvp);
-    o.n  = normalize(mul(i.n, (float3x3)mv));
+    o.n  = normalize(i.n);
     o.t  = i.t;
     o.wp = i.p;
     return o;
@@ -1300,6 +1300,117 @@ float4 PS(VSOUT i) : SV_Target {
 }
 )";
 
+static const char* g_terrain_ps_live = R"(
+cbuffer CB : register(b0){
+    float4x4 mvp;
+    float4   lightDir;
+    float4x4 mv;
+    float4   params;
+}
+cbuffer TerrainCB : register(b2){
+    float4 chunk_origin_extent;
+    float4 chunk_grid_size;
+    float4 splat_params;
+    float4 mesh_xform;
+    float4 material_params[32];
+}
+Texture2DArray  lod_array     : register(t0);
+Texture2DArray  chunk_idx     : register(t1);
+Texture2DArray  chunk_blend   : register(t2);
+Texture2DArray  chunk_uv      : register(t3);
+Texture2D       splat_mask    : register(t4);
+Texture2D       lightmap      : register(t5);
+Texture2DArray  lod_detail_array : register(t6);
+SamplerState    smp_wrap      : register(s0);
+SamplerState    smp_point     : register(s1);
+
+struct VSOUT{
+    float4 p   : SV_Position;
+    float3 n   : NORMAL;
+    float2 t   : TEXCOORD0;
+    float3 wp  : TEXCOORD1;
+};
+
+float3 sample_material(int slice, float2 world_xy, float slope_w){
+    int max_slice = max((int)chunk_grid_size.z - 1, 0);
+    int s = min(max(slice, 0), max_slice);
+    float4 mp = material_params[s];
+    float base_scale = (mp.x > 0.0) ? mp.x : splat_params.y;
+    float detail_scale = (mp.y > 0.0) ? mp.y : base_scale;
+    float3 base = lod_array.Sample(
+        smp_wrap, float3(world_xy * base_scale, s)).rgb;
+    float3 detail = lod_detail_array.Sample(
+        smp_wrap, float3(world_xy * detail_scale, s)).rgb;
+    float detail_w = slope_w * saturate(mp.z) * saturate(mp.w);
+    return lerp(base, detail, detail_w);
+}
+
+float4 PS(VSOUT i) : SV_Target {
+    float2 mesh_xy  = float2(i.wp.x, i.wp.z);
+    float2 world_xy = mesh_xy * mesh_xform.xy + mesh_xform.zw;
+    float2 origin   = chunk_origin_extent.xy;
+    float2 extent   = chunk_origin_extent.zw;
+    float  CW       = chunk_grid_size.x;
+    float  CH       = chunk_grid_size.y;
+
+    float2 chunk_co = (world_xy - origin) / extent;
+    float2 chunk_clamped = clamp(chunk_co,
+                                 float2(0, 0),
+                                 float2(CW - 0.001, CH - 0.001));
+    int2   chunk_xy = int2(floor(chunk_clamped));
+    float2 corner_uv = frac(chunk_clamped);
+
+    float wx = corner_uv.x, wy = corner_uv.y;
+    float w00 = (1.0 - wx) * (1.0 - wy);
+    float w10 =        wx  * (1.0 - wy);
+    float w01 = (1.0 - wx) *        wy ;
+    float w11 =        wx  *        wy ;
+    float slope_w = saturate((0.82 - abs(normalize(i.n).y)) / 0.35);
+
+    float3 final = float3(0.0, 0.0, 0.0);
+    float  weight_sum = 0.0;
+
+    [loop]
+    for (int layer = 0; layer < 16; ++layer) {
+        float4 idx_norm = chunk_idx.Load(int4(chunk_xy, layer, 0));
+        float4 idx255   = round(idx_norm * 255.0);
+        if (idx255.x > 254.5) break;
+
+        float4 bln_norm = chunk_blend.Load(int4(chunk_xy, layer, 0));
+        float2 mask_origin = chunk_uv.Load(int4(chunk_xy, layer, 0)).xy;
+        float4 bln = saturate((bln_norm * 255.0) / splat_params.x);
+        float2 mask_uv = mask_origin + corner_uv * splat_params.zw;
+        float mask_w = splat_mask.SampleLevel(smp_point, mask_uv, 0).r;
+        if (mask_w <= 0.001) continue;
+
+        float3 c00 = sample_material((int)idx255.x, world_xy, slope_w);
+        float3 c10 = sample_material((int)idx255.y, world_xy, slope_w);
+        float3 c01 = sample_material((int)idx255.z, world_xy, slope_w);
+        float3 c11 = sample_material((int)idx255.w, world_xy, slope_w);
+
+        float3 lc = c00 * w00 + c10 * w10 + c01 * w01 + c11 * w11;
+        float lw = mask_w * saturate(
+              bln.x * w00 + bln.y * w10
+            + bln.z * w01 + bln.w * w11);
+        final += lc * lw;
+        weight_sum += lw;
+    }
+
+    if (weight_sum > 0.001) {
+        final /= weight_sum;
+    } else {
+        final = sample_material(0, world_xy, slope_w);
+    }
+
+    if (params.z > 0.5) {
+        float3 hi = float3(0.10, 0.95, 0.25);
+        final = lerp(final, hi, 0.65);
+    }
+
+    return float4(final, 1.0);
+}
+)";
+
 static bool create_white_srv(ID3D11Device* dev, ID3D11ShaderResourceView** out_srv){
     *out_srv = nullptr;
     UINT px = 0xFFFFFFFFu;
@@ -1387,7 +1498,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     {
         ID3DBlob* tvsb = nullptr; ID3DBlob* tpsb = nullptr;
         if (compile_shader(g_terrain_vs, "VS", "vs_5_0", &tvsb) &&
-            compile_shader(g_terrain_ps, "PS", "ps_5_0", &tpsb))
+            compile_shader(g_terrain_ps_live, "PS", "ps_5_0", &tpsb))
         {
             dev->CreateVertexShader(tvsb->GetBufferPointer(),
                                     tvsb->GetBufferSize(),
@@ -1402,14 +1513,14 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     {
         D3D11_BUFFER_DESC tcb{};
         tcb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        tcb.ByteWidth = 64;
+        tcb.ByteWidth = 64 + 32 * 16;
         tcb.Usage = D3D11_USAGE_DYNAMIC;
         tcb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         dev->CreateBuffer(&tcb, nullptr, &mp.cbuffer_terrain);
     }
     {
         D3D11_SAMPLER_DESC psd{};
-        psd.Filter   = D3D11_FILTER_MIN_MAG_MIP_POINT;
+        psd.Filter   = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         psd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
         psd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
         psd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -1947,9 +2058,20 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         const auto& R = TerrainSplat::Get();
         const bool use_terrain_shader =
             m.is_terrain && R.ok &&
+            R.lod_diffuse_array && R.lod_detail_array &&
+            R.chunk_idx_array && R.chunk_blend_array && R.chunk_uv_array &&
+            R.splat_mask && R.lightmap &&
             mp.vs_terrain && mp.ps_terrain && mp.cbuffer_terrain;
 
         if (use_terrain_shader) {
+            static uint32_t s_logged_splat_generation = 0;
+            if (s_logged_splat_generation != R.generation) {
+                s_logged_splat_generation = R.generation;
+                OutputLog::success("terrain SPLAT shader draw active: "
+                    + std::to_string(R.chunk_w) + "x"
+                    + std::to_string(R.chunk_h) + " chunks, "
+                    + std::to_string(R.lod_count) + " material slices");
+            }
             D3D11_MAPPED_SUBRESOURCE tms{};
             if (SUCCEEDED(ctx->Map(mp.cbuffer_terrain, 0,
                                    D3D11_MAP_WRITE_DISCARD, 0, &tms))) {
@@ -1958,6 +2080,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                     float grid_size[4];
                     float splat_params[4];
                     float mesh_xform[4];
+                    float material_params[32][4];
                 } t{};
                 t.origin_extent[0] = R.world_origin_x;
                 t.origin_extent[1] = R.world_origin_z;
@@ -1970,12 +2093,20 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 t.splat_params[0] = 3.0f;   
                 t.splat_params[1] = (R.tile_scale > 0.0f)
                     ? R.tile_scale : 0.125f;
-                t.splat_params[2] = 0.0f;
-                t.splat_params[3] = 0.0f;
+                t.splat_params[2] = (R.splat_w > 0)
+                    ? 32.0f / float(R.splat_w) : 0.0f;
+                t.splat_params[3] = (R.splat_h > 0)
+                    ? 32.0f / float(R.splat_h) : 0.0f;
                 t.mesh_xform[0] = 1.0f;
                 t.mesh_xform[1] = 1.0f;
                 t.mesh_xform[2] = R.mesh_to_world_x;
                 t.mesh_xform[3] = R.mesh_to_world_z;
+                for (int mi = 0; mi < 32; ++mi) {
+                    for (int mj = 0; mj < 4; ++mj) {
+                        t.material_params[mi][mj] =
+                            R.material_params[mi][mj];
+                    }
+                }
                 std::memcpy(tms.pData, &t, sizeof(t));
                 ctx->Unmap(mp.cbuffer_terrain, 0);
             }
@@ -1985,18 +2116,23 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             ctx->VSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
             ctx->PSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
 
-            ID3D11ShaderResourceView* srvs[4] = {
+            ID3D11ShaderResourceView* srvs[7] = {
                 R.lod_diffuse_array,
                 R.chunk_idx_array,
                 R.chunk_blend_array,
-                R.lightmap
+                R.chunk_uv_array,
+                R.splat_mask,
+                R.lightmap,
+                R.lod_detail_array
             };
-            ctx->PSSetShaderResources(0, 4, srvs);
+            ctx->PSSetShaderResources(0, 7, srvs);
 
             ctx->DrawIndexed(m.index_count, 0, 0);
 
-            ID3D11ShaderResourceView* nulls[4] = { nullptr, nullptr, nullptr, nullptr };
-            ctx->PSSetShaderResources(0, 4, nulls);
+            ID3D11ShaderResourceView* nulls[7] = {
+                nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr
+            };
+            ctx->PSSetShaderResources(0, 7, nulls);
             ID3D11Buffer* null_cb = nullptr;
             ctx->VSSetConstantBuffers(2, 1, &null_cb);
             ctx->PSSetConstantBuffers(2, 1, &null_cb);

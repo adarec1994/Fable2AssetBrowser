@@ -37,7 +37,7 @@ const AVCodec *av_codec_iterate(void **opaque) {
     return codec_avcodec(c);
 }
 
-const AVCodec *avcodec_find_decoder(enum AVCodecID id) {
+const AVCodec *avcodec_find_decoder(enum AVCodecID id) {    
     void *iter = nullptr;
     while (const AVCodec *p = av_codec_iterate(&iter)) {
         if (av_codec_is_decoder(p) && p->id == id) return p;

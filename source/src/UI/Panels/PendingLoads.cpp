@@ -1202,6 +1202,10 @@ void process_pending_loads() {
                     e.base_normal_path    = pe.base_normal;
                     e.detail_diffuse_path = pe.detail_diffuse;
                     e.detail_normal_path  = pe.detail_normal;
+                    e.base_tile_scale     = pe.base_tile_scale;
+                    e.detail_tile_scale   = pe.detail_tile_scale;
+                    e.base_intensity      = pe.base_intensity;
+                    e.detail_intensity    = pe.detail_intensity;
                     decode_one(pe.base_diffuse,   e.srv_base_diffuse,
                                e.base_diffuse_w,  e.base_diffuse_h);
                     decode_one(pe.base_normal,    e.srv_base_normal,

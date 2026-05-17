@@ -1,4 +1,5 @@
 #include "EhfChunkParser.h"
+#include "TextureAtlasDecoder.h"
 
 #include <algorithm>
 #include <cstring>
@@ -215,7 +216,12 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
                 return false;
             }
         }
-        if (!w.skip(12)) { out.error = "LOD mid floats"; return false; }
+        for (int p = 0; p < 3; ++p) {
+            if (!w.f32(out.lods[k].params[0][p])) {
+                out.error = "LOD mid floats";
+                return false;
+            }
+        }
         for (int s = 3; s < 6; ++s) {
             if (!w.null_str(out.lods[k].strs[s])) {
                 out.error = "LOD[" + std::to_string(k) + "].str["
@@ -223,13 +229,35 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
                 return false;
             }
         }
-        if (!w.skip(12)) { out.error = "LOD trailing floats"; return false; }
+        for (int p = 0; p < 3; ++p) {
+            if (!w.f32(out.lods[k].params[1][p])) {
+                out.error = "LOD trailing floats";
+                return false;
+            }
+        }
     }
 
     uint32_t db0_cnt;
     if (!w.u32(db0_cnt)) { out.error = "85DB0 count"; return false; }
     if (db0_cnt > 32) { out.error = "85DB0 count implausible"; return false; }
     for (uint32_t k = 0; k < db0_cnt; ++k) {
+        if (!w.need(0x60)) {
+            out.error = "85DB0 tex[" + std::to_string(k) + "]: " + w.err;
+            return false;
+        }
+        const size_t tex_start = w.pos;
+        const uint32_t pf = be_u32(w.p + tex_start + 0x18);
+        if (pf == 99u) {
+            int sw = 0, sh = 0;
+            std::string err;
+            if (TextureAtlas::DecodePF99SplatMap(
+                    w.p + tex_start, w.n - tex_start,
+                    out.splat_indices, sw, sh, err))
+            {
+                out.splat_w = (uint32_t)sw;
+                out.splat_h = (uint32_t)sh;
+            }
+        }
         if (!skip_tex_blob(w)) {
             out.error = "85DB0 tex[" + std::to_string(k) + "]: " + w.err;
             return false;
@@ -273,8 +301,7 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
         c.layers.resize(lcount);
         for (uint32_t li = 0; li < lcount; ++li) {
             EhfChunkLayer& L = c.layers[li];
-            uint32_t v0;
-            if (!w.u32(v0))           { out.error = "layer v0"; return false; }
+            if (!w.u32(L.material_idx)) { out.error = "layer material_idx"; return false; }
             if (!w.u32(L.name_idx))   { out.error = "layer name_idx"; return false; }
             if (!w.f32(L.tile_uv[0])) { out.error = "layer uv0"; return false; }
             if (!w.f32(L.tile_uv[1])) { out.error = "layer uv1"; return false; }
@@ -282,7 +309,6 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
                 if (!w.u8(L.texture_idx[i])) { out.error = "layer idx"; return false; }
                 if (!w.u8(L.blend[i])) { out.error = "layer blend"; return false; }
             }
-            (void)v0;  
         }
     }
 

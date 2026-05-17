@@ -84,6 +84,18 @@ set(APP_SOURCES
         src/Audio/AudioPlayer.cpp
         src/Audio/XmaDecoder.cpp
         src/Audio/MfAudioEncoder.cpp
+        # Native C++ port of the FFmpeg XMA/WMA Pro decoder pipeline
+        # (src/Audio/Xma2Codec/). Currently parked work-in-progress:
+        # the files compile to catch drift, but XmaDecoder.cpp uses
+        # FFmpeg's prebuilt .libs at runtime via F2_HAVE_FFMPEG. The
+        # port can be re-wired as the runtime later once decode_coeffs
+        # bit-counting is correct vs FFmpeg reference output.
+        src/Audio/Xma2Codec/XmaSupport.cpp
+        src/Audio/Xma2Codec/XmaParser.cpp
+        src/Audio/Xma2Codec/XmaWmaCore.cpp
+        src/Audio/Xma2Codec/XmaBitstream.cpp
+        src/Audio/Xma2Codec/XmaTx.cpp
+        src/Audio/Xma2Codec/XmaWmaProDecoder.cpp
         src/UI/ModelPreview.cpp
         src/UI/ModelPreview.h
         src/Lua.cpp

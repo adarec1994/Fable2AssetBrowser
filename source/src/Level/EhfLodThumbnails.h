@@ -26,6 +26,11 @@ struct Entry {
     int base_normal_w = 0,    base_normal_h = 0;
     int detail_diffuse_w = 0, detail_diffuse_h = 0;
     int detail_normal_w = 0,  detail_normal_h = 0;
+
+    float base_tile_scale = 0.125f;
+    float detail_tile_scale = 0.125f;
+    float base_intensity = 1.0f;
+    float detail_intensity = 1.0f;
 };
 
 void Set(std::vector<Entry> entries);

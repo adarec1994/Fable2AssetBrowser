@@ -1,3 +1,5 @@
 /source/.claude
 /source/docs
 /source/tools
+source/strip_comments.py
+/source/Archive/audio

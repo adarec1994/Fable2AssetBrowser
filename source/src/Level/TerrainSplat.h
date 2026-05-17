@@ -18,12 +18,16 @@ namespace TerrainSplat {
 
 constexpr int kCommonLodSize = 1024;   
 constexpr int kMaxLayers     = 16;
+constexpr int kMaxMaterials  = 32;
 
 struct Resources {
 #ifdef _WIN32
     ID3D11ShaderResourceView* lod_diffuse_array   = nullptr;
+    ID3D11ShaderResourceView* lod_detail_array    = nullptr;
     ID3D11ShaderResourceView* chunk_idx_array     = nullptr;
     ID3D11ShaderResourceView* chunk_blend_array   = nullptr;
+    ID3D11ShaderResourceView* chunk_uv_array      = nullptr;
+    ID3D11ShaderResourceView* splat_mask          = nullptr;
     ID3D11ShaderResourceView* lightmap            = nullptr;
 #endif
     float world_origin_x = 0.f, world_origin_z = 0.f;
@@ -34,6 +38,11 @@ struct Resources {
     float mesh_to_world_x = 0.f, mesh_to_world_z = 0.f;
 
     float tile_scale = 0.125f;
+    int   splat_w = 0;
+    int   splat_h = 0;
+    float material_params[kMaxMaterials][4] = {};
+
+    uint32_t generation = 0;
 
     bool  ok = false;
 };

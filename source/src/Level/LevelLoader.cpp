@@ -2780,6 +2780,10 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
             e.base_normal    = L.strs[1];
             e.detail_diffuse = L.strs[3];
             e.detail_normal  = L.strs[4];
+            e.base_tile_scale   = L.params[0][0];
+            e.base_intensity    = L.params[0][1];
+            e.detail_tile_scale = L.params[1][0];
+            e.detail_intensity  = L.params[1][1];
             pe.push_back(std::move(e));
         }
         TerrainTextureRegistry::SetLodPalette(std::move(pe));
@@ -2943,6 +2947,48 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
         }
     };
 
+    auto sample_mask = [&](const EhfChunkLayer& L,
+                           float local_x, float local_z) -> float
+    {
+        if (parsed.splat_indices.empty() ||
+            parsed.splat_w == 0 || parsed.splat_h == 0 ||
+            parsed.splat_indices.size() !=
+                size_t(parsed.splat_w) * size_t(parsed.splat_h))
+        {
+            return 1.0f;
+        }
+
+        const float u = L.tile_uv[0]
+            + std::clamp(local_x, 0.0f, 1.0f)
+            * (32.0f / float(parsed.splat_w));
+        const float v = L.tile_uv[1]
+            + std::clamp(local_z, 0.0f, 1.0f)
+            * (32.0f / float(parsed.splat_h));
+
+        float px = u * float(parsed.splat_w) - 0.5f;
+        float py = v * float(parsed.splat_h) - 0.5f;
+        px = std::clamp(px, 0.0f, float(parsed.splat_w - 1));
+        py = std::clamp(py, 0.0f, float(parsed.splat_h - 1));
+
+        const int x0 = int(px);
+        const int y0 = int(py);
+        const int x1 = std::min<int>(x0 + 1, int(parsed.splat_w) - 1);
+        const int y1 = std::min<int>(y0 + 1, int(parsed.splat_h) - 1);
+        const float dx = px - float(x0);
+        const float dy = py - float(y0);
+        auto at = [&](int x, int y) -> float {
+            return parsed.splat_indices[
+                size_t(y) * size_t(parsed.splat_w) + size_t(x)] / 255.0f;
+        };
+        const float w00m = (1.0f - dx) * (1.0f - dy);
+        const float w10m =         dx  * (1.0f - dy);
+        const float w01m = (1.0f - dx) *         dy;
+        const float w11m =         dx  *         dy;
+        return std::clamp(at(x0, y0) * w00m + at(x1, y0) * w10m
+                        + at(x0, y1) * w01m + at(x1, y1) * w11m,
+                          0.0f, 1.0f);
+    };
+
     constexpr float kBlendMax     = 3.0f;  
 
     for (int y = 0; y < lm_h; ++y) {
@@ -2971,7 +3017,7 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
                 parsed.chunks[size_t(cx) * parsed.chunk_h + cy];
 
             float accum_r = 0.f, accum_g = 0.f, accum_b = 0.f;
-            float accum_a = 0.f;
+            float accum_w = 0.f;
 
             const float wu = world_x;
             const float wv = world_z;
@@ -2980,43 +3026,33 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
                 const float blend_px =
                     w00 * float(L.blend[0]) + w10 * float(L.blend[1]) +
                     w01 * float(L.blend[2]) + w11 * float(L.blend[3]);
-                const float alpha = std::clamp(blend_px / kBlendMax,
-                                               0.f, 1.f);
-                if (alpha < 1.f / 255.f) continue;
+                const float weight = std::clamp(blend_px / kBlendMax,
+                                                0.f, 1.f)
+                                   * sample_mask(L, fx_in, fy_in);
+                if (weight < 1.f / 255.f) continue;
 
-                uint8_t c00[3], c10[3], c01[3], c11[3];
-                sample_mat(int(L.texture_idx[0]), wu, wv, c00);
-                sample_mat(int(L.texture_idx[1]), wu, wv, c10);
-                sample_mat(int(L.texture_idx[2]), wu, wv, c01);
-                sample_mat(int(L.texture_idx[3]), wu, wv, c11);
-
-                const float r = w00 * c00[0] + w10 * c10[0]
-                              + w01 * c01[0] + w11 * c11[0];
-                const float g = w00 * c00[1] + w10 * c10[1]
-                              + w01 * c01[1] + w11 * c11[1];
-                const float b = w00 * c00[2] + w10 * c10[2]
-                              + w01 * c01[2] + w11 * c11[2];
-
-                const float one_minus_alpha = 1.f - alpha;
-                accum_r = accum_r * one_minus_alpha + r * alpha;
-                accum_g = accum_g * one_minus_alpha + g * alpha;
-                accum_b = accum_b * one_minus_alpha + b * alpha;
-                accum_a = std::min(1.f,
-                                   accum_a + alpha * (1.f - accum_a));
+                uint8_t rgb[3];
+                sample_mat(int(L.material_idx), wu, wv, rgb);
+                accum_r += float(rgb[0]) * weight;
+                accum_g += float(rgb[1]) * weight;
+                accum_b += float(rgb[2]) * weight;
+                accum_w += weight;
             }
 
-            if (accum_a < 0.05f) {
+            if (accum_w > 1e-4f) {
+                accum_r /= accum_w;
+                accum_g /= accum_w;
+                accum_b /= accum_w;
+            } else {
                 uint8_t base[3];
                 sample_mat(first_decoded, wu, wv, base);
                 accum_r = base[0]; accum_g = base[1]; accum_b = base[2];
             }
 
-            const uint8_t ao = lm_rgba[(size_t(y) * lm_w + x) * 4 + 0];
-            const float k  = (ao / 255.0f) * 0.55f + 0.45f;
             uint8_t* dst = out_rgba.data() + (size_t(y) * lm_w + x) * 4;
-            dst[0] = uint8_t(std::clamp(accum_r * k, 0.f, 255.f));
-            dst[1] = uint8_t(std::clamp(accum_g * k, 0.f, 255.f));
-            dst[2] = uint8_t(std::clamp(accum_b * k, 0.f, 255.f));
+            dst[0] = uint8_t(std::clamp(accum_r, 0.f, 255.f));
+            dst[1] = uint8_t(std::clamp(accum_g, 0.f, 255.f));
+            dst[2] = uint8_t(std::clamp(accum_b, 0.f, 255.f));
             dst[3] = 0xFF;
         }
     }

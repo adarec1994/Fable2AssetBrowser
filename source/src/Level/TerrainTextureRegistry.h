@@ -27,6 +27,10 @@ struct LodPaletteEntry {
     std::string base_normal;      
     std::string detail_diffuse;   
     std::string detail_normal;    
+    float       base_tile_scale = 0.125f;
+    float       detail_tile_scale = 0.125f;
+    float       base_intensity = 1.0f;
+    float       detail_intensity = 1.0f;
 };
 
 void SetLodPalette(std::vector<LodPaletteEntry> entries);

@@ -110,6 +110,23 @@ void swap_bc5_endian(uint8_t* data, size_t size) {
     }
 }
 
+void swap_bc4_endian(uint8_t* data, size_t size) {
+    for (size_t i = 0; i + 8 <= size; i += 8) {
+        uint8_t* blk = data + i;
+        uint64_t bits = 0;
+        for (int j = 0; j < 6; ++j) {
+            bits |= ((uint64_t)blk[2 + j]) << (j * 8);
+        }
+        uint64_t sw = 0;
+        for (int j = 0; j < 6; ++j) {
+            sw |= ((bits >> (j * 8)) & 0xFFu) << ((5 - j) * 8);
+        }
+        for (int j = 0; j < 6; ++j) {
+            blk[2 + j] = (uint8_t)((sw >> (j * 8)) & 0xFFu);
+        }
+    }
+}
+
 uint32_t xg_address_2d_tiled_x(uint32_t block_offset,
                                uint32_t width_in_blocks,
                                uint32_t texel_byte_pitch)
@@ -569,65 +586,53 @@ bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,
         return false;
     }
 
-    const size_t total_blocks = (size_t)raw_size / 8;
-    int padded_w = 0, padded_h = 0;
-    for (int pad_step : {128, 64, 32, 16, 8, 4}) {
-        const int pw = ((int)W + pad_step - 1) / pad_step * pad_step;
-        if (pw % 4 != 0) continue;
-        const size_t blocks_w = (size_t)pw / 4;
-        if (total_blocks % blocks_w != 0) continue;
-        const size_t blocks_h = total_blocks / blocks_w;
-        const int ph = (int)blocks_h * 4;
-        if (ph >= (int)H) { padded_w = pw; padded_h = ph; break; }
-    }
-    if (padded_w == 0) {
-        out_err = "splat: could not factor padded dims from raw_size";
+    const uint32_t blocks_w = (W + 3u) / 4u;
+    const uint32_t blocks_h = (H + 3u) / 4u;
+    const uint32_t padded_blocks_w = (blocks_w + 31u) & ~31u;
+    const uint32_t padded_blocks_h = (blocks_h + 31u) & ~31u;
+    const size_t expected_raw =
+        (size_t)padded_blocks_w * padded_blocks_h * 8u;
+    if (raw.size() < expected_raw) {
+        std::ostringstream os;
+        os << "splat: raw BC4 page too small: " << raw.size()
+           << " < " << expected_raw;
+        out_err = os.str();
         return false;
     }
 
-    const int blocks_w = padded_w / 4;
-    const int blocks_h = padded_h / 4;
-    constexpr int TILE = 32;
-    const int tiles_w = (blocks_w + TILE - 1) / TILE;
-    const int tiles_h = (blocks_h + TILE - 1) / TILE;
-    std::vector<uint8_t> linear((size_t)blocks_w * blocks_h * 8, 0);
-    size_t src_off = 0;
-    for (int ty = 0; ty < tiles_h; ++ty) {
-        for (int tx = 0; tx < tiles_w; ++tx) {
-            for (int ly = 0; ly < TILE; ++ly) {
-                const int by = ty * TILE + ly;
-                for (int lx = 0; lx < TILE; ++lx) {
-                    const int bx = tx * TILE + lx;
-                    if (by < blocks_h && bx < blocks_w &&
-                        src_off + 8 <= raw.size())
-                    {
-                        const size_t dst_off =
-                            ((size_t)by * blocks_w + bx) * 8;
-                        std::memcpy(linear.data() + dst_off,
-                                    raw.data() + src_off, 8);
-                    }
-                    src_off += 8;
-                }
-            }
-        }
+    std::vector<uint8_t> linear((size_t)blocks_w * blocks_h * 8u, 0);
+    const uint32_t total_blocks = padded_blocks_w * padded_blocks_h;
+    for (uint32_t off = 0; off < total_blocks; ++off) {
+        const uint32_t bx =
+            xg_address_2d_tiled_x(off, padded_blocks_w, 8);
+        const uint32_t by =
+            xg_address_2d_tiled_y(off, padded_blocks_w, 8);
+        if (bx >= blocks_w || by >= blocks_h) continue;
+
+        const size_t src_off = (size_t)off * 8u;
+        if (src_off + 8u > raw.size()) continue;
+        const size_t dst_off =
+            ((size_t)by * blocks_w + bx) * 8u;
+        std::memcpy(linear.data() + dst_off, raw.data() + src_off, 8);
     }
 
+    swap_bc4_endian(linear.data(), linear.size());
+
     out_indices.assign((size_t)W * (size_t)H, 0);
-    for (int by = 0; by < blocks_h; ++by) {
-        for (int bx = 0; bx < blocks_w; ++bx) {
-            const uint8_t* b8 = linear.data() + ((size_t)by * blocks_w + bx) * 8;
-            uint8_t nibs[16];
-            for (int k = 0; k < 8; ++k) {
-                nibs[k * 2]     = (b8[k] >> 4) & 0xF;
-                nibs[k * 2 + 1] =  b8[k]       & 0xF;
-            }
+    for (uint32_t by = 0; by < blocks_h; ++by) {
+        for (uint32_t bx = 0; bx < blocks_w; ++bx) {
+            const uint8_t* b8 =
+                linear.data() + ((size_t)by * blocks_w + bx) * 8u;
+            uint8_t alpha[16];
+            decode_bc4_channel(b8, alpha);
             for (int py = 0; py < 4; ++py) {
-                const int yy = by * 4 + py;
-                if (yy >= (int)H) break;
+                const uint32_t yy = by * 4u + (uint32_t)py;
+                if (yy >= H) break;
                 for (int pxn = 0; pxn < 4; ++pxn) {
-                    const int xx = bx * 4 + pxn;
-                    if (xx >= (int)W) continue;
-                    out_indices[(size_t)yy * W + xx] = nibs[py * 4 + pxn];
+                    const uint32_t xx = bx * 4u + (uint32_t)pxn;
+                    if (xx >= W) continue;
+                    out_indices[(size_t)yy * W + xx] =
+                        alpha[py * 4 + pxn];
                 }
             }
         }

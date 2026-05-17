@@ -151,6 +151,12 @@ FetchContent_Declare(
         GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(imguifiledialog)
+if(TARGET ImGuiFileDialog)
+    target_include_directories(ImGuiFileDialog PRIVATE
+            ${imgui_SOURCE_DIR}
+            ${imgui_SOURCE_DIR}/misc/cpp
+            ${imgui_SOURCE_DIR}/backends)
+endif()
 
 FetchContent_Declare(
         imgui_hex_editor

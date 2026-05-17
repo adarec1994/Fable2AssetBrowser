@@ -4,7 +4,6 @@
 #include <string>
 #include <vector>
 
-
 #ifdef _WIN32
 struct ID3D11Device;
 struct ID3D11ShaderResourceView;
@@ -16,7 +15,7 @@ namespace EhfLodThumbnails { struct Entry; }
 
 namespace TerrainSplat {
 
-constexpr int kCommonLodSize = 1024;   
+constexpr int kCommonLodSize = 1024;
 constexpr int kMaxLayers     = 16;
 constexpr int kMaxMaterials  = 32;
 
@@ -62,4 +61,4 @@ const Resources& Get();
 
 void Clear();
 
-}  
+}

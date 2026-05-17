@@ -86,7 +86,6 @@ public:
     }
     ~BNKReader() { close(); }
 
-
     enum class StorageMode { Disk, IsoStream, Memory };
     StorageMode storage_mode() const {
         switch (_mode) {

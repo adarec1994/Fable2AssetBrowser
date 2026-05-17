@@ -93,7 +93,7 @@ std::vector<Chunk> parse_chunks(const std::vector<uint8_t>& buf, size_t start) {
     return out;
 }
 
-}  // namespace
+}
 
 bool decode_xma_wav_file_to_pcm_wav(const std::vector<uint8_t>& src_bytes,
                                     const std::string& out_path,
@@ -108,9 +108,6 @@ bool decode_xma_wav_file_to_pcm_wav(const std::vector<uint8_t>& src_bytes,
     return true;
 }
 
-// ---------------------------------------------------------------------
-// Runtime decode path: in-tree native C++ port (src/Audio/Xma2Codec/).
-// ---------------------------------------------------------------------
 bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
                        std::vector<int16_t>& pcm_out,
                        int& sample_rate,
@@ -251,9 +248,7 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     int pkt_count = 0;
     int got_count = 0;
     for (size_t pos = 0; pos < data_size; pos += kPktSize) {
-        // Slide pkt.data forward by `rc` bytes between inner calls so
-        // the decoder's "continue this packet" branch sees the right
-        // bit offset (matches FFmpeg's avpkt-advance convention).
+
         const uint8_t* base = data_ptr + pos;
         int           pkt_remaining = int(std::min(kPktSize, data_size - pos));
         const int     pkt_total     = pkt_remaining;
@@ -282,7 +277,7 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
             if (inner > 32) break;
         }
     }
-    // Drain.
+
     Xma::Packet empty{};
     bool got = false;
     dec.decode_packet(empty, frame, got);
@@ -318,4 +313,4 @@ bool decode_xma_to_pcm(const std::vector<uint8_t>& wav_bytes,
     return true;
 }
 
-}  // namespace XmaDecoder
+}

@@ -1,4 +1,3 @@
-
 #include "AnimDataFile.h"
 
 #include "../UI/OutputLog.h"

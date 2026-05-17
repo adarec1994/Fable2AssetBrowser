@@ -1,12 +1,3 @@
-// Native C++ port of the FFmpeg XMA/WMA Pro decoder pipeline.
-// This unit replaces a handful of FFmpeg framework types
-// (AVCodecContext, AVFrame, AVPacket, AVChannelLayout, AVSampleFormat)
-// with the slim subset the WMA Pro decoder actually touches, plus
-// float -> s16 conversion and a debug log writer.
-//
-// Derived from FFmpeg (LGPL 2.1+); see Archive/audio/libavcodec for the
-// original sources.
-
 #pragma once
 
 #include <array>
@@ -100,12 +91,6 @@ inline uint32_t read_u32le(const void* p) {
            (uint32_t(b[2]) << 16) | (uint32_t(b[3]) << 24);
 }
 
-// ---------------------------------------------------------------------
-// Debug log writer. Writes to xma_debug.log next to the running .exe.
-// _fsopen(_SH_DENYNO) on Windows so external tools can read while we
-// write. log_reset() truncates on next write and resets the per-decode
-// log budgets below.
-// ---------------------------------------------------------------------
 void log_msg(const char* fmt, ...);
 void log_hexdump(const char* label, const void* data, std::size_t n);
 void log_flush();
@@ -115,4 +100,4 @@ extern int g_log_packet_budget;
 extern int g_log_frame_budget;
 extern int g_log_subframe_budget;
 
-}  // namespace Xma
+}

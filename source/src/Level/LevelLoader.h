@@ -7,17 +7,16 @@
 
 #include "HeightfieldLoader.h"
 
-
-struct FlatAssetEntry;   
+struct FlatAssetEntry;
 
 namespace Level {
 
 struct EngineLevelEntry {
     uint32_t type   = 0;
-    size_t   offset = 0;   
-    size_t   size   = 0;   
-    std::string str_a;     
-    std::string str_b;     
+    size_t   offset = 0;
+    size_t   size   = 0;
+    std::string str_a;
+    std::string str_b;
 };
 
 struct PropInstance {
@@ -47,11 +46,11 @@ struct EngineLevelInfo {
 };
 
 struct LevelResources {
-    std::string ehf_path;   
-    std::string ghf_path;   
-    std::string hdb_path;   
-    std::string genv_path;  
-    std::string ama_path;   
+    std::string ehf_path;
+    std::string ghf_path;
+    std::string hdb_path;
+    std::string genv_path;
+    std::string ama_path;
     std::string amm_path;
     std::string amr_path;
     std::string model_body_bnk;
@@ -117,7 +116,7 @@ bool BakeEhfTerrainComposite(const std::vector<uint8_t>& ehf,
                              int&                   out_h,
                              std::string&           out_picked_name);
 
-}  
+}
 
 extern std::atomic<bool>  g_pending_terrain_load;
 extern Level::TerrainMesh g_pending_terrain_mesh;
@@ -150,7 +149,7 @@ extern std::vector<std::string> g_level_vfs_model_bnks;
 extern std::vector<std::string> g_level_vfs_streaming_bnks;
 
 struct HavokCollisionMesh {
-    std::vector<float>    vertices;   
+    std::vector<float>    vertices;
     std::vector<uint16_t> indices16;
     std::vector<uint32_t> indices32;
 };
@@ -161,6 +160,6 @@ struct GdbWorldPlacement {
     float    yaw;
     float    scale;
     uint32_t hash;
-    uint32_t marker;   
+    uint32_t marker;
 };
 extern std::vector<GdbWorldPlacement> g_level_gdb_placements;

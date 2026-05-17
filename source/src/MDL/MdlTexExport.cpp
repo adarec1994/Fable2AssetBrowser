@@ -1,4 +1,3 @@
-
 #include "MdlTexExport.h"
 
 #include <cstring>

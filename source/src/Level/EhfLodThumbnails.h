@@ -3,7 +3,6 @@
 #include <string>
 #include <vector>
 
-
 #ifdef _WIN32
 struct ID3D11ShaderResourceView;
 #endif
@@ -39,4 +38,4 @@ const std::vector<Entry>& Get();
 
 void Clear();
 
-}  
+}

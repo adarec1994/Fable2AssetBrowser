@@ -1,4 +1,3 @@
-
 #include "TextureExport.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION

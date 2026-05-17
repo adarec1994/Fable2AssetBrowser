@@ -151,11 +151,6 @@ struct BeReader {
         if (exp_h == 0) {
             if (mant == 0) {
                 bits = sign;
-                if (!save_physics_placements.empty()) {
-                    OutputLog::info("save: " +
-                                    std::to_string(save_physics_placements.size()) +
-                                    " PhysicsData transform(s)");
-                }
             } else {
                 uint32_t e = 127 - 14;
                 uint32_t m = mant;
@@ -185,9 +180,9 @@ struct BeReader {
 };
 
 constexpr char kEngineLevelMagic[]  = "LevelGraphicsFile";
-constexpr size_t kEngineLevelMagicLen = sizeof(kEngineLevelMagic) - 1;  
+constexpr size_t kEngineLevelMagicLen = sizeof(kEngineLevelMagic) - 1;
 
-}  
+}
 
 bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                       EngineLevelInfo&            out)
@@ -352,7 +347,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                                 return false;
                             }
                         }
-                        inst.values[7] = 1.0f;  // cos(0) = identity
+                        inst.values[7] = 1.0f;
                         inst.values[9] = inst.values[10] = inst.values[11] = 1.0f;
                         t21_block.instances.push_back(inst);
                     }
@@ -379,8 +374,8 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                         const float den = 1.0f - 2.0f * (qy * qy + qz * qz);
                         const float mag = std::sqrt(num * num + den * den);
                         if (mag > 1e-6f) {
-                            inst.values[6] = num / mag;  // sin(yaw)
-                            inst.values[7] = den / mag;  // cos(yaw)
+                            inst.values[6] = num / mag;
+                            inst.values[7] = den / mag;
                         } else {
                             inst.values[6] = 0.0f;
                             inst.values[7] = 1.0f;
@@ -437,8 +432,8 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                     const float fxy =
                         std::sqrt(p2[0] * p2[0] + p2[1] * p2[1]);
                     if (std::isfinite(fxy) && fxy > 0.001f && fxy < 100.0f) {
-                        inst.values[6] = p2[1] / fxy;  // sin
-                        inst.values[7] = p2[0] / fxy;  // cos
+                        inst.values[6] = p2[1] / fxy;
+                        inst.values[7] = p2[0] / fxy;
                     } else {
                         inst.values[6] = 0.0f;
                         inst.values[7] = 1.0f;
@@ -976,6 +971,11 @@ bool Open(const FlatAssetEntry& entry)
                 }
                 OutputLog::info("save: " + std::to_string(save_hash_to_name.size())
                                 + " entity hash→name mappings");
+                if (!save_physics_placements.empty()) {
+                    OutputLog::info("save: " +
+                                    std::to_string(save_physics_placements.size()) +
+                                    " PhysicsData transform(s)");
+                }
             } else {
                 OutputLog::warn("no .save sibling in BNK");
             }
@@ -1177,13 +1177,6 @@ bool Open(const FlatAssetEntry& entry)
                 << "position decode is still wrong, buildings clustered)";
             OutputLog::warn(os3.str());
 
-            /* ---- Havok-scenario entity-position scan ----
-               The .havok_scenario file contains ~2400 entity hashes
-               from .save XML, each paired with a transform record.
-               The position vec3 sits ~36 bytes (= -0x24) before the
-               hash on most entity layouts.  We pick the vec3 with all
-               3 components meaningful (>0.5) in world bounds, then
-               build a synthetic PropBlock per resolved MDL.        */
             std::vector<uint8_t> hk_scan_bytes;
             const std::string hk_scan_path = sibling_with_ext(".havok_scenario");
             if (save_physics_instances_emitted > 0) {
@@ -1201,15 +1194,12 @@ bool Open(const FlatAssetEntry& entry)
                     float f; std::memcpy(&f, &u, 4); return f;
                 };
 
-                /* Build a fast lookup: bytes-of-hash → entity name. */
                 std::unordered_map<uint32_t, std::string> hash_to_name;
                 hash_to_name.reserve(save_hash_to_name.size());
                 for (const auto& kv : save_hash_to_name) {
                     hash_to_name.emplace(kv.first, kv.second);
                 }
 
-                /* Linear scan over hk bytes, looking for any 4-byte
-                   value that matches a save entity hash. */
                 size_t found = 0;
                 size_t resolved_hk = 0;
                 size_t in_terrain = 0;
@@ -1242,8 +1232,6 @@ bool Open(const FlatAssetEntry& entry)
                     if (it == hash_to_name.end()) continue;
                     ++found;
 
-                    /* Find best position vec3 in [-128, +64] around the
-                       hash; prefer in-terrain, then closest to hash.   */
                     float best_x = 0, best_y = 0, best_z = 0;
                     int   best_dist = INT_MAX;
                     bool  best_in_terrain = false;
@@ -1275,7 +1263,6 @@ bool Open(const FlatAssetEntry& entry)
                     ++resolved_hk;
                     if (best_in_terrain) ++in_terrain;
 
-                    /* Fuzzy-match the entity name to an MDL. */
                     std::string tok = canonicalize_for_match(it->second);
                     if (tok.empty()) continue;
                     const FlatAssetEntry* hit = nullptr;
@@ -1297,20 +1284,17 @@ bool Open(const FlatAssetEntry& entry)
                     }
                     if (!hit) continue;
 
-                    /* Emit a synthetic PropBlock instance.  Engine
-                       convention: values[0..2] = (X, Y_horiz, Z_height).
-                       We assume havok stores positions in that order. */
                     auto& pb = blocks_by_path[hit->full_path];
                     if (pb.model_path.empty()) {
-                        pb.type = 0xB2;            /* havok-derived */
+                        pb.type = 0xB2;
                         pb.model_path = hit->full_path;
                     }
                     Level::PropInstance pi;
                     pi.values[0]  = best_x;
                     pi.values[1]  = best_y;
                     pi.values[2]  = best_z;
-                    pi.values[6]  = 0.0f;          /* yaw sin */
-                    pi.values[7]  = 1.0f;          /* yaw cos = identity */
+                    pi.values[6]  = 0.0f;
+                    pi.values[7]  = 1.0f;
                     pi.values[9]  = pi.values[10] = pi.values[11] = 1.0f;
                     pb.instances.push_back(pi);
                 }
@@ -1323,27 +1307,22 @@ bool Open(const FlatAssetEntry& entry)
                 if (resolved_hk > 0) OutputLog::success(hos.str());
                 else                  OutputLog::warn(hos.str());
 
-                /* Flush all blocks_by_path entries into the global
-                   pending list.  These contain both GDB-attempted
-                   and havok-derived placements; only the havok ones
-                   actually have instances since the gdb branch above
-                   skips emission.                                      */
-                size_t hk_blocks = 0, hk_insts = 0;
-                for (auto& kv : blocks_by_path) {
-                    if (kv.second.instances.empty()) continue;
-                    ++hk_blocks;
-                    hk_insts += kv.second.instances.size();
-                    g_pending_level_prop_blocks.push_back(std::move(kv.second));
-                }
-                std::ostringstream eos;
-                eos << "havok-derived placements: "
-                    << hk_blocks << " unique models / "
-                    << hk_insts << " instances appended to prop pipeline";
-                if (hk_insts > 0) OutputLog::success(eos.str());
-                else              OutputLog::warn(eos.str());
             } else {
                 OutputLog::warn("havok entity-scan skipped: no .havok_scenario");
             }
+            size_t extra_blocks = 0, extra_insts = 0;
+            for (auto& kv : blocks_by_path) {
+                if (kv.second.instances.empty()) continue;
+                ++extra_blocks;
+                extra_insts += kv.second.instances.size();
+                g_pending_level_prop_blocks.push_back(std::move(kv.second));
+            }
+            std::ostringstream eos;
+            eos << "derived placements: "
+                << extra_blocks << " unique models / "
+                << extra_insts << " instances appended to prop pipeline";
+            if (extra_insts > 0) OutputLog::success(eos.str());
+            else                 OutputLog::warn(eos.str());
         } else {
             OutputLog::warn("no .gdb sibling in BNK");
         }
@@ -1497,7 +1476,7 @@ bool Open(const FlatAssetEntry& entry)
                                 break;
                             }
                         }
-                        break;   
+                        break;
                     }
                 }
 
@@ -1901,7 +1880,6 @@ bool Open(const FlatAssetEntry& entry)
         OutputLog::warn("no .ehf or .ghf path in level — can't load terrain");
     }
 
-
     return true;
 }
 
@@ -2146,7 +2124,7 @@ static bool parse_ehf_render_tiles(const std::vector<uint8_t>& ehf,
     if (!ehf_skip_tex_blob(ehf, body_end, pos)) return false;
     if (pos + 8 > body_end) return false;
 
-    pos += 4;  // state float
+    pos += 4;
     const uint32_t count = ehf_be32(ehf, pos);
     pos += 4;
     if (count == 0 || count > 4096) return false;
@@ -2435,7 +2413,7 @@ static bool DecodeEhfEmbeddedTileComposite(const std::vector<uint8_t>& ehf,
     return true;
 }
 
-}  // namespace
+}
 
 bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
                                      uint32_t              cells_w,
@@ -2474,7 +2452,7 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
         const uint32_t PF = u32_at(i + 24);
         const uint32_t mip_off = u32_at(i + 32);
         if (W == 0 || H == 0 || W > 8192 || H > 8192) continue;
-        if (PF != 35u) continue;     
+        if (PF != 35u) continue;
         if (mip_off != 0x54) continue;
 
         if (i + mip_off + 4 > eh_n) continue;
@@ -2576,7 +2554,7 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
     std::vector<Cand> cands;
     auto add = [&](uint32_t w, uint32_t h) {
         if (w == 0 || h == 0) return;
-        if ((w & 3u) != 0 || (h & 3u) != 0) return;       
+        if ((w & 3u) != 0 || (h & 3u) != 0) return;
         cands.push_back({w, h, (size_t)w * h / 2});
     };
     add(pow2_W, pow2_H);
@@ -3141,7 +3119,7 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
                           0.0f, 1.0f);
     };
 
-    constexpr float kBlendMax     = 3.0f;  
+    constexpr float kBlendMax     = 3.0f;
 
     for (int y = 0; y < lm_h; ++y) {
         const float v_norm = (lm_h > 1)
@@ -3217,4 +3195,4 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
     return true;
 }
 
-}  
+}

@@ -247,7 +247,6 @@ static void blit_bc5_to_rgba(const uint8_t* src, int w, int h,
     }
 }
 
-
 static uint32_t xbox360_tiled_offset(uint32_t x, uint32_t y,
                                      uint32_t width_in_blocks,
                                      uint32_t texel_byte_size)
@@ -289,7 +288,6 @@ static void untile_xbox360_bc(const uint8_t* tiled, size_t tiled_size,
         }
     }
 }
-
 
 static uint32_t xg_address_2d_tiled_x(uint32_t block_offset,
                                       uint32_t width_in_blocks,
@@ -481,7 +479,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
 
         out_w = w; out_h = h;
 
-        if (m.CompFlag == 200) {              
+        if (m.CompFlag == 200) {
             std::vector<uint8_t> linear;
             untile_xbox360_imageheat(raw.data(), raw.size(), linear,
                                      w, h, 4, 8);
@@ -490,7 +488,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
             return true;
         }
-        if (m.CompFlag == 201) {              
+        if (m.CompFlag == 201) {
             std::vector<uint8_t> linear;
             untile_xbox360_imageheat(raw.data(), raw.size(), linear,
                                      w, h, 4, 16);
@@ -499,7 +497,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
             return true;
         }
-        if (m.CompFlag == 202) {              
+        if (m.CompFlag == 202) {
             std::vector<uint8_t> linear;
             untile_xbox360_imageheat(raw.data(), raw.size(), linear,
                                      w, h, 4, 16);
@@ -1020,7 +1018,6 @@ cbuffer CB : register(b0){
     float4   params;
 }
 
-
 cbuffer Bones : register(b1){
     row_major float4x4 bones[256];
 }
@@ -1035,9 +1032,6 @@ struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
 VSOUT VS(VSIN i){
     VSOUT o;
 
-    
-    
-    
     float4x4 skin =
         bones[i.bid.x] * i.bw.x +
         bones[i.bid.y] * i.bw.y +
@@ -1069,13 +1063,11 @@ Texture2D tex4 : register(t4);
 SamplerState smp : register(s0);
 struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
 float4 PS(VSOUT i) : SV_Target {
-    
+
     float4 diffSamp = tex0.Sample(smp, i.t);
     float3 albedo   = diffSamp.rgb;
     float  alpha    = diffSamp.a;
 
-    
-    
     float3 nSamp = tex1.Sample(smp, i.t).rgb;
     bool   nIsDefault = (nSamp.r > 0.98 && nSamp.g > 0.98 && nSamp.b > 0.98);
     float3 N_geo = normalize(i.n);
@@ -1085,17 +1077,13 @@ float4 PS(VSOUT i) : SV_Target {
         N = normalize(N_geo + N_m * 0.5);
     }
 
-    
     float3 L = normalize(float3(0.3, 0.7, 0.5));
     float3 V = float3(0.0, 0.0, 1.0);
     float3 H = normalize(L + V);
 
-    
     float ndotl = abs(dot(N, L));
     float diff_term = 0.55 + 0.45 * ndotl;
 
-    
-    
     float3 sSamp = tex2.Sample(smp, i.t).rgb;
     bool   sIsDefault = (sSamp.r > 0.98 && sSamp.g > 0.98 && sSamp.b > 0.98);
     float  spec_mask  = sIsDefault ? 0.0 : sSamp.r;
@@ -1104,29 +1092,16 @@ float4 PS(VSOUT i) : SV_Target {
 
     float3 color = albedo * diff_term + spec.xxx;
 
-    
-    
-    
     if (params.z > 0.5) {
         float3 hi = float3(0.10, 0.95, 0.25);
         color = lerp(color, hi, 0.65);
     }
 
-    
-    
-    
-    
-    
-    
-    
-    
-    
     if (alpha < 0.25) discard;
 
     return float4(color, alpha);
 }
 )";
-
 
 static const char* g_terrain_vs = R"(
 cbuffer CB : register(b0){
@@ -1148,8 +1123,8 @@ struct VSIN{
 struct VSOUT{
     float4 p   : SV_Position;
     float3 n   : NORMAL;
-    float2 t   : TEXCOORD0;  
-    float3 wp  : TEXCOORD1;  
+    float2 t   : TEXCOORD0;
+    float3 wp  : TEXCOORD1;
 };
 VSOUT VS(VSIN i){
     VSOUT o;
@@ -1243,7 +1218,7 @@ float4 PS(VSOUT i) : SV_Target {
     for (int L = 0; L < 16; ++L) {
         float4 idx_norm = chunk_idx.Load(int4(chunk_xy, L, 0));
         float4 idx255   = round(idx_norm * 255.0);
-        if (idx255.x > 254.5) break;       
+        if (idx255.x > 254.5) break;
 
         float4 bln_norm = chunk_blend.Load(int4(chunk_xy, L, 0));
         /* blend_scale lets us recover the original 0..max_blend range
@@ -1669,7 +1644,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     }
     mp.meshes.clear();
     mp.lod_count    = 1;
-    mp.selected_lod = -1;   
+    mp.selected_lod = -1;
 
     auto extract_lod = [](std::string& name) -> uint32_t {
         size_t pos = name.rfind("|lod");
@@ -1682,7 +1657,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             v = v * 10 + uint32_t(*q - '0');
             ++q;
         }
-        if (*q != '\0') return 0;          
+        if (*q != '\0') return 0;
         name.erase(pos);
         return v;
     };
@@ -1829,7 +1804,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
                 auto& slot = tex_cache_table()[ck];
                 slot.tried = true;
                 if (*out_srv && slot.srv == nullptr) {
-                    (*out_srv)->AddRef();   
+                    (*out_srv)->AddRef();
                     slot.srv       = *out_srv;
                     slot.has_alpha = *alpha_ptr;
                 } else if (*out_srv && slot.srv != nullptr) {
@@ -2070,7 +2045,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 t.grid_size[1] = (float)R.chunk_h;
                 t.grid_size[2] = (float)R.lod_count;
                 t.grid_size[3] = 255.f;
-                t.splat_params[0] = 3.0f;   
+                t.splat_params[0] = 3.0f;
                 t.splat_params[1] = (R.tile_scale > 0.0f)
                     ? R.tile_scale : 0.125f;
                 t.splat_params[2] = (R.splat_w > 0)
@@ -2243,12 +2218,11 @@ uniform sampler2D uTexMetallic;
 uniform sampler2D uTexExtra;
 out vec4 FragColor;
 void main() {
-    
+
     vec4 diffSamp = texture(uTexDiffuse, vTexCoord);
     vec3 albedo = diffSamp.rgb;
     float alpha = diffSamp.a;
 
-    
     vec3 nSamp = texture(uTexNormal, vTexCoord).rgb;
     bool nIsDefault = (nSamp.r > 0.98 && nSamp.g > 0.98 && nSamp.b > 0.98);
     vec3 N_geo = normalize(vNormal);
@@ -2262,11 +2236,9 @@ void main() {
     vec3 V = vec3(0.0, 0.0, 1.0);
     vec3 H = normalize(L + V);
 
-    
     float ndotl = abs(dot(N, L));
     float diff_term = 0.55 + 0.45 * ndotl;
 
-    
     vec3 sSamp = texture(uTexSpecular, vTexCoord).rgb;
     bool sIsDefault = (sSamp.r > 0.98 && sSamp.g > 0.98 && sSamp.b > 0.98);
     float spec_mask = sIsDefault ? 0.0 : sSamp.r;

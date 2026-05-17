@@ -1,8 +1,8 @@
 #include "TerrainEdit.h"
 
-#include "../UI/ModelPreview.h"   
-#include "../Utilities/State.h"   
-#include "../ISO/IsoMount.h"      
+#include "../UI/ModelPreview.h"
+#include "../Utilities/State.h"
+#include "../ISO/IsoMount.h"
 #include "../UI/OutputLog.h"
 
 #ifdef _WIN32
@@ -38,7 +38,7 @@ void sync_positions_y() {
     s.dirty = true;
 }
 
-}  
+}
 
 void Init(int width, int height, float tile_size,
           float center_x, float center_z,
@@ -139,7 +139,7 @@ void Reset() {
     if (!s.loaded) return;
     s.heights_current = s.heights_original;
     sync_positions_y();
-    s.dirty = false;   
+    s.dirty = false;
 }
 
 float SampleHeightAtWorldXZ(float wx, float wz) {
@@ -179,7 +179,7 @@ bool Raycast(float ox, float oy, float oz,
         (s.max_x - s.min_x) + (s.max_z - s.min_z),
         std::abs(oy) * 8.f);
     float prev_t  = 0.f;
-    float prev_dh = oy - SampleHeightAtWorldXZ(ox, oz); 
+    float prev_dh = oy - SampleHeightAtWorldXZ(ox, oz);
     for (float t = step; t < max_dist; t += step) {
         const float wx = ox + dx * t;
         const float wy = oy + dy * t;
@@ -305,7 +305,7 @@ void ApplyToGpu(ID3D11Device* device, void* mesh_v) {
 
     D3D11_BUFFER_DESC vd{};
     mesh->vb->GetDesc(&vd);
-    if (vd.ByteWidth != need_bytes) return;   
+    if (vd.ByteWidth != need_bytes) return;
 
     D3D11_BUFFER_DESC sd = vd;
     sd.Usage          = D3D11_USAGE_STAGING;
@@ -349,7 +349,7 @@ void ApplyToGpu(ID3D11Device* device, void* mesh_v) {
     ctx->Release();
 }
 
-#endif  
+#endif
 
 namespace {
 
@@ -386,7 +386,7 @@ bool gzip_compress(const std::vector<uint8_t>& payload,
     return true;
 }
 
-}  
+}
 
 bool Save(std::string& out_path_or_error) {
     auto& s = storage();
@@ -522,4 +522,4 @@ void Clear() {
     storage() = State{};
 }
 
-}  
+}

@@ -4,10 +4,6 @@ project(Fable_2_Asset_Browser CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Force the Release CRT (/MD) for every configuration. The FFmpeg static
-# libs we ship are built with /MD; mixing them with /MDd in Debug
-# produces LNK2038 (RuntimeLibrary mismatch). Losing /MDd costs us only
-# a few CRT-level debug asserts; the C++ debugger still works fine.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 
 set(APP_SOURCES
@@ -172,9 +168,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
-# Font Awesome 6 — IconFontCppHeaders for the icon code points + the
-# Solid font itself. Pulled separately because the headers repo doesn't
-# carry the font binaries.
 FetchContent_Declare(
         iconfontcpp
         GIT_REPOSITORY https://github.com/juliettef/IconFontCppHeaders.git
@@ -183,9 +176,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(iconfontcpp)
 
-# fontawesome-free, "free for desktop", contains the .ttf files we need
-# under otfs/ (Font Awesome 6 Free-Solid-900.otf). We fetch master and
-# pick out the otf at runtime/build-time.
 FetchContent_Declare(
         fontawesome
         GIT_REPOSITORY https://github.com/FortAwesome/Font-Awesome.git
@@ -194,9 +184,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fontawesome)
 
-# miniaudio: single-header public-domain audio output library. We use it
-# as the playback backend for the in-app audio player so we don't have to
-# write our own WASAPI/CoreAudio/ALSA wrapper.
 FetchContent_Declare(
         miniaudio
         GIT_REPOSITORY https://github.com/mackron/miniaudio.git
@@ -204,11 +191,6 @@ FetchContent_Declare(
         GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(miniaudio)
-
-# XMA decoding is now handled entirely by the in-tree native C++ port
-# under src/Audio/Xma2Codec/ (~1700-line WMA Pro / XMA1 / XMA2 decoder
-# derived from FFmpeg's wmaprodec.c, LGPL 2.1+). No external FFmpeg
-# dependency is required at build or runtime.
 
 if(WIN32)
     FetchContent_Declare(
@@ -245,18 +227,12 @@ if(WIN32)
             ${miniaudio_SOURCE_DIR}
     )
 
-    # Stage the FontAwesome 6 Solid ttf at a stable path that fable.rc
-    # references (it goes in next to the splash images so it can be
-    # bundled into the exe as RCDATA).
     set(FA_TTF_SOURCE "${fontawesome_SOURCE_DIR}/webfonts/fa-solid-900.ttf")
     set(FA_TTF_STAGED "${CMAKE_CURRENT_SOURCE_DIR}/include/image/fa-solid-900.ttf")
     if(EXISTS "${FA_TTF_SOURCE}")
         configure_file("${FA_TTF_SOURCE}" "${FA_TTF_STAGED}" COPYONLY)
     endif()
 
-    # mfreadwrite gives us MFCreateSinkWriterFromURL, the entry point for
-    # the PCM→MP3/AAC encode pipeline in MfAudioEncoder. mfplat / mfuuid
-    # are Media Foundation system libs needed alongside it.
     target_link_libraries(Fable_2_Asset_Browser PRIVATE
             d3d11 dxgi d3dcompiler dwmapi winmm
             mfreadwrite mfplat mfuuid strmiids)

@@ -64,7 +64,7 @@ void fill_window(float* window, int n) {
     }
 }
 
-}  // namespace
+}
 
 void wma_init_sine_window(int index) {
     if (index < kMinLog2 || index > kMaxLog2) return;
@@ -94,4 +94,4 @@ unsigned wma_get_large_val(GetBits& gb) {
     return gb.read_long(n_bits);
 }
 
-}  // namespace Xma
+}

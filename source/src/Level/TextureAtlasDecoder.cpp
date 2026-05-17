@@ -5,7 +5,6 @@
 #include <sstream>
 #include <zlib.h>
 
-
 namespace {
 
 inline bool rd32be(const uint8_t* p, size_t n, size_t off, uint32_t& out) {
@@ -324,7 +323,7 @@ bool inflate_zlib(const uint8_t* in, size_t in_size,
            produced == expected_raw;
 }
 
-}  
+}
 
 namespace TextureAtlas {
 
@@ -384,7 +383,7 @@ DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob)
     rd32be(d, n, mt + 4, comp_size);
 
     size_t   expected_raw = 0;
-    uint32_t block_bytes  = 0;        
+    uint32_t block_bytes  = 0;
     if      (PF == 35u) { expected_raw = (size_t)W * H / 2; block_bytes = 8;  }
     else if (PF == 24u) { expected_raw = (size_t)raw_size;  block_bytes = 2;  }
     else                { expected_raw = (size_t)W * H;     block_bytes = 16; }
@@ -447,7 +446,7 @@ DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob)
         swap_bc3_endian(linear.data(), linear.size());
         blit_bc_to_rgba<16>(linear.data(), (int)W, (int)H, r.rgba,
                             decode_bc3_block);
-    } else { 
+    } else {
         swap_bc5_endian(linear.data(), linear.size());
         blit_bc5_to_rgba(linear.data(), (int)W, (int)H, r.rgba);
     }
@@ -488,13 +487,13 @@ bool decode_zlib_bc_page_generic(const uint8_t* zlib_stream,
         swap_bc3_endian(linear.data(), linear.size());
         blit_bc_to_rgba<16>(linear.data(), width_pixels, height_pixels,
                             rgba, decode_bc3_block);
-    } else { 
+    } else {
         swap_bc5_endian(linear.data(), linear.size());
         blit_bc5_to_rgba(linear.data(), width_pixels, height_pixels, rgba);
     }
     return true;
 }
-}  
+}
 
 bool DecodeZlibBc1Page(const uint8_t* zlib_stream, size_t comp_size,
                        size_t expected_raw, int w, int h,
@@ -643,4 +642,4 @@ bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,
     return true;
 }
 
-}  
+}

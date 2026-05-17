@@ -4,16 +4,15 @@
 #include <string>
 #include <vector>
 
-
 namespace TextureAtlas {
 
 struct DecodedAtlas {
     bool                  ok          = false;
-    std::vector<uint8_t>  rgba;        
+    std::vector<uint8_t>  rgba;
     int                   width       = 0;
     int                   height      = 0;
-    uint32_t              pixel_format = 0;  
-    std::string           error;       
+    uint32_t              pixel_format = 0;
+    std::string           error;
 };
 
 DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob);
@@ -47,4 +46,4 @@ bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,
                         int& out_w, int& out_h,
                         std::string& out_err);
 
-}  
+}

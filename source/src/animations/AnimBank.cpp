@@ -1,4 +1,3 @@
-
 #include "AnimBank.h"
 #include "AnimDataFile.h"
 

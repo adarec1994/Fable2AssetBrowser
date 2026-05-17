@@ -1,4 +1,3 @@
-
 #include "mdl_converter.h"
 #include "ModelParser.h"
 #include "MdlTexExport.h"

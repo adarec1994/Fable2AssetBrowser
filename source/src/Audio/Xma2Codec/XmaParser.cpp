@@ -52,7 +52,7 @@ uint32_t default_channel_mask(int channels) {
     }
 }
 
-}  // namespace
+}
 
 bool xma_synthesize_extradata(const XmaSynthInput& in,
                               std::array<uint8_t, 34>& out) {
@@ -105,4 +105,4 @@ bool xma_synthesize_extradata(const XmaSynthInput& in,
     return true;
 }
 
-}  // namespace Xma
+}

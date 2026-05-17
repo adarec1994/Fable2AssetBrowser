@@ -4,7 +4,6 @@
 #include <string>
 #include <vector>
 
-
 #ifdef _WIN32
 struct ID3D11Device;
 struct ID3D11Buffer;
@@ -25,15 +24,15 @@ struct State {
     std::vector<float>    heights_original;
     std::vector<float>    heights_current;
 
-    std::vector<float>    positions;     
+    std::vector<float>    positions;
 
     std::vector<uint8_t>  ghf_payload_original;
 
-    std::string           ghf_bnk_path;       
+    std::string           ghf_bnk_path;
     int                   ghf_file_index = -1;
-    std::string           ghf_full_path;      
+    std::string           ghf_full_path;
 
-    uint64_t              ghf_bnk_entry_offset = 0;     
+    uint64_t              ghf_bnk_entry_offset = 0;
     uint32_t              ghf_bnk_entry_on_disk_size = 0;
     bool                  ghf_bnk_entry_is_compressed = false;
 
@@ -58,13 +57,11 @@ bool IsLoaded();
 
 bool IsDirty();
 
-
 void RaiseAll(float delta);
 void LowerAll(float delta);
-void SmoothAll();            
+void SmoothAll();
 void FlattenAll(float target_height);
-void Reset();                
-
+void Reset();
 
 enum class BrushTool : int {
     None    = 0,
@@ -93,4 +90,4 @@ bool Save(std::string& out_path_or_error);
 
 void Clear();
 
-}  
+}

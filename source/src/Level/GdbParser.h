@@ -4,16 +4,15 @@
 #include <string>
 #include <vector>
 
-
 namespace Gdb {
 
 struct Placement {
     float    x, y, z;
-    float    yaw;      
-    float    scale;    
-    uint32_t marker;   
-    uint32_t hash_a;   
-    std::string entity_name;   
+    float    yaw;
+    float    scale;
+    uint32_t marker;
+    uint32_t hash_a;
+    std::string entity_name;
 };
 
 struct GdbInfo {
@@ -26,4 +25,4 @@ GdbInfo ParseWithSaveMap(
     const std::vector<uint8_t>& bytes,
     const std::vector<std::pair<uint32_t, std::string>>& hash_to_name);
 
-}  // namespace Gdb
+}

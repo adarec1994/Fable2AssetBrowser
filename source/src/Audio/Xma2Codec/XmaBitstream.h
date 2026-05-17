@@ -1,9 +1,3 @@
-// Native C++ port of FFmpeg's BE non-cached bitstream reader
-// (get_bits.h), BE bit writer (put_bits.h), and the table-driven
-// canonical-Huffman VLC decoder (vlc.h) used by wmaprodec.c.
-//
-// Derived from FFmpeg (LGPL 2.1+); see Archive/audio/libavcodec/*.h.
-
 #pragma once
 
 #include <cstdint>
@@ -49,8 +43,6 @@ private:
     int      bit_left_ = 64;
 };
 
-// VlcElem.sym is int32_t — sub-table offsets for long WMA Pro codebooks
-// (e.g. HUFF_SCALE_RL_MAXBITS=21 with VLCBITS=9) exceed int16 range.
 struct VlcElem {
     int32_t sym;
     int16_t len;
@@ -82,4 +74,4 @@ constexpr int kVlcInitStaticOverlong = 2 | kVlcInitUseStatic;
 constexpr int kVlcInitInputLE        = 4;
 constexpr int kVlcInitOutputLE       = 8;
 
-}  // namespace Xma
+}

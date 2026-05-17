@@ -38,7 +38,6 @@ std::string g_pending_mdl_full_path;
 std::atomic<bool> g_pending_tex_load{false};
 int g_pending_tex_index = -1;
 
-// Global extern declarations to resolve MSVC internal linkage error (C7631)
 extern ModelPreview g_mp;
 extern bool         g_mp_initialized;
 extern FlyCam       g_flycam;
@@ -87,7 +86,7 @@ struct LevelPropStreamState {
     std::atomic<size_t>         instances_loaded{0};
     size_t                      total_instances = 0;
     size_t                      model_misses    = 0;
-    std::vector<MDLMeshGeom>    geoms;     // terrain + transformed props (worker writes, main reads after phase==2)
+    std::vector<MDLMeshGeom>    geoms;
     MDLInfo                     info;
     std::thread                 worker;
     std::vector<GeneratedTerrainTexture> terrain_textures;
@@ -187,7 +186,7 @@ static void prop_worker_run(LevelPropStreamState* s)
         }
     }
 
-    s->phase.store(2, std::memory_order_release);   // done — render thread will pick up
+    s->phase.store(2, std::memory_order_release);
 }
 
 static void start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
@@ -213,7 +212,6 @@ static void start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
         g_level_prop_stream.total_instances += b.instances.size();
     }
     if (g_level_prop_stream.total_instances == 0) return;
-
 
     progress_open((int)g_level_prop_stream.total_instances,
                   "Loading props...");
@@ -267,7 +265,7 @@ static bool stream_level_prop_batch(ID3D11Device* device)
                     "Loading props " + std::to_string(loaded) + "/" +
                     std::to_string(total));
 
-    if (phase != 2) return true;   // still working — just keep showing progress
+    if (phase != 2) return true;
 
     if (g_level_prop_stream.worker.joinable()) {
         g_level_prop_stream.worker.join();
@@ -601,7 +599,7 @@ void process_pending_loads() {
                     MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
 
                     S.terrain_mode = false;
-                    g_mp.no_tilt   = false;   
+                    g_mp.no_tilt   = false;
 
                     S.cam_yaw = 3.14159265f;
                     S.cam_pitch = 0.2f;
@@ -936,8 +934,8 @@ void process_pending_loads() {
             g_flycam.pos[0] = cx_mesh;
             g_flycam.pos[1] = maxy + diag * 0.7f;
             g_flycam.pos[2] = cz_mesh - diag * 1.0f;
-            g_flycam.yaw    = 0.0f;          
-            g_flycam.pitch  = -0.6f;         
+            g_flycam.yaw    = 0.0f;
+            g_flycam.pitch  = -0.6f;
             g_flycam.is_looking = false;
             g_flycam.move_speed = std::max(diag * 0.2f, 50.0f);
 

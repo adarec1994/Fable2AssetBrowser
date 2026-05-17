@@ -3,7 +3,6 @@
 #include <string>
 #include <vector>
 
-
 namespace Level {
 
 struct VfsConfig {
@@ -17,4 +16,4 @@ struct VfsConfig {
 
 VfsConfig ParseVfsConfig(const std::vector<uint8_t>& bytes);
 
-}  // namespace Level
+}

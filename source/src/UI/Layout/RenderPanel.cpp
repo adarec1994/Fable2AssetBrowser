@@ -60,7 +60,7 @@ bool        g_tex_popout_show_uvs = false;
 
 namespace {
 struct TerrainEditUI {
-    int   tool             = 0;   
+    int   tool             = 0;
     float brush_size       = 32.f;
     float brush_strength   = 1.f;
     bool  has_changes      = false;
@@ -69,7 +69,7 @@ struct TerrainEditUI {
     float hover_x = 0.f, hover_y = 0.f, hover_z = 0.f;
 };
 static TerrainEditUI g_te_ui;
-}  
+}
 
 #ifdef _WIN32
 ID3D11ShaderResourceView* g_heightmap_popout_srv = nullptr;
@@ -147,19 +147,19 @@ void rotate_first_mesh(ID3D11Device* device, int axis, float angle_rad,
     const float c = std::cos(angle_rad);
     auto rotate_xyz = [&](float& x, float& y, float& z) {
         switch (axis) {
-            case 0: {                          // X
+            case 0: {
                 const float ny = c * y - s * z;
                 const float nz = s * y + c * z;
                 y = ny; z = nz;
                 break;
             }
-            case 1: {                          // Y
+            case 1: {
                 const float nx =  c * x + s * z;
                 const float nz = -s * x + c * z;
                 x = nx; z = nz;
                 break;
             }
-            case 2: {                          // Z
+            case 2: {
                 const float nx = c * x - s * y;
                 const float ny = s * x + c * y;
                 x = nx; y = ny;
@@ -174,7 +174,7 @@ void rotate_first_mesh(ID3D11Device* device, int axis, float angle_rad,
         p[0] -= pivot_x; p[1] -= pivot_y; p[2] -= pivot_z;
         rotate_xyz(p[0],  p[1],  p[2]);
         p[0] += pivot_x; p[1] += pivot_y; p[2] += pivot_z;
-        rotate_xyz(nv[0], nv[1], nv[2]);   // normal — direction only
+        rotate_xyz(nv[0], nv[1], nv[2]);
     }
 
     D3D11_BUFFER_DESC nd = vd;
@@ -355,7 +355,7 @@ void draw_terrain_rotate_overlay(ID3D11Device* device,
                                  const ImVec2& region,
                                  float&        next_overlay_y)
 {
-    if (!g_mp.has_model || !g_mp.no_tilt) return;   // terrain mode only
+    if (!g_mp.has_model || !g_mp.no_tilt) return;
 
     const float kW = 220.0f;
     const ImVec2 pos(origin.x + region.x - kW - 6.0f, next_overlay_y);
@@ -426,8 +426,8 @@ void draw_terrain_rotate_overlay(ID3D11Device* device,
                                       dz * s_step);
             }
         };
-        move_row("X", 1.0f, 0.0f);   // engine X → renderer X
-        move_row("Y", 0.0f, 1.0f);   // engine Y → renderer Z
+        move_row("X", 1.0f, 0.0f);
+        move_row("Y", 0.0f, 1.0f);
 
         ImGui::Separator();
         ImGui::TextDisabled("Scale terrain (multiplicative)");
@@ -458,9 +458,9 @@ void draw_terrain_rotate_overlay(ID3D11Device* device,
             }
             (void)sx; (void)sy; (void)sz;
         };
-        scale_row("X",      0);   // renderer X = engine X (horizontal)
-        scale_row("Y(h)",   1);   // renderer Y = height
-        scale_row("Z",      2);   // renderer Z = engine Y (horizontal)
+        scale_row("X",      0);
+        scale_row("Y(h)",   1);
+        scale_row("Z",      2);
         ImGui::Spacing();
         if (ImGui::Button("Uniform XZ ×", ImVec2(-1, 0))) {
             const float k = std::max(s_scale_step, 1.001f);
@@ -781,8 +781,8 @@ static void draw_gdb_placements_overlay(const ImVec2& origin,
     XMMATRIX VP = V * P;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImU32 col_fixed = IM_COL32(255, 80, 80, 230);   
-    const ImU32 col_var   = IM_COL32(120, 220, 255, 180); 
+    const ImU32 col_fixed = IM_COL32(255, 80, 80, 230);
+    const ImU32 col_var   = IM_COL32(120, 220, 255, 180);
 
     const int   gw = g_pending_terrain_ghf_width;
     const int   gh = g_pending_terrain_ghf_height;
@@ -1230,7 +1230,7 @@ void draw_model_in_panel(ID3D11Device* device) {
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "LOD");
 
             const int lod_count = (int)g_mp.lod_count;
-            int current = g_mp.selected_lod;        
+            int current = g_mp.selected_lod;
             if (current < -1 || current >= lod_count) current = 0;
 
             if (ImGui::RadioButton("All", current == -1)) {

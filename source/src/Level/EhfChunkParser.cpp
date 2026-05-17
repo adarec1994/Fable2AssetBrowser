@@ -10,7 +10,7 @@ namespace Level {
 namespace {
 
 constexpr char   kMagic[]   = "HeightFieldGraphicsFile";
-constexpr size_t kMagicLen  = sizeof(kMagic) - 1;   
+constexpr size_t kMagicLen  = sizeof(kMagic) - 1;
 constexpr size_t kHeaderLen = 63;
 
 inline uint32_t be_u32(const uint8_t* p) {
@@ -93,17 +93,15 @@ bool skip_tex_blob(Walker& w) {
         w.err = os.str();
         return false;
     }
-    
+
     if (!w.need(mt + 8)) return false;
     uint32_t raw_size = be_u32(w.p + tex_start + mt);
 
     if (pf == 98u) {
-        
-        
+
         w.pos = tex_start + mt + 4 + raw_size;
     } else {
-        
-        
+
         uint32_t comp_size = be_u32(w.p + tex_start + mt + 4);
         w.pos = tex_start + mt + 8 + comp_size;
     }
@@ -117,8 +115,7 @@ bool skip_tex_blob(Walker& w) {
     return true;
 }
 
-}  
-
+}
 
 bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
 {
@@ -181,7 +178,7 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
             out.error = "860E8 entries: " + w.err;
             return false;
         }
-        out.bytes_consumed = cnt;  
+        out.bytes_consumed = cnt;
     }
     const uint32_t cnt_860e8 = uint32_t(out.bytes_consumed);
 
@@ -330,4 +327,4 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
     return true;
 }
 
-}  
+}

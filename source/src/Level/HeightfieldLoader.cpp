@@ -53,7 +53,7 @@ bool gunzip(const std::vector<uint8_t>& in,
         return false;
     }
 
-    out.resize(in.size() * 4);     
+    out.resize(in.size() * 4);
     size_t produced = 0;
     while (true) {
         zs.next_out  = out.data() + produced;
@@ -115,7 +115,7 @@ void parse_ehf_header(const std::vector<uint8_t>& bytes,
 {
     out = {};
     static constexpr char   kMagic[]   = "HeightFieldGraphicsFile";
-    static constexpr size_t kMagicLen  = sizeof(kMagic) - 1;       
+    static constexpr size_t kMagicLen  = sizeof(kMagic) - 1;
     static constexpr size_t kHeaderLen = 63;
 
     if (bytes.size() < kHeaderLen) return;
@@ -123,21 +123,21 @@ void parse_ehf_header(const std::vector<uint8_t>& bytes,
 
     const uint8_t* p = bytes.data();
     out.magic.assign(kMagic);
-    out.version      = be_u32(p + kMagicLen);          
-    out.prefix_float = be_f32(p + kMagicLen + 4);      
-    out.f0           = be_f32(p + 27);                 
-    out.f1           = be_f32(p + 31);                 
-    out.u0           = be_u32(p + 35);                 
-    out.u1           = be_u32(p + 39);                 
-    out.f2           = be_f32(p + 43);                 
-    out.f3           = be_f32(p + 47);                 
-    out.f4           = be_f32(p + 51);                 
+    out.version      = be_u32(p + kMagicLen);
+    out.prefix_float = be_f32(p + kMagicLen + 4);
+    out.f0           = be_f32(p + 27);
+    out.f1           = be_f32(p + 31);
+    out.u0           = be_u32(p + 35);
+    out.u1           = be_u32(p + 39);
+    out.f2           = be_f32(p + 43);
+    out.f3           = be_f32(p + 47);
+    out.f4           = be_f32(p + 51);
     out.body_offset  = be_u32(p + 55);
     out.body_size    = be_u32(p + 59);
     out.ok           = true;
 }
 
-}  
+}
 
 const FlatAssetEntry* FindHeightfieldByPath(const std::string& relative_path)
 {
@@ -180,7 +180,6 @@ bool LoadHeightfieldFiles(const std::string& ehf_path,
             return false;
         }
     }
-
 
     out.ok = true;
     return true;
@@ -256,7 +255,6 @@ bool BuildTerrainMesh(const GhfHeights& hg, TerrainMesh& out)
     out.uvs.resize      (N * 2);
     out.indices.resize  (tris * 3);
 
-
     constexpr float kUvRepeatsPerWu = 0.125f;
     for (uint32_t y = 0; y < H; ++y) {
         for (uint32_t x = 0; x < W; ++x) {
@@ -315,4 +313,4 @@ bool BuildTerrainMesh(const GhfHeights& hg, TerrainMesh& out)
     return true;
 }
 
-}  
+}

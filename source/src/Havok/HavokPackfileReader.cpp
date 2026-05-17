@@ -13,8 +13,8 @@ namespace Havok {
 
 namespace {
 
-constexpr size_t kHeaderSize        = 0x40;  // up to "__classnames__" header
-constexpr size_t kSectionHeaderSize = 0x30;  // 48 bytes per section header
+constexpr size_t kHeaderSize        = 0x40;
+constexpr size_t kSectionHeaderSize = 0x30;
 
 uint32_t read_u32_be(const uint8_t* p) {
     return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
@@ -39,7 +39,7 @@ bool read_section_header(const std::vector<uint8_t>& bytes,
     return true;
 }
 
-}  // anon
+}
 
 const ClassEntry* PackFile::find_class(const std::string& name) const {
     for (const auto& c : classes) {
@@ -130,7 +130,7 @@ std::optional<PackFile> LoadPackFileFromBytes(std::vector<uint8_t> bytes,
             return std::nullopt;
         }
         if (vf_end - vf_start >= 8) {
-            size_t i = vf_start + 8;   
+            size_t i = vf_start + 8;
             while (i + 12 <= vf_end) {
                 VirtualFixup vf;
                 vf.classnames_offset = read_u32_be(pf.bytes.data() + i);
@@ -357,7 +357,7 @@ void ApplyLocalFixups(PackFile& pf) {
         const uint32_t src = read_u32_be(i);
         const uint32_t dst = read_u32_be(i + 4);
         i += 8;
-        if (src == 0xFFFFFFFF || dst == 0xFFFFFFFF) break;  
+        if (src == 0xFFFFFFFF || dst == 0xFFFFFFFF) break;
         const size_t pfield = ds.absolute_data_start + src;
         if (pfield + 4 > pf.bytes.size()) continue;
         write_u32_be(pfield, dst);
@@ -518,7 +518,7 @@ void ScanDataSection(const PackFile& pf,
 {
     const size_t data_start = pf.data_section.absolute_data_start;
     const size_t data_end   = std::min(
-        data_start + pf.data_section.local_fixups,   
+        data_start + pf.data_section.local_fixups,
         pf.bytes.size());
     if (data_end <= data_start) return;
     const uint8_t* p = pf.bytes.data();
@@ -545,7 +545,7 @@ void ScanDataSection(const PackFile& pf,
                 OutputLog::info(os.str());
                 ++shown;
             }
-            ++i;  
+            ++i;
         }
         if (shown >= max_strings) {
             OutputLog::info("    (truncated)");
@@ -590,4 +590,4 @@ void ScanDataSection(const PackFile& pf,
     }
 }
 
-}  // namespace Havok
+}

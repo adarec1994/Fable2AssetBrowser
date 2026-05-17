@@ -1,4 +1,3 @@
-
 #include "TextureExport.h"
 
 #include <fstream>

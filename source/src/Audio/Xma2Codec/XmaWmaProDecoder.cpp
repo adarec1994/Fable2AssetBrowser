@@ -1,12 +1,3 @@
-// XmaWmaProDecoder.cpp — native C++ port of libavcodec/wmaprodec.c.
-//
-// Direct port of FFmpeg's WMA Pro / XMA1 / XMA2 decoder. Pulls the
-// constant huffman tables verbatim from Archive/audio/libavcodec/
-// wmaprodata.h (pure const-data, no FFmpeg framework deps).
-//
-// Derived from FFmpeg (LGPL 2.1+) — wmaprodec.c by Baptiste Coudurier,
-// Benjamin Larsson, Sascha Sommer, Ulion.
-
 #include "XmaWmaProDecoder.h"
 #include "XmaBitstream.h"
 #include "XmaSupport.h"
@@ -220,10 +211,6 @@ inline void vector_fmul_scalar(float* dst, const float* src, float c, int n) {
     for (int i = 0; i < n; ++i) dst[i] = src[i] * c;
 }
 
-// FFmpeg's vector_fmul_window: window is 2*len elements. Reads upper
-// half via win[2*len-1-k] (the bug I had before: I was reading
-// win[len-1-k] which aliases into the low half and drops the upper
-// half of the window).
 inline void vector_fmul_window(float* dst, const float* src0,
                                const float* src1, const float* win, int len) {
     for (int k = 0; k < len; ++k) {
@@ -692,12 +679,10 @@ int decode_coeffs(WmaProState* s, int c) {
     if (cur_coeff < s->subframe_len) {
         std::memset(&ci->coeffs[cur_coeff], 0,
                     sizeof(float) * std::size_t(s->subframe_len - cur_coeff));
-        // run_level_decode arg order matches FFmpeg's
-        // ff_wma_run_level_decode: (..., num_coefs, block_len,
-        // frame_len_bits=esc_len, coef_nb_bits=0).
-        return run_level_decode(s, vlc, level, run, /*version*/1,
+
+        return run_level_decode(s, vlc, level, run, 1,
                                 ci->coeffs, cur_coeff, s->subframe_len,
-                                s->subframe_len, s->esc_len, /*coef_nb_bits*/0);
+                                s->subframe_len, s->esc_len, 0);
     }
     return 0;
 }
@@ -1166,10 +1151,7 @@ void save_bits(WmaProState* s, GetBits& gb, int len, int append) {
     }
     s->num_saved_bits += len;
     if (!append) {
-        // Pad frame_offset zero bits FIRST so the saved buffer aligns
-        // with the source byte boundary, matching FFmpeg's ff_copy_bits.
-        // s->gb.skip(frame_offset) below then correctly skips this
-        // leading garbage to land on the real frame start.
+
         s->pb.write(s->frame_offset, 0);
         copy_bits_to_pb(s, gb, len);
     } else {
@@ -1304,7 +1286,7 @@ int decode_packet_stream(WmaProState* s, const Packet& avpkt,
     return gb.tell() >> 3;
 }
 
-}  // namespace
+}
 
 struct WmaProDecoder::Impl {
     CodecContext* ctx = nullptr;
@@ -1463,4 +1445,4 @@ bool WmaProDecoder::packet_loss() const {
     return st.packet_loss != 0;
 }
 
-}  // namespace Xma
+}

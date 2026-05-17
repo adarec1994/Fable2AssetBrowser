@@ -29,13 +29,13 @@ inline bool Finite3(float x, float y, float z) {
 
 constexpr uint32_t kFixedMarker  = 0x00004B40;
 constexpr uint32_t kVarMarker    = 0x00004B80;
-constexpr uint32_t kTagVec3      = 0x00000568;   
-constexpr uint32_t kTagFloat     = 0x00000540;   
-constexpr uint32_t kTagQuat      = 0x00004B10;   
-constexpr size_t   kFixedRecSize = 92;           
+constexpr uint32_t kTagVec3      = 0x00000568;
+constexpr uint32_t kTagFloat     = 0x00000540;
+constexpr uint32_t kTagQuat      = 0x00004B10;
+constexpr size_t   kFixedRecSize = 92;
 constexpr size_t   kHeaderSize   = 0x18;
 
-}  
+}
 
 GdbInfo Parse(const std::vector<uint8_t>& bytes) {
     return ParseWithSaveMap(bytes, {});
@@ -83,7 +83,6 @@ GdbInfo ParseWithSaveMap(
         off += kFixedRecSize;
     }
 
-
     while (off + 4 <= bytes.size() &&
            ReadBeU32(bytes.data() + off) != kVarMarker) {
         off += 4;
@@ -98,7 +97,7 @@ GdbInfo ParseWithSaveMap(
             }
             s += 4;
         }
-        var_offs.push_back(bytes.size());   
+        var_offs.push_back(bytes.size());
     }
 
     size_t master_dict_size = 0;
@@ -183,4 +182,4 @@ GdbInfo ParseWithSaveMap(
     return out;
 }
 
-}  
+}

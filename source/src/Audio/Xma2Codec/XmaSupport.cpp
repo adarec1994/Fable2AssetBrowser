@@ -31,7 +31,7 @@ constexpr uint64_t default_masks[9] = {
     0x0000063F,
     0x000000FF,
 };
-}  // namespace
+}
 
 int channel_layout_popcount(uint64_t mask) {
     return int(std::bitset<64>(mask).count());
@@ -134,7 +134,7 @@ FILE* open_log() {
     return fp;
 }
 
-}  // namespace
+}
 
 int g_log_packet_budget = 0;
 int g_log_frame_budget = 0;
@@ -192,4 +192,4 @@ void log_flush() {
     if (FILE* fp = open_log()) std::fflush(fp);
 }
 
-}  // namespace Xma
+}

@@ -1,8 +1,3 @@
-// Native C++ port of the shared WMA decoder helpers from
-// libavcodec/wma.{h,c}, wma_common.{h,c}, wma_freqs.{h,c}, sinewin.{h,c}.
-//
-// Derived from FFmpeg (LGPL 2.1+).
-
 #pragma once
 
 #include <array>
@@ -21,4 +16,4 @@ const float* wma_sine_window(int index);
 class GetBits;
 unsigned wma_get_large_val(GetBits& gb);
 
-}  // namespace Xma
+}

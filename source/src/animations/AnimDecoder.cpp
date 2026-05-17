@@ -1,4 +1,3 @@
-
 #include "AnimDecoder.h"
 
 #include <cmath>

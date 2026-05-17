@@ -1,8 +1,3 @@
-// XmaBitstream.cpp — BE non-cached bitstream reader, BE bit writer,
-// and canonical-Huffman VLC decoder with multi-level dispatch.
-//
-// Derived from FFmpeg (LGPL 2.1+).
-
 #include "XmaBitstream.h"
 
 #include <algorithm>
@@ -121,7 +116,7 @@ void PutBits::flush() {
 namespace {
 
 int read_symbol(const void* base, int stride, int elem_size,
-                int index, int /*flags*/) {
+                int index, int ) {
     const uint8_t* p = static_cast<const uint8_t*>(base) + index * stride;
     if (elem_size == 1) {
         return int(*p);
@@ -131,7 +126,7 @@ int read_symbol(const void* base, int stride, int elem_size,
     return 0;
 }
 
-}  // namespace
+}
 
 int Vlc::init_from_lengths(int nb_bits, int nb_codes,
                            const int8_t* lens, int lens_stride,
@@ -146,14 +141,6 @@ int Vlc::init_from_lengths(int nb_bits, int nb_codes,
     std::vector<Entry> entries;
     entries.reserve(std::size_t(nb_codes));
 
-    // FFmpeg's ff_vlc_init_from_lengths algorithm: walk entries in
-    // ORIGINAL INDEX ORDER (do not sort by length first), accumulating
-    // an MSB-aligned 32-bit `code` counter via code += 1 << (32-len).
-    // Each entry's actual `len`-bit code is `code >> (32-len)`. This
-    // is what FFmpeg's wmaprodata.h tables are tuned to. Sorting by
-    // length first ("classical canonical Huffman") produces a valid
-    // prefix code but with different code values, which decodes the
-    // FFmpeg-encoded XMA bitstream to wrong symbols.
     uint64_t code = 0;
     for (int i = 0; i < nb_codes; ++i) {
         const int len = int(lens[i * lens_stride]);
@@ -166,20 +153,15 @@ int Vlc::init_from_lengths(int nb_bits, int nb_codes,
         const uint32_t actual_code = uint32_t(code >> (32 - len));
         entries.push_back({len, sym, i, actual_code});
         code += uint64_t(1) << (32 - len);
-        if (code > (uint64_t(1) << 32)) return -1;  // Kraft overflow
+        if (code > (uint64_t(1) << 32)) return -1;
     }
 
-    // Sort by length now so the per-prefix max-leaf pass and the
-    // root-table fill below see entries grouped by length. The
-    // canonical code values (e.code) were already assigned above.
     std::stable_sort(entries.begin(), entries.end(),
                      [](const Entry& a, const Entry& b) {
                          if (a.len != b.len) return a.len < b.len;
                          return a.order < b.order;
                      });
 
-    // Per-prefix max residual: each prefix that has any multi-level
-    // entry needs a sub-table sized for the widest residual under it.
     std::unordered_map<uint32_t, int> prefix_max_leaf;
     for (const auto& e : entries) {
         if (e.len > nb_bits) {
@@ -253,7 +235,7 @@ int Vlc::init_sparse(int nb_bits, int nb_codes,
                              0, flags);
 }
 
-int Vlc::get(GetBits& gb, int /*depth*/) const {
+int Vlc::get(GetBits& gb, int ) const {
     unsigned idx = gb.show(bits);
     if (idx >= table.size()) return -1;
     int code = table[idx].sym;
@@ -273,4 +255,4 @@ int Vlc::get(GetBits& gb, int /*depth*/) const {
     return code;
 }
 
-}  // namespace Xma
+}

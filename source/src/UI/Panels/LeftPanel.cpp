@@ -1011,7 +1011,7 @@ void draw_left_panel() {
 
         if (s_active_tab == 6) {
             struct LvlMap {
-                const char* path;     
+                const char* path;
                 const char* name;
             };
             struct LvlGroup {
@@ -1240,7 +1240,7 @@ void draw_left_panel() {
                     if (rows.empty()) continue;
 
                     ImGui::PushStyleColor(ImGuiCol_Text,
-                        ImVec4(1.0f, 0.84f, 0.0f, 1.0f));   
+                        ImVec4(1.0f, 0.84f, 0.0f, 1.0f));
                     ImGui::TextUnformatted(g.heading);
                     ImGui::PopStyleColor();
                     ImGui::Indent(8.0f);

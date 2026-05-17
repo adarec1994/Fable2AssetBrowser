@@ -50,7 +50,7 @@ std::string extract_attr(const std::string& s, size_t tag_open,
     return {};
 }
 
-}  // anon
+}
 
 VfsConfig ParseVfsConfig(const std::vector<uint8_t>& bytes) {
     VfsConfig out;
@@ -136,4 +136,4 @@ VfsConfig ParseVfsConfig(const std::vector<uint8_t>& bytes) {
     return out;
 }
 
-}  // namespace Level
+}

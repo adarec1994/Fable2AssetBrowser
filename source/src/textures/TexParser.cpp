@@ -151,15 +151,15 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
             const size_t W = (size_t)out.TextureWidth;
             const size_t H = (size_t)out.TextureHeight;
             const size_t sz_argb8  = W * H * 4;
-            const size_t sz_bc1    = W * H / 2;        
-            const size_t sz_bc3    = W * H * 1;        
+            const size_t sz_bc1    = W * H / 2;
+            const size_t sz_bc3    = W * H * 1;
 
             const size_t pW_argb = (W + 31) & ~size_t(31);
             const size_t pH_argb = (H + 31) & ~size_t(31);
             const size_t sz_argb8_padded = pW_argb * pH_argb * 4;
 
-            const size_t Wb = (W + 3) / 4;   
-            const size_t Hb = (H + 3) / 4;   
+            const size_t Wb = (W + 3) / 4;
+            const size_t Hb = (H + 3) / 4;
             const size_t pWb = (Wb + 31) & ~size_t(31);
             const size_t pHb = (Hb + 31) & ~size_t(31);
             const size_t sz_bc1_padded = pWb * pHb * 8;
@@ -228,19 +228,19 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
                 if (zlib_magic && (size_t)size_prefix == sz_bc1 &&
                     out.PixelFormat == 35) {
                     expected_raw = sz_bc1;
-                    z_tag        = 200u;  
+                    z_tag        = 200u;
                 } else if (zlib_magic && (size_t)size_prefix == sz_bc3 &&
                            out.PixelFormat == 39) {
                     expected_raw = sz_bc3;
-                    z_tag        = 201u;  
+                    z_tag        = 201u;
                 } else if (zlib_magic && (size_t)size_prefix == sz_bc3 &&
                            out.PixelFormat == 40) {
                     expected_raw = sz_bc3;
-                    z_tag        = 202u;  
+                    z_tag        = 202u;
                 } else if (zlib_magic && (size_t)size_prefix == sz_argb8 &&
                            (out.PixelFormat == 2 || out.PixelFormat == 4)) {
                     expected_raw = sz_argb8;
-                    z_tag        = 203u;  
+                    z_tag        = 203u;
                 }
                 if (z_tag) {
                     TexInfo::MipDef md{};
@@ -319,7 +319,7 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
     if (out.MipMapOffset.empty()) return true;
 
     size_t walk_off = (size_t) out.MipMapOffset[0];
-    int safety = 64;   
+    int safety = 64;
     while (safety-- > 0 && walk_off + 48 <= d.size()) {
         TexInfo::MipDef md{};
         size_t body_end = 0;
@@ -650,7 +650,6 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
     }
 
     if (header_idx < 0) return false;
-
 
     if (body_idx < 0 && !g_level_vfs_texture_body_bnks.empty()) {
         std::vector<std::string> resolved_vfs_paths;

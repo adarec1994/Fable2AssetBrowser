@@ -1,8 +1,3 @@
-// Native C++ port of libavcodec/wmaprodec.c (WMA Pro / XMA1 / XMA2
-// bitstream decoding to planar float PCM).
-//
-// Derived from FFmpeg (LGPL 2.1+).
-
 #pragma once
 
 #include <memory>
@@ -34,4 +29,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace Xma
+}

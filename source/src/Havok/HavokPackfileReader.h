@@ -5,7 +5,6 @@
 #include <string>
 #include <vector>
 
-
 namespace Havok {
 
 struct SectionHeader {
@@ -26,15 +25,15 @@ struct ClassEntry {
 };
 
 struct VirtualFixup {
-    uint32_t classnames_offset = 0;  
-    uint32_t data_offset       = 0;  
-    uint32_t section_idx       = 0;  
+    uint32_t classnames_offset = 0;
+    uint32_t data_offset       = 0;
+    uint32_t section_idx       = 0;
 };
 
 struct PackFile {
     std::vector<uint8_t> bytes;
 
-    std::string version_string;        
+    std::string version_string;
 
     SectionHeader classnames_section;
     SectionHeader data_section;
@@ -88,13 +87,13 @@ struct LocalFixup {
 };
 
 struct CollisionMesh {
-    std::vector<float>    vertices;   
-    std::vector<uint16_t> indices16;  
-    std::vector<uint32_t> indices32;  
+    std::vector<float>    vertices;
+    std::vector<uint16_t> indices16;
+    std::vector<uint32_t> indices32;
 };
 
 void ApplyLocalFixups(PackFile& pf);
 
 std::vector<CollisionMesh> ExtractCollisionMeshes(const PackFile& pf);
 
-}  // namespace Havok
+}

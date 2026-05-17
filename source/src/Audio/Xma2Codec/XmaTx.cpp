@@ -1,15 +1,3 @@
-// XmaTx.cpp — naive but correct inverse float MDCT.
-//
-// FFmpeg's lavu_tx AV_TX_FLOAT_MDCT (inverse) as wmaprodec uses it:
-//   - input  = `len` real coefficients (wmaprodec fills tmp[0..len-1])
-//   - output = `len` real samples (= central N of the unrolled 2N MDCT)
-//
-// Formula:
-//   y[m] = sum_{k=0..N-1} X[k] * cos((pi/N) * (m + 0.5 + N) * (k + 0.5))
-//
-// O(N^2) per transform — slow but correct. Replaceable with an FFT-based
-// fast path later.
-
 #include "XmaTx.h"
 
 #include <cmath>
@@ -47,4 +35,4 @@ void Mdct::run(float* out, const float* in, std::ptrdiff_t stride) {
     }
 }
 
-}  // namespace Xma
+}

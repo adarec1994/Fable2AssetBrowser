@@ -1,4 +1,3 @@
-
 #include "IsoExtract.h"
 #include <cstdio>
 #include <cstdint>

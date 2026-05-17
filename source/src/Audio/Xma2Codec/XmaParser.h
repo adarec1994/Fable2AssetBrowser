@@ -1,8 +1,3 @@
-// Native C++ port of libavcodec/xma_parser.c + the extradata synth
-// helper formerly inlined in XmaDecoder.cpp.
-//
-// Derived from FFmpeg (LGPL 2.1+).
-
 #pragma once
 
 #include <array>
@@ -37,4 +32,4 @@ struct XmaSynthInput {
 bool xma_synthesize_extradata(const XmaSynthInput& in,
                               std::array<uint8_t, 34>& out);
 
-}  // namespace Xma
+}

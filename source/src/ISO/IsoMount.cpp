@@ -1,4 +1,3 @@
-
 #include "IsoMount.h"
 #include <algorithm>
 #include <cctype>

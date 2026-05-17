@@ -1,4 +1,3 @@
-
 #include "TextureExport.h"
 #include "stb_image_write.h"
 

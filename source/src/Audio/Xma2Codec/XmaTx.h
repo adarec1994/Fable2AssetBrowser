@@ -1,10 +1,3 @@
-// Native C++ port of libavutil/tx.{h,c} (the float inverse MDCT path
-// that wmaprodec.c uses). The current implementation is the naive
-// O(N^2) direct formula; an FFT-based fast path can replace run()
-// without changing the API.
-//
-// Derived from FFmpeg (LGPL 2.1+).
-
 #pragma once
 
 #include <cstdint>
@@ -27,4 +20,4 @@ private:
     std::vector<int>   revtab_;
 };
 
-}  // namespace Xma
+}

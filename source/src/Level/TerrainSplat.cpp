@@ -139,6 +139,8 @@ void Clear() {
     auto& s = storage();
     release_srv(s.lod_diffuse_array);
     release_srv(s.lod_detail_array);
+    release_srv(s.lod_normal_array);
+    release_srv(s.lod_detail_normal_array);
     release_srv(s.chunk_idx_array);
     release_srv(s.chunk_blend_array);
     release_srv(s.chunk_uv_array);
@@ -220,8 +222,27 @@ bool Build(ID3D11Device*                                       device,
             return neutral;
         };
 
+        auto make_neutral_normal = [&]() {
+            // Tangent-space neutral normal: (0, 0, 1) -> (0.5, 0.5, 1.0) in unorm
+            std::vector<uint8_t> neutral(size_t(W) * size_t(H) * 4, 0);
+            for (size_t i = 0; i < neutral.size(); i += 4) {
+                neutral[i + 0] = 0x80; // X = 0.5
+                neutral[i + 1] = 0x80; // Y = 0.5
+                neutral[i + 2] = 0xFF; // Z = 1.0
+                neutral[i + 3] = 0xFF; // A
+            }
+            return neutral;
+        };
+
+        enum LodSlot {
+            kBaseDiffuse = 0,
+            kDetailDiffuse,
+            kBaseNormal,
+            kDetailNormal
+        };
+
         auto build_array = [&](const char* label,
-                               bool detail_array,
+                               LodSlot slot,
                                ID3D11ShaderResourceView*& out_srv,
                                int& out_seeded,
                                int& out_real_seeded) -> bool
@@ -229,6 +250,11 @@ bool Build(ID3D11Device*                                       device,
             out_srv = nullptr;
             out_seeded = 0;
             out_real_seeded = 0;
+
+            const bool is_detail = (slot == kDetailDiffuse ||
+                                    slot == kDetailNormal);
+            const bool is_normal = (slot == kBaseNormal ||
+                                    slot == kDetailNormal);
 
             D3D11_TEXTURE2D_DESC td{};
             td.Width            = W;
@@ -257,15 +283,29 @@ bool Build(ID3D11Device*                                       device,
             int fallback_seeded = 0;
             for (int s = 0; s < N; ++s) {
                 ID3D11ShaderResourceView* src_srv = nullptr;
-                if (detail_array) {
-                    src_srv = (lod_thumbs[s].srv_base_diffuse &&
-                               lod_thumbs[s].srv_detail_diffuse)
-                        ? lod_thumbs[s].srv_detail_diffuse
-                        : nullptr;
-                } else {
-                    src_srv = lod_thumbs[s].srv_base_diffuse
-                        ? lod_thumbs[s].srv_base_diffuse
-                        : lod_thumbs[s].srv_detail_diffuse;
+                switch (slot) {
+                    case kBaseDiffuse:
+                        src_srv = lod_thumbs[s].srv_base_diffuse
+                            ? lod_thumbs[s].srv_base_diffuse
+                            : lod_thumbs[s].srv_detail_diffuse;
+                        break;
+                    case kDetailDiffuse:
+                        src_srv = (lod_thumbs[s].srv_base_diffuse &&
+                                   lod_thumbs[s].srv_detail_diffuse)
+                            ? lod_thumbs[s].srv_detail_diffuse
+                            : nullptr;
+                        break;
+                    case kBaseNormal:
+                        src_srv = lod_thumbs[s].srv_base_normal
+                            ? lod_thumbs[s].srv_base_normal
+                            : lod_thumbs[s].srv_detail_normal;
+                        break;
+                    case kDetailNormal:
+                        src_srv = (lod_thumbs[s].srv_base_normal &&
+                                   lod_thumbs[s].srv_detail_normal)
+                            ? lod_thumbs[s].srv_detail_normal
+                            : nullptr;
+                        break;
                 }
 
                 std::vector<uint8_t> resized;
@@ -276,18 +316,30 @@ bool Build(ID3D11Device*                                       device,
                                           src_rgba, sw, sh) &&
                         !src_rgba.empty() && sw > 0 && sh > 0) {
                         resize_rgba8(src_rgba, sw, sh, resized, W, H);
-                        if (!detail_array && base_fallback.empty()) {
+                        if (!is_detail && base_fallback.empty()) {
                             base_fallback = resized;
                         }
                         ++out_real_seeded;
                     }
-                } else if (detail_array) {
-                    if (neutral.empty()) neutral = make_neutral_detail();
+                } else if (is_detail) {
+                    if (neutral.empty()) {
+                        neutral = is_normal
+                            ? make_neutral_normal()
+                            : make_neutral_detail();
+                    }
                     resized = neutral;
                 }
 
-                if (resized.empty() && !detail_array && !base_fallback.empty()) {
+                if (resized.empty() && !is_detail && !base_fallback.empty()) {
                     resized = base_fallback;
+                    ++fallback_seeded;
+                }
+                if (resized.empty() && is_normal) {
+                    // Make sure normal arrays always get a slice so the
+                    // shader gets a valid sample even if no source texture
+                    // is provided for this material.
+                    if (neutral.empty()) neutral = make_neutral_normal();
+                    resized = neutral;
                     ++fallback_seeded;
                 }
                 if (resized.empty()) {
@@ -339,14 +391,22 @@ bool Build(ID3D11Device*                                       device,
 
         int base_seeded = 0, base_real = 0;
         int detail_seeded = 0, detail_real = 0;
-        if (!build_array("base diffuse", false, R.lod_diffuse_array,
+        int base_n_seeded = 0, base_n_real = 0;
+        int detail_n_seeded = 0, detail_n_real = 0;
+        if (!build_array("base diffuse", kBaseDiffuse, R.lod_diffuse_array,
                          base_seeded, base_real)) {
             return false;
         }
-        if (!build_array("detail diffuse", true, R.lod_detail_array,
+        if (!build_array("detail diffuse", kDetailDiffuse, R.lod_detail_array,
                          detail_seeded, detail_real)) {
             return false;
         }
+        // Normal map arrays are best-effort: if no normals are available
+        // we still let terrain rendering proceed with the diffuse arrays.
+        build_array("base normal", kBaseNormal, R.lod_normal_array,
+                    base_n_seeded, base_n_real);
+        build_array("detail normal", kDetailNormal, R.lod_detail_normal_array,
+                    detail_n_seeded, detail_n_real);
     }
 
     {

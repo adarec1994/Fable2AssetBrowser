@@ -23,6 +23,7 @@ struct PropInstance {
     uint64_t hash = 0;
     uint8_t flags[3] = {0, 0, 0};
     float values[20] = {};
+    bool has_full_transform = false;
 };
 
 struct PropBlock {
@@ -158,6 +159,7 @@ extern std::vector<HavokCollisionMesh> g_level_havok_collision;
 struct GdbWorldPlacement {
     float    x, y, z;
     float    yaw;
+    float    rot_x, rot_y, rot_z;
     float    scale;
     uint32_t hash;
     uint32_t parent_hash;

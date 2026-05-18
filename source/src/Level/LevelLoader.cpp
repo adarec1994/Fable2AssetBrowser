@@ -217,6 +217,74 @@ struct StreamingModelCandidate {
     bool from_gmd = false;
 };
 
+void mat3_mul(const float a[9], const float b[9], float out[9])
+{
+    float r[9] = {};
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            r[row * 3 + col] =
+                a[row * 3 + 0] * b[0 * 3 + col] +
+                a[row * 3 + 1] * b[1 * 3 + col] +
+                a[row * 3 + 2] * b[2 * 3 + col];
+        }
+    }
+    for (int i = 0; i < 9; ++i) {
+        out[i] = r[i];
+    }
+}
+
+void fill_gdb_rotation_matrix(Level::PropInstance& pi,
+                              float rx,
+                              float ry,
+                              float rz,
+                              float scale)
+{
+    if (!std::isfinite(rx)) rx = 0.0f;
+    if (!std::isfinite(ry)) ry = 0.0f;
+    if (!std::isfinite(rz)) rz = 0.0f;
+    if (!std::isfinite(scale) || scale <= 0.01f || scale >= 100.0f) {
+        scale = 1.0f;
+    }
+
+    const float cx = std::cos(rx);
+    const float sx = std::sin(rx);
+    const float cy = std::cos(ry);
+    const float sy = std::sin(ry);
+    const float cz = std::cos(rz);
+    const float sz = std::sin(rz);
+
+    const float mx[9] = {
+        1.0f, 0.0f, 0.0f,
+        0.0f, cx,   sx,
+        0.0f, -sx,  cx
+    };
+    const float my[9] = {
+        cy,   0.0f, -sy,
+        0.0f, 1.0f, 0.0f,
+        sy,   0.0f, cy
+    };
+    const float mz[9] = {
+        cz,   sz,   0.0f,
+        -sz,  cz,   0.0f,
+        0.0f, 0.0f, 1.0f
+    };
+
+    float tmp[9] = {};
+    float game[9] = {};
+    mat3_mul(my, mx, tmp);
+    mat3_mul(mz, tmp, game);
+
+    const int axis_map[3] = {0, 2, 1};
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            pi.values[3 + row * 3 + col] =
+                game[axis_map[row] * 3 + axis_map[col]];
+        }
+    }
+    pi.values[12] = scale;
+    pi.has_full_transform = true;
+}
+
 const StreamingModelCandidate*
 choose_streaming_model_for_gdb(const std::string& entity_name,
                                const std::vector<StreamingModelCandidate>& candidates,
@@ -1663,6 +1731,9 @@ bool Open(const FlatAssetEntry& entry)
                 gp.y      = p.y;
                 gp.z      = p.z;
                 gp.yaw    = p.yaw;
+                gp.rot_x  = p.rot_x;
+                gp.rot_y  = p.rot_y;
+                gp.rot_z  = p.rot_z;
                 gp.scale  = p.scale;
                 gp.hash   = p.hash_a;
                 gp.parent_hash = p.parent_hash;
@@ -2154,6 +2225,9 @@ bool Open(const FlatAssetEntry& entry)
 
             size_t resolved = 0;
             size_t gdb_instances_emitted = 0;
+            size_t gdb_full_euler_rotations = 0;
+            size_t gdb_yaw_only_rotations = 0;
+            size_t gdb_identity_rotations = 0;
             for (const auto& p : info.placements) {
                 if (p.entity_name.empty()) continue;
                 std::string tok = canonicalize_for_match(p.entity_name);
@@ -2202,19 +2276,36 @@ bool Open(const FlatAssetEntry& entry)
                 pi.values[0] = p.x;
                 pi.values[1] = p.y;
                 pi.values[2] = p.z;
-                const float s_yaw = std::sin(p.yaw);
-                const float c_yaw = std::cos(p.yaw);
-                if (std::isfinite(s_yaw) && std::isfinite(c_yaw)) {
-                    pi.values[6] = s_yaw;
-                    pi.values[7] = c_yaw;
-                } else {
-                    pi.values[6] = 0.0f;
-                    pi.values[7] = 1.0f;
-                }
                 const float scale =
                     (std::isfinite(p.scale) && p.scale > 0.01f && p.scale < 100.0f)
                         ? p.scale : 1.0f;
-                pi.values[9] = pi.values[10] = pi.values[11] = scale;
+                if (p.has_rotation) {
+                    fill_gdb_rotation_matrix(pi, p.rot_x, p.rot_y, p.rot_z, scale);
+                    if (std::fabs(p.rot_x) > 1e-4f ||
+                        std::fabs(p.rot_y) > 1e-4f) {
+                        ++gdb_full_euler_rotations;
+                    } else if (std::fabs(p.rot_z) > 1e-4f) {
+                        ++gdb_yaw_only_rotations;
+                    } else {
+                        ++gdb_identity_rotations;
+                    }
+                } else {
+                    const float s_yaw = std::sin(p.yaw);
+                    const float c_yaw = std::cos(p.yaw);
+                    if (std::isfinite(s_yaw) && std::isfinite(c_yaw)) {
+                        pi.values[6] = s_yaw;
+                        pi.values[7] = c_yaw;
+                    } else {
+                        pi.values[6] = 0.0f;
+                        pi.values[7] = 1.0f;
+                    }
+                    pi.values[9] = pi.values[10] = pi.values[11] = scale;
+                    if (std::fabs(p.yaw) > 1e-4f) {
+                        ++gdb_yaw_only_rotations;
+                    } else {
+                        ++gdb_identity_rotations;
+                    }
+                }
                 pb.instances.push_back(pi);
                 ++gdb_instances_emitted;
             }
@@ -2226,6 +2317,13 @@ bool Open(const FlatAssetEntry& entry)
                 os3 << ", emitted " << gdb_instances_emitted
                     << " instance(s)";
                 OutputLog::success(os3.str());
+                OutputLog::info(
+                    "gdb-derived rotations: full-euler=" +
+                    std::to_string(gdb_full_euler_rotations) +
+                    ", yaw-only=" +
+                    std::to_string(gdb_yaw_only_rotations) +
+                    ", identity=" +
+                    std::to_string(gdb_identity_rotations));
             } else {
                 os3 << " (not emitted: GDB has entity names, not model paths)";
                 OutputLog::warn(os3.str());

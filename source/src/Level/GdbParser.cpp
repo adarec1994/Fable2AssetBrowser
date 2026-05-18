@@ -139,9 +139,21 @@ struct GdbView {
                    uint8_t expected_type,
                    size_t& slot,
                    uint8_t* found_type = nullptr) const {
+        size_t owner = 0;
+        return findFieldOwner(record, field_hash, expected_type, slot, owner,
+                              found_type);
+    }
+
+    bool findFieldOwner(size_t record,
+                        uint32_t field_hash,
+                        uint8_t expected_type,
+                        size_t& slot,
+                        size_t& owner,
+                        uint8_t* found_type = nullptr) const {
         size_t cur = record;
         for (int depth = 0; depth < 64; ++depth) {
             if (findLocal(cur, field_hash, expected_type, slot, found_type)) {
+                owner = cur;
                 return true;
             }
             size_t parent_slot = 0;
@@ -191,6 +203,19 @@ struct GdbView {
         return lookup(hash, rec) && readVec3Record(rec, x, y, z, raw_x, raw_y, raw_z);
     }
 
+    bool readRotationVec3Ref(uint32_t hash,
+                             float& x,
+                             float& y,
+                             float& z) const {
+        size_t rec = 0;
+        if (!lookup(hash, rec) || rec + 16 > body_end) return false;
+        if (ReadBeU32(bytes.data() + rec) != kTagVec3) return false;
+        x = ReadBeF32(bytes.data() + rec + 4);
+        y = ReadBeF32(bytes.data() + rec + 8);
+        z = ReadBeF32(bytes.data() + rec + 12);
+        return Finite3(x, y, z);
+    }
+
     bool payloadRange(size_t record, size_t& payload_start, size_t& payload_end) const {
         size_t sch = 0;
         uint32_t n = 0;
@@ -230,9 +255,14 @@ bool TryTransformRecord(const GdbView& view,
                         float& x,
                         float& y,
                         float& z,
-                        float& yaw) {
+                        float& rot_x,
+                        float& rot_y,
+                        float& rot_z,
+                        bool& has_rotation) {
     size_t pos_slot = 0;
-    if (!view.findField(record, kHashPosition, 6, pos_slot, nullptr)) {
+    size_t pos_owner = 0;
+    if (!view.findFieldOwner(record, kHashPosition, 6,
+                             pos_slot, pos_owner, nullptr)) {
         return false;
     }
     const uint32_t pos_hash = ReadBeU32(view.bytes.data() + pos_slot);
@@ -241,13 +271,15 @@ bool TryTransformRecord(const GdbView& view,
 
     size_t rot_slot = 0;
     float rx = 0.0f, ry = 0.0f, rz = 0.0f;
-    if (view.findField(record, kHashRotation, 6, rot_slot, nullptr)) {
+    if (view.findLocal(pos_owner, kHashRotation, 6, rot_slot, nullptr)) {
         const uint32_t rot_hash = ReadBeU32(view.bytes.data() + rot_slot);
-        if (view.readVec3Ref(rot_hash, rx, ry, rz)) {
-            // GDB vec3s use the same reversed storage as positions.  After
-            // readVec3Ref, z is the game-space vertical-axis rotation used by
-            // the level prop renderer's yaw-only instance path.
-            if (std::isfinite(rz)) yaw = rz;
+        if (view.readRotationVec3Ref(rot_hash, rx, ry, rz)) {
+            if (Finite3(rx, ry, rz)) {
+                rot_x = rx;
+                rot_y = ry;
+                rot_z = rz;
+                has_rotation = true;
+            }
         }
     }
     return true;
@@ -258,7 +290,10 @@ bool TryComponentTransformRecord(const GdbView& view,
                                  float& x,
                                  float& y,
                                  float& z,
-                                 float& yaw) {
+                                 float& rot_x,
+                                 float& rot_y,
+                                 float& rot_z,
+                                 bool& has_rotation) {
     size_t transform_slot = 0;
     if (!view.findLocal(record, kHashTransformComponent, 6,
                         transform_slot, nullptr)) {
@@ -269,7 +304,8 @@ bool TryComponentTransformRecord(const GdbView& view,
         ReadBeU32(view.bytes.data() + transform_slot);
     size_t transform_record = 0;
     if (!view.lookup(transform_hash, transform_record)) return false;
-    return TryTransformRecord(view, transform_record, x, y, z, yaw);
+    return TryTransformRecord(view, transform_record, x, y, z,
+                              rot_x, rot_y, rot_z, has_rotation);
 }
 
 bool TryInlineTransform(const std::vector<uint8_t>& bytes,
@@ -278,8 +314,10 @@ bool TryInlineTransform(const std::vector<uint8_t>& bytes,
                         float& x,
                         float& y,
                         float& z,
-                        float& yaw) {
-    bool saw_rot = false;
+                        float& rot_x,
+                        float& rot_y,
+                        float& rot_z,
+                        bool& has_rotation) {
     for (size_t q = rs + 4; q + 16 <= re; q += 4) {
         if (ReadBeU32(bytes.data() + q) != kTagVec3) continue;
 
@@ -287,16 +325,6 @@ bool TryInlineTransform(const std::vector<uint8_t>& bytes,
         const float ry = ReadBeF32(bytes.data() + q + 8);
         const float rx = ReadBeF32(bytes.data() + q + 12);
         if (!Finite3(rx, ry, rz)) continue;
-
-        const bool rotationish =
-            std::fabs(rx) <= 6.5f &&
-            std::fabs(ry) <= 6.5f &&
-            std::fabs(rz) <= 6.5f;
-        if (rotationish && !saw_rot) {
-            yaw = rz;
-            saw_rot = true;
-            continue;
-        }
 
         if (!PlausiblePosition(rx, ry, rz)) continue;
         x = rx;
@@ -313,10 +341,14 @@ bool TryInlineTransformRange(const std::vector<uint8_t>& bytes,
                              float& x,
                              float& y,
                              float& z,
-                             float& yaw) {
+                             float& rot_x,
+                             float& rot_y,
+                             float& rot_z,
+                             bool& has_rotation) {
     if (begin >= end || end > bytes.size()) return false;
     const size_t shim = (begin >= 4) ? begin - 4 : begin;
-    return TryInlineTransform(bytes, shim, end, x, y, z, yaw);
+    return TryInlineTransform(bytes, shim, end, x, y, z,
+                              rot_x, rot_y, rot_z, has_rotation);
 }
 
 bool TryIndexedInlineTransform(const GdbView& view,
@@ -324,12 +356,16 @@ bool TryIndexedInlineTransform(const GdbView& view,
                                float& x,
                                float& y,
                                float& z,
-                               float& yaw) {
+                               float& rot_x,
+                               float& rot_y,
+                               float& rot_z,
+                               bool& has_rotation) {
     size_t payload_start = 0;
     size_t payload_end = 0;
     if (!view.payloadRange(record, payload_start, payload_end)) return false;
     return TryInlineTransformRange(view.bytes, payload_start, payload_end,
-                                   x, y, z, yaw);
+                                   x, y, z, rot_x, rot_y, rot_z,
+                                   has_rotation);
 }
 
 bool TryEmbeddedTransformRecords(const GdbView& view,
@@ -338,14 +374,20 @@ bool TryEmbeddedTransformRecords(const GdbView& view,
                                  float& x,
                                  float& y,
                                  float& z,
-                                 float& yaw) {
+                                 float& rot_x,
+                                 float& rot_y,
+                                 float& rot_z,
+                                 bool& has_rotation) {
     for (size_t q = rs + 4; q + 12 <= re && q + 4 <= view.body_end; q += 4) {
         size_t sch = 0;
         uint32_t n = 0;
         if (!view.schema(q, sch, n)) continue;
         size_t slot = 0;
         if (!view.findLocal(q, kHashPosition, 6, slot, nullptr)) continue;
-        if (TryTransformRecord(view, q, x, y, z, yaw)) return true;
+        if (TryTransformRecord(view, q, x, y, z,
+                               rot_x, rot_y, rot_z, has_rotation)) {
+            return true;
+        }
     }
     return false;
 }
@@ -386,6 +428,10 @@ GdbInfo ParseWithSaveMap(
         pl.z      = ReadBeF32(p + 0x30);
         pl.yaw    = ReadBeF32(p + 0x4C);
         if (!std::isfinite(pl.yaw)) pl.yaw = 0.0f;
+        pl.rot_x  = 0.0f;
+        pl.rot_y  = 0.0f;
+        pl.rot_z  = pl.yaw;
+        pl.has_rotation = true;
         pl.scale  = ReadBeF32(p + 0x58);
         if (!std::isfinite(pl.scale) || pl.scale <= 0.0f || pl.scale > 1000.0f) {
             pl.scale = 1.0f;
@@ -445,7 +491,8 @@ GdbInfo ParseWithSaveMap(
         }
 
         float pos_x = 0.f, pos_y = 0.f, pos_z = 0.f;
-        float yaw_from_eulers = 0.0f;
+        float rot_x = 0.0f, rot_y = 0.0f, rot_z = 0.0f;
+        bool has_rotation = false;
         bool have_pos = false;
 
         if (view.ok && inst_hash != 0) {
@@ -453,18 +500,33 @@ GdbInfo ParseWithSaveMap(
             if (view.lookup(inst_hash, direct)) {
                 have_pos = TryTransformRecord(view, direct,
                                               pos_x, pos_y, pos_z,
-                                              yaw_from_eulers);
+                                              rot_x, rot_y, rot_z,
+                                              has_rotation);
+                if (!have_pos) {
+                    have_pos = TryComponentTransformRecord(view, direct,
+                                                           pos_x, pos_y, pos_z,
+                                                           rot_x, rot_y, rot_z,
+                                                           has_rotation);
+                }
+                if (!have_pos) {
+                    have_pos = TryIndexedInlineTransform(view, direct,
+                                                         pos_x, pos_y, pos_z,
+                                                         rot_x, rot_y, rot_z,
+                                                         has_rotation);
+                }
             }
         }
         if (!have_pos) {
             have_pos = TryInlineTransform(bytes, rs, re,
                                           pos_x, pos_y, pos_z,
-                                          yaw_from_eulers);
+                                          rot_x, rot_y, rot_z,
+                                          has_rotation);
         }
         if (!have_pos && view.ok) {
             have_pos = TryEmbeddedTransformRecords(view, rs, re,
                                                    pos_x, pos_y, pos_z,
-                                                   yaw_from_eulers);
+                                                   rot_x, rot_y, rot_z,
+                                                   has_rotation);
         }
 
         if (!have_pos) continue;
@@ -473,7 +535,11 @@ GdbInfo ParseWithSaveMap(
         pl.x          = pos_x;
         pl.y          = pos_y;
         pl.z          = pos_z;
-        pl.yaw        = std::isfinite(yaw_from_eulers) ? yaw_from_eulers : 0.0f;
+        pl.rot_x      = rot_x;
+        pl.rot_y      = rot_y;
+        pl.rot_z      = rot_z;
+        pl.has_rotation = has_rotation;
+        pl.yaw        = has_rotation && std::isfinite(rot_z) ? rot_z : 0.0f;
         pl.scale      = 1.0f;
         pl.marker     = kVarMarker;
         pl.hash_a     = inst_hash;
@@ -507,19 +573,23 @@ GdbInfo ParseWithSaveMap(
             if (!view.lookup(inst_hash, direct)) continue;
 
             float pos_x = 0.0f, pos_y = 0.0f, pos_z = 0.0f;
-            float yaw_from_eulers = 0.0f;
+            float rot_x = 0.0f, rot_y = 0.0f, rot_z = 0.0f;
+            bool has_rotation = false;
             bool have_pos = TryTransformRecord(view, direct,
                                                pos_x, pos_y, pos_z,
-                                               yaw_from_eulers);
+                                               rot_x, rot_y, rot_z,
+                                               has_rotation);
             if (!have_pos) {
                 have_pos = TryComponentTransformRecord(view, direct,
                                                        pos_x, pos_y, pos_z,
-                                                       yaw_from_eulers);
+                                                       rot_x, rot_y, rot_z,
+                                                       has_rotation);
             }
             if (!have_pos) {
                 have_pos = TryIndexedInlineTransform(view, direct,
                                                      pos_x, pos_y, pos_z,
-                                                     yaw_from_eulers);
+                                                     rot_x, rot_y, rot_z,
+                                                     has_rotation);
             }
             if (!have_pos) {
                 continue;
@@ -529,7 +599,11 @@ GdbInfo ParseWithSaveMap(
             pl.x          = pos_x;
             pl.y          = pos_y;
             pl.z          = pos_z;
-            pl.yaw        = std::isfinite(yaw_from_eulers) ? yaw_from_eulers : 0.0f;
+            pl.rot_x      = rot_x;
+            pl.rot_y      = rot_y;
+            pl.rot_z      = rot_z;
+            pl.has_rotation = has_rotation;
+            pl.yaw        = has_rotation && std::isfinite(rot_z) ? rot_z : 0.0f;
             pl.scale      = 1.0f;
             pl.marker     = kVarMarker;
             pl.hash_a     = inst_hash;

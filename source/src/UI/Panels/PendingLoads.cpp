@@ -64,6 +64,72 @@ static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
                                          float terrain_cx,
                                          float terrain_cz);
 
+static void transform_instance_point(const Level::PropInstance& inst,
+                                     float lx,
+                                     float ly,
+                                     float lz,
+                                     float& x,
+                                     float& y,
+                                     float& z)
+{
+    const float px = inst.values[0];
+    const float py = inst.values[2];
+    const float pz = inst.values[1];
+    if (inst.has_full_transform) {
+        float scale = inst.values[12];
+        if (!std::isfinite(scale) || scale == 0.0f) scale = 1.0f;
+        lx *= scale;
+        ly *= scale;
+        lz *= scale;
+        const float* m = &inst.values[3];
+        x = px + m[0] * lx + m[1] * ly + m[2] * lz;
+        y = py + m[3] * lx + m[4] * ly + m[5] * lz;
+        z = pz + m[6] * lx + m[7] * ly + m[8] * lz;
+        return;
+    }
+
+    const float s  = inst.values[6];
+    const float c  = inst.values[7];
+    const float sx = inst.values[9]  == 0.0f ? 1.0f : inst.values[9];
+    const float sy = inst.values[10] == 0.0f ? sx   : inst.values[10];
+    const float sz = inst.values[11] == 0.0f ? sx   : inst.values[11];
+    lx *= sx;
+    ly *= sz;
+    lz *= sy;
+    x = px + lx * c + lz * s;
+    y = py + ly;
+    z = pz - lx * s + lz * c;
+}
+
+static void transform_instance_normal(const Level::PropInstance& inst,
+                                      float lx,
+                                      float ly,
+                                      float lz,
+                                      float& x,
+                                      float& y,
+                                      float& z)
+{
+    if (inst.has_full_transform) {
+        const float* m = &inst.values[3];
+        x = m[0] * lx + m[1] * ly + m[2] * lz;
+        y = m[3] * lx + m[4] * ly + m[5] * lz;
+        z = m[6] * lx + m[7] * ly + m[8] * lz;
+        const float len = std::sqrt(x * x + y * y + z * z);
+        if (std::isfinite(len) && len > 1e-6f) {
+            x /= len;
+            y /= len;
+            z /= len;
+        }
+        return;
+    }
+
+    const float s = inst.values[6];
+    const float c = inst.values[7];
+    x = lx * c + lz * s;
+    y = ly;
+    z = -lx * s + lz * c;
+}
+
 static void merge_transformed_instance_into(MDLMeshGeom& dst,
                                             const MDLMeshGeom& src,
                                             const Level::PropInstance& inst)
@@ -72,26 +138,18 @@ static void merge_transformed_instance_into(MDLMeshGeom& dst,
 
     const uint32_t base_vertex = uint32_t(dst.positions.size() / 3);
 
-    const float px = inst.values[0];
-    const float py = inst.values[2];
-    const float pz = inst.values[1];
-    const float s  = inst.values[6];
-    const float c  = inst.values[7];
-    const float sx = inst.values[9]  == 0.0f ? 1.0f : inst.values[9];
-    const float sy = inst.values[10] == 0.0f ? sx   : inst.values[10];
-    const float sz = inst.values[11] == 0.0f ? sx   : inst.values[11];
-
     const size_t src_vcount = src.positions.size() / 3;
 
     const size_t pos_off = dst.positions.size();
     dst.positions.resize(pos_off + src.positions.size());
     for (size_t i = 0; i < src_vcount; ++i) {
-        const float lx = src.positions[i*3+0] * sx;
-        const float ly = src.positions[i*3+2] * sz;
-        const float lz = src.positions[i*3+1] * sy;
-        dst.positions[pos_off + i*3 + 0] = px + lx * c + lz * s;
-        dst.positions[pos_off + i*3 + 1] = py + ly;
-        dst.positions[pos_off + i*3 + 2] = pz - lx * s + lz * c;
+        const float lx = src.positions[i*3+0];
+        const float ly = src.positions[i*3+2];
+        const float lz = src.positions[i*3+1];
+        transform_instance_point(inst, lx, ly, lz,
+                                 dst.positions[pos_off + i*3 + 0],
+                                 dst.positions[pos_off + i*3 + 1],
+                                 dst.positions[pos_off + i*3 + 2]);
     }
 
     if (!src.normals.empty()) {
@@ -102,9 +160,10 @@ static void merge_transformed_instance_into(MDLMeshGeom& dst,
             const float lx = src.normals[i*3+0];
             const float ly = src.normals[i*3+2];
             const float lz = src.normals[i*3+1];
-            dst.normals[n_off + i*3 + 0] = lx * c + lz * s;
-            dst.normals[n_off + i*3 + 1] = ly;
-            dst.normals[n_off + i*3 + 2] = -lx * s + lz * c;
+            transform_instance_normal(inst, lx, ly, lz,
+                                      dst.normals[n_off + i*3 + 0],
+                                      dst.normals[n_off + i*3 + 1],
+                                      dst.normals[n_off + i*3 + 2]);
         }
     }
 
@@ -438,22 +497,14 @@ static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
 {
     MDLMeshGeom dst = src;
 
-    const float px = inst.values[0];
-    const float py = inst.values[2];
-    const float pz = inst.values[1];
-    const float s  = inst.values[6];
-    const float c  = inst.values[7];
-    const float sx = inst.values[9]  == 0.0f ? 1.0f : inst.values[9];
-    const float sy = inst.values[10] == 0.0f ? sx   : inst.values[10];
-    const float sz = inst.values[11] == 0.0f ? sx   : inst.values[11];
-
     for (size_t i = 0; i + 2 < dst.positions.size(); i += 3) {
-        const float lx = src.positions[i + 0] * sx;
-        const float ly = src.positions[i + 2] * sz;
-        const float lz = src.positions[i + 1] * sy;
-        dst.positions[i + 0] = px + lx * c + lz * s;
-        dst.positions[i + 1] = py + ly;
-        dst.positions[i + 2] = pz - lx * s + lz * c;
+        const float lx = src.positions[i + 0];
+        const float ly = src.positions[i + 2];
+        const float lz = src.positions[i + 1];
+        transform_instance_point(inst, lx, ly, lz,
+                                 dst.positions[i + 0],
+                                 dst.positions[i + 1],
+                                 dst.positions[i + 2]);
     }
 
     if (dst.normals.size() == src.normals.size()) {
@@ -461,9 +512,10 @@ static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
             const float lx = src.normals[i + 0];
             const float ly = src.normals[i + 2];
             const float lz = src.normals[i + 1];
-            dst.normals[i + 0] = lx * c + lz * s;
-            dst.normals[i + 1] = ly;
-            dst.normals[i + 2] = -lx * s + lz * c;
+            transform_instance_normal(inst, lx, ly, lz,
+                                      dst.normals[i + 0],
+                                      dst.normals[i + 1],
+                                      dst.normals[i + 2]);
         }
     }
 

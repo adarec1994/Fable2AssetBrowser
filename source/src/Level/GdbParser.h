@@ -9,7 +9,9 @@ namespace Gdb {
 struct Placement {
     float    x, y, z;
     float    yaw;
+    float    rot_x, rot_y, rot_z;
     float    scale;
+    bool     has_rotation;
     uint32_t marker;
     uint32_t hash_a;
     uint32_t parent_hash;

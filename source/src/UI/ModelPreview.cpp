@@ -1290,16 +1290,18 @@ cbuffer TerrainCB : register(b2){
     float4 weight_params;
     float4 material_params[32];
 }
-Texture2DArray  lod_array     : register(t0);
-Texture2DArray  chunk_idx     : register(t1);
-Texture2DArray  chunk_blend   : register(t2);
-Texture2DArray  chunk_uv      : register(t3);
-Texture2D       splat_mask    : register(t4);
-Texture2D       lightmap      : register(t5);
-Texture2DArray  lod_detail_array : register(t6);
-Texture2DArray  material_weights : register(t7);
-SamplerState    smp_wrap      : register(s0);
-SamplerState    smp_point     : register(s1);
+Texture2DArray  lod_array                : register(t0);
+Texture2DArray  chunk_idx                 : register(t1);
+Texture2DArray  chunk_blend               : register(t2);
+Texture2DArray  chunk_uv                  : register(t3);
+Texture2D       splat_mask                : register(t4);
+Texture2D       lightmap                  : register(t5);
+Texture2DArray  lod_detail_array          : register(t6);
+Texture2DArray  material_weights          : register(t7);
+Texture2DArray  lod_normal_array          : register(t8);
+Texture2DArray  lod_detail_normal_array   : register(t9);
+SamplerState    smp_wrap                  : register(s0);
+SamplerState    smp_point                 : register(s1);
 
 struct VSOUT{
     float4 p   : SV_Position;
@@ -1308,7 +1310,8 @@ struct VSOUT{
     float3 wp  : TEXCOORD1;
 };
 
-float3 sample_material(int slice, float2 world_xy, float slope_w){
+void sample_material(int slice, float2 world_xy, float slope_w,
+                     out float3 out_color, out float3 out_normal_ts){
     int max_slice = max((int)chunk_grid_size.z - 1, 0);
     int s = min(max(slice, 0), max_slice);
     float4 mp = material_params[s];
@@ -1318,8 +1321,13 @@ float3 sample_material(int slice, float2 world_xy, float slope_w){
         smp_wrap, float3(world_xy * base_scale, s)).rgb;
     float3 detail = lod_detail_array.Sample(
         smp_wrap, float3(world_xy * detail_scale, s)).rgb;
+    float3 base_n = lod_normal_array.Sample(
+        smp_wrap, float3(world_xy * base_scale, s)).rgb * 2.0 - 1.0;
+    float3 detail_n = lod_detail_normal_array.Sample(
+        smp_wrap, float3(world_xy * detail_scale, s)).rgb * 2.0 - 1.0;
     float detail_w = slope_w * saturate(mp.z) * saturate(mp.w);
-    return lerp(base, detail, detail_w);
+    out_color = lerp(base, detail, detail_w);
+    out_normal_ts = lerp(base_n, detail_n, detail_w);
 }
 
 float4 PS(VSOUT i) : SV_Target {
@@ -1329,10 +1337,12 @@ float4 PS(VSOUT i) : SV_Target {
     float2 extent   = chunk_origin_extent.zw;
     float  CW       = chunk_grid_size.x;
     float  CH       = chunk_grid_size.y;
-    float slope_w = saturate((0.82 - abs(normalize(i.n).y)) / 0.35);
+    float3 geo_n    = normalize(i.n);
+    float slope_w   = saturate((0.82 - abs(geo_n.y)) / 0.35);
 
-    float3 final = float3(0.0, 0.0, 0.0);
-    float  weight_sum = 0.0;
+    float3 final_color = float3(0.0, 0.0, 0.0);
+    float3 final_n_ts  = float3(0.0, 0.0, 0.0);
+    float  weight_sum  = 0.0;
 
     float2 terrain_uv = saturate((world_xy - origin)
         / (extent * float2(CW, CH)));
@@ -1346,22 +1356,42 @@ float4 PS(VSOUT i) : SV_Target {
         float w = material_weights.SampleLevel(
             smp_point, float3(weight_uv, material), 0).r;
         if (w <= 0.001) continue;
-        final += sample_material(material, world_xy, slope_w) * w;
+        float3 mc, mn;
+        sample_material(material, world_xy, slope_w, mc, mn);
+        final_color += mc * w;
+        final_n_ts  += mn * w;
         weight_sum += w;
     }
 
     if (weight_sum > 0.001) {
-        final /= weight_sum;
+        final_color /= weight_sum;
+        final_n_ts  /= weight_sum;
     } else {
-        final = sample_material(0, world_xy, slope_w);
+        sample_material(0, world_xy, slope_w, final_color, final_n_ts);
     }
+
+    // Build a simple TBN around the geometric normal so the
+    // tangent-space normal map can perturb the lighting.
+    float3 N = geo_n;
+    float3 ref = (abs(N.y) < 0.999) ? float3(0.0, 1.0, 0.0)
+                                    : float3(1.0, 0.0, 0.0);
+    float3 T = normalize(cross(ref, N));
+    float3 B = normalize(cross(N, T));
+    float3 nrm = normalize(
+        T * final_n_ts.x + B * final_n_ts.y + N * max(final_n_ts.z, 0.1));
+
+    float3 L = normalize(-lightDir.xyz);
+    float ndotl = saturate(dot(nrm, L));
+    float ambient = 0.35;
+    float lit = ambient + ndotl * 0.7;
+    final_color *= lit;
 
     if (params.z > 0.5) {
         float3 hi = float3(0.15, 0.45, 1.00);
-        final = lerp(final, hi, 0.65);
+        final_color = lerp(final_color, hi, 0.65);
     }
 
-    return float4(final, 1.0);
+    return float4(final_color, 1.0);
 }
 )";
 
@@ -2013,6 +2043,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         const bool use_terrain_shader =
             m.is_terrain && R.ok &&
             R.lod_diffuse_array && R.lod_detail_array &&
+            R.lod_normal_array && R.lod_detail_normal_array &&
             R.chunk_idx_array && R.chunk_blend_array && R.chunk_uv_array &&
             R.splat_mask && R.material_weight_array && R.lightmap &&
             mp.vs_terrain && mp.ps_terrain && mp.cbuffer_terrain;
@@ -2075,7 +2106,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             ctx->VSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
             ctx->PSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
 
-            ID3D11ShaderResourceView* srvs[8] = {
+            ID3D11ShaderResourceView* srvs[10] = {
                 R.lod_diffuse_array,
                 R.chunk_idx_array,
                 R.chunk_blend_array,
@@ -2083,17 +2114,19 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 R.splat_mask,
                 R.lightmap,
                 R.lod_detail_array,
-                R.material_weight_array
+                R.material_weight_array,
+                R.lod_normal_array,
+                R.lod_detail_normal_array
             };
-            ctx->PSSetShaderResources(0, 8, srvs);
+            ctx->PSSetShaderResources(0, 10, srvs);
 
             ctx->DrawIndexed(m.index_count, 0, 0);
 
-            ID3D11ShaderResourceView* nulls[8] = {
-                nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                nullptr
+            ID3D11ShaderResourceView* nulls[10] = {
+                nullptr, nullptr, nullptr, nullptr, nullptr,
+                nullptr, nullptr, nullptr, nullptr, nullptr
             };
-            ctx->PSSetShaderResources(0, 8, nulls);
+            ctx->PSSetShaderResources(0, 10, nulls);
             ID3D11Buffer* null_cb = nullptr;
             ctx->VSSetConstantBuffers(2, 1, &null_cb);
             ctx->PSSetConstantBuffers(2, 1, &null_cb);

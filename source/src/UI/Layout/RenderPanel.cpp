@@ -576,6 +576,8 @@ int pick_level_mesh_at(const ImVec2& mouse,
         if (m.index_count == 0 || m.radius <= 0.0f) continue;
         if (g_mp.selected_lod >= 0 &&
             m.lod_index != (uint32_t)g_mp.selected_lod) continue;
+        if (m.is_terrain) continue;
+        if (m.is_water)   continue;
         if (m.name.rfind("engine_level:", 0) == 0) continue;
 
         const float lx = ox - m.center[0];

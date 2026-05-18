@@ -26,6 +26,22 @@ uint32_t next_generation() {
     return g++;
 }
 
+float material_uv_multiplier(float tile_size_or_multiplier,
+                             float fallback = 0.125f)
+{
+    if (tile_size_or_multiplier > 0.0f &&
+        tile_size_or_multiplier < 1.0f)
+    {
+        return tile_size_or_multiplier;
+    }
+    if (tile_size_or_multiplier >= 1.0f &&
+        tile_size_or_multiplier < 1024.0f)
+    {
+        return 1.0f / tile_size_or_multiplier;
+    }
+    return fallback;
+}
+
 #ifdef _WIN32
 void release_srv(ID3D11ShaderResourceView*& srv) {
     if (srv) { srv->Release(); srv = nullptr; }
@@ -177,23 +193,26 @@ bool Build(ID3D11Device*                                       device,
     for (int i = 0; i < kMaxMaterials; ++i) {
         R.material_params[i][0] = 0.125f;
         R.material_params[i][1] = 0.125f;
-        R.material_params[i][2] = 0.0f;
-        R.material_params[i][3] = 1.0f;
+        R.material_params[i][2] = 1.0f;
+        R.material_params[i][3] = 0.0f;
     }
     for (size_t i = 0; i < lod_thumbs.size() && i < kMaxMaterials; ++i) {
         const auto& e = lod_thumbs[i];
-        const float base_scale =
-            (e.base_tile_scale > 0.0f && e.base_tile_scale < 16.0f)
-                ? e.base_tile_scale : 0.125f;
-        const float detail_scale =
-            (e.detail_tile_scale > 0.0f && e.detail_tile_scale < 16.0f)
-                ? e.detail_tile_scale : base_scale;
+        const float base_scale = material_uv_multiplier(e.base_tile_scale);
+        const float detail_scale = (e.detail_tile_scale > 0.0f)
+            ? material_uv_multiplier(e.detail_tile_scale, base_scale)
+            : base_scale;
+        const float base_intensity =
+            (e.base_intensity > 0.0f && e.base_intensity < 16.0f)
+                ? e.base_intensity : 1.0f;
+        const float detail_weight =
+            (e.srv_detail_diffuse &&
+             e.detail_intensity > 0.0f && e.detail_intensity < 16.0f)
+                ? e.detail_intensity : 0.0f;
         R.material_params[i][0] = base_scale;
         R.material_params[i][1] = detail_scale;
-        R.material_params[i][2] = e.srv_detail_diffuse ? 1.0f : 0.0f;
-        R.material_params[i][3] =
-            (e.detail_intensity > 0.0f && e.detail_intensity < 16.0f)
-                ? e.detail_intensity : 1.0f;
+        R.material_params[i][2] = base_intensity;
+        R.material_params[i][3] = detail_weight;
         if (i == 0) R.tile_scale = base_scale;
     }
 
@@ -699,12 +718,19 @@ bool Build(ID3D11Device*                                       device,
                 return 1.0f;
             }
 
+            const float scale_u = (L.mask_scale[0] > 0.0f)
+                ? L.mask_scale[0]
+                : 32.0f / float(parsed.splat_w);
+            const float scale_v = (L.mask_scale[1] > 0.0f)
+                ? L.mask_scale[1]
+                : 32.0f / float(parsed.splat_h);
+
             const float u = L.tile_uv[0]
                 + std::clamp(local_x, 0.0f, 1.0f)
-                * (32.0f / float(parsed.splat_w));
+                * scale_u;
             const float v = L.tile_uv[1]
                 + std::clamp(local_z, 0.0f, 1.0f)
-                * (32.0f / float(parsed.splat_h));
+                * scale_v;
 
             float px = u * float(parsed.splat_w) - 0.5f;
             float py = v * float(parsed.splat_h) - 0.5f;

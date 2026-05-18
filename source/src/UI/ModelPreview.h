@@ -65,6 +65,7 @@ struct MPPerMesh {
     bool isolated  = false;
 
     bool is_terrain = false;
+    bool is_water   = false;
 
     uint32_t source_mesh_idx = 0;
 
@@ -85,6 +86,9 @@ struct ModelPreview {
     ID3D11VertexShader* vs_terrain = nullptr;
     ID3D11PixelShader*  ps_terrain = nullptr;
     ID3D11Buffer*       cbuffer_terrain = nullptr;
+    ID3D11VertexShader* vs_water = nullptr;
+    ID3D11PixelShader*  ps_water = nullptr;
+    ID3D11Buffer*       cbuffer_water = nullptr;
     ID3D11SamplerState* sampler_point = nullptr;
     ID3D11RasterizerState* rs = nullptr;
     ID3D11RasterizerState* rs_wire = nullptr;

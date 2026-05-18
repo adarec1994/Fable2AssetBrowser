@@ -82,7 +82,7 @@ constexpr HashOverride kParentHashOverrides[] = {
     { 0xD306D0F9, "Art\\Environment\\Regions\\Dungeon\\Tombs\\Pieces\\dotXSI\\Cellar_Small_Room\\Cellar_Small_Room.mdl" }, // 13x Cellar_Small_Room
     { 0x03AB4C39, "Art\\Environment\\Shared assets\\Props\\dotXSI\\ESA_Books_Block_V2\\ESA_Books_Block_V2.mdl" }, // 12x Books_Group_V3
     { 0x1D242882, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Wall_Tower\\BS_Market_Wall_Tower.mdl" }, // 12x NewObjectBuildingBSMarketWallTower
-    { 0x351F7BC0, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Arch\\BS_Market_Docks_Arch.mdl" }, // 12x NewObjectBuildingBSMarketDock
+    { 0x351F7BC0, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Platform1\\BS_Market_Docks_Platform1.mdl" }, // 12x NewObjectBuildingBSMarketDock
     { 0x3E7DB724, "Art\\Environment\\Shared assets\\Props\\dotXSI\\ESA_PictureFrame5\\ESA_PictureFrame5.mdl" }, // 12x ObjectFurniturePictureFrame5
     { 0x7002F0BA, "Art\\Environment\\Shared assets\\Props\\dotXSI\\ESA_Cask_Small_V1\\ESA_Cask_Small_V1.mdl" }, // 12x Cask_Small
     { 0x8D3BF70B, "Art\\Environment\\Shared assets\\Furniture\\dotXSI\\ESA_F_Drawers_UltraDecorative\\ESA_F_Drawers_UltraDecorative.mdl" }, // 12x Drawers_UltraDecorative
@@ -105,7 +105,8 @@ constexpr HashOverride kParentHashOverrides[] = {
     { 0x68DD7F94, "Art\\Environment\\Regions\\Dungeon\\Tombs\\Pieces\\dotXSI\\Cellar_Corridor_Stair_Corner\\Cellar_Corridor_Stair_Corner.mdl" }, // 8x Cellar_Corridor_Stair_Corner
     { 0x7046E366, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Guardpost\\BS_Market_Guardpost.mdl" }, // 8x NewObjectBuildingBSGuardPost
     { 0x748A3051, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Wall_Slope\\BS_Market_Wall_Slope.mdl" }, // 8x NewObjectBuildingBSMarketWallSlope
-    { 0x89682293, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Wall\\BS_Market_Docks_Wall.mdl" }, // 8x BS_Docks_Wall_Buttress
+    { 0x89682293, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Wall_Buttress\\BS_Market_Docks_Wall_Buttress.mdl" }, // 8x BS_Docks_Wall_Buttress
+    { 0x8B41EC78, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Wall_thin\\BS_Market_Docks_Wall_thin.mdl" }, // 2x BS_Docks_Wall_Thin
     { 0x9A2E51C6, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Wall_Gate\\BS_Market_Wall_Gate.mdl" }, // 8x BowerstoneWall_Closed_Gate
     { 0xAE711422, "Art\\Environment\\Shared assets\\Props\\dotXSI\\ESA_Workbench\\ESA_Workbench.mdl" }, // 8x Workbench
     { 0xC6177B50, "Art\\Environment\\Shared assets\\Props\\dotXSI\\ESA_Cask_Large_V2\\ESA_Cask_Large_V2.mdl" }, // 8x Cask_Large_V2
@@ -113,7 +114,13 @@ constexpr HashOverride kParentHashOverrides[] = {
     { 0xFDD6D925, "Art\\Environment\\Shared assets\\Props\\dotXSI\\ESA_Easel\\ESA_Easel.mdl" }, // 8x Easel
     { 0xA214008A, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_LockGates\\BS_Market_LockGates.mdl" }, // 4x NewObjectBuildingBSLockgate
     { 0x047E48AE, "Art\\Environment\\Regions\\Bowerstone\\Buildings\\dotXSI\\BS_Market_Gatehouse\\BS_Market_Gatehouse.mdl" }, // 2x NewObjectBuildingBSGateHouseRear
+    { 0x1CFD98E6, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Crane\\BS_Market_Docks_Crane.mdl" }, // 2x NewObjectBuildingBSMarketDockCrane
+    { 0x525BA9F0, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Jetty_5Steps\\BS_Market_Docks_Jetty_5Steps.mdl" }, // 3x NewObjectBuildingBSMarketDockJettySteps
+    { 0x899BA881, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Jetty\\BS_Market_Docks_Jetty.mdl" }, // 2x NewObjectBuildingBSMarketDockJetty
     { 0xB7C6F3FD, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Bridge\\BS_Market_Bridge.mdl" }, // 2x NewObjectBuildingBSMarketBridge
+    { 0xECC8C174, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Platform1\\BS_Market_Docks_Platform1.mdl" }, // 4x NewObjectBuildingBSMarketDock2
+    { 0x43EE783D, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Castle_Arch\\BS_Market_Castle_Arch.mdl" }, // 1x ObjectBuildingBSMarketArchCastle
+    { 0xD70DA79C, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Archway\\BS_Market_Archway.mdl" }, // 1x NewObjectBuildingBSMarketarch
     { 0xD55304DB, "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_ClockTower\\BS_Market_ClockTower.mdl" }, // 2x QO700_ClockTowerBase
 };
 
@@ -189,7 +196,13 @@ constexpr KeyOverride kEntityKeyOverrides[] = {
     { "obejctfurnituresmallwallcorner", "Art\\Environment\\Shared assets\\Walls\\dotXSI\\Stone_Wall_Medium_Curved_Spiked\\Stone_Wall_Medium_Curved_Spiked.mdl" },
     { "cellarsmallroom", "Art\\Environment\\Regions\\Dungeon\\Tombs\\Pieces\\dotXSI\\Cellar_Small_Room\\Cellar_Small_Room.mdl" },
     { "esasmarchedwinv", "Art\\Environment\\Shared assets\\Doors_Windows\\dotXSI\\ESA_SmArchedWin_V1\\ESA_SmArchedWin_V1.mdl" },
-    { "bsmarketdock", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Arch\\BS_Market_Docks_Arch.mdl" },
+    { "bsmarketdock", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Platform1\\BS_Market_Docks_Platform1.mdl" },
+    { "bsmarketdock2", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Platform1\\BS_Market_Docks_Platform1.mdl" },
+    { "bsmarketdockcrane", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Crane\\BS_Market_Docks_Crane.mdl" },
+    { "bsmarketdockjetty", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Jetty\\BS_Market_Docks_Jetty.mdl" },
+    { "bsmarketdockjettysteps", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Jetty_5Steps\\BS_Market_Docks_Jetty_5Steps.mdl" },
+    { "bsdockswallthin", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Wall_thin\\BS_Market_Docks_Wall_thin.mdl" },
+    { "bsdockwallthin", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Wall_thin\\BS_Market_Docks_Wall_thin.mdl" },
     { "bsmarketwalltower", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Wall_Tower\\BS_Market_Wall_Tower.mdl" },
     { "coveredtable", "Art\\Environment\\Shared assets\\ShopClutter\\dotXSI\\ESA_Shop_Covered_Table\\ESA_Shop_Covered_Table.mdl" },
     { "artistsbrush", "Art\\Environment\\Shared assets\\Props\\dotXSI\\ESA_Artists_Brush\\ESA_Artists_Brush.mdl" },
@@ -212,10 +225,12 @@ constexpr KeyOverride kEntityKeyOverrides[] = {
     { "vasev", "Art\\Environment\\Regions\\Bowerstone\\Props\\dotXSI\\BS_Vase_V2\\BS_Vase_V2.mdl" },
     { "bookcaseworn", "Art\\Environment\\Shared assets\\Furniture\\dotXSI\\ESA_F_Bookcase_Worn\\ESA_F_Bookcase_Worn.mdl" },
     { "bsmarketwallslope", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Wall_Slope\\BS_Market_Wall_Slope.mdl" },
-    { "bsdockswallbuttress", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Wall\\BS_Market_Docks_Wall.mdl" },
+    { "bsdockswallbuttress", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Docks_Wall_Buttress\\BS_Market_Docks_Wall_Buttress.mdl" },
     { "chairwoodenupgradeable", "Art\\Environment\\Shared assets\\Furniture\\dotXSI\\ESA_F_Chair_Wooden_UltraDecorative\\ESA_F_Chair_Wooden_UltraDecorative.mdl" },
     { "weaponrack", "Art\\Environment\\Shared assets\\ShopClutter\\dotXSI\\ESA_Shop_Weapon_Rack\\ESA_Shop_Weapon_Rack.mdl" },
     { "bsmarketbridge", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Bridge\\BS_Market_Bridge.mdl" },
+    { "bsmarketarch", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Archway\\BS_Market_Archway.mdl" },
+    { "bsmarketarchcastle", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Castle_Arch\\BS_Market_Castle_Arch.mdl" },
     { "qo700clocktowerbase", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_ClockTower\\BS_Market_ClockTower.mdl" },
     { "bslockgate", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_LockGates\\BS_Market_LockGates.mdl" },
     { "bsgatehouserear", "Art\\Environment\\Regions\\Bowerstone\\Buildings\\dotXSI\\BS_Market_Gatehouse\\BS_Market_Gatehouse.mdl" },

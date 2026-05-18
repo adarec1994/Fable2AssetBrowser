@@ -282,9 +282,6 @@ void draw() {
                 if (ImGui::SmallButton("Scroll to bottom")) {
                     want_scroll_bottom = true;
                 }
-                ImGui::SameLine();
-                ImGui::TextDisabled("(%zu lines, drag to select, Ctrl+C to copy)",
-                                    local_count);
             }
             ImGui::Separator();
 

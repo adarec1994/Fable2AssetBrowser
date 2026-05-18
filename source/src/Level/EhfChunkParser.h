@@ -8,16 +8,24 @@ namespace Level {
 
 struct EhfLodEntry {
     std::string strs[6];
+    uint32_t    material_flags = 0;
     float       params[2][3] = {{0.0f, 1.0f, 0.0f},
                                 {0.0f, 1.0f, 0.0f}};
 };
 
+struct EhfPaintResource {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t pixel_format = 0;
+};
+
 struct EhfChunkLayer {
-    uint32_t material_idx;
-    uint32_t name_idx;
-    float    tile_uv[2];
-    uint8_t  texture_idx[4];
-    uint8_t  blend[4];
+    uint32_t material_idx = 0;
+    uint32_t name_idx = 0;
+    float    tile_uv[2] = {0.0f, 0.0f};
+    float    mask_scale[2] = {0.0f, 0.0f};
+    uint8_t  texture_idx[4] = {0, 0, 0, 0};
+    uint8_t  blend[4] = {0, 0, 0, 0};
 };
 
 struct EhfChunk {
@@ -36,6 +44,7 @@ struct EhfParsedBody {
     uint32_t                     splat_h = 0;
 
     std::vector<EhfLodEntry>     lods;
+    std::vector<EhfPaintResource> paint_resources;
     std::vector<EhfChunk>        chunks;
     std::vector<uint8_t>         splat_indices;
 

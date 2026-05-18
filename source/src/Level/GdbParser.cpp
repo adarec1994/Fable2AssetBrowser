@@ -39,6 +39,8 @@ constexpr uint32_t kHashParent   = 0x5F6317D5;
 constexpr uint32_t kHashPosition = 0xBD7C27D4;
 constexpr uint32_t kHashRotation = 0x21EBC83B;
 constexpr uint32_t kHashTransformComponent = 0xF73572C4;
+constexpr uint32_t kHashModelResource = 0x29CF50D1;
+constexpr uint32_t kHashModelPathHash = 0x0C17DB4E;
 constexpr size_t   kFixedRecSize = 92;
 constexpr size_t   kHeaderSize   = 0x18;
 
@@ -308,6 +310,39 @@ bool TryComponentTransformRecord(const GdbView& view,
                               rot_x, rot_y, rot_z, has_rotation);
 }
 
+bool TryReadModelPathHashForParent(const GdbView& view,
+                                   uint32_t parent_hash,
+                                   uint32_t& out_hash)
+{
+    out_hash = 0;
+    if (!view.ok || parent_hash == 0) return false;
+
+    size_t parent_record = 0;
+    if (!view.lookup(parent_hash, parent_record)) return false;
+
+    size_t model_slot = 0;
+    if (!view.findField(parent_record, kHashModelResource, 6,
+                        model_slot, nullptr)) {
+        return false;
+    }
+
+    const uint32_t model_resource_hash =
+        ReadBeU32(view.bytes.data() + model_slot);
+    size_t model_resource_record = 0;
+    if (!view.lookup(model_resource_hash, model_resource_record)) return false;
+
+    size_t path_hash_slot = 0;
+    uint8_t path_hash_type = 0;
+    if (!view.findLocal(model_resource_record, kHashModelPathHash, 0xFF,
+                        path_hash_slot, &path_hash_type)) {
+        return false;
+    }
+    if (path_hash_type != 4 && path_hash_type != 3) return false;
+
+    out_hash = ReadBeU32(view.bytes.data() + path_hash_slot);
+    return out_hash != 0;
+}
+
 bool TryInlineTransform(const std::vector<uint8_t>& bytes,
                         size_t rs,
                         size_t re,
@@ -439,6 +474,7 @@ GdbInfo ParseWithSaveMap(
         pl.marker = kFixedMarker;
         pl.hash_a = ReadBeU32(p + 0x04);
         pl.parent_hash = 0;
+        pl.model_path_hash = 0;
 
         if (Finite3(pl.x, pl.y, pl.z)) {
             out.placements.push_back(pl);
@@ -498,15 +534,15 @@ GdbInfo ParseWithSaveMap(
         if (view.ok && inst_hash != 0) {
             size_t direct = 0;
             if (view.lookup(inst_hash, direct)) {
-                have_pos = TryTransformRecord(view, direct,
-                                              pos_x, pos_y, pos_z,
-                                              rot_x, rot_y, rot_z,
-                                              has_rotation);
+                have_pos = TryComponentTransformRecord(view, direct,
+                                                       pos_x, pos_y, pos_z,
+                                                       rot_x, rot_y, rot_z,
+                                                       has_rotation);
                 if (!have_pos) {
-                    have_pos = TryComponentTransformRecord(view, direct,
-                                                           pos_x, pos_y, pos_z,
-                                                           rot_x, rot_y, rot_z,
-                                                           has_rotation);
+                    have_pos = TryTransformRecord(view, direct,
+                                                  pos_x, pos_y, pos_z,
+                                                  rot_x, rot_y, rot_z,
+                                                  has_rotation);
                 }
                 if (!have_pos) {
                     have_pos = TryIndexedInlineTransform(view, direct,
@@ -544,12 +580,15 @@ GdbInfo ParseWithSaveMap(
         pl.marker     = kVarMarker;
         pl.hash_a     = inst_hash;
         pl.parent_hash = 0;
+        pl.model_path_hash = 0;
         if (view.ok && inst_hash != 0) {
             size_t direct = 0;
             size_t parent_slot = 0;
             if (view.lookup(inst_hash, direct) &&
                 view.findLocal(direct, kHashParent, 6, parent_slot, nullptr)) {
                 pl.parent_hash = ReadBeU32(bytes.data() + parent_slot);
+                TryReadModelPathHashForParent(view, pl.parent_hash,
+                                              pl.model_path_hash);
             }
         }
         pl.entity_name = std::move(entity_name);
@@ -575,15 +614,15 @@ GdbInfo ParseWithSaveMap(
             float pos_x = 0.0f, pos_y = 0.0f, pos_z = 0.0f;
             float rot_x = 0.0f, rot_y = 0.0f, rot_z = 0.0f;
             bool has_rotation = false;
-            bool have_pos = TryTransformRecord(view, direct,
-                                               pos_x, pos_y, pos_z,
-                                               rot_x, rot_y, rot_z,
-                                               has_rotation);
+            bool have_pos = TryComponentTransformRecord(view, direct,
+                                                        pos_x, pos_y, pos_z,
+                                                        rot_x, rot_y, rot_z,
+                                                        has_rotation);
             if (!have_pos) {
-                have_pos = TryComponentTransformRecord(view, direct,
-                                                       pos_x, pos_y, pos_z,
-                                                       rot_x, rot_y, rot_z,
-                                                       has_rotation);
+                have_pos = TryTransformRecord(view, direct,
+                                              pos_x, pos_y, pos_z,
+                                              rot_x, rot_y, rot_z,
+                                              has_rotation);
             }
             if (!have_pos) {
                 have_pos = TryIndexedInlineTransform(view, direct,
@@ -608,10 +647,13 @@ GdbInfo ParseWithSaveMap(
             pl.marker     = kVarMarker;
             pl.hash_a     = inst_hash;
             pl.parent_hash = 0;
+            pl.model_path_hash = 0;
 
             size_t parent_slot = 0;
             if (view.findLocal(direct, kHashParent, 6, parent_slot, nullptr)) {
                 pl.parent_hash = ReadBeU32(bytes.data() + parent_slot);
+                TryReadModelPathHashForParent(view, pl.parent_hash,
+                                              pl.model_path_hash);
             }
             pl.entity_name = kv.second;
             out.placements.push_back(std::move(pl));

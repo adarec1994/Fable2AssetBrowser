@@ -213,12 +213,19 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
                 return false;
             }
         }
-        for (int p = 0; p < 3; ++p) {
-            if (!w.f32(out.lods[k].params[0][p])) {
-                out.error = "LOD mid floats";
-                return false;
-            }
+        if (!w.f32(out.lods[k].params[0][0])) {
+            out.error = "LOD base scale";
+            return false;
         }
+        if (!w.u32(out.lods[k].material_flags)) {
+            out.error = "LOD material flags";
+            return false;
+        }
+        if (!w.f32(out.lods[k].params[0][1])) {
+            out.error = "LOD base intensity";
+            return false;
+        }
+        out.lods[k].params[0][2] = 0.0f;
         for (int s = 3; s < 6; ++s) {
             if (!w.null_str(out.lods[k].strs[s])) {
                 out.error = "LOD[" + std::to_string(k) + "].str["
@@ -237,13 +244,19 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
     uint32_t db0_cnt;
     if (!w.u32(db0_cnt)) { out.error = "85DB0 count"; return false; }
     if (db0_cnt > 32) { out.error = "85DB0 count implausible"; return false; }
+    out.paint_resources.reserve(db0_cnt);
     for (uint32_t k = 0; k < db0_cnt; ++k) {
         if (!w.need(0x60)) {
             out.error = "85DB0 tex[" + std::to_string(k) + "]: " + w.err;
             return false;
         }
         const size_t tex_start = w.pos;
+        EhfPaintResource res;
+        res.width = be_u32(w.p + tex_start + 0x10);
+        res.height = be_u32(w.p + tex_start + 0x14);
         const uint32_t pf = be_u32(w.p + tex_start + 0x18);
+        res.pixel_format = pf;
+        out.paint_resources.push_back(res);
         if (pf == 99u) {
             int sw = 0, sh = 0;
             std::string err;
@@ -302,6 +315,17 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
             if (!w.u32(L.name_idx))   { out.error = "layer name_idx"; return false; }
             if (!w.f32(L.tile_uv[0])) { out.error = "layer uv0"; return false; }
             if (!w.f32(L.tile_uv[1])) { out.error = "layer uv1"; return false; }
+            L.mask_scale[0] = 0.0f;
+            L.mask_scale[1] = 0.0f;
+            if (L.name_idx < out.paint_resources.size()) {
+                const EhfPaintResource& res = out.paint_resources[L.name_idx];
+                if (res.width > 0) {
+                    L.mask_scale[0] = 16.0f / float(res.width);
+                }
+                if (res.height > 0) {
+                    L.mask_scale[1] = 16.0f / float(res.height);
+                }
+            }
             for (int i = 0; i < 4; ++i) {
                 if (!w.u8(L.texture_idx[i])) { out.error = "layer idx"; return false; }
                 if (!w.u8(L.blend[i])) { out.error = "layer blend"; return false; }

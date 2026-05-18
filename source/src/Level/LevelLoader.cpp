@@ -61,6 +61,8 @@ int                   g_pending_terrain_ghf_height = 0;
 FlatAssetEntry        g_pending_terrain_ghf_entry;
 std::vector<Level::PropBlock> g_pending_level_prop_blocks;
 std::string                   g_pending_level_model_body_bnk;
+Level::WaterScene             g_pending_level_water_scene;
+bool                          g_pending_level_water_present = false;
 std::vector<std::string>           g_level_vfs_texture_body_bnks;
 std::vector<std::string>           g_level_vfs_model_bnks;
 std::vector<std::string>           g_level_vfs_streaming_bnks;
@@ -107,6 +109,8 @@ void OpenAsync(const FlatAssetEntry& entry)
             g_pending_terrain_level_entry = FlatAssetEntry{};
             g_pending_terrain_label.clear();
             g_pending_level_model_body_bnk.clear();
+            g_pending_level_water_present = false;
+            g_pending_level_water_scene = Level::WaterScene{};
             g_level_havok_collision.clear();
             g_level_gdb_placements.clear();
             g_level_vfs_texture_body_bnks.clear();
@@ -233,6 +237,14 @@ void mat3_mul(const float a[9], const float b[9], float out[9])
     }
 }
 
+bool is_gdb_pi_pair_yaw_rotation(float rx, float ry)
+{
+    constexpr float kPi = 3.14159265358979323846f;
+    return std::isfinite(rx) && std::isfinite(ry) &&
+           std::fabs(std::fabs(rx) - kPi) < 1e-4f &&
+           std::fabs(std::fabs(ry) - kPi) < 1e-4f;
+}
+
 void fill_gdb_rotation_matrix(Level::PropInstance& pi,
                               float rx,
                               float ry,
@@ -246,33 +258,27 @@ void fill_gdb_rotation_matrix(Level::PropInstance& pi,
         scale = 1.0f;
     }
 
-    const float cx = std::cos(rx);
-    const float sx = std::sin(rx);
-    const float cy = std::cos(ry);
-    const float sy = std::sin(ry);
-    const float cz = std::cos(rz);
-    const float sz = std::sin(rz);
-
-    const float mx[9] = {
-        1.0f, 0.0f, 0.0f,
-        0.0f, cx,   sx,
-        0.0f, -sx,  cx
-    };
-    const float my[9] = {
-        cy,   0.0f, -sy,
-        0.0f, 1.0f, 0.0f,
-        sy,   0.0f, cy
-    };
-    const float mz[9] = {
-        cz,   sz,   0.0f,
-        -sz,  cz,   0.0f,
-        0.0f, 0.0f, 1.0f
-    };
-
-    float tmp[9] = {};
     float game[9] = {};
-    mat3_mul(my, mx, tmp);
-    mat3_mul(mz, tmp, game);
+    const float a = -rz;
+    const float b = ry;
+    const float c = rx;
+    const float sa = std::sin(a);
+    const float ca = std::cos(a);
+    const float sb = std::sin(b);
+    const float cb = std::cos(b);
+    const float sc = std::sin(c);
+    const float cc = std::cos(c);
+
+    // Matches the game's Euler-to-matrix helper in default.xex (0x8257ACA0).
+    game[0] = cb * ca;
+    game[1] = sb * sc - cb * cc * sa;
+    game[2] = cb * sc * sa + sb * cc;
+    game[3] = sa;
+    game[4] = cc * ca;
+    game[5] = -sc * ca;
+    game[6] = -sb * ca;
+    game[7] = sb * cc * sa + cb * sc;
+    game[8] = cb * cc - sb * sc * sa;
 
     const int axis_map[3] = {0, 2, 1};
     for (int row = 0; row < 3; ++row) {
@@ -299,6 +305,20 @@ std::string lower_slash(std::string s)
                    [](unsigned char c){ return std::tolower(c); });
     std::replace(s.begin(), s.end(), '\\', '/');
     return s;
+}
+
+uint32_t fnv1_model_path_hash(std::string s)
+{
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    std::replace(s.begin(), s.end(), '/', '\\');
+
+    uint32_t h = 0x811C9DC5u;
+    for (unsigned char c : s) {
+        h *= 0x01000193u;
+        h ^= uint32_t(c);
+    }
+    return h;
 }
 
 std::string strip_model_suffixes(std::string s)
@@ -333,6 +353,54 @@ std::string model_name_from_path(const std::string& path)
     p = strip_model_suffixes(p);
     const size_t slash = p.find_last_of('/');
     return (slash == std::string::npos) ? p : p.substr(slash + 1);
+}
+
+bool is_gdb_authored_level_shell_model(
+    const std::string& model_path,
+    const std::unordered_set<std::string>& authored_level_model_paths)
+{
+    const std::string p = lower_slash(model_path);
+    if (authored_level_model_paths.find(p) ==
+        authored_level_model_paths.end())
+    {
+        return false;
+    }
+
+    // GDB adds gameplay ownership/contents around buildings, while engine_level
+    // already authors the large exterior shells.  Only suppress exact path
+    // collisions, so distinct variants and interior shell pieces still render.
+    return p.find("/buildings/") != std::string::npos ||
+           p.find("/structures/") != std::string::npos;
+}
+
+bool is_gdb_shell_audit_model(const std::string& model_path)
+{
+    const std::string p = lower_slash(model_path);
+    return p.find("/buildings/") != std::string::npos ||
+           p.find("/structures/") != std::string::npos;
+}
+
+std::string hex_u32(uint32_t v)
+{
+    std::ostringstream os;
+    os << "0x" << std::uppercase << std::hex
+       << std::setw(8) << std::setfill('0') << v;
+    return os.str();
+}
+
+std::string gdb_shell_sample_text(
+    const Gdb::Placement& p,
+    const std::string& model_path)
+{
+    std::ostringstream os;
+    os << (p.entity_name.empty() ? "<unnamed>" : p.entity_name)
+       << " parent=" << hex_u32(p.parent_hash);
+    if (p.model_path_hash != 0) {
+        os << " modelHash=" << hex_u32(p.model_path_hash);
+    }
+    os << " pos=(" << p.x << ", " << p.y << ", " << p.z << ")"
+       << " model=" << model_path;
+    return os.str();
 }
 
 std::string gdb_representative_name(const std::vector<std::string>& examples)
@@ -370,103 +438,6 @@ std::string gdb_entity_key(std::string s)
         }
     }
     return compact_match_key(s);
-}
-
-bool should_emit_gdb_render_entity(const std::string& entity_name)
-{
-    const std::string key = gdb_entity_key(entity_name);
-    if (key.empty()) return false;
-
-    static const char* non_render[] = {
-        "trigger",
-        "lookat",
-        "lookfrom",
-        "standpos",
-        "pointofinterest",
-        "poi",
-        "wait",
-    };
-    for (const char* needle : non_render) {
-        if (key.find(needle) != std::string::npos) {
-            return false;
-        }
-    }
-
-    static const char* force_allowed[] = {
-        "bridge",
-        "clocktower",
-        "grandfatherclock",
-        "wallclock",
-        "dockarch",
-        "archway",
-        "gatehouse",
-        "lockgate",
-        "walltower",
-        "wallgate",
-        "guardpost",
-        "marketstairs",
-        "scaffoldingstairs",
-        "generalshopstairsfloor",
-        "generalstorestairsfloor",
-        "castlearch",
-        "dockwall",
-        "dockswall",
-        "docksarch",
-        "oilamp",
-        "oillantern",
-        "statue",
-        "window",
-        "weaponrack",
-    };
-    for (const char* needle : force_allowed) {
-        if (key.find(needle) != std::string::npos) {
-            return true;
-        }
-    }
-
-    static const char* blocked[] = {
-        "building",
-        "townhouse",
-        "house",
-        "facade",
-        "cellar",
-    };
-    for (const char* needle : blocked) {
-        if (key.find(needle) != std::string::npos) {
-            return false;
-        }
-    }
-
-    static const char* allowed[] = {
-        "furniture",
-        "shelf",
-        "dresser",
-        "bookcase",
-        "table",
-        "bucket",
-        "sink",
-        "rug",
-        "chair",
-        "bed",
-        "sign",
-        "book",
-        "crate",
-        "grain",
-        "wallpost",
-        "smallwall",
-        "tower",
-        "light",
-        "lamp",
-        "lantern",
-        "rack",
-        "window",
-    };
-    for (const char* needle : allowed) {
-        if (key.find(needle) != std::string::npos) {
-            return true;
-        }
-    }
-    return false;
 }
 
 bool is_gdb_landmark_name(const std::string& entity_name)
@@ -1324,6 +1295,18 @@ bool Open(const FlatAssetEntry& entry)
     }
     OutputLog::info(ps.str());
 
+    std::unordered_set<std::string> authored_level_model_paths;
+    authored_level_model_paths.reserve(info.prop_blocks.size() * 2);
+    for (const auto& block : info.prop_blocks) {
+        if (!block.model_path.empty()) {
+            authored_level_model_paths.insert(lower_slash(block.model_path));
+        }
+        if (!block.lod_model_path.empty()) {
+            authored_level_model_paths.insert(
+                lower_slash(block.lod_model_path));
+        }
+    }
+
     {
         const std::vector<std::string> wanted = {
             "bridge", "lamp", "lantern", "fence", "bench", "post",
@@ -1725,6 +1708,7 @@ bool Open(const FlatAssetEntry& entry)
             g_level_gdb_placements.reserve(info.placements.size());
 
             size_t fixed_count = 0, var_count = 0, named_count = 0;
+            size_t model_hash_count = 0;
             for (const auto& p : info.placements) {
                 GdbWorldPlacement gp;
                 gp.x      = p.x;
@@ -1737,17 +1721,20 @@ bool Open(const FlatAssetEntry& entry)
                 gp.scale  = p.scale;
                 gp.hash   = p.hash_a;
                 gp.parent_hash = p.parent_hash;
+                gp.model_path_hash = p.model_path_hash;
                 gp.marker = p.marker;
                 g_level_gdb_placements.push_back(gp);
                 if (p.marker == 0x00004B40) ++fixed_count;
                 else                         ++var_count;
                 if (!p.entity_name.empty())  ++named_count;
+                if (p.model_path_hash != 0)  ++model_hash_count;
             }
             std::ostringstream os;
             os << "gdb: " << g_level_gdb_placements.size()
                << " placements (" << fixed_count << " fixed + "
                << var_count << " variable, "
-               << named_count << " resolved to .save entity names)";
+               << named_count << " resolved to .save entity names, "
+               << model_hash_count << " with model path hashes)";
             OutputLog::success(os.str());
 
             {
@@ -2123,6 +2110,25 @@ bool Open(const FlatAssetEntry& entry)
                     }
                     return best;
                 };
+
+            std::unordered_map<uint32_t, std::vector<const FlatAssetEntry*>>
+                mdl_by_model_path_hash;
+            mdl_by_model_path_hash.reserve(S.all_mdl_files.size() * 2);
+            for (const auto& m : S.all_mdl_files) {
+                if (m.full_path.empty()) continue;
+                mdl_by_model_path_hash[fnv1_model_path_hash(m.full_path)]
+                    .push_back(&m);
+            }
+            auto resolve_model_by_path_hash = [&](uint32_t model_path_hash) {
+                if (model_path_hash == 0) {
+                    return static_cast<const FlatAssetEntry*>(nullptr);
+                }
+                auto it = mdl_by_model_path_hash.find(model_path_hash);
+                if (it == mdl_by_model_path_hash.end()) {
+                    return static_cast<const FlatAssetEntry*>(nullptr);
+                }
+                return choose_model_candidate(it->second);
+            };
             auto resolve_model_for_entity = [&](const std::string& entity_name) {
                 std::string tok = canonicalize_for_match(entity_name);
                 if (tok.empty()) return static_cast<const FlatAssetEntry*>(nullptr);
@@ -2165,8 +2171,9 @@ bool Open(const FlatAssetEntry& entry)
                 return best;
             };
 
-            // GDB/save names are instance labels, so only emit placements that
-            // resolved through the level streaming hints and global .mdl index.
+            // GDB/save names are instance labels. Prefer exact model-path hashes
+            // from the GDB parent records, then fall back to streaming hints and
+            // the global .mdl index.
             constexpr bool emit_gdb_render_placements = true;
             constexpr bool emit_derived_render_placements = false;
             std::unordered_map<std::string, Level::PropBlock> blocks_by_path;
@@ -2225,25 +2232,47 @@ bool Open(const FlatAssetEntry& entry)
 
             size_t resolved = 0;
             size_t gdb_instances_emitted = 0;
+            size_t gdb_hint_only_skipped = 0;
             size_t gdb_full_euler_rotations = 0;
             size_t gdb_yaw_only_rotations = 0;
             size_t gdb_identity_rotations = 0;
+            size_t gdb_pi_pair_yaw_rotations = 0;
+            size_t gdb_model_hash_hits = 0;
+            size_t gdb_model_hash_misses = 0;
+            size_t gdb_authored_shell_skipped = 0;
+            std::unordered_map<std::string, size_t>
+                gdb_authored_shell_skip_paths;
+            std::unordered_map<std::string, std::vector<std::string>>
+                gdb_authored_shell_skip_samples;
+            std::unordered_map<std::string, size_t>
+                gdb_emitted_shell_paths;
+            std::unordered_map<std::string, std::vector<std::string>>
+                gdb_emitted_shell_samples;
             for (const auto& p : info.placements) {
-                if (p.entity_name.empty()) continue;
+                if (!emit_gdb_render_placements) continue;
+                const bool has_model_hash = p.model_path_hash != 0;
+                if (p.entity_name.empty() && !has_model_hash) continue;
                 std::string tok = canonicalize_for_match(p.entity_name);
-                if (tok.empty()) continue;
+                if (tok.empty() && !has_model_hash) continue;
                 auto parent_name_it = parent_match_names.find(p.parent_hash);
                 const std::string* parent_match_name =
                     (parent_name_it == parent_match_names.end())
                         ? nullptr : &parent_name_it->second;
-                const bool emit_this_entity =
-                    emit_gdb_render_placements &&
-                    (should_emit_gdb_render_entity(p.entity_name) ||
-                     (parent_match_name &&
-                      should_emit_gdb_render_entity(*parent_match_name)));
 
                 const FlatAssetEntry* hit = nullptr;
-                if (!streaming_model_candidates.empty()) {
+                bool matched_model = false;
+                bool hint_only = false;
+                if (p.model_path_hash != 0) {
+                    hit = resolve_model_by_path_hash(p.model_path_hash);
+                    if (hit) {
+                        matched_model = true;
+                        ++gdb_model_hash_hits;
+                    } else {
+                        ++gdb_model_hash_misses;
+                    }
+                }
+
+                if (!matched_model && !streaming_model_candidates.empty()) {
                     const StreamingModelCandidate* stream_hit =
                         choose_streaming_model_for_gdb(
                             p.entity_name, streaming_model_candidates,
@@ -2254,15 +2283,35 @@ bool Open(const FlatAssetEntry& entry)
                             nullptr, p.parent_hash);
                     }
                     if (!stream_hit) continue;
-                    ++resolved;
+                    matched_model = true;
                     hit = stream_hit->entry;
-                    if (!emit_this_entity) continue;
-                    if (!hit) continue;
-                } else {
+                    if (!hit) {
+                        hint_only = true;
+                    }
+                } else if (!matched_model) {
                     hit = resolve_model_for_entity(p.entity_name);
                     if (!hit) continue;
-                    ++resolved;
-                    if (!emit_this_entity) continue;
+                    matched_model = true;
+                }
+
+                if (!matched_model) continue;
+                ++resolved;
+                if (hint_only || !hit) {
+                    ++gdb_hint_only_skipped;
+                    continue;
+                }
+                if (is_gdb_authored_level_shell_model(
+                        hit->full_path, authored_level_model_paths))
+                {
+                    ++gdb_authored_shell_skipped;
+                    ++gdb_authored_shell_skip_paths[hit->full_path];
+                    auto& samples =
+                        gdb_authored_shell_skip_samples[hit->full_path];
+                    if (samples.size() < 4) {
+                        samples.push_back(
+                            gdb_shell_sample_text(p, hit->full_path));
+                    }
+                    continue;
                 }
 
                 auto& pb = blocks_by_path[hit->full_path];
@@ -2280,9 +2329,16 @@ bool Open(const FlatAssetEntry& entry)
                     (std::isfinite(p.scale) && p.scale > 0.01f && p.scale < 100.0f)
                         ? p.scale : 1.0f;
                 if (p.has_rotation) {
+                    const bool pi_pair_yaw =
+                        is_gdb_pi_pair_yaw_rotation(p.rot_x, p.rot_y);
+                    if (pi_pair_yaw) {
+                        ++gdb_pi_pair_yaw_rotations;
+                    }
                     fill_gdb_rotation_matrix(pi, p.rot_x, p.rot_y, p.rot_z, scale);
-                    if (std::fabs(p.rot_x) > 1e-4f ||
-                        std::fabs(p.rot_y) > 1e-4f) {
+                    if (pi_pair_yaw) {
+                        // Counted separately below; these are authored 180-degree facings.
+                    } else if (std::fabs(p.rot_x) > 1e-4f ||
+                               std::fabs(p.rot_y) > 1e-4f) {
                         ++gdb_full_euler_rotations;
                     } else if (std::fabs(p.rot_z) > 1e-4f) {
                         ++gdb_yaw_only_rotations;
@@ -2307,6 +2363,14 @@ bool Open(const FlatAssetEntry& entry)
                     }
                 }
                 pb.instances.push_back(pi);
+                if (is_gdb_shell_audit_model(hit->full_path)) {
+                    ++gdb_emitted_shell_paths[hit->full_path];
+                    auto& samples = gdb_emitted_shell_samples[hit->full_path];
+                    if (samples.size() < 4) {
+                        samples.push_back(
+                            gdb_shell_sample_text(p, hit->full_path));
+                    }
+                }
                 ++gdb_instances_emitted;
             }
 
@@ -2323,7 +2387,95 @@ bool Open(const FlatAssetEntry& entry)
                     ", yaw-only=" +
                     std::to_string(gdb_yaw_only_rotations) +
                     ", identity=" +
-                    std::to_string(gdb_identity_rotations));
+                    std::to_string(gdb_identity_rotations) +
+                    ", pi-pair-full=" +
+                    std::to_string(gdb_pi_pair_yaw_rotations));
+                if (gdb_model_hash_hits > 0 || gdb_model_hash_misses > 0) {
+                    OutputLog::info(
+                        "gdb-derived model path hashes: hit=" +
+                        std::to_string(gdb_model_hash_hits) +
+                        ", miss=" +
+                        std::to_string(gdb_model_hash_misses));
+                }
+                if (gdb_hint_only_skipped > 0) {
+                    OutputLog::info(
+                        "gdb-derived skipped after model match: hint-only=" +
+                        std::to_string(gdb_hint_only_skipped));
+                }
+                if (gdb_authored_shell_skipped > 0) {
+                    OutputLog::info(
+                        "gdb-derived skipped exact authored building/structure duplicates: " +
+                        std::to_string(gdb_authored_shell_skipped) +
+                        " instance(s) across " +
+                        std::to_string(gdb_authored_shell_skip_paths.size()) +
+                        " model(s)");
+                    std::vector<std::pair<std::string, size_t>> skipped_paths(
+                        gdb_authored_shell_skip_paths.begin(),
+                        gdb_authored_shell_skip_paths.end());
+                    std::sort(skipped_paths.begin(), skipped_paths.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second != b.second) {
+                                      return a.second > b.second;
+                                  }
+                                  return a.first < b.first;
+                              });
+                    const size_t n =
+                        std::min<size_t>(skipped_paths.size(), 8);
+                    for (size_t i = 0; i < n; ++i) {
+                        OutputLog::info(
+                            "  skip exact authored: " +
+                            std::to_string(skipped_paths[i].second) +
+                            "x  " + skipped_paths[i].first);
+                        auto sample_it =
+                            gdb_authored_shell_skip_samples.find(
+                                skipped_paths[i].first);
+                        if (sample_it !=
+                            gdb_authored_shell_skip_samples.end())
+                        {
+                            for (const auto& sample : sample_it->second) {
+                                OutputLog::info("    e.g. " + sample);
+                            }
+                        }
+                    }
+                }
+                if (!gdb_emitted_shell_paths.empty()) {
+                    size_t total_shells = 0;
+                    for (const auto& kv : gdb_emitted_shell_paths) {
+                        total_shells += kv.second;
+                    }
+                    OutputLog::info(
+                        "gdb-derived emitted building/structure audit: " +
+                        std::to_string(total_shells) +
+                        " instance(s) across " +
+                        std::to_string(gdb_emitted_shell_paths.size()) +
+                        " model(s)");
+                    std::vector<std::pair<std::string, size_t>> emitted_paths(
+                        gdb_emitted_shell_paths.begin(),
+                        gdb_emitted_shell_paths.end());
+                    std::sort(emitted_paths.begin(), emitted_paths.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second != b.second) {
+                                      return a.second > b.second;
+                                  }
+                                  return a.first < b.first;
+                              });
+                    const size_t n =
+                        std::min<size_t>(emitted_paths.size(), 12);
+                    for (size_t i = 0; i < n; ++i) {
+                        OutputLog::info(
+                            "  emit shell: " +
+                            std::to_string(emitted_paths[i].second) +
+                            "x  " + emitted_paths[i].first);
+                        auto sample_it =
+                            gdb_emitted_shell_samples.find(
+                                emitted_paths[i].first);
+                        if (sample_it != gdb_emitted_shell_samples.end()) {
+                            for (const auto& sample : sample_it->second) {
+                                OutputLog::info("    e.g. " + sample);
+                            }
+                        }
+                    }
+                }
             } else {
                 os3 << " (not emitted: GDB has entity names, not model paths)";
                 OutputLog::warn(os3.str());
@@ -2934,19 +3086,69 @@ bool Open(const FlatAssetEntry& entry)
                                 if (iy < 0) iy = 0; else if (iy >= gh) iy = gh - 1;
                                 return heights[size_t(iy) * size_t(gw) + size_t(ix)];
                             };
-                            size_t grounded = 0;
+                            size_t authored_z_count = 0;
+                            size_t terrain_delta_count = 0;
+                            float max_abs_delta = 0.0f;
                             for (auto& pb : g_pending_level_prop_blocks) {
                                 if (pb.type != 0xB1) continue;
                                 for (auto& inst : pb.instances) {
-                                    inst.values[2] = sample_h(inst.values[0],
-                                                              inst.values[1]);
-                                    ++grounded;
+                                    const float terrain_z =
+                                        sample_h(inst.values[0], inst.values[1]);
+                                    const float delta = inst.values[2] - terrain_z;
+                                    if (std::isfinite(delta)) {
+                                        max_abs_delta =
+                                            std::max(max_abs_delta,
+                                                     std::fabs(delta));
+                                        if (std::fabs(delta) > 0.25f) {
+                                            ++terrain_delta_count;
+                                        }
+                                    }
+                                    ++authored_z_count;
                                 }
                             }
                             std::ostringstream gs;
-                            gs << "grounded " << grounded
-                               << " GDB-derived placements to terrain";
+                            gs << "preserved authored Z for "
+                               << authored_z_count
+                               << " GDB-derived placements";
+                            if (authored_z_count > 0) {
+                                gs << " ("
+                                   << terrain_delta_count
+                                   << " differ from terrain by >0.25m, max="
+                                   << max_abs_delta << ")";
+                            }
                             OutputLog::info(gs.str());
+                        }
+
+                        // Probe the .water sibling that pairs with this
+                        // heightfield. We replace the .ghf extension with
+                        // .water and ask the same BNK to extract it.
+                        g_pending_level_water_present = false;
+                        g_pending_level_water_scene = Level::WaterScene{};
+                        if (!res.ghf_path.empty()) {
+                            std::filesystem::path wp = res.ghf_path;
+                            wp.replace_extension(".water");
+                            std::string water_path = wp.string();
+                            std::vector<uint8_t> water_bytes;
+                            if (load_text_sibling(water_path, water_bytes) &&
+                                !water_bytes.empty())
+                            {
+                                Level::WaterScene scene;
+                                if (Level::ParseWaterFile(water_bytes, scene)) {
+                                    size_t total_tiles = 0;
+                                    for (const auto& b : scene.bodies)
+                                        total_tiles += b.tiles.size();
+                                    OutputLog::success(
+                                        ".water parsed: " +
+                                        std::to_string(scene.bodies.size()) +
+                                        " bodies, " +
+                                        std::to_string(total_tiles) + " tiles");
+                                    g_pending_level_water_scene = std::move(scene);
+                                    g_pending_level_water_present = true;
+                                } else {
+                                    OutputLog::warn(
+                                        ".water sibling found but failed to parse");
+                                }
+                            }
                         }
 
                         g_pending_level_model_body_bnk.clear();
@@ -4245,12 +4447,19 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
             return 1.0f;
         }
 
+        const float scale_u = (L.mask_scale[0] > 0.0f)
+            ? L.mask_scale[0]
+            : 32.0f / float(parsed.splat_w);
+        const float scale_v = (L.mask_scale[1] > 0.0f)
+            ? L.mask_scale[1]
+            : 32.0f / float(parsed.splat_h);
+
         const float u = L.tile_uv[0]
             + std::clamp(local_x, 0.0f, 1.0f)
-            * (32.0f / float(parsed.splat_w));
+            * scale_u;
         const float v = L.tile_uv[1]
             + std::clamp(local_z, 0.0f, 1.0f)
-            * (32.0f / float(parsed.splat_h));
+            * scale_v;
 
         float px = u * float(parsed.splat_w) - 0.5f;
         float py = v * float(parsed.splat_h) - 0.5f;

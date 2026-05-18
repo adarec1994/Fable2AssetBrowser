@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "HeightfieldLoader.h"
+#include "WaterParser.h"
 
 struct FlatAssetEntry;
 
@@ -145,6 +146,11 @@ extern FlatAssetEntry        g_pending_terrain_ghf_entry;
 extern std::vector<Level::PropBlock> g_pending_level_prop_blocks;
 extern std::string                   g_pending_level_model_body_bnk;
 
+// Water bodies discovered from the .water sibling of the active level.
+// Cleared on cancel; consumed by PendingLoads when terrain is committed.
+extern Level::WaterScene g_pending_level_water_scene;
+extern bool              g_pending_level_water_present;
+
 extern std::vector<std::string> g_level_vfs_texture_body_bnks;
 extern std::vector<std::string> g_level_vfs_model_bnks;
 extern std::vector<std::string> g_level_vfs_streaming_bnks;
@@ -163,6 +169,7 @@ struct GdbWorldPlacement {
     float    scale;
     uint32_t hash;
     uint32_t parent_hash;
+    uint32_t model_path_hash;
     uint32_t marker;
 };
 extern std::vector<GdbWorldPlacement> g_level_gdb_placements;

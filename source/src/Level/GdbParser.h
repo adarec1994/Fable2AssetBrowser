@@ -15,6 +15,7 @@ struct Placement {
     uint32_t marker;
     uint32_t hash_a;
     uint32_t parent_hash;
+    uint32_t model_path_hash;
     std::string entity_name;
 };
 

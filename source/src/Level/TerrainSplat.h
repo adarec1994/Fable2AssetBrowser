@@ -44,6 +44,7 @@ struct Resources {
     int   splat_h = 0;
     int   weight_w = 0;
     int   weight_h = 0;
+    // x/y: base/detail UV multipliers, z: base intensity, w: detail weight.
     float material_params[kMaxMaterials][4] = {};
 
     uint32_t generation = 0;

@@ -76,6 +76,8 @@ set(APP_SOURCES
         src/Level/GdbModelHashlist.h
         src/Level/GdbParser.cpp
         src/Level/GdbParser.h
+        src/Level/WaterParser.cpp
+        src/Level/WaterParser.h
         src/Havok/HavokPackfileReader.cpp
         src/Havok/HavokPackfileReader.h
         src/BNKCore.cpp

@@ -21,14 +21,24 @@
 #include <atomic>
 #include <algorithm>
 #include <cmath>
+#include <exception>
+#include <fstream>
+#include <limits>
+#include <mutex>
 #include <thread>
 #include <ctime>
 #include <cstring>
+#include <cctype>
 #include <sstream>
 #include <unordered_map>
 
 #ifndef _WIN32
 #include <GL/glew.h>
+#else
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 std::atomic<bool> g_pending_mdl_load{false};
@@ -44,11 +54,182 @@ extern FlyCam       g_flycam;
 
     namespace {
 
+static void level_load_debug(const std::string& msg);
+
 struct CachedPropModel {
     bool loaded = false;
     MDLInfo info;
     std::vector<MDLMeshGeom> geoms;
 };
+
+static std::string normalized_asset_path(std::string s)
+{
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    std::replace(s.begin(), s.end(), '\\', '/');
+    return s;
+}
+
+static std::string asset_leaf(std::string s)
+{
+    const size_t sl = s.find_last_of("/\\");
+    if (sl != std::string::npos) s = s.substr(sl + 1);
+    return s;
+}
+
+static std::string asset_parent_key(const std::string& bnk_path)
+{
+    auto it = S.nested_bnk_parents.find(bnk_path);
+    if (it != S.nested_bnk_parents.end()) {
+        return normalized_asset_path(it->second);
+    }
+    std::filesystem::path p(bnk_path);
+    return normalized_asset_path(p.parent_path().string());
+}
+
+static bool parse_prop_model_buffer(const std::vector<unsigned char>& buf,
+                                    const std::string& model_path,
+                                    CachedPropModel& out)
+{
+    CachedPropModel tmp;
+    if (!parse_mdl_info(buf, tmp.info, model_path)) {
+        return false;
+    }
+
+    bool all_empty = !tmp.info.MeshBuffers.empty();
+    for (const auto& mb : tmp.info.MeshBuffers) {
+        if (mb.VertexCount > 0) {
+            all_empty = false;
+            break;
+        }
+    }
+    if (all_empty) {
+        reparse_mdl_buffers_via_polymsh_scan(buf, tmp.info);
+    }
+
+    parse_mdl_geometry(buf, tmp.info, tmp.geoms);
+    if (tmp.geoms.empty()) {
+        return false;
+    }
+
+    out.info = std::move(tmp.info);
+    out.geoms = std::move(tmp.geoms);
+    return true;
+}
+
+static std::vector<const FlatAssetEntry*>
+collect_prop_model_candidates(const std::string& model_path,
+                              const std::string& preferred_body_bnk)
+{
+    const std::string want_full = normalized_asset_path(model_path);
+    const std::string want_leaf = normalized_asset_path(asset_leaf(model_path));
+    const std::string preferred_bnk = normalized_asset_path(preferred_body_bnk);
+    const std::string preferred_parent = asset_parent_key(preferred_body_bnk);
+
+    struct Scored {
+        const FlatAssetEntry* entry = nullptr;
+        int score = 0;
+    };
+
+    std::vector<Scored> exact;
+    std::vector<Scored> leaf;
+    exact.reserve(16);
+    leaf.reserve(16);
+
+    for (const auto& e : S.all_mdl_files) {
+        const std::string e_full = normalized_asset_path(e.full_path);
+        const std::string e_leaf = normalized_asset_path(e.name);
+        const bool full_match = (e_full == want_full);
+        const bool leaf_match = (!full_match && !want_leaf.empty() &&
+                                 e_leaf == want_leaf);
+        if (!full_match && !leaf_match) continue;
+
+        int score = full_match ? 100000 : 10000;
+        const std::string e_bnk = normalized_asset_path(e.bnk_path);
+        if (!preferred_bnk.empty() && e_bnk == preferred_bnk) {
+            score += 50000;
+        }
+        if (!preferred_parent.empty() &&
+            asset_parent_key(e.bnk_path) == preferred_parent) {
+            score += 10000;
+        }
+        if (!e.from_nested) score += 1000;
+        score += std::min<uint32_t>(e.size, 1000000u) / 10000;
+
+        (full_match ? exact : leaf).push_back({&e, score});
+    }
+
+    auto by_score = [](const Scored& a, const Scored& b) {
+        if (a.score != b.score) return a.score > b.score;
+        return a.entry->bnk_path < b.entry->bnk_path;
+    };
+
+    auto& picked = exact.empty() ? leaf : exact;
+    std::sort(picked.begin(), picked.end(), by_score);
+
+    std::vector<const FlatAssetEntry*> out;
+    out.reserve(picked.size());
+    for (const auto& s : picked) out.push_back(s.entry);
+    return out;
+}
+
+static bool try_prop_model_candidate(const FlatAssetEntry& entry,
+                                     const std::string& model_path,
+                                     CachedPropModel& cached,
+                                     std::string& method)
+{
+    try {
+        std::vector<unsigned char> body =
+            BnkCache::extract_bytes(entry.bnk_path, entry.file_index);
+        if (!body.empty() &&
+            parse_prop_model_buffer(body, model_path, cached)) {
+            method = "body";
+            return true;
+        }
+    } catch (...) {
+    }
+
+    std::vector<unsigned char> buf;
+    if (build_mdl_buffer_for_name_with_body(model_path, entry.bnk_path, buf) &&
+        parse_prop_model_buffer(buf, model_path, cached)) {
+        method = "body+header";
+        return true;
+    }
+
+    return false;
+}
+
+static bool load_cached_prop_model(const std::string& model_path,
+                                   const std::string& preferred_body_bnk,
+                                   CachedPropModel& cached)
+{
+    std::vector<unsigned char> buf;
+    if (build_mdl_buffer_for_name_with_body(model_path,
+                                            preferred_body_bnk,
+                                            buf) &&
+        parse_prop_model_buffer(buf, model_path, cached)) {
+        return true;
+    }
+
+    const auto candidates =
+        collect_prop_model_candidates(model_path, preferred_body_bnk);
+    for (const FlatAssetEntry* entry : candidates) {
+        if (!entry) continue;
+        std::string method;
+        if (try_prop_model_candidate(*entry, model_path, cached, method)) {
+            std::ostringstream os;
+            os << "prop model recovered: " << model_path
+               << " via " << method
+               << " from " << std::filesystem::path(entry->bnk_path).filename().string()
+               << " index=" << entry->file_index
+               << " size=" << entry->size;
+            level_load_debug(os.str());
+            return true;
+        }
+    }
+
+    return false;
+}
 
 struct GeneratedTerrainTexture {
     size_t               mesh_index = 0;
@@ -57,6 +238,46 @@ struct GeneratedTerrainTexture {
     int                  width = 0;
     int                  height = 0;
 };
+
+static std::mutex g_level_load_debug_mutex;
+
+static std::filesystem::path level_load_debug_path()
+{
+#ifdef _WIN32
+    char exe_path[MAX_PATH] = {};
+    const DWORD n = GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        return std::filesystem::path(exe_path).parent_path() /
+               "level_load_debug.txt";
+    }
+#endif
+    return std::filesystem::current_path() / "level_load_debug.txt";
+}
+
+static void level_load_debug(const std::string& msg)
+{
+    std::lock_guard<std::mutex> lock(g_level_load_debug_mutex);
+    std::ofstream f(level_load_debug_path(),
+                    std::ios::app | std::ios::out);
+    if (!f) return;
+
+    std::time_t now = std::time(nullptr);
+    char stamp[32] = {};
+    if (std::tm* tm = std::localtime(&now)) {
+        std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", tm);
+    }
+    f << "[" << stamp << "] " << msg << "\n";
+}
+
+static void reset_level_load_debug()
+{
+    std::lock_guard<std::mutex> lock(g_level_load_debug_mutex);
+    std::ofstream f(level_load_debug_path(),
+                    std::ios::trunc | std::ios::out);
+    if (f) {
+        f << "Fable 2 Asset Browser level-load debug\n";
+    }
+}
 
 static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
                                          const MDLMeshGeom& src,
@@ -136,9 +357,17 @@ static void merge_transformed_instance_into(MDLMeshGeom& dst,
 {
     if (src.positions.empty() || src.indices.empty()) return;
 
-    const uint32_t base_vertex = uint32_t(dst.positions.size() / 3);
-
     const size_t src_vcount = src.positions.size() / 3;
+    const size_t dst_vcount = dst.positions.size() / 3;
+    if (src_vcount == 0 ||
+        dst_vcount > size_t(std::numeric_limits<uint32_t>::max())) {
+        return;
+    }
+    for (uint32_t idx : src.indices) {
+        if (idx >= src_vcount) return;
+    }
+
+    const uint32_t base_vertex = uint32_t(dst_vcount);
 
     const size_t pos_off = dst.positions.size();
     dst.positions.resize(pos_off + src.positions.size());
@@ -210,6 +439,60 @@ static std::string make_combined_prop_name(const std::string& model_path,
     return name;
 }
 
+constexpr size_t kMaxCombinedPropVertices = 250000;
+constexpr size_t kMaxCombinedPropIndices  = 750000;
+
+static void init_combined_prop_geom(MDLMeshGeom& dst,
+                                    const MDLMeshGeom& src,
+                                    const std::string& model_path,
+                                    size_t instance_count,
+                                    uint32_t block_type,
+                                    size_t part_index)
+{
+    dst = MDLMeshGeom{};
+    dst.diffuse_tex_name  = src.diffuse_tex_name;
+    dst.normal_tex_name   = src.normal_tex_name;
+    dst.specular_tex_name = src.specular_tex_name;
+    dst.metallic_tex_name = src.metallic_tex_name;
+    dst.extra_tex_name    = src.extra_tex_name;
+    dst.MeshIndex         = src.MeshIndex;
+    dst.SubMeshIndex      = src.SubMeshIndex;
+    dst.name = make_combined_prop_name(
+        model_path, src.name, instance_count, block_type);
+    if (part_index > 0) {
+        dst.name += " part " + std::to_string(part_index + 1);
+    }
+}
+
+static bool would_exceed_combined_prop_limits(const MDLMeshGeom& dst,
+                                              const MDLMeshGeom& src)
+{
+    if (dst.positions.empty()) return false;
+    const size_t dst_vertices = dst.positions.size() / 3;
+    const size_t src_vertices = src.positions.size() / 3;
+    if (dst_vertices + src_vertices > kMaxCombinedPropVertices) return true;
+    if (dst.indices.size() + src.indices.size() > kMaxCombinedPropIndices) {
+        return true;
+    }
+    return false;
+}
+
+static void flush_combined_prop_geom(std::vector<MDLMeshGeom>& out,
+                                     MDLMeshGeom& geom,
+                                     const MDLMeshGeom& src,
+                                     const std::string& model_path,
+                                     size_t instance_count,
+                                     uint32_t block_type,
+                                     size_t& part_index)
+{
+    if (!geom.positions.empty() && !geom.indices.empty()) {
+        out.push_back(std::move(geom));
+        ++part_index;
+    }
+    init_combined_prop_geom(geom, src, model_path, instance_count,
+                            block_type, part_index);
+}
+
 static void normalize_grid_uvs(MDLMeshGeom& geom, uint32_t width, uint32_t height)
 {
     if (width < 2 || height < 2) return;
@@ -248,115 +531,137 @@ static LevelPropStreamState g_level_prop_stream;
 
 static void prop_worker_run(LevelPropStreamState* s)
 {
-    const float terrain_cx =
-        (float(s->terrain_width) - 1.0f) * 0.5f * s->terrain_tile_size;
-    const float terrain_cz =
-        (float(s->terrain_height) - 1.0f) * 0.5f * s->terrain_tile_size;
+    std::string current_model;
+    try {
+        const float terrain_cx =
+            (float(s->terrain_width) - 1.0f) * 0.5f * s->terrain_tile_size;
+        const float terrain_cz =
+            (float(s->terrain_height) - 1.0f) * 0.5f * s->terrain_tile_size;
 
-    std::unordered_map<std::string, CachedPropModel> cache;
+        std::ostringstream start;
+        start << "prop worker start: blocks=" << s->blocks.size()
+              << " total_instances=" << s->total_instances
+              << " model_body_bnk=" << s->model_body_bnk;
+        level_load_debug(start.str());
 
-    for (const auto& block : s->blocks) {
-        if (S.cancel_requested.load()) {
-            OutputLog::warn("prop bake worker aborted: cancel requested");
-            break;
-        }
-        if (block.model_path.empty()) {
-            s->instances_loaded.fetch_add(block.instances.size(),
-                                          std::memory_order_relaxed);
-            continue;
-        }
+        std::unordered_map<std::string, CachedPropModel> cache;
 
-        auto& cached = cache[block.model_path];
-        if (!cached.loaded) {
-            std::vector<unsigned char> buf;
-            if (build_mdl_buffer_for_name_with_body(block.model_path,
-                                                    s->model_body_bnk, buf) &&
-                parse_mdl_info(buf, cached.info, block.model_path))
+        for (const auto& block : s->blocks) {
+            current_model = block.model_path;
+            if (S.cancel_requested.load()) {
+                OutputLog::warn("prop bake worker aborted: cancel requested");
+                break;
+            }
+            if (block.model_path.empty()) {
+                s->instances_loaded.fetch_add(block.instances.size(),
+                                              std::memory_order_relaxed);
+                continue;
+            }
+
             {
-                bool all_empty = !cached.info.MeshBuffers.empty();
-                for (const auto& mb : cached.info.MeshBuffers) {
-                    if (mb.VertexCount > 0) { all_empty = false; break; }
-                }
-                if (all_empty) {
-                    reparse_mdl_buffers_via_polymsh_scan(buf, cached.info);
-                }
-                parse_mdl_geometry(buf, cached.info, cached.geoms);
+                std::ostringstream os;
+                os << "prop block: type=0x" << std::hex << block.type
+                   << std::dec << " instances=" << block.instances.size()
+                   << " model=" << block.model_path;
+                level_load_debug(os.str());
             }
-            cached.loaded = true;
+
+            auto& cached = cache[block.model_path];
+            if (!cached.loaded) {
+                load_cached_prop_model(block.model_path,
+                                       s->model_body_bnk,
+                                       cached);
+                cached.loaded = true;
+                if (cached.geoms.empty()) {
+                    ++s->model_misses;
+                    OutputLog::warn("level props: model load miss " +
+                                    block.model_path);
+
+                    std::string want = block.model_path;
+                    size_t sl = want.find_last_of("/\\");
+                    std::string want_base = (sl == std::string::npos)
+                                               ? want : want.substr(sl + 1);
+                    std::string stem = want_base;
+                    size_t dot = stem.find_last_of('.');
+                    if (dot != std::string::npos) stem.resize(dot);
+                    std::transform(stem.begin(), stem.end(), stem.begin(),
+                                   ::tolower);
+
+                    int shown = 0;
+                    for (const auto& e : S.all_mdl_files) {
+                        if (shown >= 5) break;
+                        std::string lname = e.name;
+                        std::transform(lname.begin(), lname.end(),
+                                       lname.begin(), ::tolower);
+                        if (lname.find(stem) == std::string::npos) continue;
+                        std::string bnk_leaf =
+                            std::filesystem::path(e.bnk_path).filename().string();
+                        OutputLog::info("  near-match: " + e.full_path +
+                                        "  (in " + bnk_leaf + ")");
+                        ++shown;
+                    }
+                    if (shown == 0) {
+                        OutputLog::info("  no near-matches in " +
+                                        std::to_string(S.all_mdl_files.size()) +
+                                        "-entry global .mdl index");
+                    }
+                }
+            }
+
             if (cached.geoms.empty()) {
-                ++s->model_misses;
-                OutputLog::warn("level props: model load miss " +
-                                block.model_path);
-
-                std::string want = block.model_path;
-                size_t sl = want.find_last_of("/\\");
-                std::string want_base = (sl == std::string::npos)
-                                           ? want : want.substr(sl + 1);
-                std::string stem = want_base;
-                size_t dot = stem.find_last_of('.');
-                if (dot != std::string::npos) stem.resize(dot);
-                std::transform(stem.begin(), stem.end(), stem.begin(),
-                               ::tolower);
-
-                int shown = 0;
-                for (const auto& e : S.all_mdl_files) {
-                    if (shown >= 5) break;
-                    std::string lname = e.name;
-                    std::transform(lname.begin(), lname.end(),
-                                   lname.begin(), ::tolower);
-                    if (lname.find(stem) == std::string::npos) continue;
-                    std::string bnk_leaf =
-                        std::filesystem::path(e.bnk_path).filename().string();
-                    OutputLog::info("  near-match: " + e.full_path +
-                                    "  (in " + bnk_leaf + ")");
-                    ++shown;
-                }
-                if (shown == 0) {
-                    OutputLog::info("  no near-matches in " +
-                                    std::to_string(S.all_mdl_files.size()) +
-                                    "-entry global .mdl index");
-                }
+                s->instances_loaded.fetch_add(block.instances.size(),
+                                              std::memory_order_relaxed);
+                continue;
             }
-        }
 
-        if (cached.geoms.empty()) {
-            s->instances_loaded.fetch_add(block.instances.size(),
-                                          std::memory_order_relaxed);
-            continue;
-        }
-
-        std::vector<MDLMeshGeom> combined(cached.geoms.size());
-        for (size_t gi = 0; gi < cached.geoms.size(); ++gi) {
-            const auto& src = cached.geoms[gi];
-            combined[gi].diffuse_tex_name  = src.diffuse_tex_name;
-            combined[gi].normal_tex_name   = src.normal_tex_name;
-            combined[gi].specular_tex_name = src.specular_tex_name;
-            combined[gi].metallic_tex_name = src.metallic_tex_name;
-            combined[gi].extra_tex_name    = src.extra_tex_name;
-            combined[gi].name = make_combined_prop_name(
-                block.model_path, src.name, block.instances.size(),
-                block.type);
-        }
-
-        for (const auto& inst : block.instances) {
+            std::vector<MDLMeshGeom> combined(cached.geoms.size());
+            std::vector<size_t> chunk_index(cached.geoms.size(), 0);
             for (size_t gi = 0; gi < cached.geoms.size(); ++gi) {
                 const auto& src = cached.geoms[gi];
-                if (!src.positions.empty() && !src.indices.empty()) {
-                    merge_transformed_instance_into(combined[gi], src, inst);
+                init_combined_prop_geom(combined[gi], src, block.model_path,
+                                        block.instances.size(), block.type, 0);
+            }
+
+            for (const auto& inst : block.instances) {
+                for (size_t gi = 0; gi < cached.geoms.size(); ++gi) {
+                    const auto& src = cached.geoms[gi];
+                    if (!src.positions.empty() && !src.indices.empty()) {
+                        if (would_exceed_combined_prop_limits(combined[gi],
+                                                              src)) {
+                            flush_combined_prop_geom(
+                                s->geoms, combined[gi], src, block.model_path,
+                                block.instances.size(), block.type,
+                                chunk_index[gi]);
+                        }
+                        merge_transformed_instance_into(combined[gi], src, inst);
+                    }
+                }
+                s->instances_loaded.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            for (auto& cg : combined) {
+                if (!cg.positions.empty() && !cg.indices.empty()) {
+                    s->geoms.push_back(std::move(cg));
                 }
             }
-            s->instances_loaded.fetch_add(1, std::memory_order_relaxed);
+            (void)terrain_cx; (void)terrain_cz;
         }
 
-        for (auto& cg : combined) {
-            if (!cg.positions.empty() && !cg.indices.empty()) {
-                s->geoms.push_back(std::move(cg));
-            }
-        }
-        (void)terrain_cx; (void)terrain_cz;
+        level_load_debug("prop worker finished normally");
+        s->phase.store(2, std::memory_order_release);
+    } catch (const std::exception& e) {
+        level_load_debug("prop worker exception while processing model=" +
+                         current_model + " :: " + e.what());
+        OutputLog::error("level props: prop bake worker aborted on " +
+                         current_model + " (" + e.what() + ")");
+        s->phase.store(2, std::memory_order_release);
+    } catch (...) {
+        level_load_debug("prop worker unknown exception while processing model=" +
+                         current_model);
+        OutputLog::error("level props: prop bake worker aborted on " +
+                         current_model + " (unknown exception)");
+        s->phase.store(2, std::memory_order_release);
     }
-
-    s->phase.store(2, std::memory_order_release);
 }
 
 static void start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
@@ -365,6 +670,7 @@ static void start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
     if (g_level_prop_stream.worker.joinable()) {
         g_level_prop_stream.worker.join();
     }
+    reset_level_load_debug();
     g_level_prop_stream.phase.store(0);
     g_level_prop_stream.instances_loaded.store(0);
     g_level_prop_stream.total_instances = 0;
@@ -459,8 +765,44 @@ static bool stream_level_prop_batch(ID3D11Device* device)
             MP_Init(device, g_mp, 800, 600);
             g_mp_initialized = true;
         }
-        MP_Build(device, g_level_prop_stream.geoms,
-                 g_level_prop_stream.info, g_mp);
+        size_t total_vertices = 0;
+        size_t total_indices = 0;
+        size_t max_vertices = 0;
+        size_t max_indices = 0;
+        std::string max_name;
+        for (const auto& g : g_level_prop_stream.geoms) {
+            const size_t vc = g.positions.size() / 3;
+            const size_t ic = g.indices.size();
+            total_vertices += vc;
+            total_indices += ic;
+            if (vc > max_vertices || ic > max_indices) {
+                max_vertices = std::max(max_vertices, vc);
+                max_indices = std::max(max_indices, ic);
+                max_name = g.name;
+            }
+        }
+        {
+            std::ostringstream os;
+            os << "MP_Build start: geoms=" << g_level_prop_stream.geoms.size()
+               << " vertices=" << total_vertices
+               << " indices=" << total_indices
+               << " max_vertices=" << max_vertices
+               << " max_indices=" << max_indices
+               << " max_name=" << max_name;
+            level_load_debug(os.str());
+        }
+        try {
+            MP_Build(device, g_level_prop_stream.geoms,
+                     g_level_prop_stream.info, g_mp);
+            level_load_debug("MP_Build finished normally");
+        } catch (const std::exception& e) {
+            level_load_debug(std::string("MP_Build exception: ") + e.what());
+            OutputLog::error(std::string("level props: MP_Build failed (") +
+                             e.what() + ")");
+        } catch (...) {
+            level_load_debug("MP_Build unknown exception");
+            OutputLog::error("level props: MP_Build failed (unknown exception)");
+        }
         bind_generated_terrain_textures(
             device,
             g_level_prop_stream.terrain_textures,
@@ -554,24 +896,10 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
         if (block.model_path.empty()) continue;
         auto& cached = cache[block.model_path];
         if (!cached.loaded && cached.geoms.empty()) {
-            std::vector<unsigned char> buf;
-            if (build_mdl_buffer_for_name_with_body(block.model_path,
-                                                    g_pending_level_model_body_bnk,
-                                                    buf) &&
-                parse_mdl_info(buf, cached.info, block.model_path)) {
-                bool all_empty = !cached.info.MeshBuffers.empty();
-                for (const auto& mb : cached.info.MeshBuffers) {
-                    if (mb.VertexCount > 0) {
-                        all_empty = false;
-                        break;
-                    }
-                }
-                if (all_empty) {
-                    reparse_mdl_buffers_via_polymsh_scan(buf, cached.info);
-                }
-                parse_mdl_geometry(buf, cached.info, cached.geoms);
-                cached.loaded = !cached.geoms.empty();
-            }
+            cached.loaded =
+                load_cached_prop_model(block.model_path,
+                                       g_pending_level_model_body_bnk,
+                                       cached);
             if (!cached.loaded) {
                 ++models_failed;
                 if (misses_logged < 5) {
@@ -586,16 +914,11 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
         if (cached.geoms.empty()) continue;
 
         std::vector<MDLMeshGeom> combined(cached.geoms.size());
+        std::vector<size_t> chunk_index(cached.geoms.size(), 0);
         for (size_t gi = 0; gi < cached.geoms.size(); ++gi) {
             const auto& src = cached.geoms[gi];
-            combined[gi].diffuse_tex_name  = src.diffuse_tex_name;
-            combined[gi].normal_tex_name   = src.normal_tex_name;
-            combined[gi].specular_tex_name = src.specular_tex_name;
-            combined[gi].metallic_tex_name = src.metallic_tex_name;
-            combined[gi].extra_tex_name    = src.extra_tex_name;
-            combined[gi].name = make_combined_prop_name(
-                block.model_path, src.name, block.instances.size(),
-                block.type);
+            init_combined_prop_geom(combined[gi], src, block.model_path,
+                                    block.instances.size(), block.type, 0);
         }
 
         for (const auto& inst : block.instances) {
@@ -603,6 +926,12 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
             for (size_t gi = 0; gi < cached.geoms.size(); ++gi) {
                 const auto& src = cached.geoms[gi];
                 if (!src.positions.empty() && !src.indices.empty()) {
+                    if (would_exceed_combined_prop_limits(combined[gi], src)) {
+                        flush_combined_prop_geom(
+                            geoms, combined[gi], src, block.model_path,
+                            block.instances.size(), block.type,
+                            chunk_index[gi]);
+                    }
                     merge_transformed_instance_into(combined[gi], src, inst);
                 }
             }
@@ -969,6 +1298,8 @@ void process_pending_loads() {
             g_pending_terrain_ghf_entry = FlatAssetEntry{};
             g_pending_level_prop_blocks.clear();
             g_pending_level_model_body_bnk.clear();
+            g_pending_level_water_present = false;
+            g_pending_level_water_scene = Level::WaterScene{};
             progress_done();
             S.cancel_requested.store(false);
             return;
@@ -1111,6 +1442,71 @@ void process_pending_loads() {
                     : std::string("adjacent terrain: ") + adj.label;
                 geoms.push_back(std::move(ag));
             }
+
+            // Emit one flat horizontal quad per .water tile so the render
+            // pipeline picks them up alongside the terrain mesh. The water
+            // shader (selected by `is_water` on MPPerMesh) animates the
+            // surface using the wave parameters baked into the .water file.
+            size_t water_geom_first = geoms.size();
+            size_t water_geom_count = 0;
+            if (g_pending_level_water_present) {
+                for (size_t bi = 0; bi < g_pending_level_water_scene.bodies.size(); ++bi) {
+                    const auto& body = g_pending_level_water_scene.bodies[bi];
+                    for (size_t ti = 0; ti < body.tiles.size(); ++ti) {
+                        const auto& t = body.tiles[ti];
+                        // h_max appears to be the surface Y in the samples
+                        // we've seen; fall back to h_min then to the body's
+                        // base height when the tile values look degenerate.
+                        float y = t.h_max;
+                        if (!std::isfinite(y) || y == 0.0f) y = t.h_min;
+                        if (!std::isfinite(y) || y == 0.0f) y = body.base_height;
+
+                        const float x0 = t.cx - t.ex;
+                        const float x1 = t.cx + t.ex;
+                        const float z0 = t.cz - t.ez;
+                        const float z1 = t.cz + t.ez;
+
+                        MDLMeshGeom wg;
+                        wg.positions = {
+                            x0, y, z0,
+                            x1, y, z0,
+                            x1, y, z1,
+                            x0, y, z1,
+                        };
+                        wg.normals = {
+                            0.0f, 1.0f, 0.0f,
+                            0.0f, 1.0f, 0.0f,
+                            0.0f, 1.0f, 0.0f,
+                            0.0f, 1.0f, 0.0f,
+                        };
+                        // UVs in world units so the wave shader can keep
+                        // wavelengths consistent across tile sizes.
+                        wg.uvs = {
+                            x0, z0,
+                            x1, z0,
+                            x1, z1,
+                            x0, z1,
+                        };
+                        wg.indices = { 0, 2, 1, 0, 3, 2 };
+                        wg.bone_ids.assign(4 * 4, 0);
+                        wg.bone_weights.assign(4 * 4, 0.0f);
+                        for (size_t v = 0; v < 4; ++v) {
+                            wg.bone_weights[v * 4 + 0] = 1.0f;
+                        }
+                        wg.name = "water: body" + std::to_string(bi) +
+                                  ":tile" + std::to_string(ti);
+                        wg.diffuse_tex_name = body.normal_map_path;
+                        geoms.push_back(std::move(wg));
+                        ++water_geom_count;
+                    }
+                }
+                if (water_geom_count > 0) {
+                    OutputLog::success("water: " +
+                        std::to_string(water_geom_count) +
+                        " surface tile(s) emitted from .water");
+                }
+            }
+
             start_level_prop_stream(geoms, info);
 
             if (g_mp.has_model) {
@@ -1122,6 +1518,21 @@ void process_pending_loads() {
             }
             MP_Build(device, geoms, info, g_mp);
             g_mp.no_tilt = true;
+
+            // Tag the freshly-built water meshes so the renderer routes
+            // them through the water (wave) pipeline state. `water_geom_first`
+            // tracks the index in `geoms` where water tiles were appended,
+            // and `MP_Build` preserves that ordering 1:1 into g_mp.meshes
+            // unless a geom was empty (we generated full geoms only, so
+            // that doesn't apply here).
+            for (size_t mi = water_geom_first;
+                 mi < water_geom_first + water_geom_count &&
+                 mi < g_mp.meshes.size();
+                 ++mi)
+            {
+                g_mp.meshes[mi].is_water = true;
+                g_mp.meshes[mi].has_alpha = true;
+            }
 
             S.terrain_mode = true;
 
@@ -1501,6 +1912,9 @@ void process_pending_loads() {
         g_pending_level_prop_blocks.clear();
         g_pending_level_prop_blocks.shrink_to_fit();
         g_pending_level_model_body_bnk.clear();
+        // Water has been baked into g_mp; the parsed scene can be released.
+        g_pending_level_water_present = false;
+        g_pending_level_water_scene = Level::WaterScene{};
     }
 
     stream_level_prop_batch(device);

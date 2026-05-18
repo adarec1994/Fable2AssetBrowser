@@ -194,7 +194,7 @@ void draw_main(GLFWwindow* window) {
         show_output_log ? OutputLog::reserved_bottom_height() : 0.0f;
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x,
-                                    viewport->WorkSize.y - bottom_reserve));
+                                    viewport->WorkSize.y));
 
     const bool show_menu_bar = show_output_log;
     ImGuiWindowFlags main_flags =
@@ -457,9 +457,9 @@ void draw_main(GLFWwindow* window) {
         UI::draw_loading_screen();
     } else {
 #ifdef _WIN32
-        UI::draw_main_layout(device);
+        UI::draw_main_layout(device, bottom_reserve);
 #else
-        UI::draw_main_layout();
+        UI::draw_main_layout(bottom_reserve);
 #endif
     }
     ImGui::End();

@@ -48,9 +48,9 @@ void draw_splitter(float region_y) {
 }
 
 #ifdef _WIN32
-void draw_main_layout(ID3D11Device* device) {
+void draw_main_layout(ID3D11Device* device, float bottom_overlay) {
 #else
-void draw_main_layout() {
+void draw_main_layout(float bottom_overlay) {
 #endif
     ImVec2 region = ImGui::GetContentRegionAvail();
 
@@ -64,6 +64,9 @@ void draw_main_layout() {
         g_right_panel_width = std::max(min_w,
                                        region.x - content_w - kSplitterWidth);
     }
+
+    if (bottom_overlay < 0.0f) bottom_overlay = 0.0f;
+    const float right_h = std::max(50.0f, region.y - bottom_overlay);
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(20, 22, 28, 255));
     ImGui::BeginChild("##layout_render", ImVec2(content_w, region.y),
@@ -82,7 +85,7 @@ void draw_main_layout() {
     ImGui::SameLine(0.0f, 0.0f);
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(28, 30, 36, 255));
-    ImGui::BeginChild("##layout_tree", ImVec2(0, region.y),
+    ImGui::BeginChild("##layout_tree", ImVec2(0, right_h),
                       false,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 #ifdef _WIN32

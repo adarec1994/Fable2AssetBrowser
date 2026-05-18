@@ -38,6 +38,7 @@ constexpr uint32_t kTagVec3      = 0x00000568;
 constexpr uint32_t kHashParent   = 0x5F6317D5;
 constexpr uint32_t kHashPosition = 0xBD7C27D4;
 constexpr uint32_t kHashRotation = 0x21EBC83B;
+constexpr uint32_t kHashTransformComponent = 0xF73572C4;
 constexpr size_t   kFixedRecSize = 92;
 constexpr size_t   kHeaderSize   = 0x18;
 
@@ -243,10 +244,32 @@ bool TryTransformRecord(const GdbView& view,
     if (view.findField(record, kHashRotation, 6, rot_slot, nullptr)) {
         const uint32_t rot_hash = ReadBeU32(view.bytes.data() + rot_slot);
         if (view.readVec3Ref(rot_hash, rx, ry, rz)) {
-            if (std::isfinite(rx)) yaw = rx;
+            // GDB vec3s use the same reversed storage as positions.  After
+            // readVec3Ref, z is the game-space vertical-axis rotation used by
+            // the level prop renderer's yaw-only instance path.
+            if (std::isfinite(rz)) yaw = rz;
         }
     }
     return true;
+}
+
+bool TryComponentTransformRecord(const GdbView& view,
+                                 size_t record,
+                                 float& x,
+                                 float& y,
+                                 float& z,
+                                 float& yaw) {
+    size_t transform_slot = 0;
+    if (!view.findLocal(record, kHashTransformComponent, 6,
+                        transform_slot, nullptr)) {
+        return false;
+    }
+
+    const uint32_t transform_hash =
+        ReadBeU32(view.bytes.data() + transform_slot);
+    size_t transform_record = 0;
+    if (!view.lookup(transform_hash, transform_record)) return false;
+    return TryTransformRecord(view, transform_record, x, y, z, yaw);
 }
 
 bool TryInlineTransform(const std::vector<uint8_t>& bytes,
@@ -270,7 +293,7 @@ bool TryInlineTransform(const std::vector<uint8_t>& bytes,
             std::fabs(ry) <= 6.5f &&
             std::fabs(rz) <= 6.5f;
         if (rotationish && !saw_rot) {
-            yaw = rx;
+            yaw = rz;
             saw_rot = true;
             continue;
         }
@@ -488,6 +511,11 @@ GdbInfo ParseWithSaveMap(
             bool have_pos = TryTransformRecord(view, direct,
                                                pos_x, pos_y, pos_z,
                                                yaw_from_eulers);
+            if (!have_pos) {
+                have_pos = TryComponentTransformRecord(view, direct,
+                                                       pos_x, pos_y, pos_z,
+                                                       yaw_from_eulers);
+            }
             if (!have_pos) {
                 have_pos = TryIndexedInlineTransform(view, direct,
                                                      pos_x, pos_y, pos_z,

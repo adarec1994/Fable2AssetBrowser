@@ -128,15 +128,24 @@ static void merge_transformed_instance_into(MDLMeshGeom& dst,
     }
 }
 
-static std::string make_combined_engine_level_name(const std::string& model_path,
-                                                   const std::string& src_name,
-                                                   size_t              instance_count)
+static std::string make_combined_prop_name(const std::string& model_path,
+                                           const std::string& src_name,
+                                           size_t              instance_count,
+                                           uint32_t            block_type)
 {
     std::string base = model_path;
     const size_t sl = base.find_last_of("/\\");
     if (sl != std::string::npos) base = base.substr(sl + 1);
 
-    std::string name = "engine_level: " + base;
+    // Engine_level case-2 / case-21 props are NOT user-clickable in the
+    // render window (the picker filters by this exact "engine_level: "
+    // prefix in pick_level_mesh_at). Any other source — GDB, havok, etc.
+    // — gets a different prefix so the user can pick those meshes and
+    // see their textures in the Materials window.
+    const bool is_engine_level = (block_type == 2u) || (block_type == 21u);
+    std::string name =
+        is_engine_level ? std::string("engine_level: ") + base
+                        : std::string("prop: ") + base;
     if (!src_name.empty()) name += "#" + src_name;
     name += " (" + std::to_string(instance_count) + " inst)";
     return name;
@@ -188,6 +197,10 @@ static void prop_worker_run(LevelPropStreamState* s)
     std::unordered_map<std::string, CachedPropModel> cache;
 
     for (const auto& block : s->blocks) {
+        if (S.cancel_requested.load()) {
+            OutputLog::warn("prop bake worker aborted: cancel requested");
+            break;
+        }
         if (block.model_path.empty()) {
             s->instances_loaded.fetch_add(block.instances.size(),
                                           std::memory_order_relaxed);
@@ -261,8 +274,9 @@ static void prop_worker_run(LevelPropStreamState* s)
             combined[gi].specular_tex_name = src.specular_tex_name;
             combined[gi].metallic_tex_name = src.metallic_tex_name;
             combined[gi].extra_tex_name    = src.extra_tex_name;
-            combined[gi].name = make_combined_engine_level_name(
-                block.model_path, src.name, block.instances.size());
+            combined[gi].name = make_combined_prop_name(
+                block.model_path, src.name, block.instances.size(),
+                block.type);
         }
 
         for (const auto& inst : block.instances) {
@@ -366,6 +380,18 @@ static bool stream_level_prop_batch(ID3D11Device* device)
 
     if (g_level_prop_stream.worker.joinable()) {
         g_level_prop_stream.worker.join();
+    }
+
+    if (S.cancel_requested.load()) {
+        OutputLog::warn("prop upload aborted: cancel requested");
+        g_level_prop_stream.geoms.clear();
+        g_level_prop_stream.geoms.shrink_to_fit();
+        g_level_prop_stream.blocks.clear();
+        g_level_prop_stream.terrain_textures.clear();
+        g_level_prop_stream.phase.store(3);
+        progress_done();
+        S.cancel_requested.store(false);
+        return true;
     }
 
     if (!g_level_prop_stream.geoms.empty()) {
@@ -515,8 +541,9 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
             combined[gi].specular_tex_name = src.specular_tex_name;
             combined[gi].metallic_tex_name = src.metallic_tex_name;
             combined[gi].extra_tex_name    = src.extra_tex_name;
-            combined[gi].name = make_combined_engine_level_name(
-                block.model_path, src.name, block.instances.size());
+            combined[gi].name = make_combined_prop_name(
+                block.model_path, src.name, block.instances.size(),
+                block.type);
         }
 
         for (const auto& inst : block.instances) {
@@ -879,6 +906,21 @@ void process_pending_loads() {
     }
 
     if (g_pending_terrain_load.exchange(false)) {
+        if (S.cancel_requested.load()) {
+            OutputLog::warn("terrain stage skipped: cancel requested");
+            g_pending_terrain_mesh = Level::TerrainMesh{};
+            g_pending_terrain_label.clear();
+            g_pending_terrain_ehf_bytes.clear();
+            g_pending_adjacent_terrain_meshes.clear();
+            g_pending_terrain_ghf_payload.clear();
+            g_pending_terrain_ghf_heights.clear();
+            g_pending_terrain_ghf_entry = FlatAssetEntry{};
+            g_pending_level_prop_blocks.clear();
+            g_pending_level_model_body_bnk.clear();
+            progress_done();
+            S.cancel_requested.store(false);
+            return;
+        }
         progress_update(72, 100, "Uploading terrain...");
         const Level::TerrainMesh& tm = g_pending_terrain_mesh;
         if (!tm.ok || tm.indices.empty()) {
@@ -1312,6 +1354,10 @@ void process_pending_loads() {
                 };
 
                 for (const auto& pe : palette) {
+                    if (S.cancel_requested.load()) {
+                        OutputLog::warn("LOD palette decode aborted: cancel requested");
+                        break;
+                    }
                     EhfLodThumbnails::Entry e;
                     e.base_diffuse_path   = pe.base_diffuse;
                     e.base_normal_path    = pe.base_normal;

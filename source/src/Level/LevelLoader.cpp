@@ -5,6 +5,7 @@
 #include "EhfChunkParser.h"
 #include "TerrainTextureRegistry.h"
 #include "VfsConfig.h"
+#include "GdbModelHashlist.h"
 #include "GdbParser.h"
 #include "../Havok/HavokPackfileReader.h"
 
@@ -40,6 +41,7 @@ extern const std::string& mp_last_decode_info();
 #include <iomanip>
 #include <climits>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -83,11 +85,37 @@ void OpenAsync(const FlatAssetEntry& entry)
         return;
     }
 
+    S.cancel_requested.store(false);
+
     progress_open(100, "Loading level...");
     std::thread([entry]() {
         progress_update(5, 100, "Extracting level...");
         const bool ok = Open(entry);
-        if (!ok) {
+        const bool cancelled = S.cancel_requested.load();
+        if (cancelled) {
+            g_pending_terrain_load.store(false);
+            g_pending_level_prop_blocks.clear();
+            g_pending_adjacent_terrain_meshes.clear();
+            g_pending_terrain_mesh = Level::TerrainMesh{};
+            g_pending_terrain_ehf_bytes.clear();
+            g_pending_terrain_ghf_heights.clear();
+            g_pending_terrain_ghf_payload.clear();
+            g_pending_terrain_ghf_width = 0;
+            g_pending_terrain_ghf_height = 0;
+            g_pending_terrain_ghf_tile_size = 1.0f;
+            g_pending_terrain_ghf_entry = FlatAssetEntry{};
+            g_pending_terrain_level_entry = FlatAssetEntry{};
+            g_pending_terrain_label.clear();
+            g_pending_level_model_body_bnk.clear();
+            g_level_havok_collision.clear();
+            g_level_gdb_placements.clear();
+            g_level_vfs_texture_body_bnks.clear();
+            g_level_vfs_model_bnks.clear();
+            g_level_vfs_streaming_bnks.clear();
+            progress_done();
+            OutputLog::warn("Level load cancelled.");
+            S.cancel_requested.store(false);
+        } else if (!ok) {
             progress_done();
         } else {
             progress_update(70, 100, "Preparing render...");
@@ -188,6 +216,14 @@ struct StreamingModelCandidate {
     const FlatAssetEntry* entry = nullptr;
     bool from_gmd = false;
 };
+
+const StreamingModelCandidate*
+choose_streaming_model_for_gdb(const std::string& entity_name,
+                               const std::vector<StreamingModelCandidate>& candidates,
+                               int* out_score = nullptr,
+                               uint32_t parent_hash = 0);
+std::vector<StreamingModelCandidate>
+collect_streaming_model_candidates(const std::vector<std::string>& streaming_bnks);
 
 std::string lower_slash(std::string s)
 {
@@ -303,12 +339,16 @@ bool should_emit_gdb_render_entity(const std::string& entity_name)
         "marketstairs",
         "scaffoldingstairs",
         "generalshopstairsfloor",
+        "generalstorestairsfloor",
         "castlearch",
+        "dockwall",
         "dockswall",
         "docksarch",
         "oilamp",
         "oillantern",
         "statue",
+        "window",
+        "weaponrack",
     };
     for (const char* needle : force_allowed) {
         if (key.find(needle) != std::string::npos) {
@@ -341,11 +381,17 @@ bool should_emit_gdb_render_entity(const std::string& entity_name)
         "chair",
         "bed",
         "sign",
+        "book",
+        "crate",
+        "grain",
         "wallpost",
         "smallwall",
         "tower",
+        "light",
         "lamp",
         "lantern",
+        "rack",
+        "window",
     };
     for (const char* needle : allowed) {
         if (key.find(needle) != std::string::npos) {
@@ -398,6 +444,36 @@ bool bytes_contain_be_u32(const std::vector<uint8_t>& bytes, uint32_t value)
         }
     }
     return false;
+}
+
+std::string hex32_for_log(uint32_t value)
+{
+    std::ostringstream os;
+    os << "0x" << std::hex << std::uppercase
+       << std::setw(8) << std::setfill('0') << value;
+    return os.str();
+}
+
+void log_curated_hashlist_miss(const std::string& entity_name,
+                               uint32_t parent_hash,
+                               const char* target_model_path)
+{
+    static std::mutex logged_mutex;
+    static std::unordered_set<std::string> logged_keys;
+
+    std::string key = hex32_for_log(parent_hash) + "|" +
+                      gdb_entity_key(entity_name) + "|" +
+                      (target_model_path ? target_model_path : "");
+    {
+        std::lock_guard<std::mutex> lock(logged_mutex);
+        if (!logged_keys.insert(key).second) return;
+    }
+
+    OutputLog::warn(
+        "GDB hashlist: curated model target missing in streaming candidates; "
+        "parent=" + hex32_for_log(parent_hash) +
+        " entity='" + entity_name +
+        "' target='" + (target_model_path ? target_model_path : "") + "'");
 }
 
 std::string resolve_streaming_bnk_path(const std::string& vfs_stream_path)
@@ -591,9 +667,19 @@ int streaming_model_score(const std::string& entity_name,
         { "wallpost",              "stonewallmediumpostspiked",     14500 },
         { "smallwallstraight",     "stonewallmediumstraightspiked", 15000 },
         { "smallwallcurved",       "stonewallmediumcurvedspiked",   15000 },
+        { "smallwallcorner",       "stonewallmediumcurvedspiked",   14500 },
         { "smallwallbroken",       "stonewallmediumbrokenspiked",   15000 },
         { "shelflong",             "esashelflong",                  15000 },
         { "woodenbucket",          "esabucketwooden",               15000 },
+        { "lightsceiling",         "bslightceiling",                15000 },
+        { "lightfixingceiling",    "bslightceiling",                15000 },
+        { "candleholder",          "bscandleholder",                14000 },
+        { "grainsack",             "esasackgrain",                  14500 },
+        { "shippingcrate",         "esashippingcrate",              14500 },
+        { "weaponrackwallmulti",   "esashopweaponswallrackmulti",   15000 },
+        { "weaponrackwallsingle",  "esashopweaponswallracksingle",  15000 },
+        { "weaponrack",            "esashopweaponrack",             13500 },
+        { "booksgroup",            "esabooksblock",                 13000 },
         { "pubtable",              "esatabletavern",                14500 },
         { "largesquareultradecorative","esaftableultradecorative",  13800 },
         { "largesquareupgradeable","esaftabledecorative",           12500 },
@@ -626,9 +712,26 @@ int streaming_model_score(const std::string& entity_name,
         { "closedgate",            "bsmarketwallgate",              13000 },
         { "guardpost",             "bsmarketguardpost",             14500 },
         { "marketstairs",          "bsmarketstairs",                14500 },
+        { "generalstorestairsfloor","bsmarketgeneralshopstairsfloor",14500 },
+        { "generalshopstairsfloor", "bsmarketgeneralshopstairsfloor",14500 },
         { "scaffoldingstairs",     "bsmarketscaffoldingstairs",     14500 },
+        { "scaffoldstairs",        "bsmarketscaffoldingstairs",     14500 },
+        { "scaffoldstraight",      "bsmarketscaffoldingstraight",   14000 },
+        { "marketwalljoiner",      "bsmarketwallbuffer",            13500 },
+        { "walljoiner",            "bsmarketwallbuffer",            13000 },
         { "castlearch",            "bsmarketcastlearch",            14500 },
         { "dockswall",             "bsmarketdockswall",             14500 },
+        { "dockwall",              "bsmarketdockswall",             14500 },
+        { "bsdockwall",            "bsmarketdockswall",             14500 },
+        { "slumswall",             "bsslumsthinwallv1",             14000 },
+        { "slumsthinwall",         "bsslumsthinwallv1",             14500 },
+        { "windowsmallarched",     "esasmarchedwin",                14000 },
+        { "smallarchedwin",        "esasmarchedwin",                14000 },
+        { "smarchedwin",           "esasmarchedwin",                14000 },
+        { "marketdocksjetty",      "bsmarketdocksjetty",            14000 },
+        { "docksjetty",            "bsmarketdocksjetty",            13500 },
+        { "docksplatform",         "bsmarketdocksplatform",         13500 },
+        { "dockscrane",            "bsmarketdockscrane",            13500 },
         { "oillanternsingle",      "bscemetaryoillampsingle",       13000 },
         { "oillampsingle",         "bscemetaryoillampsingle",       13000 },
         { "statue",                "okstatuedolphinv1",             12000 },
@@ -661,8 +764,84 @@ int streaming_model_score(const std::string& entity_name,
 const StreamingModelCandidate*
 choose_streaming_model_for_gdb(const std::string& entity_name,
                                const std::vector<StreamingModelCandidate>& candidates,
-                               int* out_score = nullptr)
+                               int* out_score,
+                               uint32_t parent_hash)
 {
+    auto path_suffix_matches = [](const std::string& path,
+                                  const std::string& target) {
+        if (path.empty() || target.empty()) return false;
+        if (path == target) return true;
+        return path.size() > target.size() &&
+               path.compare(path.size() - target.size(),
+                            target.size(), target) == 0 &&
+               (path[path.size() - target.size() - 1] == '/' ||
+                path[path.size() - target.size() - 1] == '\\');
+    };
+
+    auto choose_curated_override =
+        [&](const char* target_model_path, int* score_out) {
+            if (!target_model_path || !*target_model_path) {
+                return static_cast<const StreamingModelCandidate*>(nullptr);
+            }
+            const std::string target_lower = lower_slash(target_model_path);
+            const std::string target_key =
+                compact_match_key(model_name_from_path(target_model_path));
+            const StreamingModelCandidate* best = nullptr;
+            int best_score = INT_MIN;
+            for (const auto& c : candidates) {
+                int score = INT_MIN;
+                const std::string resolved_lower = lower_slash(c.resolved_path);
+                const std::string hint_lower = lower_slash(c.hint_path);
+                if (resolved_lower == target_lower) {
+                    score = std::max(score, 50000);
+                } else if (path_suffix_matches(resolved_lower, target_lower)) {
+                    score = std::max(score, 49250);
+                }
+                if (hint_lower == target_lower) {
+                    score = std::max(score, 49000);
+                } else if (path_suffix_matches(hint_lower, target_lower)) {
+                    score = std::max(score, 48250);
+                }
+                if (!target_key.empty()) {
+                    if (c.key == target_key) {
+                        score = std::max(score, 46000);
+                    }
+                    const std::string path_key =
+                        compact_match_key(c.hint_path + " " +
+                                          c.resolved_path);
+                    if (path_key.find(target_key) != std::string::npos) {
+                        score = std::max(score, 44000);
+                    }
+                }
+                if (score == INT_MIN) continue;
+                if (c.entry) score += 500;
+                if (c.from_gmd) score += 150;
+                score -= int(std::min<size_t>(c.hint_path.size(), 200));
+                if (!best || score > best_score) {
+                    best = &c;
+                    best_score = score;
+                }
+            }
+            if (score_out) *score_out = best_score;
+            return best;
+        };
+
+    const std::string entity_key = gdb_entity_key(entity_name);
+    const char* curated_model =
+        GdbModelHashlist::LookupParentHash(parent_hash);
+    if (!curated_model) {
+        curated_model = GdbModelHashlist::LookupEntityKey(entity_key);
+    }
+    if (curated_model && *curated_model) {
+        if (const StreamingModelCandidate* curated =
+                choose_curated_override(curated_model, out_score)) {
+            return curated;
+        }
+        log_curated_hashlist_miss(entity_name, parent_hash, curated_model);
+        if (out_score) *out_score = INT_MIN;
+        return nullptr;
+    }
+
     const StreamingModelCandidate* best = nullptr;
     int best_score = INT_MIN;
     for (const auto& c : candidates) {
@@ -990,8 +1169,16 @@ bool Open(const FlatAssetEntry& entry)
     OutputLog::info("loading level '" + entry.name + "' …");
     progress_update(8, 100, "Extracting " + entry.name);
 
+    auto bail_if_cancelled = [&](const char* where) -> bool {
+        if (!S.cancel_requested.load()) return false;
+        OutputLog::warn(std::string("level load cancelled at ") + where);
+        return true;
+    };
+
     g_pending_level_prop_blocks.clear();
     g_pending_adjacent_terrain_meshes.clear();
+
+    if (bail_if_cancelled("entry")) return false;
 
     std::vector<uint8_t> bytes;
     try {
@@ -1007,6 +1194,7 @@ bool Open(const FlatAssetEntry& entry)
         OutputLog::error("level extract produced 0 bytes");
         return false;
     }
+    if (bail_if_cancelled("after-extract")) return false;
 
     progress_update(18, 100, "Parsing level entries...");
     EngineLevelInfo info;
@@ -1015,6 +1203,7 @@ bool Open(const FlatAssetEntry& entry)
                          + info.error);
         return false;
     }
+    if (bail_if_cancelled("after-parse")) return false;
 
     info.source_path = entry.full_path;
 
@@ -1338,7 +1527,6 @@ bool Open(const FlatAssetEntry& entry)
                         " streaming hint path(s), " + std::to_string(indexed) +
                         " resolved through global .mdl index");
     }
-
     g_level_gdb_placements.clear();
     {
         std::vector<std::pair<uint32_t, std::string>> save_hash_to_name;
@@ -1600,7 +1788,8 @@ bool Open(const FlatAssetEntry& entry)
             }
             if (!streaming_model_candidates.empty()) {
                 auto best_gdb_name_for_examples =
-                    [&](const std::vector<std::string>& examples) {
+                    [&](const std::vector<std::string>& examples,
+                        uint32_t parent_hash) {
                         std::string best_name =
                             gdb_representative_name(examples);
                         int best_score = INT_MIN;
@@ -1610,7 +1799,8 @@ bool Open(const FlatAssetEntry& entry)
                             int score = INT_MIN;
                             const StreamingModelCandidate* hit =
                                 choose_streaming_model_for_gdb(
-                                    repr, streaming_model_candidates, &score);
+                                    repr, streaming_model_candidates, &score,
+                                    parent_hash);
                             if (hit && score > best_score) {
                                 best_name = repr;
                                 best_score = score;
@@ -1622,11 +1812,13 @@ bool Open(const FlatAssetEntry& entry)
                 for (size_t ai = 0; ai < archetype_log_count; ++ai) {
                     const auto& kv = archetypes[ai];
                     const std::string repr =
-                        best_gdb_name_for_examples(kv.second->examples);
+                        best_gdb_name_for_examples(kv.second->examples,
+                                                   kv.first);
                     int score = INT_MIN;
                     const StreamingModelCandidate* hit =
                         choose_streaming_model_for_gdb(
-                            repr, streaming_model_candidates, &score);
+                            repr, streaming_model_candidates, &score,
+                            kv.first);
                     std::ostringstream mos;
                     mos << "  0x" << std::hex << std::uppercase
                         << std::setw(8) << std::setfill('0') << kv.first
@@ -1656,7 +1848,8 @@ bool Open(const FlatAssetEntry& entry)
                 size_t keyword_lines = 0;
                 for (const auto& kv : archetypes) {
                     const std::string repr =
-                        best_gdb_name_for_examples(kv.second->examples);
+                        best_gdb_name_for_examples(kv.second->examples,
+                                                   kv.first);
                     const std::string key = gdb_entity_key(repr);
                     bool interesting = false;
                     for (const char* n : needles) {
@@ -1669,7 +1862,8 @@ bool Open(const FlatAssetEntry& entry)
                     int score = INT_MIN;
                     const StreamingModelCandidate* hit =
                         choose_streaming_model_for_gdb(
-                            repr, streaming_model_candidates, &score);
+                            repr, streaming_model_candidates, &score,
+                            kv.first);
                     std::ostringstream kos;
                     kos << "  0x" << std::hex << std::uppercase
                         << std::setw(8) << std::setfill('0') << kv.first
@@ -1733,6 +1927,42 @@ bool Open(const FlatAssetEntry& entry)
                 return out;
             };
 
+            auto best_gdb_name_for_examples_for_matching =
+                [&](const std::vector<std::string>& examples,
+                    uint32_t parent_hash) {
+                    std::string best_name = gdb_representative_name(examples);
+                    int best_score = INT_MIN;
+                    for (const auto& ex : examples) {
+                        const std::string repr =
+                            gdb_representative_name(std::vector<std::string>{ex});
+                        int score = INT_MIN;
+                        const StreamingModelCandidate* hit =
+                            choose_streaming_model_for_gdb(
+                                repr, streaming_model_candidates, &score,
+                                parent_hash);
+                        if (hit && score > best_score) {
+                            best_name = repr;
+                            best_score = score;
+                        }
+                    }
+                    return best_name;
+                };
+
+            std::unordered_map<uint32_t, std::string> parent_match_names;
+            if (!streaming_model_candidates.empty()) {
+                parent_match_names.reserve(archetype_diag.size());
+                for (const auto& kv : archetype_diag) {
+                    std::string repr =
+                        best_gdb_name_for_examples_for_matching(
+                            kv.second.examples, kv.first);
+                    if (repr.empty()) continue;
+                    if (choose_streaming_model_for_gdb(
+                            repr, streaming_model_candidates, nullptr,
+                            kv.first)) {
+                        parent_match_names.emplace(kv.first, std::move(repr));
+                    }
+                }
+            }
             std::vector<std::string> preferred_model_bnks;
             auto add_preferred_model_bnk = [&](const std::string& bnk) {
                 if (bnk.empty()) return;
@@ -1928,15 +2158,27 @@ bool Open(const FlatAssetEntry& entry)
                 if (p.entity_name.empty()) continue;
                 std::string tok = canonicalize_for_match(p.entity_name);
                 if (tok.empty()) continue;
+                auto parent_name_it = parent_match_names.find(p.parent_hash);
+                const std::string* parent_match_name =
+                    (parent_name_it == parent_match_names.end())
+                        ? nullptr : &parent_name_it->second;
                 const bool emit_this_entity =
                     emit_gdb_render_placements &&
-                    should_emit_gdb_render_entity(p.entity_name);
+                    (should_emit_gdb_render_entity(p.entity_name) ||
+                     (parent_match_name &&
+                      should_emit_gdb_render_entity(*parent_match_name)));
 
                 const FlatAssetEntry* hit = nullptr;
                 if (!streaming_model_candidates.empty()) {
                     const StreamingModelCandidate* stream_hit =
                         choose_streaming_model_for_gdb(
-                            p.entity_name, streaming_model_candidates);
+                            p.entity_name, streaming_model_candidates,
+                            nullptr, p.parent_hash);
+                    if (!stream_hit && parent_match_name) {
+                        stream_hit = choose_streaming_model_for_gdb(
+                            *parent_match_name, streaming_model_candidates,
+                            nullptr, p.parent_hash);
+                    }
                     if (!stream_hit) continue;
                     ++resolved;
                     hit = stream_hit->entry;
@@ -2351,12 +2593,17 @@ bool Open(const FlatAssetEntry& entry)
         }
     }
 
+    if (bail_if_cancelled("pre-heightfield")) return false;
+
     if (!res.ehf_path.empty() || !res.ghf_path.empty()) {
         HeightfieldFiles hf;
         progress_update(32, 100, "Loading heightfield files...");
         if (!LoadHeightfieldFiles(res.ehf_path, res.ghf_path,
                                   res.hdb_path, res.genv_path, hf)) {
             OutputLog::error("heightfield load failed: " + hf.error);
+        } else if (S.cancel_requested.load()) {
+            OutputLog::warn("level load cancelled during heightfield load");
+            return false;
         } else {
             std::ostringstream hos;
             hos << "heightfield loaded:"
@@ -2439,6 +2686,10 @@ bool Open(const FlatAssetEntry& entry)
 
                     TerrainMesh mesh;
                     progress_update(58, 100, "Building terrain mesh...");
+                    if (S.cancel_requested.load()) {
+                        OutputLog::warn("level load cancelled before terrain mesh build");
+                        return false;
+                    }
                     if (!BuildTerrainMesh(hg, mesh)) {
                         OutputLog::error("  terrain mesh build failed");
                     } else {
@@ -2501,6 +2752,10 @@ bool Open(const FlatAssetEntry& entry)
                                         ? ehf_tile : hg.tile_size;
                             }
 
+                            if (S.cancel_requested.load()) {
+                                OutputLog::warn("level load cancelled during adjacent terrain loop");
+                                return false;
+                            }
                             TerrainMesh adj_mesh;
                             if (!BuildTerrainMesh(adj_hg, adj_mesh)) {
                                 OutputLog::warn("adjacent terrain mesh build failed: " +
@@ -2624,6 +2879,10 @@ bool Open(const FlatAssetEntry& entry)
                             }
                         }
 
+                        if (S.cancel_requested.load()) {
+                            OutputLog::warn("level load cancelled before handoff to terrain stage");
+                            return false;
+                        }
                         g_pending_terrain_load        = true;
 
                         {

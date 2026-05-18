@@ -72,6 +72,8 @@ set(APP_SOURCES
         src/Level/TerrainEdit.h
         src/Level/VfsConfig.cpp
         src/Level/VfsConfig.h
+        src/Level/GdbModelHashlist.cpp
+        src/Level/GdbModelHashlist.h
         src/Level/GdbParser.cpp
         src/Level/GdbParser.h
         src/Havok/HavokPackfileReader.cpp

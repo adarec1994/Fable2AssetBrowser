@@ -320,10 +320,10 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
             if (L.name_idx < out.paint_resources.size()) {
                 const EhfPaintResource& res = out.paint_resources[L.name_idx];
                 if (res.width > 0) {
-                    L.mask_scale[0] = 16.0f / float(res.width);
+                    L.mask_scale[0] = 32.0f / float(res.width);
                 }
                 if (res.height > 0) {
-                    L.mask_scale[1] = 16.0f / float(res.height);
+                    L.mask_scale[1] = 32.0f / float(res.height);
                 }
             }
             for (int i = 0; i < 4; ++i) {

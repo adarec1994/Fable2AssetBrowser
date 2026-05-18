@@ -66,6 +66,7 @@ struct MPPerMesh {
 
     bool is_terrain = false;
     bool is_water   = false;
+    float water_params[38] = {};
 
     uint32_t source_mesh_idx = 0;
 

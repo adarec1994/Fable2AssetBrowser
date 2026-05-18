@@ -75,6 +75,7 @@ struct MDLMeshGeom {
     std::string name;
     bool is_terrain = false;
     bool is_water = false;
+    float water_params[38] = {};
     uint32_t MeshIndex = 0;
     uint32_t SubMeshIndex = 0;
 };

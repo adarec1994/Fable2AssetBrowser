@@ -1021,6 +1021,12 @@ static bool compile_shader(const char* src, const char* entry, const char* profi
 #endif
     ID3DBlob* err = nullptr;
     HRESULT hr = D3DCompile(src, strlen(src), nullptr, nullptr, nullptr, entry, profile, flags, 0, blob, &err);
+    if (FAILED(hr) && err) {
+        const char* msg = static_cast<const char*>(err->GetBufferPointer());
+        OutputLog::error(std::string("shader compile failed ")
+            + profile + "/" + entry + ": "
+            + (msg ? msg : "unknown error"));
+    }
     if(err){ err->Release(); }
     return SUCCEEDED(hr);
 }
@@ -1377,17 +1383,17 @@ float4 PS(VSOUT i) : SV_Target {
     bool   have_first  = false;
 
     [loop]
-    for (int L = 0; L < 16; ++L) {
-        float4 idx255 = round(chunk_idx.Load(int4(chunk_xy, L, 0)) * 255.0);
+    for (int layer_i = 0; layer_i < 16; ++layer_i) {
+        float4 idx255 = round(chunk_idx.Load(int4(chunk_xy, layer_i, 0)) * 255.0);
         if (idx255.x > 254.5) break;
 
         int material = clamp((int)idx255.x, 0, material_count - 1);
-        float4 bln = chunk_blend.Load(int4(chunk_xy, L, 0))
+        float4 bln = chunk_blend.Load(int4(chunk_xy, layer_i, 0))
                    * (255.0 / max(splat_params.x, 1.0));
         float layer_alpha = saturate(bln.x * w00 + bln.y * w10
                                    + bln.z * w01 + bln.w * w11);
 
-        float2 mask_base = chunk_uv.Load(int4(chunk_xy, L, 0)).xy;
+        float2 mask_base = chunk_uv.Load(int4(chunk_xy, layer_i, 0)).xy;
         float2 mask_uv = mask_base + local_uv * splat_params.zw;
         layer_alpha *= splat_mask.SampleLevel(smp_point, mask_uv, 0).r;
 
@@ -1476,7 +1482,7 @@ struct VSOUT{
 float wave_disp(float4 w, float2 xz, float t){
     if (w.z <= 0.0001) return 0.0;
     float k = 6.28318 / w.z;                  // 2π / wavelength
-    float phase = dot(w.xy, xz) * k + t * w.z * 2.0;
+    float phase = dot(w.xy, xz) * k + t * w.z * 0.35;
     return sin(phase) * w.w;
 }
 
@@ -1522,18 +1528,29 @@ struct PSIN{
     float3 wp  : TEXCOORD1;
 };
 
+float2 wave_grad(float4 w, float2 xz, float t){
+    if (w.z <= 0.0001) return float2(0.0, 0.0);
+    float k = 6.28318 / w.z;
+    float phase = dot(w.xy, xz) * k + t * w.z * 0.35;
+    return w.xy * (cos(phase) * w.w * k);
+}
+
 float4 PS(PSIN i) : SV_Target {
     float t = params.w;
+    float2 xz = i.wp.xz;
+    float2 grad = wave_grad(wave0, xz, t)
+                + wave_grad(wave1, xz, t)
+                + wave_grad(wave2, xz, t)
+                + wave_grad(wave3, xz, t);
+    float3 wave_n = normalize(float3(-grad.x, 1.0, -grad.y));
 
-    // Two scrolling samples of the normal map summed together for a
-    // cheap "rippling" surface.
     float2 uv0 = i.t * 0.20 + float2( 0.0,  1.0) * t * wparams.x;
     float2 uv1 = i.t * 0.13 + float2( 1.0, -0.4) * t * wparams.y;
     float3 n0 = tex_normal.Sample(smp, uv0).rgb * 2.0 - 1.0;
     float3 n1 = tex_normal.Sample(smp, uv1).rgb * 2.0 - 1.0;
     float3 n_ts = normalize(n0 + n1);
-    n_ts.xy *= wparams.z;
-    float3 N = normalize(float3(n_ts.x, max(n_ts.z, 0.1) + 0.6, n_ts.y));
+    float3 N = normalize(wave_n + float3(n_ts.x, 0.0, n_ts.y)
+                                  * (0.08 * wparams.z));
 
     float3 L = normalize(-lightDir.xyz);
     float ndotl = saturate(dot(N, L));
@@ -2081,6 +2098,8 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         m.isolated  = false;
         m.is_terrain = g.is_terrain;
         m.is_water   = g.is_water;
+        std::memcpy(m.water_params, g.water_params,
+                    sizeof(m.water_params));
 
         m.source_mesh_idx = (uint32_t)i;
 
@@ -2391,9 +2410,9 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 t.splat_params[1] = (R.tile_scale > 0.0f)
                     ? R.tile_scale : 0.125f;
                 t.splat_params[2] = (R.splat_w > 0)
-                    ? 16.0f / float(R.splat_w) : 0.0f;
+                    ? 32.0f / float(R.splat_w) : 0.0f;
                 t.splat_params[3] = (R.splat_h > 0)
-                    ? 16.0f / float(R.splat_h) : 0.0f;
+                    ? 32.0f / float(R.splat_h) : 0.0f;
                 t.mesh_xform[0] = 1.0f;
                 t.mesh_xform[1] = 1.0f;
                 t.mesh_xform[2] = R.mesh_to_world_x;
@@ -2463,14 +2482,51 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                     float wparams[4];
                 } w{};
 
-                w.wave0[0] =  0.8f; w.wave0[1] =  0.6f; w.wave0[2] = 6.0f; w.wave0[3] = 0.06f;
-                w.wave1[0] = -0.5f; w.wave1[1] =  0.86f; w.wave1[2] = 3.4f; w.wave1[3] = 0.035f;
-                w.wave2[0] =  0.3f; w.wave2[1] = -0.95f; w.wave2[2] = 2.1f; w.wave2[3] = 0.025f;
-                w.wave3[0] = -0.94f; w.wave3[1] = -0.34f; w.wave3[2] = 1.3f; w.wave3[3] = 0.012f;
-                w.wparams[0] = 0.04f;
-                w.wparams[1] = 0.025f;
-                w.wparams[2] = 0.55f;
-                w.wparams[3] = 0.0f;
+                auto finite_or = [&](int idx, float fallback) {
+                    const float v = (idx >= 0 && idx < 38)
+                        ? m.water_params[idx] : fallback;
+                    return std::isfinite(v) ? v : fallback;
+                };
+                auto set_wave = [](float out[4],
+                                   float dx, float dz,
+                                   float wavelength,
+                                   float amp)
+                {
+                    const float len = std::sqrt(dx * dx + dz * dz);
+                    if (len > 1e-5f) {
+                        out[0] = dx / len;
+                        out[1] = dz / len;
+                    } else {
+                        out[0] = 1.0f;
+                        out[1] = 0.0f;
+                    }
+                    out[2] = std::clamp(wavelength, 1.2f, 18.0f);
+                    out[3] = std::clamp(amp, 0.004f, 0.09f);
+                };
+
+                const float sx0 = finite_or(3,  0.052f);
+                const float sz0 = finite_or(4,  0.011f);
+                const float sx1 = finite_or(5, -0.019f);
+                const float sz1 = finite_or(6,  0.019f);
+                const float sc0 = std::max(std::abs(finite_or(7, 0.188f)),
+                                           0.06f);
+                const float sc1 = std::max(std::abs(finite_or(9, 0.220f)),
+                                           0.06f);
+                set_wave(w.wave0, sx0, sz0, 1.0f / sc0,
+                         std::sqrt(sx0 * sx0 + sz0 * sz0));
+                set_wave(w.wave1, sx1, sz1, 1.0f / sc1,
+                         std::sqrt(sx1 * sx1 + sz1 * sz1));
+                set_wave(w.wave2, -sz0, sx0, 1.0f / (sc0 * 1.7f),
+                         0.45f * std::sqrt(sx0 * sx0 + sz0 * sz0));
+                set_wave(w.wave3, -sz1, sx1, 1.0f / (sc1 * 2.3f),
+                         0.35f * std::sqrt(sx1 * sx1 + sz1 * sz1));
+                w.wparams[0] = std::max(std::sqrt(sx0 * sx0 + sz0 * sz0),
+                                        0.015f);
+                w.wparams[1] = std::max(std::sqrt(sx1 * sx1 + sz1 * sz1),
+                                        0.012f);
+                w.wparams[2] = std::clamp(finite_or(1, 0.2f) * 3.0f,
+                                          0.3f, 1.2f);
+                w.wparams[3] = finite_or(0, 0.0f);
                 std::memcpy(wms.pData, &w, sizeof(w));
                 ctx->Unmap(mp.cbuffer_water, 0);
             }

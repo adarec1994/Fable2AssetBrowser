@@ -734,10 +734,10 @@ bool Build(ID3D11Device*                                       device,
 
             const float scale_u = (L.mask_scale[0] > 0.0f)
                 ? L.mask_scale[0]
-                : 16.0f / float(parsed.splat_w);
+                : 32.0f / float(parsed.splat_w);
             const float scale_v = (L.mask_scale[1] > 0.0f)
                 ? L.mask_scale[1]
-                : 16.0f / float(parsed.splat_h);
+                : 32.0f / float(parsed.splat_h);
 
             const float u = L.tile_uv[0]
                 + std::clamp(local_x, 0.0f, 1.0f)

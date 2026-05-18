@@ -4772,6 +4772,17 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
     const float world_span_z = std::max(1e-6f, world_max_z - world_min_z);
     const float chunk_size_x = world_span_x / std::max(1u, parsed.chunk_w);
     const float chunk_size_z = world_span_z / std::max(1u, parsed.chunk_h);
+    std::vector<const EhfChunk*> chunk_grid(
+        size_t(parsed.chunk_w) * size_t(parsed.chunk_h), nullptr);
+    for (const auto& c : parsed.chunks) {
+        const int cx = std::clamp(
+            int(std::lround((c.origin[0] - world_min_x) / chunk_size_x)),
+            0, int(parsed.chunk_w) - 1);
+        const int cy = std::clamp(
+            int(std::lround((c.origin[1] - world_min_z) / chunk_size_z)),
+            0, int(parsed.chunk_h) - 1);
+        chunk_grid[size_t(cy) * size_t(parsed.chunk_w) + size_t(cx)] = &c;
+    }
     {
         std::ostringstream os;
         os << "ehf chunk world bounds: x=[" << world_min_x << ".."
@@ -4888,8 +4899,12 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
             const float w01 = (1.f - fx_in) *        fy_in;
             const float w11 =        fx_in  *        fy_in;
 
+            const size_t chunk_index =
+                size_t(cy) * size_t(parsed.chunk_w) + size_t(cx);
             const EhfChunk& chunk =
-                parsed.chunks[size_t(cx) * parsed.chunk_h + cy];
+                (chunk_index < chunk_grid.size() && chunk_grid[chunk_index])
+                    ? *chunk_grid[chunk_index]
+                    : parsed.chunks.front();
 
             float accum_r = 0.f, accum_g = 0.f, accum_b = 0.f;
             float accum_a = 0.f;

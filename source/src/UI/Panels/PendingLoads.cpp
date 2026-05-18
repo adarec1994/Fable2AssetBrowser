@@ -89,10 +89,15 @@ static std::string asset_parent_key(const std::string& bnk_path)
 
 static bool parse_prop_model_buffer(const std::vector<unsigned char>& buf,
                                     const std::string& model_path,
-                                    CachedPropModel& out)
+                                    CachedPropModel& out,
+                                    std::string* reason = nullptr)
 {
     CachedPropModel tmp;
     if (!parse_mdl_info(buf, tmp.info, model_path)) {
+        if (reason) {
+            *reason = "parse_mdl_info failed, bytes=" +
+                      std::to_string(buf.size());
+        }
         return false;
     }
 
@@ -109,11 +114,21 @@ static bool parse_prop_model_buffer(const std::vector<unsigned char>& buf,
 
     parse_mdl_geometry(buf, tmp.info, tmp.geoms);
     if (tmp.geoms.empty()) {
+        if (reason) {
+            *reason = "parse_mdl_geometry produced 0 geoms"
+                      ", bytes=" + std::to_string(buf.size()) +
+                      ", meshes=" + std::to_string(tmp.info.Meshes.size()) +
+                      ", buffers=" +
+                      std::to_string(tmp.info.MeshBuffers.size());
+        }
         return false;
     }
 
     out.info = std::move(tmp.info);
     out.geoms = std::move(tmp.geoms);
+    if (reason) {
+        *reason = "ok, geoms=" + std::to_string(out.geoms.size());
+    }
     return true;
 }
 
@@ -176,24 +191,45 @@ collect_prop_model_candidates(const std::string& model_path,
 static bool try_prop_model_candidate(const FlatAssetEntry& entry,
                                      const std::string& model_path,
                                      CachedPropModel& cached,
-                                     std::string& method)
+                                     std::string& method,
+                                     std::string* fail_reason = nullptr)
 {
     try {
         std::vector<unsigned char> body =
             BnkCache::extract_bytes(entry.bnk_path, entry.file_index);
-        if (!body.empty() &&
-            parse_prop_model_buffer(body, model_path, cached)) {
-            method = "body";
-            return true;
+        if (!body.empty()) {
+            std::string parse_reason;
+            if (parse_prop_model_buffer(body, model_path, cached,
+                                        &parse_reason)) {
+                method = "body";
+                return true;
+            }
+            if (fail_reason) {
+                *fail_reason = "body parse rejected: " + parse_reason;
+            }
+        } else if (fail_reason) {
+            *fail_reason = "body extract returned 0 bytes";
         }
     } catch (...) {
+        if (fail_reason) {
+            *fail_reason = "body extract threw";
+        }
     }
 
     std::vector<unsigned char> buf;
-    if (build_mdl_buffer_for_name_with_body(model_path, entry.bnk_path, buf) &&
-        parse_prop_model_buffer(buf, model_path, cached)) {
-        method = "body+header";
-        return true;
+    if (build_mdl_buffer_for_name_with_body(model_path, entry.bnk_path, buf)) {
+        std::string parse_reason;
+        if (parse_prop_model_buffer(buf, model_path, cached, &parse_reason)) {
+            method = "body+header";
+            return true;
+        }
+        if (fail_reason) {
+            if (!fail_reason->empty()) *fail_reason += "; ";
+            *fail_reason += "body+header parse rejected: " + parse_reason;
+        }
+    } else if (fail_reason) {
+        if (!fail_reason->empty()) *fail_reason += "; ";
+        *fail_reason += "body+header build failed";
     }
 
     return false;
@@ -206,17 +242,30 @@ static bool load_cached_prop_model(const std::string& model_path,
     std::vector<unsigned char> buf;
     if (build_mdl_buffer_for_name_with_body(model_path,
                                             preferred_body_bnk,
-                                            buf) &&
-        parse_prop_model_buffer(buf, model_path, cached)) {
-        return true;
+                                            buf)) {
+        std::string parse_reason;
+        if (parse_prop_model_buffer(buf, model_path, cached, &parse_reason)) {
+            return true;
+        }
+        level_load_debug("prop model preferred parse rejected: " +
+                         model_path + " (" + parse_reason + ")");
+    } else {
+        level_load_debug("prop model preferred build failed: " + model_path +
+                         " preferred_body_bnk=" +
+                         std::filesystem::path(preferred_body_bnk)
+                             .filename().string());
     }
 
     const auto candidates =
         collect_prop_model_candidates(model_path, preferred_body_bnk);
+    std::vector<std::string> failures;
+    failures.reserve(std::min<size_t>(candidates.size(), 8));
     for (const FlatAssetEntry* entry : candidates) {
         if (!entry) continue;
         std::string method;
-        if (try_prop_model_candidate(*entry, model_path, cached, method)) {
+        std::string fail_reason;
+        if (try_prop_model_candidate(*entry, model_path, cached, method,
+                                     &fail_reason)) {
             std::ostringstream os;
             os << "prop model recovered: " << model_path
                << " via " << method
@@ -225,6 +274,24 @@ static bool load_cached_prop_model(const std::string& model_path,
                << " size=" << entry->size;
             level_load_debug(os.str());
             return true;
+        }
+        if (failures.size() < 8) {
+            std::ostringstream os;
+            os << std::filesystem::path(entry->bnk_path).filename().string()
+               << " index=" << entry->file_index
+               << " size=" << entry->size
+               << ": " << fail_reason;
+            failures.push_back(os.str());
+        }
+    }
+
+    {
+        std::ostringstream os;
+        os << "prop model unresolved: " << model_path
+           << " candidates=" << candidates.size();
+        level_load_debug(os.str());
+        for (const auto& failure : failures) {
+            level_load_debug("  candidate rejected: " + failure);
         }
     }
 
@@ -712,17 +779,25 @@ static void bind_generated_terrain_textures(
         m.srv_diffuse      = srv;
         m.diffuse_visible  = true;
         m.diffuse_tex_name = t.label;
+        const bool splat_active =
+            (t.mesh_index == 0 && TerrainSplat::Get().ok);
         if (t.mesh_index == 0) {
             m.is_terrain = true;
-            if (TerrainSplat::Get().ok) {
+            if (splat_active) {
                 m.diffuse_tex_name = "ehf_splat_terrain";
             }
         }
 
         TerrainTextureRegistry::Register(t.label, t.rgba, t.width, t.height);
-        OutputLog::success(std::string(log_prefix) + ": " + t.label +
-                           " (" + std::to_string(t.width) + "x" +
-                           std::to_string(t.height) + ")");
+        if (splat_active) {
+            OutputLog::success(
+                "terrain SPLAT shader retained after prop upload "
+                "(composite kept only as fallback)");
+        } else {
+            OutputLog::success(std::string(log_prefix) + ": " + t.label +
+                               " (" + std::to_string(t.width) + "x" +
+                               std::to_string(t.height) + ")");
+        }
     }
 }
 
@@ -1466,36 +1541,87 @@ void process_pending_loads() {
                         const float z0 = t.cz - t.ez;
                         const float z1 = t.cz + t.ez;
 
-                        MDLMeshGeom wg;
-                        wg.positions = {
-                            x0, y, z0,
-                            x1, y, z0,
-                            x1, y, z1,
-                            x0, y, z1,
-                        };
-                        wg.normals = {
-                            0.0f, 1.0f, 0.0f,
-                            0.0f, 1.0f, 0.0f,
-                            0.0f, 1.0f, 0.0f,
-                            0.0f, 1.0f, 0.0f,
-                        };
+                        int mask_w = int(std::lround(t.h_min));
+                        int mask_h = int(std::lround(t.h_max));
+                        const size_t mask_count = t.mask.size();
+                        if (mask_w <= 0 || mask_h <= 0 ||
+                            size_t(mask_w) * size_t(mask_h) != mask_count)
+                        {
+                            const int sq = int(std::lround(
+                                std::sqrt(double(mask_count))));
+                            if (sq > 0 && size_t(sq) * size_t(sq) == mask_count) {
+                                mask_w = sq;
+                                mask_h = sq;
+                            } else if (mask_count > 0) {
+                                mask_w = std::max(1, int(mask_count));
+                                mask_h = 1;
+                            } else {
+                                mask_w = 16;
+                                mask_h = 16;
+                            }
+                        }
+                        mask_w = std::clamp(mask_w, 1, 128);
+                        mask_h = std::clamp(mask_h, 1, 128);
 
-                        wg.uvs = {
-                            x0, z0,
-                            x1, z0,
-                            x1, z1,
-                            x0, z1,
+                        MDLMeshGeom wg;
+                        const int vert_w = mask_w + 1;
+                        const int vert_h = mask_h + 1;
+                        const size_t vert_count =
+                            size_t(vert_w) * size_t(vert_h);
+                        wg.positions.reserve(vert_count * 3);
+                        wg.normals.reserve(vert_count * 3);
+                        wg.uvs.reserve(vert_count * 2);
+                        for (int mz = 0; mz <= mask_h; ++mz) {
+                            const float vz = float(mz) / float(mask_h);
+                            const float pz = z0 + (z1 - z0) * vz;
+                            for (int mx = 0; mx <= mask_w; ++mx) {
+                                const float vx = float(mx) / float(mask_w);
+                                const float px = x0 + (x1 - x0) * vx;
+                                wg.positions.insert(wg.positions.end(),
+                                                    { px, y, pz });
+                                wg.normals.insert(wg.normals.end(),
+                                                  { 0.0f, 1.0f, 0.0f });
+                                wg.uvs.insert(wg.uvs.end(), { px, pz });
+                            }
+                        }
+
+                        auto active_cell = [&](int mx, int mz) -> bool {
+                            if (t.mask.empty()) return true;
+                            const size_t mi = size_t(mz) * size_t(mask_w)
+                                            + size_t(mx);
+                            return mi < t.mask.size() && t.mask[mi] != 0;
                         };
-                        wg.indices = { 0, 2, 1, 0, 3, 2 };
-                        wg.bone_ids.assign(4 * 4, 0);
-                        wg.bone_weights.assign(4 * 4, 0.0f);
-                        for (size_t v = 0; v < 4; ++v) {
+                        for (int mz = 0; mz < mask_h; ++mz) {
+                            for (int mx = 0; mx < mask_w; ++mx) {
+                                if (!active_cell(mx, mz)) continue;
+                                const uint32_t v00 =
+                                    uint32_t(mz * vert_w + mx);
+                                const uint32_t v10 = v00 + 1;
+                                const uint32_t v01 =
+                                    uint32_t((mz + 1) * vert_w + mx);
+                                const uint32_t v11 = v01 + 1;
+                                wg.indices.insert(wg.indices.end(),
+                                                  { v00, v11, v10,
+                                                    v00, v01, v11 });
+                            }
+                        }
+                        if (wg.indices.empty()) {
+                            continue;
+                        }
+                        wg.bone_ids.assign(vert_count * 4, 0);
+                        wg.bone_weights.assign(vert_count * 4, 0.0f);
+                        for (size_t v = 0; v < vert_count; ++v) {
                             wg.bone_weights[v * 4 + 0] = 1.0f;
                         }
                         wg.name = "water: body" + std::to_string(bi) +
                                   ":tile" + std::to_string(ti);
                         wg.diffuse_tex_name = body.normal_map_path;
                         wg.is_water = true;
+                        for (size_t pi = 0; pi < body.wave_params.size() &&
+                                            pi < 38; ++pi) {
+                            wg.water_params[pi] = body.wave_params[pi];
+                        }
+                        wg.water_params[0] = y;
                         geoms.push_back(std::move(wg));
                         ++water_geom_count;
                     }
@@ -1503,7 +1629,7 @@ void process_pending_loads() {
                 if (water_geom_count > 0) {
                     OutputLog::success("water: " +
                         std::to_string(water_geom_count) +
-                        " surface tile(s) emitted from .water");
+                        " tessellated masked surface tile(s) emitted from .water");
                 }
             }
 

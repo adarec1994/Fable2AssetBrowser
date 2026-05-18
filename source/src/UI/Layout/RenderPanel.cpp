@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <limits>
 #include <vector>
 #include <cstdint>
 #include <cstdio>
@@ -43,8 +44,9 @@ void render_panel_handle_flycam(float dt);
 
 bool g_skel_overlay_show = false;
 
-int g_highlight_mesh_idx = -1;
-int g_isolate_mesh_idx   = -1;
+int g_highlight_mesh_idx    = -1;
+int g_isolate_mesh_idx      = -1;
+int g_selected_level_mesh_idx = -1;
 
 #ifdef _WIN32
 ID3D11ShaderResourceView* g_tex_popout_srv = nullptr;
@@ -90,392 +92,6 @@ namespace UI {
 
 namespace {
 
-#ifdef _WIN32
-void flip_first_mesh_x(ID3D11Device* device);
-
-void rotate_first_mesh(ID3D11Device* device, int axis, float angle_rad,
-                       bool around_mesh_center = false)
-{
-    if (!device || !g_mp.has_model || g_mp.meshes.empty()) return;
-    MPPerMesh& mesh = g_mp.meshes[0];
-    if (!mesh.vb || mesh.index_count == 0) return;
-
-    D3D11_BUFFER_DESC vd{};
-    mesh.vb->GetDesc(&vd);
-    if (vd.ByteWidth == 0) return;
-
-    D3D11_BUFFER_DESC sd = vd;
-    sd.Usage          = D3D11_USAGE_STAGING;
-    sd.BindFlags      = 0;
-    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    sd.MiscFlags      = 0;
-    ID3D11Buffer* staging = nullptr;
-    if (FAILED(device->CreateBuffer(&sd, nullptr, &staging))) return;
-
-    ID3D11DeviceContext* ctx = nullptr;
-    device->GetImmediateContext(&ctx);
-    ctx->CopyResource(staging, mesh.vb);
-
-    std::vector<uint8_t> cpu(vd.ByteWidth);
-    D3D11_MAPPED_SUBRESOURCE map{};
-    if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
-        staging->Release(); ctx->Release(); return;
-    }
-    std::memcpy(cpu.data(), map.pData, vd.ByteWidth);
-    ctx->Unmap(staging, 0);
-    staging->Release();
-
-    const UINT stride = sizeof(MPVertex);
-    const size_t vcount = vd.ByteWidth / stride;
-
-    float pivot_x = 0.0f, pivot_y = 0.0f, pivot_z = 0.0f;
-    if (around_mesh_center) {
-        double sx = 0, sy = 0, sz = 0;
-        for (size_t i = 0; i < vcount; ++i) {
-            const float* p =
-                reinterpret_cast<const float*>(cpu.data() + i * stride);
-            sx += p[0]; sy += p[1]; sz += p[2];
-        }
-        if (vcount > 0) {
-            pivot_x = float(sx / double(vcount));
-            pivot_y = float(sy / double(vcount));
-            pivot_z = float(sz / double(vcount));
-        }
-    }
-
-    const float s = std::sin(angle_rad);
-    const float c = std::cos(angle_rad);
-    auto rotate_xyz = [&](float& x, float& y, float& z) {
-        switch (axis) {
-            case 0: {
-                const float ny = c * y - s * z;
-                const float nz = s * y + c * z;
-                y = ny; z = nz;
-                break;
-            }
-            case 1: {
-                const float nx =  c * x + s * z;
-                const float nz = -s * x + c * z;
-                x = nx; z = nz;
-                break;
-            }
-            case 2: {
-                const float nx = c * x - s * y;
-                const float ny = s * x + c * y;
-                x = nx; y = ny;
-                break;
-            }
-        }
-    };
-
-    for (size_t i = 0; i < vcount; ++i) {
-        float* p  = reinterpret_cast<float*>(cpu.data() + i * stride + 0);
-        float* nv = reinterpret_cast<float*>(cpu.data() + i * stride + 12);
-        p[0] -= pivot_x; p[1] -= pivot_y; p[2] -= pivot_z;
-        rotate_xyz(p[0],  p[1],  p[2]);
-        p[0] += pivot_x; p[1] += pivot_y; p[2] += pivot_z;
-        rotate_xyz(nv[0], nv[1], nv[2]);
-    }
-
-    D3D11_BUFFER_DESC nd = vd;
-    nd.Usage          = D3D11_USAGE_IMMUTABLE;
-    nd.CPUAccessFlags = 0;
-    D3D11_SUBRESOURCE_DATA isd{};
-    isd.pSysMem = cpu.data();
-    ID3D11Buffer* new_vb = nullptr;
-    if (SUCCEEDED(device->CreateBuffer(&nd, &isd, &new_vb))) {
-        mesh.vb->Release();
-        mesh.vb = new_vb;
-    }
-    ctx->Release();
-}
-
-void scale_first_mesh(ID3D11Device* device, float sx, float sy, float sz)
-{
-    if (!device || !g_mp.has_model || g_mp.meshes.empty()) return;
-    if (sx == 1.0f && sy == 1.0f && sz == 1.0f) return;
-    MPPerMesh& mesh = g_mp.meshes[0];
-    if (!mesh.vb || mesh.index_count == 0) return;
-
-    D3D11_BUFFER_DESC vd{};
-    mesh.vb->GetDesc(&vd);
-    if (vd.ByteWidth == 0) return;
-
-    D3D11_BUFFER_DESC sd = vd;
-    sd.Usage          = D3D11_USAGE_STAGING;
-    sd.BindFlags      = 0;
-    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    sd.MiscFlags      = 0;
-    ID3D11Buffer* staging = nullptr;
-    if (FAILED(device->CreateBuffer(&sd, nullptr, &staging))) return;
-
-    ID3D11DeviceContext* ctx = nullptr;
-    device->GetImmediateContext(&ctx);
-    ctx->CopyResource(staging, mesh.vb);
-
-    std::vector<uint8_t> cpu(vd.ByteWidth);
-    D3D11_MAPPED_SUBRESOURCE map{};
-    if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
-        staging->Release(); ctx->Release(); return;
-    }
-    std::memcpy(cpu.data(), map.pData, vd.ByteWidth);
-    ctx->Unmap(staging, 0);
-    staging->Release();
-
-    const UINT stride = sizeof(MPVertex);
-    const size_t vcount = vd.ByteWidth / stride;
-    for (size_t i = 0; i < vcount; ++i) {
-        float* p = reinterpret_cast<float*>(cpu.data() + i * stride + 0);
-        p[0] *= sx;
-        p[1] *= sy;
-        p[2] *= sz;
-    }
-
-    D3D11_BUFFER_DESC nd = vd;
-    nd.Usage          = D3D11_USAGE_IMMUTABLE;
-    nd.CPUAccessFlags = 0;
-    D3D11_SUBRESOURCE_DATA isd{};
-    isd.pSysMem = cpu.data();
-    ID3D11Buffer* new_vb = nullptr;
-    if (SUCCEEDED(device->CreateBuffer(&nd, &isd, &new_vb))) {
-        mesh.vb->Release();
-        mesh.vb = new_vb;
-    }
-    ctx->Release();
-}
-
-void translate_first_mesh(ID3D11Device* device, float dx, float dz)
-{
-    if (!device || !g_mp.has_model || g_mp.meshes.empty()) return;
-    if (dx == 0.0f && dz == 0.0f) return;
-    MPPerMesh& mesh = g_mp.meshes[0];
-    if (!mesh.vb || mesh.index_count == 0) return;
-
-    D3D11_BUFFER_DESC vd{};
-    mesh.vb->GetDesc(&vd);
-    if (vd.ByteWidth == 0) return;
-
-    D3D11_BUFFER_DESC sd = vd;
-    sd.Usage          = D3D11_USAGE_STAGING;
-    sd.BindFlags      = 0;
-    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    sd.MiscFlags      = 0;
-    ID3D11Buffer* staging = nullptr;
-    if (FAILED(device->CreateBuffer(&sd, nullptr, &staging))) return;
-
-    ID3D11DeviceContext* ctx = nullptr;
-    device->GetImmediateContext(&ctx);
-    ctx->CopyResource(staging, mesh.vb);
-
-    std::vector<uint8_t> cpu(vd.ByteWidth);
-    D3D11_MAPPED_SUBRESOURCE map{};
-    if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
-        staging->Release(); ctx->Release(); return;
-    }
-    std::memcpy(cpu.data(), map.pData, vd.ByteWidth);
-    ctx->Unmap(staging, 0);
-    staging->Release();
-
-    const UINT stride = sizeof(MPVertex);
-    const size_t vcount = vd.ByteWidth / stride;
-    for (size_t i = 0; i < vcount; ++i) {
-        float* p = reinterpret_cast<float*>(cpu.data() + i * stride + 0);
-        p[0] += dx;
-        p[2] += dz;
-    }
-
-    D3D11_BUFFER_DESC nd = vd;
-    nd.Usage          = D3D11_USAGE_IMMUTABLE;
-    nd.CPUAccessFlags = 0;
-    D3D11_SUBRESOURCE_DATA isd{};
-    isd.pSysMem = cpu.data();
-    ID3D11Buffer* new_vb = nullptr;
-    if (SUCCEEDED(device->CreateBuffer(&nd, &isd, &new_vb))) {
-        mesh.vb->Release();
-        mesh.vb = new_vb;
-    }
-    ctx->Release();
-}
-
-void flip_first_mesh_x(ID3D11Device* device)
-{
-    if (!device || !g_mp.has_model || g_mp.meshes.empty()) return;
-    MPPerMesh& mesh = g_mp.meshes[0];
-    if (!mesh.vb || mesh.index_count == 0) return;
-
-    D3D11_BUFFER_DESC vd{};
-    mesh.vb->GetDesc(&vd);
-    if (vd.ByteWidth == 0) return;
-
-    D3D11_BUFFER_DESC sd = vd;
-    sd.Usage          = D3D11_USAGE_STAGING;
-    sd.BindFlags      = 0;
-    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    sd.MiscFlags      = 0;
-    ID3D11Buffer* staging = nullptr;
-    if (FAILED(device->CreateBuffer(&sd, nullptr, &staging))) return;
-
-    ID3D11DeviceContext* ctx = nullptr;
-    device->GetImmediateContext(&ctx);
-    ctx->CopyResource(staging, mesh.vb);
-
-    std::vector<uint8_t> cpu(vd.ByteWidth);
-    D3D11_MAPPED_SUBRESOURCE map{};
-    if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
-        staging->Release(); ctx->Release(); return;
-    }
-    std::memcpy(cpu.data(), map.pData, vd.ByteWidth);
-    ctx->Unmap(staging, 0);
-    staging->Release();
-
-    const UINT stride = sizeof(MPVertex);
-    const size_t vcount = vd.ByteWidth / stride;
-    for (size_t i = 0; i < vcount; ++i) {
-        float* p  = reinterpret_cast<float*>(cpu.data() + i * stride + 0);
-        float* nv = reinterpret_cast<float*>(cpu.data() + i * stride + 12);
-        p[0]  = -p[0];
-        nv[0] = -nv[0];
-    }
-
-    D3D11_BUFFER_DESC nd = vd;
-    nd.Usage          = D3D11_USAGE_IMMUTABLE;
-    nd.CPUAccessFlags = 0;
-    D3D11_SUBRESOURCE_DATA isd{};
-    isd.pSysMem = cpu.data();
-    ID3D11Buffer* new_vb = nullptr;
-    if (SUCCEEDED(device->CreateBuffer(&nd, &isd, &new_vb))) {
-        mesh.vb->Release();
-        mesh.vb = new_vb;
-    }
-    ctx->Release();
-}
-
-void draw_terrain_rotate_overlay(ID3D11Device* device,
-                                 const ImVec2& origin,
-                                 const ImVec2& region,
-                                 float&        next_overlay_y)
-{
-    if (!g_mp.has_model || !g_mp.no_tilt) return;
-
-    const float kW = 220.0f;
-    const ImVec2 pos(origin.x + region.x - kW - 6.0f, next_overlay_y);
-    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(kW, 0), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.85f);
-
-    ImGuiWindowFlags fl = ImGuiWindowFlags_NoResize
-                        | ImGuiWindowFlags_NoCollapse
-                        | ImGuiWindowFlags_NoSavedSettings
-                        | ImGuiWindowFlags_AlwaysAutoResize;
-    if (ImGui::Begin("Rotate Terrain##rotate_terrain", nullptr, fl)) {
-        ImGui::TextDisabled("Probe rotation alignment");
-        ImGui::Separator();
-        static bool s_around_center = false;
-        ImGui::Checkbox("Around mesh center", &s_around_center);
-        const float kPi = 3.14159265f;
-        auto row = [&](const char* label, int axis) {
-            ImGui::TextUnformatted(label); ImGui::SameLine(40);
-            if (ImGui::Button((std::string("-90##") + label).c_str(),
-                              ImVec2(60, 0))) {
-                rotate_first_mesh(device, axis, -kPi * 0.5f,
-                                  s_around_center);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button((std::string("+90##") + label).c_str(),
-                              ImVec2(60, 0))) {
-                rotate_first_mesh(device, axis,  kPi * 0.5f,
-                                  s_around_center);
-            }
-        };
-        row("X", 0);
-        row("Y", 1);
-        row("Z", 2);
-        ImGui::Spacing();
-        if (ImGui::Button("Flip X (mirror)", ImVec2(-1, 0))) {
-            flip_first_mesh_x(device);
-        }
-        ImGui::Spacing();
-        if (s_around_center) {
-            ImGui::TextDisabled("Rotates around the terrain's");
-            ImGui::TextDisabled("own centroid; props don't move.");
-        } else {
-            ImGui::TextDisabled("Rotates around world (0,0,0).");
-            ImGui::TextDisabled("Props stay in place; only the");
-            ImGui::TextDisabled("terrain mesh moves.");
-        }
-
-        ImGui::Separator();
-        ImGui::TextDisabled("Move terrain (engine X/Y, Z up)");
-        static float s_step = 50.0f;
-        ImGui::SetNextItemWidth(-1);
-        ImGui::DragFloat("##step", &s_step, 1.0f, 0.1f, 5000.0f,
-                         "step = %.1f");
-        auto move_row = [&](const char* label, float dx, float dz) {
-            ImGui::TextUnformatted(label); ImGui::SameLine(40);
-            if (ImGui::Button((std::string("-##") + label).c_str(),
-                              ImVec2(60, 0))) {
-                translate_first_mesh(device,
-                                     -dx * s_step,
-                                     -dz * s_step);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button((std::string("+##") + label).c_str(),
-                              ImVec2(60, 0))) {
-                translate_first_mesh(device,
-                                      dx * s_step,
-                                      dz * s_step);
-            }
-        };
-        move_row("X", 1.0f, 0.0f);
-        move_row("Y", 0.0f, 1.0f);
-
-        ImGui::Separator();
-        ImGui::TextDisabled("Scale terrain (multiplicative)");
-        static float s_scale_step = 1.5f;
-        ImGui::SetNextItemWidth(-1);
-        ImGui::DragFloat("##scale_step", &s_scale_step, 0.01f, 1.01f, 10.0f,
-                         "factor = %.3f×");
-        auto scale_row = [&](const char* label, int axis) {
-            ImGui::TextUnformatted(label); ImGui::SameLine(40);
-            const float k = std::max(s_scale_step, 1.001f);
-            const float inv = 1.0f / k;
-            float sx = 1.0f, sy = 1.0f, sz = 1.0f;
-            if (axis == 0)      { sx = 1.0f; }
-            else if (axis == 1) { sy = 1.0f; }
-            else                { sz = 1.0f; }
-            if (ImGui::Button((std::string("÷##s") + label).c_str(),
-                              ImVec2(60, 0))) {
-                if (axis == 0) scale_first_mesh(device, inv, 1.0f, 1.0f);
-                if (axis == 1) scale_first_mesh(device, 1.0f, inv, 1.0f);
-                if (axis == 2) scale_first_mesh(device, 1.0f, 1.0f, inv);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button((std::string("×##s") + label).c_str(),
-                              ImVec2(60, 0))) {
-                if (axis == 0) scale_first_mesh(device, k, 1.0f, 1.0f);
-                if (axis == 1) scale_first_mesh(device, 1.0f, k, 1.0f);
-                if (axis == 2) scale_first_mesh(device, 1.0f, 1.0f, k);
-            }
-            (void)sx; (void)sy; (void)sz;
-        };
-        scale_row("X",      0);
-        scale_row("Y(h)",   1);
-        scale_row("Z",      2);
-        ImGui::Spacing();
-        if (ImGui::Button("Uniform XZ ×", ImVec2(-1, 0))) {
-            const float k = std::max(s_scale_step, 1.001f);
-            scale_first_mesh(device, k, 1.0f, k);
-        }
-        if (ImGui::Button("Uniform XZ ÷", ImVec2(-1, 0))) {
-            const float k = std::max(s_scale_step, 1.001f);
-            scale_first_mesh(device, 1.0f / k, 1.0f, 1.0f / k);
-        }
-        ImGui::TextDisabled("Scales around world (0,0,0).");
-    }
-    next_overlay_y = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y + 4.0f;
-    ImGui::End();
-}
-#endif
 
 void draw_placeholder() {
 
@@ -916,11 +532,80 @@ static int pick_bone_at(const ImVec2& mouse, const ImVec2& origin,
     return best;
 }
 
+int pick_level_mesh_at(const ImVec2& mouse,
+                       const ImVec2& origin,
+                       const ImVec2& region) {
+    if (!g_mp.has_model || !g_mp.no_tilt || g_mp.meshes.empty()) return -1;
+    const float fw = std::max(1.0f, region.x);
+    const float fh = std::max(1.0f, region.y);
+
+    const float mx = mouse.x - origin.x;
+    const float my = mouse.y - origin.y;
+    if (mx < 0.0f || my < 0.0f || mx > fw || my > fh) return -1;
+
+    const float fov         = 60.0f * 3.14159265f / 180.0f;
+    const float aspect      = fw / fh;
+    const float tan_half    = std::tan(0.5f * fov);
+    const float u_view      = (2.0f * mx / fw - 1.0f) * aspect * tan_half;
+    const float v_view      = (1.0f - 2.0f * my / fh) * tan_half;
+
+    const float cy = std::cos(g_flycam.yaw);
+    const float sy = std::sin(g_flycam.yaw);
+    const float cp = std::cos(g_flycam.pitch);
+    const float sp = std::sin(g_flycam.pitch);
+
+    const float fx = sy * cp, fy = sp, fz = cy * cp;
+    const float rx = cy,      ry = 0.0f, rz = -sy;
+    const float ux = -sp * sy, uy = cp, uz = -sp * cy;
+
+    float dx = rx * u_view + ux * v_view + fx;
+    float dy = ry * u_view + uy * v_view + fy;
+    float dz = rz * u_view + uz * v_view + fz;
+    const float dlen = std::sqrt(dx*dx + dy*dy + dz*dz);
+    if (dlen <= 1e-6f) return -1;
+    dx /= dlen; dy /= dlen; dz /= dlen;
+
+    const float ox = g_flycam.pos[0];
+    const float oy = g_flycam.pos[1];
+    const float oz = g_flycam.pos[2];
+
+    int   best     = -1;
+    float best_t   = std::numeric_limits<float>::infinity();
+    for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
+        const auto& m = g_mp.meshes[i];
+        if (m.index_count == 0 || m.radius <= 0.0f) continue;
+        if (g_mp.selected_lod >= 0 &&
+            m.lod_index != (uint32_t)g_mp.selected_lod) continue;
+        if (m.name.rfind("engine_level:", 0) == 0) continue;
+
+        const float lx = ox - m.center[0];
+        const float ly = oy - m.center[1];
+        const float lz = oz - m.center[2];
+        const float l_dot_d = lx*dx + ly*dy + lz*dz;
+        const float l_len2  = lx*lx + ly*ly + lz*lz;
+        const float r2      = m.radius * m.radius;
+        const float c       = l_len2 - r2;
+        const float disc    = l_dot_d * l_dot_d - c;
+        if (disc < 0.0f) continue;
+        const float sq = std::sqrt(disc);
+        float t = -l_dot_d - sq;
+        if (t < 0.0f) t = -l_dot_d + sq;
+        if (t < 0.0f) continue;
+        if (t < best_t) { best_t = t; best = (int)i; }
+    }
+    return best;
+}
+
 void draw_model_in_panel(ID3D11Device* device) {
     ImVec2 region = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
     int w = std::max(1, (int)region.x);
     int h = std::max(1, (int)region.y);
+
+    if (::g_selected_level_mesh_idx >= (int)g_mp.meshes.size() ||
+        !g_mp.has_model || !g_mp.no_tilt) {
+        ::g_selected_level_mesh_idx = -1;
+    }
 
     if (!g_mp_initialized) {
         MP_Init(device, g_mp, w, h);
@@ -1005,6 +690,14 @@ void draw_model_in_panel(ID3D11Device* device) {
         S.selected_bone = picked;
     }
 
+    if (g_mp.no_tilt && hovered && !rotate_active &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+        !ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f))
+    {
+        const int picked = pick_level_mesh_at(ImGui::GetIO().MousePos, origin, region);
+        ::g_selected_level_mesh_idx = picked;
+    }
+
     if (S.terrain_mode) {
         const float dt = ImGui::GetIO().DeltaTime;
         if (hovered || g_flycam.is_looking) {
@@ -1051,7 +744,8 @@ void draw_model_in_panel(ID3D11Device* device) {
     }
 
     for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
-        g_mp.meshes[i].highlight = ((int)i == ::g_highlight_mesh_idx);
+        g_mp.meshes[i].highlight = ((int)i == ::g_highlight_mesh_idx)
+                                || ((int)i == ::g_selected_level_mesh_idx);
         g_mp.meshes[i].isolated  = ((int)i == ::g_isolate_mesh_idx);
     }
 
@@ -1095,11 +789,6 @@ void draw_model_in_panel(ID3D11Device* device) {
     ImGui::TextDisabled("Wheel  zoom  /  ESC  close");
 
     float next_overlay_y = origin.y + 76.0f;
-
-#ifdef _WIN32
-    float rotate_overlay_top = origin.y + 6.0f;
-    draw_terrain_rotate_overlay(device, origin, region, rotate_overlay_top);
-#endif
 
     bool has_skeleton = g_mp.has_model && g_mp.bone_count > 0;
     if (has_skeleton) {
@@ -1287,7 +976,7 @@ void draw_model_in_panel(ID3D11Device* device) {
 
             const ImVec2 thumb_size(48, 48);
 
-            for (size_t mi = 0; mi < g_mp.meshes.size(); ++mi) {
+            if (!g_mp.no_tilt) for (size_t mi = 0; mi < g_mp.meshes.size(); ++mi) {
                 auto& mesh = g_mp.meshes[mi];
 
                 if (g_mp.selected_lod >= 0 &&
@@ -1397,7 +1086,94 @@ void draw_model_in_panel(ID3D11Device* device) {
                 ImGui::PopID();
             }
 
+            if (g_mp.no_tilt && ::g_selected_level_mesh_idx >= 0 &&
+                ::g_selected_level_mesh_idx < (int)g_mp.meshes.size())
             {
+                const int mi   = ::g_selected_level_mesh_idx;
+                auto&     mesh = g_mp.meshes[mi];
+
+                ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1.0f),
+                                   "Selected mesh");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Clear##sel_clear")) {
+                    ::g_selected_level_mesh_idx = -1;
+                }
+                ImGui::TextWrapped("%s",
+                    mesh.name.empty() ? "(unnamed)" : mesh.name.c_str());
+                ImGui::Separator();
+
+                ImGui::PushID(0x20000 + mi);
+
+                struct ThumbSpec {
+                    const char*               slot_id;
+                    ID3D11ShaderResourceView* srv;
+                    const std::string*        name;
+                    bool*                     visible;
+                };
+                ThumbSpec thumbs[5] = {
+                    {"diffuse",  mesh.srv_diffuse,  &mesh.diffuse_tex_name,  &mesh.diffuse_visible},
+                    {"normal",   mesh.srv_normal,   &mesh.normal_tex_name,   &mesh.normal_visible},
+                    {"specular", mesh.srv_specular, &mesh.specular_tex_name, &mesh.specular_visible},
+                    {"metallic", mesh.srv_metallic, &mesh.metallic_tex_name, &mesh.metallic_visible},
+                    {"extra",    mesh.srv_extra,    &mesh.extra_tex_name,    &mesh.extra_visible},
+                };
+                bool any_thumb = false;
+                for (int ti = 0; ti < 5; ++ti) {
+                    const ThumbSpec& t = thumbs[ti];
+                    if (!t.srv || t.srv == g_mp.default_srv) continue;
+                    if (t.name->empty()) continue;
+                    if (any_thumb) ImGui::SameLine();
+                    any_thumb = true;
+                    ImGui::PushID(t.slot_id);
+                    ImGui::BeginGroup();
+                    ImVec4 tint = (*t.visible) ? ImVec4(1, 1, 1, 1)
+                                               : ImVec4(0.45f, 0.45f, 0.45f, 1);
+                    if (ImGui::ImageButton("##t",
+                                           (ImTextureID)t.srv,
+                                           thumb_size,
+                                           ImVec2(0, 0), ImVec2(1, 1),
+                                           ImVec4(0, 0, 0, 0), tint)) {
+                        ::g_tex_popout_srv      = t.srv;
+                        ::g_tex_popout_name     = *t.name;
+                        ::g_tex_popout_open     = true;
+                        ::g_tex_popout_mesh_idx = mi;
+                    }
+                    if (ImGui::BeginPopupContextItem()) {
+                        const auto* terrain_tex =
+                            TerrainTextureRegistry::Find(*t.name);
+                        if (terrain_tex) {
+                            tex_export_menu_rgba(*t.name,
+                                                 terrain_tex->rgba,
+                                                 terrain_tex->width,
+                                                 terrain_tex->height);
+                        } else {
+                            const std::string& preferred_bnk =
+                                (S.selected_nested_index != -1 &&
+                                 !S.selected_nested_temp_path.empty())
+                                    ? S.selected_nested_temp_path
+                                    : S.selected_bnk;
+                            tex_export_menu_named(*t.name, *t.name,
+                                                  preferred_bnk, 0);
+                        }
+                        ImGui::EndPopup();
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s\n[%s]",
+                                          t.name->c_str(), t.slot_id);
+                    }
+                    ImGui::Checkbox("##vis", t.visible);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Show %s in render", t.slot_id);
+                    }
+                    ImGui::EndGroup();
+                    ImGui::PopID();
+                }
+                if (!any_thumb) {
+                    ImGui::TextDisabled("(no textures)");
+                }
+                ImGui::Separator();
+                ImGui::PopID();
+            } else if (g_mp.no_tilt) {
                 const auto& lod = EhfLodThumbnails::Get();
                 if (!lod.empty()) {
                     ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1.0f),
@@ -1490,12 +1266,13 @@ void draw_model_in_panel(ID3D11Device* device) {
         ImGui::PopStyleVar();
     } else {
 
-        ::g_highlight_mesh_idx  = -1;
-        ::g_isolate_mesh_idx    = -1;
-        ::g_tex_popout_open     = false;
-        ::g_tex_popout_srv      = nullptr;
+        ::g_highlight_mesh_idx       = -1;
+        ::g_isolate_mesh_idx         = -1;
+        ::g_selected_level_mesh_idx  = -1;
+        ::g_tex_popout_open          = false;
+        ::g_tex_popout_srv           = nullptr;
         ::g_tex_popout_name.clear();
-        ::g_tex_popout_mesh_idx = -1;
+        ::g_tex_popout_mesh_idx      = -1;
     }
 
     if (S.dev_mode && g_mp.has_model && g_mp.no_tilt) {
@@ -2461,7 +2238,7 @@ void draw_materials_overlay_gl(const ImVec2& origin,
         ImGui::Separator();
 
         const ImVec2 thumb_size(48, 48);
-        for (size_t mi = 0; mi < g_mp.meshes.size(); ++mi) {
+        if (!g_mp.no_tilt) for (size_t mi = 0; mi < g_mp.meshes.size(); ++mi) {
         auto& mesh = g_mp.meshes[mi];
 
         if (g_mp.selected_lod >= 0 &&

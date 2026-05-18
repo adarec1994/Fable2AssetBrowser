@@ -12,6 +12,7 @@ struct Placement {
     float    scale;
     uint32_t marker;
     uint32_t hash_a;
+    uint32_t parent_hash;
     std::string entity_name;
 };
 

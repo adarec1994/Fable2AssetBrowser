@@ -160,6 +160,7 @@ struct GdbWorldPlacement {
     float    yaw;
     float    scale;
     uint32_t hash;
+    uint32_t parent_hash;
     uint32_t marker;
 };
 extern std::vector<GdbWorldPlacement> g_level_gdb_placements;

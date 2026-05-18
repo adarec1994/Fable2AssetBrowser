@@ -1431,8 +1431,29 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
 
                 std::vector<uint16_t> sub_strip(strip.begin() + start_idx, strip.begin() + end_idx);
 
+                bool sub_has_ffff = false;
+                for (uint16_t v : sub_strip) {
+                    if (v == 0xFFFF) { sub_has_ffff = true; break; }
+                }
+                const bool looks_like_triangle_list =
+                    !sub_has_ffff && sub.FaceCount > 0 &&
+                    sub_strip.size() == (size_t)sub.FaceCount * 3;
+
                 std::vector<uint32_t> sub_indices;
-                build_triangles_from_strip(sub_strip, sub_indices);
+                if (looks_like_triangle_list) {
+                    sub_indices.resize(sub_strip.size());
+                    for (size_t k = 0; k < sub_strip.size(); ++k) {
+                        sub_indices[k] = sub_strip[k];
+                    }
+                } else {
+                    build_triangles_from_strip(sub_strip, sub_indices);
+                    if (sub.FaceCount > 0) {
+                        const size_t face_cap_idx = (size_t)sub.FaceCount * 3;
+                        if (sub_indices.size() > face_cap_idx) {
+                            sub_indices.resize(face_cap_idx);
+                        }
+                    }
+                }
 
                 if(sub_indices.empty()){
                     out.push_back(std::move(g));

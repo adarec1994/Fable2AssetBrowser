@@ -1093,7 +1093,7 @@ float4 PS(VSOUT i) : SV_Target {
     float3 color = albedo * diff_term + spec.xxx;
 
     if (params.z > 0.5) {
-        float3 hi = float3(0.10, 0.95, 0.25);
+        float3 hi = float3(0.15, 0.45, 1.00);
         color = lerp(color, hi, 0.65);
     }
 
@@ -1267,7 +1267,7 @@ float4 PS(VSOUT i) : SV_Target {
 
     /* Highlight tint (same as main shader). */
     if (params.z > 0.5) {
-        float3 hi = float3(0.10, 0.95, 0.25);
+        float3 hi = float3(0.15, 0.45, 1.00);
         final = lerp(final, hi, 0.65);
     }
 
@@ -1357,7 +1357,7 @@ float4 PS(VSOUT i) : SV_Target {
     }
 
     if (params.z > 0.5) {
-        float3 hi = float3(0.10, 0.95, 0.25);
+        float3 hi = float3(0.15, 0.45, 1.00);
         final = lerp(final, hi, 0.65);
     }
 

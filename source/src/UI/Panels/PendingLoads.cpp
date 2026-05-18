@@ -64,6 +64,84 @@ static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
                                          float terrain_cx,
                                          float terrain_cz);
 
+static void merge_transformed_instance_into(MDLMeshGeom& dst,
+                                            const MDLMeshGeom& src,
+                                            const Level::PropInstance& inst)
+{
+    if (src.positions.empty() || src.indices.empty()) return;
+
+    const uint32_t base_vertex = uint32_t(dst.positions.size() / 3);
+
+    const float px = inst.values[0];
+    const float py = inst.values[2];
+    const float pz = inst.values[1];
+    const float s  = inst.values[6];
+    const float c  = inst.values[7];
+    const float sx = inst.values[9]  == 0.0f ? 1.0f : inst.values[9];
+    const float sy = inst.values[10] == 0.0f ? sx   : inst.values[10];
+    const float sz = inst.values[11] == 0.0f ? sx   : inst.values[11];
+
+    const size_t src_vcount = src.positions.size() / 3;
+
+    const size_t pos_off = dst.positions.size();
+    dst.positions.resize(pos_off + src.positions.size());
+    for (size_t i = 0; i < src_vcount; ++i) {
+        const float lx = src.positions[i*3+0] * sx;
+        const float ly = src.positions[i*3+2] * sz;
+        const float lz = src.positions[i*3+1] * sy;
+        dst.positions[pos_off + i*3 + 0] = px + lx * c + lz * s;
+        dst.positions[pos_off + i*3 + 1] = py + ly;
+        dst.positions[pos_off + i*3 + 2] = pz - lx * s + lz * c;
+    }
+
+    if (!src.normals.empty()) {
+        const size_t n_off = dst.normals.size();
+        dst.normals.resize(n_off + src.normals.size());
+        const size_t src_ncount = src.normals.size() / 3;
+        for (size_t i = 0; i < src_ncount; ++i) {
+            const float lx = src.normals[i*3+0];
+            const float ly = src.normals[i*3+2];
+            const float lz = src.normals[i*3+1];
+            dst.normals[n_off + i*3 + 0] = lx * c + lz * s;
+            dst.normals[n_off + i*3 + 1] = ly;
+            dst.normals[n_off + i*3 + 2] = -lx * s + lz * c;
+        }
+    }
+
+    if (!src.uvs.empty()) {
+        dst.uvs.insert(dst.uvs.end(), src.uvs.begin(), src.uvs.end());
+    }
+    if (!src.bone_ids.empty()) {
+        dst.bone_ids.insert(dst.bone_ids.end(),
+                            src.bone_ids.begin(), src.bone_ids.end());
+    }
+    if (!src.bone_weights.empty()) {
+        dst.bone_weights.insert(dst.bone_weights.end(),
+                                src.bone_weights.begin(),
+                                src.bone_weights.end());
+    }
+
+    const size_t i_off = dst.indices.size();
+    dst.indices.resize(i_off + src.indices.size());
+    for (size_t k = 0; k < src.indices.size(); ++k) {
+        dst.indices[i_off + k] = src.indices[k] + base_vertex;
+    }
+}
+
+static std::string make_combined_engine_level_name(const std::string& model_path,
+                                                   const std::string& src_name,
+                                                   size_t              instance_count)
+{
+    std::string base = model_path;
+    const size_t sl = base.find_last_of("/\\");
+    if (sl != std::string::npos) base = base.substr(sl + 1);
+
+    std::string name = "engine_level: " + base;
+    if (!src_name.empty()) name += "#" + src_name;
+    name += " (" + std::to_string(instance_count) + " inst)";
+    return name;
+}
+
 static void normalize_grid_uvs(MDLMeshGeom& geom, uint32_t width, uint32_t height)
 {
     if (width < 2 || height < 2) return;
@@ -175,15 +253,34 @@ static void prop_worker_run(LevelPropStreamState* s)
             continue;
         }
 
+        std::vector<MDLMeshGeom> combined(cached.geoms.size());
+        for (size_t gi = 0; gi < cached.geoms.size(); ++gi) {
+            const auto& src = cached.geoms[gi];
+            combined[gi].diffuse_tex_name  = src.diffuse_tex_name;
+            combined[gi].normal_tex_name   = src.normal_tex_name;
+            combined[gi].specular_tex_name = src.specular_tex_name;
+            combined[gi].metallic_tex_name = src.metallic_tex_name;
+            combined[gi].extra_tex_name    = src.extra_tex_name;
+            combined[gi].name = make_combined_engine_level_name(
+                block.model_path, src.name, block.instances.size());
+        }
+
         for (const auto& inst : block.instances) {
-            for (const auto& src : cached.geoms) {
+            for (size_t gi = 0; gi < cached.geoms.size(); ++gi) {
+                const auto& src = cached.geoms[gi];
                 if (!src.positions.empty() && !src.indices.empty()) {
-                    append_transformed_prop_geom(s->geoms, src, inst,
-                                                 terrain_cx, terrain_cz);
+                    merge_transformed_instance_into(combined[gi], src, inst);
                 }
             }
             s->instances_loaded.fetch_add(1, std::memory_order_relaxed);
         }
+
+        for (auto& cg : combined) {
+            if (!cg.positions.empty() && !cg.indices.empty()) {
+                s->geoms.push_back(std::move(cg));
+            }
+        }
+        (void)terrain_cx; (void)terrain_cz;
     }
 
     s->phase.store(2, std::memory_order_release);
@@ -409,16 +506,36 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
         }
 
         if (cached.geoms.empty()) continue;
+
+        std::vector<MDLMeshGeom> combined(cached.geoms.size());
+        for (size_t gi = 0; gi < cached.geoms.size(); ++gi) {
+            const auto& src = cached.geoms[gi];
+            combined[gi].diffuse_tex_name  = src.diffuse_tex_name;
+            combined[gi].normal_tex_name   = src.normal_tex_name;
+            combined[gi].specular_tex_name = src.specular_tex_name;
+            combined[gi].metallic_tex_name = src.metallic_tex_name;
+            combined[gi].extra_tex_name    = src.extra_tex_name;
+            combined[gi].name = make_combined_engine_level_name(
+                block.model_path, src.name, block.instances.size());
+        }
+
         for (const auto& inst : block.instances) {
             ++instances_seen;
-            for (const auto& src : cached.geoms) {
+            for (size_t gi = 0; gi < cached.geoms.size(); ++gi) {
+                const auto& src = cached.geoms[gi];
                 if (!src.positions.empty() && !src.indices.empty()) {
-                    append_transformed_prop_geom(geoms, src, inst,
-                                                 terrain_cx, terrain_cz);
+                    merge_transformed_instance_into(combined[gi], src, inst);
                 }
             }
             ++instances_loaded;
         }
+
+        for (auto& cg : combined) {
+            if (!cg.positions.empty() && !cg.indices.empty()) {
+                geoms.push_back(std::move(cg));
+            }
+        }
+        (void)terrain_cx; (void)terrain_cz;
     }
 
     OutputLog::info("level props: appended " +

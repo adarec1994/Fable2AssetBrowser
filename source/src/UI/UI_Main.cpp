@@ -310,9 +310,15 @@ void draw_main(GLFWwindow* window) {
                             if (ImGui::MenuItem("BNK contents (raw)")) {
                                 ISO::dump_bnk_contents();
                             }
+                            if (ImGui::MenuItem(".gdb + .save (preserve paths)")) {
+                                ISO::dump_gdb_save_files();
+                            }
                         } else {
                             ImGui::MenuItem(
                                 "BNK contents (no BNKs indexed)",
+                                nullptr, false, false);
+                            ImGui::MenuItem(
+                                ".gdb + .save (no BNKs indexed)",
                                 nullptr, false, false);
                         }
                         if (!S.all_mdl_files.empty()) {

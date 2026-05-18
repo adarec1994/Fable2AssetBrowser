@@ -146,8 +146,6 @@ extern FlatAssetEntry        g_pending_terrain_ghf_entry;
 extern std::vector<Level::PropBlock> g_pending_level_prop_blocks;
 extern std::string                   g_pending_level_model_body_bnk;
 
-// Water bodies discovered from the .water sibling of the active level.
-// Cleared on cancel; consumed by PendingLoads when terrain is committed.
 extern Level::WaterScene g_pending_level_water_scene;
 extern bool              g_pending_level_water_present;
 

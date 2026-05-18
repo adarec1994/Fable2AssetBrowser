@@ -384,16 +384,32 @@ DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob)
 
     size_t   expected_raw = 0;
     uint32_t block_bytes  = 0;
-    if      (PF == 35u) { expected_raw = (size_t)W * H / 2; block_bytes = 8;  }
-    else if (PF == 24u) { expected_raw = (size_t)raw_size;  block_bytes = 2;  }
-    else                { expected_raw = (size_t)W * H;     block_bytes = 16; }
-    if (PF != 24u && (size_t)raw_size != expected_raw) {
-        std::ostringstream os;
-        os << "atlas: raw_size " << raw_size << " != expected "
-           << expected_raw << " for " << W << "x" << H
-           << " PF=" << PF;
-        r.error = os.str();
-        return r;
+    if (PF == 24u) {
+        expected_raw = (size_t)raw_size;
+        block_bytes = 2;
+    } else {
+        block_bytes = (PF == 35u) ? 8u : 16u;
+        const uint32_t blocks_w = (W + 3u) / 4u;
+        const uint32_t blocks_h = (H + 3u) / 4u;
+        const uint32_t padded_w = (blocks_w + 31u) & ~31u;
+        const uint32_t padded_h = (blocks_h + 31u) & ~31u;
+        const size_t logical_raw =
+            size_t(blocks_w) * size_t(blocks_h) * size_t(block_bytes);
+        const size_t padded_raw =
+            size_t(padded_w) * size_t(padded_h) * size_t(block_bytes);
+        if ((size_t)raw_size < logical_raw ||
+            (size_t)raw_size > padded_raw ||
+            raw_size == 0)
+        {
+            std::ostringstream os;
+            os << "atlas: raw_size " << raw_size
+               << " outside logical/padded range ["
+               << logical_raw << ".." << padded_raw << "] for "
+               << W << "x" << H << " PF=" << PF;
+            r.error = os.str();
+            return r;
+        }
+        expected_raw = (size_t)raw_size;
     }
 
     const size_t zlib_off = mt + 8;

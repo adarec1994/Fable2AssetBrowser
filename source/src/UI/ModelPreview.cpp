@@ -9,6 +9,7 @@
 #include <sstream>
 #include <limits>
 #include <mutex>
+#include <fstream>
 #include <unordered_map>
 #include <functional>
 #include "ModelPreview.h"
@@ -31,6 +32,15 @@ using namespace DirectX;
 #include <GL/glew.h>
 #endif
 FlyCam g_flycam;
+static std::mutex g_mp_debug_mutex;
+static void mp_level_load_debug(const std::string& msg)
+{
+    std::lock_guard<std::mutex> lock(g_mp_debug_mutex);
+    std::ofstream f(std::filesystem::current_path() / "level_load_debug.txt",
+                    std::ios::app);
+    if (f) f << msg << "\n";
+}
+
 static inline std::string tolower_copy(std::string s){ std::transform(s.begin(), s.end(), s.begin(), ::tolower); return s; }
 static inline std::string basename_lower_noext(const std::string& s){
     auto b = std::filesystem::path(s).filename().string();
@@ -1345,33 +1355,65 @@ float4 PS(VSOUT i) : SV_Target {
     float3 geo_n    = normalize(i.n);
     float slope_w   = saturate((0.82 - abs(geo_n.y)) / 0.35);
 
+    float2 chunk_co = (world_xy - origin) / extent;
+    float2 chunk_clamped = clamp(chunk_co,
+                                 float2(0.0, 0.0),
+                                 float2(CW - 0.001, CH - 0.001));
+    int2   chunk_xy = int2(floor(chunk_clamped));
+    float2 local_uv = frac(chunk_clamped);
+    float wx = local_uv.x;
+    float wy = local_uv.y;
+    float w00 = (1.0 - wx) * (1.0 - wy);
+    float w10 =        wx  * (1.0 - wy);
+    float w01 = (1.0 - wx) *        wy ;
+    float w11 =        wx  *        wy ;
+
+    int material_count = min((int)chunk_grid_size.z, 32);
     float3 final_color = float3(0.0, 0.0, 0.0);
     float3 final_n_ts  = float3(0.0, 0.0, 0.0);
-    float  weight_sum  = 0.0;
-
-    float2 terrain_uv = saturate((world_xy - origin)
-        / (extent * float2(CW, CH)));
-    float2 weight_uv = (terrain_uv * (weight_params.xy - 1.0)
-        + 0.5) / weight_params.xy;
-    int material_count = min((int)chunk_grid_size.z, 32);
+    float3 first_color = float3(0.0, 0.0, 0.0);
+    float3 first_n_ts  = float3(0.0, 0.0, 0.0);
+    float  coverage    = 0.0;
+    bool   have_first  = false;
 
     [loop]
-    for (int material = 0; material < 32; ++material) {
-        if (material >= material_count) break;
-        float w = material_weights.SampleLevel(
-            smp_point, float3(weight_uv, material), 0).r;
-        if (w <= 0.001) continue;
+    for (int L = 0; L < 16; ++L) {
+        float4 idx255 = round(chunk_idx.Load(int4(chunk_xy, L, 0)) * 255.0);
+        if (idx255.x > 254.5) break;
+
+        int material = clamp((int)idx255.x, 0, material_count - 1);
+        float4 bln = chunk_blend.Load(int4(chunk_xy, L, 0))
+                   * (255.0 / max(splat_params.x, 1.0));
+        float layer_alpha = saturate(bln.x * w00 + bln.y * w10
+                                   + bln.z * w01 + bln.w * w11);
+
+        float2 mask_base = chunk_uv.Load(int4(chunk_xy, L, 0)).xy;
+        float2 mask_uv = mask_base + local_uv * splat_params.zw;
+        layer_alpha *= splat_mask.SampleLevel(smp_point, mask_uv, 0).r;
+
         float3 mc, mn;
         sample_material(material, world_xy, slope_w, mc, mn);
-        final_color += mc * w;
-        final_n_ts  += mn * w;
-        weight_sum += w;
+        if (!have_first) {
+            first_color = mc;
+            first_n_ts = mn;
+            have_first = true;
+        }
+
+        if (layer_alpha <= 0.001) continue;
+        float keep = 1.0 - layer_alpha;
+        final_color = final_color * keep + mc * layer_alpha;
+        final_n_ts  = final_n_ts  * keep + mn * layer_alpha;
+        coverage = coverage * keep + layer_alpha;
     }
 
-    if (weight_sum > 0.001) {
-        final_color /= weight_sum;
-        final_n_ts  /= weight_sum;
-    } else {
+    if (coverage < 0.999 && have_first) {
+        float fill = 1.0 - coverage;
+        final_color += first_color * fill;
+        final_n_ts  += first_n_ts  * fill;
+        coverage = 1.0;
+    }
+
+    if (coverage <= 0.001) {
         sample_material(0, world_xy, slope_w, final_color, final_n_ts);
     }
 
@@ -1400,12 +1442,6 @@ float4 PS(VSOUT i) : SV_Target {
 }
 )";
 
-// Water surface shaders. These run on the flat quads emitted from the
-// .water file in PendingLoads.cpp. The vertex shader displaces the
-// surface using a tiny Gerstner-style sum of four sinusoidal waves
-// driven by params.w (game time, seconds). The pixel shader fakes a
-// crude Fresnel-blended deep/shallow water colour and mixes in the
-// normal-map sampled with two scrolling UVs.
 static const char* g_water_vs = R"(
 cbuffer CB : register(b0){
     float4x4 mvp;
@@ -1540,14 +1576,54 @@ static bool create_white_srv(ID3D11Device* dev, ID3D11ShaderResourceView** out_s
     tex->Release(); *out_srv=srv; return true;
 }
 ID3D11ShaderResourceView* create_srv_from_rgba(ID3D11Device* dev, int w, int h, const std::vector<uint8_t>& rgba){
-    D3D11_TEXTURE2D_DESC td{}; td.Width=w; td.Height=h; td.MipLevels=0; td.ArraySize=1; td.Format=DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count=1; td.Usage=D3D11_USAGE_DEFAULT; td.BindFlags=D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET; td.MiscFlags=D3D11_RESOURCE_MISC_GENERATE_MIPS;
-    ID3D11Texture2D* t=nullptr; if(FAILED(dev->CreateTexture2D(&td,nullptr,&t))) return nullptr;
-    ID3D11DeviceContext* ctx=nullptr; dev->GetImmediateContext(&ctx);
-    ctx->UpdateSubresource(t, 0, nullptr, rgba.data(), w*4, 0);
-    ID3D11ShaderResourceView* v=nullptr; if(FAILED(dev->CreateShaderResourceView(t,nullptr,&v))){ t->Release(); ctx->Release(); return nullptr; }
-    ctx->GenerateMips(v);
-    ctx->Release();
-    t->Release(); return v;
+    constexpr int kMaxUploadDim = 8192;
+    if (!dev || w <= 0 || h <= 0 || w > kMaxUploadDim || h > kMaxUploadDim) {
+        OutputLog::warn("texture upload skipped: invalid RGBA dimensions " +
+                        std::to_string(w) + "x" + std::to_string(h));
+        return nullptr;
+    }
+
+    const uint64_t expected =
+        uint64_t(w) * uint64_t(h) * uint64_t(4);
+    if (expected == 0 ||
+        expected > std::numeric_limits<UINT>::max() ||
+        rgba.size() < expected) {
+        OutputLog::warn("texture upload skipped: invalid RGBA payload " +
+                        std::to_string(w) + "x" + std::to_string(h) +
+                        " bytes=" + std::to_string(rgba.size()));
+        return nullptr;
+    }
+
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = (UINT)w;
+    td.Height = (UINT)h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_IMMUTABLE;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA sd{};
+    sd.pSysMem = rgba.data();
+    sd.SysMemPitch = (UINT)w * 4u;
+    sd.SysMemSlicePitch = (UINT)expected;
+
+    ID3D11Texture2D* t = nullptr;
+    if (FAILED(dev->CreateTexture2D(&td, &sd, &t))) {
+        OutputLog::warn("texture upload failed: CreateTexture2D " +
+                        std::to_string(w) + "x" + std::to_string(h));
+        return nullptr;
+    }
+    ID3D11ShaderResourceView* v = nullptr;
+    if (FAILED(dev->CreateShaderResourceView(t, nullptr, &v))) {
+        OutputLog::warn("texture upload failed: CreateShaderResourceView " +
+                        std::to_string(w) + "x" + std::to_string(h));
+        t->Release();
+        return nullptr;
+    }
+    t->Release();
+    return v;
 }
 static bool srv_from_tex_blob_auto(ID3D11Device* dev, const std::vector<unsigned char>& blob, ID3D11ShaderResourceView** out_srv, bool* out_has_alpha){
     *out_srv = nullptr;
@@ -1637,9 +1713,6 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
         dev->CreateBuffer(&tcb, nullptr, &mp.cbuffer_terrain);
     }
 
-    // Water pipeline: vertex displacement + Fresnel-shaded surface with
-    // two scrolling normal-map samples. Inputs use the same MPVertex
-    // layout (so we reuse `mp.layout`).
     {
         ID3DBlob* wvsb = nullptr; ID3DBlob* wpsb = nullptr;
         if (compile_shader(g_water_vs, "VS", "vs_5_0", &wvsb) &&
@@ -1658,7 +1731,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     {
         D3D11_BUFFER_DESC wcb{};
         wcb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        // 5 float4s = 80 bytes
+
         wcb.ByteWidth = 5 * 16;
         wcb.Usage = D3D11_USAGE_DYNAMIC;
         wcb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -1910,7 +1983,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             }
         }
         MPPerMesh m;
-        // Per-mesh bounding sphere — needed for click-picking in level mode.
+
         {
             float mnx =  1e30f, mny =  1e30f, mnz =  1e30f;
             float mxx = -1e30f, mxy = -1e30f, mxz = -1e30f;
@@ -1939,13 +2012,25 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             uint64_t(vtx.size()) * uint64_t(sizeof(MPVertex));
         const uint64_t ib_bytes =
             uint64_t(g.indices.size()) * uint64_t(sizeof(uint32_t));
+        const std::string mesh_log_name =
+            g.name.empty() ? std::to_string(i) : g.name;
+        mp_level_load_debug(
+            "MP_Build mesh begin " + std::to_string(i + 1) + "/" +
+            std::to_string(geoms.size()) +
+            " v=" + std::to_string(vcount) +
+            " idx=" + std::to_string(g.indices.size()) +
+            " vb=" + std::to_string(vb_bytes) +
+            " ib=" + std::to_string(ib_bytes) +
+            " name=" + mesh_log_name);
         if (vb_bytes == 0 || ib_bytes == 0 ||
             vb_bytes > std::numeric_limits<UINT>::max() ||
             ib_bytes > std::numeric_limits<UINT>::max()) {
             OutputLog::warn("MP_Build: skipped oversized mesh '" +
-                            (g.name.empty() ? std::to_string(i) : g.name) +
+                            mesh_log_name +
                             "' vb=" + std::to_string(vb_bytes) +
                             " ib=" + std::to_string(ib_bytes));
+            mp_level_load_debug("MP_Build mesh skipped oversized name=" +
+                                mesh_log_name);
             continue;
         }
 
@@ -1953,17 +2038,21 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         D3D11_SUBRESOURCE_DATA vsd{}; vsd.pSysMem=vtx.data();
         if(FAILED(dev->CreateBuffer(&vb,&vsd,&m.vb))) {
             OutputLog::warn("MP_Build: vertex buffer create failed for '" +
-                            (g.name.empty() ? std::to_string(i) : g.name) +
+                            mesh_log_name +
                             "' bytes=" + std::to_string(vb_bytes));
+            mp_level_load_debug("MP_Build mesh vertex buffer failed name=" +
+                                mesh_log_name);
             continue;
         }
         D3D11_BUFFER_DESC ib{}; ib.BindFlags=D3D11_BIND_INDEX_BUFFER; ib.ByteWidth=(UINT)ib_bytes; ib.Usage=D3D11_USAGE_IMMUTABLE;
         D3D11_SUBRESOURCE_DATA isd{}; isd.pSysMem=g.indices.data();
         if(FAILED(dev->CreateBuffer(&ib,&isd,&m.ib))) {
             OutputLog::warn("MP_Build: index buffer create failed for '" +
-                            (g.name.empty() ? std::to_string(i) : g.name) +
+                            mesh_log_name +
                             "' bytes=" + std::to_string(ib_bytes));
             m.vb->Release();
+            mp_level_load_debug("MP_Build mesh index buffer failed name=" +
+                                mesh_log_name);
             continue;
         }
         m.index_count = (UINT)g.indices.size();
@@ -1990,6 +2079,8 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
 
         m.highlight = false;
         m.isolated  = false;
+        m.is_terrain = g.is_terrain;
+        m.is_water   = g.is_water;
 
         m.source_mesh_idx = (uint32_t)i;
 
@@ -2063,8 +2154,11 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         if (!m.srv_specular&& mp.default_srv) { m.srv_specular= mp.default_srv; m.srv_specular->AddRef(); }
         if (!m.srv_metallic     && mp.default_srv) { m.srv_metallic     = mp.default_srv; m.srv_metallic->AddRef(); }
         if (!m.srv_extra    && mp.default_srv) { m.srv_extra    = mp.default_srv; m.srv_extra->AddRef(); }
-        m.has_alpha = hasA;
+        m.has_alpha = hasA || m.is_water;
         mp.meshes.push_back(m);
+        mp_level_load_debug("MP_Build mesh done " + std::to_string(i + 1) +
+                            "/" + std::to_string(geoms.size()) +
+                            " name=" + mesh_log_name);
     }
 
     if (mp.lod_count > 1) {
@@ -2116,6 +2210,8 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     S.bone_rotate_mode  = false;
 
     mp.has_model = !mp.meshes.empty();
+    mp_level_load_debug("MP_Build internal finished meshes=" +
+                        std::to_string(mp.meshes.size()));
     return true;
 }
 void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
@@ -2235,7 +2331,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
 
     const float water_time = (float)ImGui::GetTime();
     auto upload_per_mesh_cb = [&](bool highlight){
-        // params: x=spec_term, y=spec_power, z=highlight flag, w=time(s)
+
         cb.params = XMFLOAT4(0.4f, 48.0f,
                              highlight ? 1.0f : 0.0f, water_time);
         D3D11_MAPPED_SUBRESOURCE pms{};
@@ -2295,9 +2391,9 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 t.splat_params[1] = (R.tile_scale > 0.0f)
                     ? R.tile_scale : 0.125f;
                 t.splat_params[2] = (R.splat_w > 0)
-                    ? 32.0f / float(R.splat_w) : 0.0f;
+                    ? 16.0f / float(R.splat_w) : 0.0f;
                 t.splat_params[3] = (R.splat_h > 0)
-                    ? 32.0f / float(R.splat_h) : 0.0f;
+                    ? 16.0f / float(R.splat_h) : 0.0f;
                 t.mesh_xform[0] = 1.0f;
                 t.mesh_xform[1] = 1.0f;
                 t.mesh_xform[2] = R.mesh_to_world_x;
@@ -2355,10 +2451,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             m.is_water && mp.vs_water && mp.ps_water && mp.cbuffer_water;
 
         if (use_water_shader) {
-            // Update the water CB (5 float4s). Wave directions and
-            // amplitudes are chosen to look plausibly Fable-ish — a
-            // proper port of the per-body parameters in WaterScene
-            // can replace these defaults later.
+
             D3D11_MAPPED_SUBRESOURCE wms{};
             if (SUCCEEDED(ctx->Map(mp.cbuffer_water, 0,
                                    D3D11_MAP_WRITE_DISCARD, 0, &wms))) {
@@ -2369,14 +2462,14 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                     float wave3[4];
                     float wparams[4];
                 } w{};
-                // wave: dir.xy, wavelength, amplitude
+
                 w.wave0[0] =  0.8f; w.wave0[1] =  0.6f; w.wave0[2] = 6.0f; w.wave0[3] = 0.06f;
                 w.wave1[0] = -0.5f; w.wave1[1] =  0.86f; w.wave1[2] = 3.4f; w.wave1[3] = 0.035f;
                 w.wave2[0] =  0.3f; w.wave2[1] = -0.95f; w.wave2[2] = 2.1f; w.wave2[3] = 0.025f;
                 w.wave3[0] = -0.94f; w.wave3[1] = -0.34f; w.wave3[2] = 1.3f; w.wave3[3] = 0.012f;
-                w.wparams[0] = 0.04f;  // scroll speed 0
-                w.wparams[1] = 0.025f; // scroll speed 1
-                w.wparams[2] = 0.55f;  // normal-map intensity
+                w.wparams[0] = 0.04f;
+                w.wparams[1] = 0.025f;
+                w.wparams[2] = 0.55f;
                 w.wparams[3] = 0.0f;
                 std::memcpy(wms.pData, &w, sizeof(w));
                 ctx->Unmap(mp.cbuffer_water, 0);
@@ -2387,9 +2480,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             ctx->VSSetConstantBuffers(3, 1, &mp.cbuffer_water);
             ctx->PSSetConstantBuffers(3, 1, &mp.cbuffer_water);
 
-            // Bind the per-body normal map. The water mesh's diffuse
-            // slot was set to the body's normalmap path by the
-            // generator in PendingLoads.
             ID3D11ShaderResourceView* nrm_srv =
                 m.srv_diffuse ? m.srv_diffuse : mp.default_srv;
             ctx->PSSetShaderResources(0, 1, &nrm_srv);

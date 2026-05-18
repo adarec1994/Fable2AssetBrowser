@@ -73,6 +73,8 @@ struct MDLMeshGeom {
     std::string metallic_tex_name;
     std::string extra_tex_name;
     std::string name;
+    bool is_terrain = false;
+    bool is_water = false;
     uint32_t MeshIndex = 0;
     uint32_t SubMeshIndex = 0;
 };

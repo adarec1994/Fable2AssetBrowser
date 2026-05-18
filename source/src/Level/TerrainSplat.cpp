@@ -242,13 +242,13 @@ bool Build(ID3D11Device*                                       device,
         };
 
         auto make_neutral_normal = [&]() {
-            // Tangent-space neutral normal: (0, 0, 1) -> (0.5, 0.5, 1.0) in unorm
+
             std::vector<uint8_t> neutral(size_t(W) * size_t(H) * 4, 0);
             for (size_t i = 0; i < neutral.size(); i += 4) {
-                neutral[i + 0] = 0x80; // X = 0.5
-                neutral[i + 1] = 0x80; // Y = 0.5
-                neutral[i + 2] = 0xFF; // Z = 1.0
-                neutral[i + 3] = 0xFF; // A
+                neutral[i + 0] = 0x80;
+                neutral[i + 1] = 0x80;
+                neutral[i + 2] = 0xFF;
+                neutral[i + 3] = 0xFF;
             }
             return neutral;
         };
@@ -354,9 +354,7 @@ bool Build(ID3D11Device*                                       device,
                     ++fallback_seeded;
                 }
                 if (resized.empty() && is_normal) {
-                    // Make sure normal arrays always get a slice so the
-                    // shader gets a valid sample even if no source texture
-                    // is provided for this material.
+
                     if (neutral.empty()) neutral = make_neutral_normal();
                     resized = neutral;
                     ++fallback_seeded;
@@ -420,13 +418,14 @@ bool Build(ID3D11Device*                                       device,
                          detail_seeded, detail_real)) {
             return false;
         }
-        // Normal map arrays are best-effort: if no normals are available
-        // we still let terrain rendering proceed with the diffuse arrays.
+
         build_array("base normal", kBaseNormal, R.lod_normal_array,
                     base_n_seeded, base_n_real);
         build_array("detail normal", kDetailNormal, R.lod_detail_normal_array,
                     detail_n_seeded, detail_n_real);
     }
+
+    std::vector<const Level::EhfChunk*> grid_chunks;
 
     {
         if (parsed.chunk_w == 0 || parsed.chunk_h == 0) {
@@ -443,6 +442,20 @@ bool Build(ID3D11Device*                                       device,
 
         const int CW = R.chunk_w, CH = R.chunk_h;
         const int L  = kMaxLayers;
+        grid_chunks.assign(size_t(CW) * size_t(CH), nullptr);
+        auto chunk_grid_xy = [&](const Level::EhfChunk& c,
+                                 int& cx,
+                                 int& cy) -> bool
+        {
+            if (R.chunk_extent_x <= 0.0f || R.chunk_extent_z <= 0.0f) {
+                return false;
+            }
+            const float fx = (c.origin[0] - world_min_x) / R.chunk_extent_x;
+            const float fy = (c.origin[1] - world_min_z) / R.chunk_extent_z;
+            cx = std::clamp(int(std::lround(fx)), 0, CW - 1);
+            cy = std::clamp(int(std::lround(fy)), 0, CH - 1);
+            return true;
+        };
         std::vector<uint8_t> idx_data(size_t(CW) * CH * 4 * L, 0xFF);
         std::vector<uint8_t> bln_data(size_t(CW) * CH * 4 * L, 0);
         std::vector<float> uv_data(size_t(CW) * CH * 2 * L, 0.0f);
@@ -456,9 +469,10 @@ bool Build(ID3D11Device*                                       device,
 
         const size_t expected_chunks = size_t(CW) * size_t(CH);
         for (size_t ci = 0; ci < parsed.chunks.size() && ci < expected_chunks; ++ci) {
-            const int cx = int(ci / size_t(CH));
-            const int cy = int(ci % size_t(CH));
             const auto& chunk = parsed.chunks[ci];
+            int cx = 0, cy = 0;
+            if (!chunk_grid_xy(chunk, cx, cy)) continue;
+            grid_chunks[size_t(cy) * size_t(CW) + size_t(cx)] = &chunk;
             total_records += chunk.layers.size();
 
             const int layer_count =
@@ -720,10 +734,10 @@ bool Build(ID3D11Device*                                       device,
 
             const float scale_u = (L.mask_scale[0] > 0.0f)
                 ? L.mask_scale[0]
-                : 32.0f / float(parsed.splat_w);
+                : 16.0f / float(parsed.splat_w);
             const float scale_v = (L.mask_scale[1] > 0.0f)
                 ? L.mask_scale[1]
-                : 32.0f / float(parsed.splat_h);
+                : 16.0f / float(parsed.splat_h);
 
             const float u = L.tile_uv[0]
                 + std::clamp(local_x, 0.0f, 1.0f)
@@ -782,9 +796,10 @@ bool Build(ID3D11Device*                                       device,
                     std::clamp(fx_chunk - float(cx), 0.0f, 1.0f);
 
                 const size_t chunk_idx =
-                    size_t(cx) * size_t(R.chunk_h) + size_t(cy);
-                if (chunk_idx >= parsed.chunks.size() ||
-                    chunk_idx >= expected_chunks)
+                    size_t(cy) * size_t(R.chunk_w) + size_t(cx);
+                if (chunk_idx >= expected_chunks ||
+                    chunk_idx >= grid_chunks.size() ||
+                    !grid_chunks[chunk_idx])
                 {
                     weight_data[size_t(y) * size_t(R.weight_w) + size_t(x)] =
                         255;
@@ -797,11 +812,11 @@ bool Build(ID3D11Device*                                       device,
                 const float w11 =         fx_in  *         fy_in;
 
                 float weights[kMaxMaterials] = {};
-                float weight_sum = 0.0f;
+                float coverage = 0.0f;
                 int first_material = 0;
                 bool found_material = false;
 
-                const auto& chunk = parsed.chunks[chunk_idx];
+                const auto& chunk = *grid_chunks[chunk_idx];
                 for (const auto& L : chunk.layers) {
                     const int material =
                         (L.material_idx < uint32_t(material_count))
@@ -817,25 +832,34 @@ bool Build(ID3D11Device*                                       device,
                     const float blend_px =
                         w00 * float(L.blend[0]) + w10 * float(L.blend[1]) +
                         w01 * float(L.blend[2]) + w11 * float(L.blend[3]);
-                    const float w =
+                    const float alpha =
                         std::clamp(blend_px / kBlendMax, 0.0f, 1.0f)
                         * sample_mask(L, fx_in, fy_in);
-                    if (w <= 0.0f) {
+                    if (alpha <= 0.0f) {
                         continue;
                     }
-                    weights[material] += w;
-                    weight_sum += w;
+                    const float keep = 1.0f - alpha;
+                    for (int m = 0; m < material_count; ++m) {
+                        weights[m] *= keep;
+                    }
+                    weights[material] += alpha;
+                    coverage = coverage * keep + alpha;
                 }
 
-                if (weight_sum <= 1e-6f) {
+                if (coverage < 0.999f && found_material) {
+                    weights[first_material] += 1.0f - coverage;
+                    coverage = 1.0f;
+                }
+
+                if (coverage <= 1e-6f) {
                     weights[first_material] = 1.0f;
-                    weight_sum = 1.0f;
+                    coverage = 1.0f;
                 }
 
                 const size_t texel =
                     size_t(y) * size_t(R.weight_w) + size_t(x);
                 for (int m = 0; m < material_count; ++m) {
-                    const float n = std::clamp(weights[m] / weight_sum,
+                    const float n = std::clamp(weights[m] / coverage,
                                                0.0f, 1.0f);
                     weight_data[size_t(m) * size_t(R.weight_w) *
                                 size_t(R.weight_h) + texel] =

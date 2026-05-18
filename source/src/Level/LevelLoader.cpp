@@ -269,7 +269,6 @@ void fill_gdb_rotation_matrix(Level::PropInstance& pi,
     const float sc = std::sin(c);
     const float cc = std::cos(c);
 
-    // Matches the game's Euler-to-matrix helper in default.xex (0x8257ACA0).
     game[0] = cb * ca;
     game[1] = sb * sc - cb * cc * sa;
     game[2] = cb * sc * sa + sb * cc;
@@ -366,9 +365,6 @@ bool is_gdb_authored_level_shell_model(
         return false;
     }
 
-    // GDB adds gameplay ownership/contents around buildings, while engine_level
-    // already authors the large exterior shells.  Only suppress exact path
-    // collisions, so distinct variants and interior shell pieces still render.
     return p.find("/buildings/") != std::string::npos ||
            p.find("/structures/") != std::string::npos;
 }
@@ -401,6 +397,66 @@ std::string gdb_shell_sample_text(
     os << " pos=(" << p.x << ", " << p.y << ", " << p.z << ")"
        << " model=" << model_path;
     return os.str();
+}
+
+std::string gdb_instance_key(
+    const Gdb::Placement& p,
+    const std::string& model_path)
+{
+    auto q = [](float v) -> long long {
+        if (!std::isfinite(v)) return 0;
+        return static_cast<long long>(std::llround(v * 100.0f));
+    };
+    std::ostringstream os;
+    os << lower_slash(model_path) << '|'
+       << std::hex << p.hash_a << '|' << p.parent_hash << std::dec << '|'
+       << p.entity_name << '|'
+       << q(p.x) << ',' << q(p.y) << ',' << q(p.z);
+    return os.str();
+}
+
+std::string companion_interior_path(const std::string& model_path)
+{
+    std::string p = lower_slash(model_path);
+    const std::string suffix = "/exterior.mdl";
+    if (p.size() < suffix.size() ||
+        p.compare(p.size() - suffix.size(), suffix.size(), suffix) != 0)
+    {
+        return {};
+    }
+    p.replace(p.size() - suffix.size(), suffix.size(), "/interior.mdl");
+    return p;
+}
+
+std::string house_facade_companion_exterior_path(const std::string& model_path)
+{
+    std::string p = lower_slash(model_path);
+    struct Map {
+        const char* facade;
+        const char* shell;
+    };
+    static const Map maps[] = {
+        { "bs_townhouse_basic_facade_mid", "bs_townhouse_basic" },
+        { "bs_townhouse_basic_facade",     "bs_townhouse_basic" },
+        { "bs_townhouse_v1_facade_mid",    "bs_townhouse_v1" },
+        { "bs_townhouse_v1_facade",        "bs_townhouse_v1" },
+        { "bs_townhouse_v2_facade_mid",    "bs_townhouse_v2" },
+        { "bs_townhouse_v2_facade",        "bs_townhouse_v2" },
+    };
+    for (const Map& map : maps) {
+        const std::string needle =
+            std::string("/buildings/dotxsi/") + map.facade + "/" +
+            map.facade + ".mdl";
+        const size_t pos = p.find(needle);
+        if (pos == std::string::npos) continue;
+
+        const std::string exterior =
+            std::string("/buildings/dotxsi/") + map.shell + "/" +
+            map.shell + "/exterior.mdl";
+        p.replace(pos, needle.size(), exterior);
+        return p;
+    }
+    return {};
 }
 
 std::string gdb_representative_name(const std::vector<std::string>& examples)
@@ -1363,6 +1419,7 @@ bool Open(const FlatAssetEntry& entry)
     const int kMaxLog      = 16;
 
     std::vector<std::string> all_ehf_refs;
+    std::vector<std::string> all_water_refs;
 
     for (const auto& e : info.entries) {
         if (e.str_a.empty()) continue;
@@ -1375,6 +1432,7 @@ bool Open(const FlatAssetEntry& entry)
             ends_with_ci(e.str_a, ".ama")  ||
             ends_with_ci(e.str_a, ".amm")  ||
             ends_with_ci(e.str_a, ".amr")  ||
+            ends_with_ci(e.str_a, ".water") ||
             (e.str_a.find("heightfield") != std::string::npos) ||
             (e.str_a.find("Heightfield") != std::string::npos);
 
@@ -1384,6 +1442,8 @@ bool Open(const FlatAssetEntry& entry)
                             + "  " + e.str_a);
             if (ends_with_ci(e.str_a, ".ehf")) {
                 all_ehf_refs.push_back(e.str_a);
+            } else if (ends_with_ci(e.str_a, ".water")) {
+                all_water_refs.push_back(e.str_a);
             }
         } else if (n_logged < kMaxLog) {
             ++n_logged;
@@ -1409,18 +1469,104 @@ bool Open(const FlatAssetEntry& entry)
     auto load_text_sibling = [&](const std::string& sibling_full_path,
                                  std::vector<uint8_t>& out_bytes) -> bool
     {
-        std::string key = sibling_full_path;
-        std::transform(key.begin(), key.end(), key.begin(),
-                       [](unsigned char c){ return std::tolower(c); });
-        std::replace(key.begin(), key.end(), '\\', '/');
-        int idx = BnkCache::find_index(entry.bnk_path, key);
-        if (idx < 0) return false;
-        try {
-            out_bytes = BnkCache::extract_bytes(entry.bnk_path, idx);
-            return !out_bytes.empty();
-        } catch (...) {
-            return false;
+        out_bytes.clear();
+        auto normalize_asset_key = [](std::string s) {
+            std::transform(s.begin(), s.end(), s.begin(),
+                           [](unsigned char c){ return std::tolower(c); });
+            std::replace(s.begin(), s.end(), '\\', '/');
+            return s;
+        };
+        auto filename_of_key = [](const std::string& s) {
+            const size_t p = s.find_last_of("/\\");
+            return (p == std::string::npos) ? s : s.substr(p + 1);
+        };
+        auto try_extract = [&](const std::string& bnk_path,
+                               int idx) -> bool
+        {
+            if (bnk_path.empty() || idx < 0) return false;
+            try {
+                auto v = BnkCache::extract_bytes(bnk_path, idx);
+                if (v.empty()) return false;
+                out_bytes.assign(v.begin(), v.end());
+                return true;
+            } catch (...) {
+                return false;
+            }
+        };
+        auto try_bnk_path = [&](const std::string& bnk_path,
+                                const std::string& key,
+                                const std::string& leaf) -> bool
+        {
+            int idx = BnkCache::find_index(bnk_path, key);
+            if (idx < 0 && !leaf.empty()) {
+                idx = BnkCache::find_index(bnk_path, leaf);
+            }
+            return try_extract(bnk_path, idx);
+        };
+        auto try_file = [&](const std::filesystem::path& p) -> bool
+        {
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(p, ec)) return false;
+            std::ifstream f(p, std::ios::binary);
+            if (!f) return false;
+            f.seekg(0, std::ios::end);
+            const std::streamoff size = f.tellg();
+            if (size <= 0) return false;
+            f.seekg(0, std::ios::beg);
+            out_bytes.resize(static_cast<size_t>(size));
+            f.read(reinterpret_cast<char*>(out_bytes.data()), size);
+            if (!f) {
+                out_bytes.clear();
+                return false;
+            }
+            return true;
+        };
+
+        const std::string key = normalize_asset_key(sibling_full_path);
+        const std::string leaf = filename_of_key(key);
+
+        if (try_bnk_path(entry.bnk_path, key, leaf)) {
+            return true;
         }
+
+        for (const auto& fe : S.all_heightfield_files) {
+            const std::string fe_full =
+                normalize_asset_key(fe.full_path.empty()
+                    ? fe.name : fe.full_path);
+            const std::string fe_name = normalize_asset_key(fe.name);
+            const bool match =
+                fe_full == key ||
+                fe_name == key ||
+                (!leaf.empty() &&
+                 (filename_of_key(fe_full) == leaf ||
+                  filename_of_key(fe_name) == leaf));
+            if (!match) continue;
+            if (try_extract(fe.bnk_path, fe.file_index)) {
+                return true;
+            }
+        }
+
+        for (const auto& bnk_path : S.bnk_paths) {
+            if (bnk_path == entry.bnk_path) continue;
+            if (try_bnk_path(bnk_path, key, leaf)) {
+                return true;
+            }
+        }
+
+        if (!leaf.empty()) {
+            std::error_code ec;
+            const auto cwd = std::filesystem::current_path(ec);
+            if (!ec) {
+                if (try_file(cwd / "extracted" / leaf)) return true;
+                if (try_file(cwd / "cmake-build-debug" / "extracted" / leaf))
+                    return true;
+                if (try_file(cwd.parent_path() / "cmake-build-debug" /
+                             "extracted" / leaf))
+                    return true;
+            }
+        }
+
+        return false;
     };
 
     LevelResources res;
@@ -2114,10 +2260,14 @@ bool Open(const FlatAssetEntry& entry)
             std::unordered_map<uint32_t, std::vector<const FlatAssetEntry*>>
                 mdl_by_model_path_hash;
             mdl_by_model_path_hash.reserve(S.all_mdl_files.size() * 2);
+            std::unordered_map<std::string, std::vector<const FlatAssetEntry*>>
+                mdl_by_lower_path;
+            mdl_by_lower_path.reserve(S.all_mdl_files.size() * 2);
             for (const auto& m : S.all_mdl_files) {
                 if (m.full_path.empty()) continue;
                 mdl_by_model_path_hash[fnv1_model_path_hash(m.full_path)]
                     .push_back(&m);
+                mdl_by_lower_path[lower_slash(m.full_path)].push_back(&m);
             }
             auto resolve_model_by_path_hash = [&](uint32_t model_path_hash) {
                 if (model_path_hash == 0) {
@@ -2129,6 +2279,17 @@ bool Open(const FlatAssetEntry& entry)
                 }
                 return choose_model_candidate(it->second);
             };
+            auto resolve_model_by_lower_path =
+                [&](const std::string& lower_path) {
+                    if (lower_path.empty()) {
+                        return static_cast<const FlatAssetEntry*>(nullptr);
+                    }
+                    auto it = mdl_by_lower_path.find(lower_path);
+                    if (it == mdl_by_lower_path.end()) {
+                        return static_cast<const FlatAssetEntry*>(nullptr);
+                    }
+                    return choose_model_candidate(it->second);
+                };
             auto resolve_model_for_entity = [&](const std::string& entity_name) {
                 std::string tok = canonicalize_for_match(entity_name);
                 if (tok.empty()) return static_cast<const FlatAssetEntry*>(nullptr);
@@ -2171,9 +2332,6 @@ bool Open(const FlatAssetEntry& entry)
                 return best;
             };
 
-            // GDB/save names are instance labels. Prefer exact model-path hashes
-            // from the GDB parent records, then fall back to streaming hints and
-            // the global .mdl index.
             constexpr bool emit_gdb_render_placements = true;
             constexpr bool emit_derived_render_placements = false;
             std::unordered_map<std::string, Level::PropBlock> blocks_by_path;
@@ -2240,6 +2398,8 @@ bool Open(const FlatAssetEntry& entry)
             size_t gdb_model_hash_hits = 0;
             size_t gdb_model_hash_misses = 0;
             size_t gdb_authored_shell_skipped = 0;
+            size_t gdb_duplicate_instances_skipped = 0;
+            size_t gdb_companion_interiors_emitted = 0;
             std::unordered_map<std::string, size_t>
                 gdb_authored_shell_skip_paths;
             std::unordered_map<std::string, std::vector<std::string>>
@@ -2248,6 +2408,24 @@ bool Open(const FlatAssetEntry& entry)
                 gdb_emitted_shell_paths;
             std::unordered_map<std::string, std::vector<std::string>>
                 gdb_emitted_shell_samples;
+            std::unordered_map<std::string, size_t>
+                gdb_companion_interior_paths;
+            std::unordered_map<std::string, size_t>
+                gdb_duplicate_skip_paths;
+            struct HouseCompanionProbe {
+                size_t skipped = 0;
+                size_t exterior_hits = 0;
+                size_t exterior_misses = 0;
+                size_t interior_hits = 0;
+                size_t interior_misses = 0;
+                std::string exterior_path;
+                std::string interior_path;
+                std::vector<std::string> samples;
+            };
+            std::unordered_map<std::string, HouseCompanionProbe>
+                gdb_house_companion_probes;
+            std::unordered_set<std::string> gdb_emitted_instance_keys;
+            gdb_emitted_instance_keys.reserve(info.placements.size() * 2);
             for (const auto& p : info.placements) {
                 if (!emit_gdb_render_placements) continue;
                 const bool has_model_hash = p.model_path_hash != 0;
@@ -2269,6 +2447,22 @@ bool Open(const FlatAssetEntry& entry)
                         ++gdb_model_hash_hits;
                     } else {
                         ++gdb_model_hash_misses;
+                    }
+                }
+
+                if (!matched_model) {
+                    const char* curated_path =
+                        GdbModelHashlist::LookupParentHash(p.parent_hash);
+                    if (!curated_path) {
+                        curated_path = GdbModelHashlist::LookupEntityKey(
+                            gdb_entity_key(p.entity_name));
+                    }
+                    if (curated_path && *curated_path) {
+                        hit = resolve_model_by_lower_path(
+                            lower_slash(curated_path));
+                        if (hit) {
+                            matched_model = true;
+                        }
                     }
                 }
 
@@ -2303,14 +2497,53 @@ bool Open(const FlatAssetEntry& entry)
                 if (is_gdb_authored_level_shell_model(
                         hit->full_path, authored_level_model_paths))
                 {
+                    const std::string authored_path = hit->full_path;
+                    const std::string companion_exterior =
+                        house_facade_companion_exterior_path(authored_path);
+                    if (!companion_exterior.empty()) {
+                        HouseCompanionProbe& probe =
+                            gdb_house_companion_probes[authored_path];
+                        ++probe.skipped;
+                        if (probe.exterior_path.empty()) {
+                            probe.exterior_path = companion_exterior;
+                        }
+                        if (resolve_model_by_lower_path(companion_exterior)) {
+                            ++probe.exterior_hits;
+                        } else {
+                            ++probe.exterior_misses;
+                        }
+                        const std::string companion_interior =
+                            companion_interior_path(companion_exterior);
+                        if (probe.interior_path.empty()) {
+                            probe.interior_path = companion_interior;
+                        }
+                        if (!companion_interior.empty() &&
+                            resolve_model_by_lower_path(companion_interior)) {
+                            ++probe.interior_hits;
+                        } else {
+                            ++probe.interior_misses;
+                        }
+                        if (probe.samples.size() < 4) {
+                            probe.samples.push_back(
+                                gdb_shell_sample_text(p, authored_path));
+                        }
+                    }
                     ++gdb_authored_shell_skipped;
-                    ++gdb_authored_shell_skip_paths[hit->full_path];
+                    ++gdb_authored_shell_skip_paths[authored_path];
                     auto& samples =
-                        gdb_authored_shell_skip_samples[hit->full_path];
+                        gdb_authored_shell_skip_samples[authored_path];
                     if (samples.size() < 4) {
                         samples.push_back(
-                            gdb_shell_sample_text(p, hit->full_path));
+                            gdb_shell_sample_text(p, authored_path));
                     }
+                    continue;
+                }
+
+                const std::string instance_key =
+                    gdb_instance_key(p, hit->full_path);
+                if (!gdb_emitted_instance_keys.insert(instance_key).second) {
+                    ++gdb_duplicate_instances_skipped;
+                    ++gdb_duplicate_skip_paths[hit->full_path];
                     continue;
                 }
 
@@ -2336,7 +2569,7 @@ bool Open(const FlatAssetEntry& entry)
                     }
                     fill_gdb_rotation_matrix(pi, p.rot_x, p.rot_y, p.rot_z, scale);
                     if (pi_pair_yaw) {
-                        // Counted separately below; these are authored 180-degree facings.
+
                     } else if (std::fabs(p.rot_x) > 1e-4f ||
                                std::fabs(p.rot_y) > 1e-4f) {
                         ++gdb_full_euler_rotations;
@@ -2363,6 +2596,19 @@ bool Open(const FlatAssetEntry& entry)
                     }
                 }
                 pb.instances.push_back(pi);
+                if (const FlatAssetEntry* interior_hit =
+                        resolve_model_by_lower_path(
+                            companion_interior_path(hit->full_path)))
+                {
+                    auto& interior_pb = blocks_by_path[interior_hit->full_path];
+                    if (interior_pb.model_path.empty()) {
+                        interior_pb.type = 0xB1;
+                        interior_pb.model_path = interior_hit->full_path;
+                    }
+                    interior_pb.instances.push_back(pi);
+                    ++gdb_companion_interiors_emitted;
+                    ++gdb_companion_interior_paths[interior_hit->full_path];
+                }
                 if (is_gdb_shell_audit_model(hit->full_path)) {
                     ++gdb_emitted_shell_paths[hit->full_path];
                     auto& samples = gdb_emitted_shell_samples[hit->full_path];
@@ -2402,6 +2648,29 @@ bool Open(const FlatAssetEntry& entry)
                         "gdb-derived skipped after model match: hint-only=" +
                         std::to_string(gdb_hint_only_skipped));
                 }
+                if (gdb_duplicate_instances_skipped > 0) {
+                    OutputLog::info(
+                        "gdb-derived skipped exact duplicate records: " +
+                        std::to_string(gdb_duplicate_instances_skipped));
+                    std::vector<std::pair<std::string, size_t>> dup_paths(
+                        gdb_duplicate_skip_paths.begin(),
+                        gdb_duplicate_skip_paths.end());
+                    std::sort(dup_paths.begin(), dup_paths.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second != b.second) {
+                                      return a.second > b.second;
+                                  }
+                                  return a.first < b.first;
+                              });
+                    const size_t n =
+                        std::min<size_t>(dup_paths.size(), 8);
+                    for (size_t i = 0; i < n; ++i) {
+                        OutputLog::info(
+                            "  skip duplicate: " +
+                            std::to_string(dup_paths[i].second) +
+                            "x  " + dup_paths[i].first);
+                    }
+                }
                 if (gdb_authored_shell_skipped > 0) {
                     OutputLog::info(
                         "gdb-derived skipped exact authored building/structure duplicates: " +
@@ -2436,6 +2705,79 @@ bool Open(const FlatAssetEntry& entry)
                                 OutputLog::info("    e.g. " + sample);
                             }
                         }
+                    }
+                }
+                if (!gdb_house_companion_probes.empty()) {
+                    size_t total = 0;
+                    for (const auto& kv : gdb_house_companion_probes) {
+                        total += kv.second.skipped;
+                    }
+                    OutputLog::info(
+                        "gdb-derived skipped house facade companion probe: " +
+                        std::to_string(total) +
+                        " instance(s) across " +
+                        std::to_string(gdb_house_companion_probes.size()) +
+                        " model(s)");
+                    std::vector<std::pair<std::string, HouseCompanionProbe>>
+                        probes(gdb_house_companion_probes.begin(),
+                               gdb_house_companion_probes.end());
+                    std::sort(probes.begin(), probes.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second.skipped != b.second.skipped) {
+                                      return a.second.skipped >
+                                             b.second.skipped;
+                                  }
+                                  return a.first < b.first;
+                              });
+                    const size_t n =
+                        std::min<size_t>(probes.size(), 8);
+                    for (size_t i = 0; i < n; ++i) {
+                        const HouseCompanionProbe& probe = probes[i].second;
+                        OutputLog::info(
+                            "  house companion probe: " +
+                            std::to_string(probe.skipped) +
+                            "x  " + probes[i].first);
+                        OutputLog::info(
+                            "    exterior: " +
+                            std::to_string(probe.exterior_hits) +
+                            " hit / " +
+                            std::to_string(probe.exterior_misses) +
+                            " miss  " + probe.exterior_path);
+                        OutputLog::info(
+                            "    interior: " +
+                            std::to_string(probe.interior_hits) +
+                            " hit / " +
+                            std::to_string(probe.interior_misses) +
+                            " miss  " + probe.interior_path);
+                        for (const auto& sample : probe.samples) {
+                            OutputLog::info("    e.g. " + sample);
+                        }
+                    }
+                }
+                if (gdb_companion_interiors_emitted > 0) {
+                    OutputLog::info(
+                        "gdb-derived companion interiors: " +
+                        std::to_string(gdb_companion_interiors_emitted) +
+                        " instance(s) across " +
+                        std::to_string(gdb_companion_interior_paths.size()) +
+                        " model(s)");
+                    std::vector<std::pair<std::string, size_t>> interior_paths(
+                        gdb_companion_interior_paths.begin(),
+                        gdb_companion_interior_paths.end());
+                    std::sort(interior_paths.begin(), interior_paths.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second != b.second) {
+                                      return a.second > b.second;
+                                  }
+                                  return a.first < b.first;
+                              });
+                    const size_t n =
+                        std::min<size_t>(interior_paths.size(), 8);
+                    for (size_t i = 0; i < n; ++i) {
+                        OutputLog::info(
+                            "  companion interior: " +
+                            std::to_string(interior_paths[i].second) +
+                            "x  " + interior_paths[i].first);
                     }
                 }
                 if (!gdb_emitted_shell_paths.empty()) {
@@ -3119,19 +3461,47 @@ bool Open(const FlatAssetEntry& entry)
                             OutputLog::info(gs.str());
                         }
 
-                        // Probe the .water sibling that pairs with this
-                        // heightfield. We replace the .ghf extension with
-                        // .water and ask the same BNK to extract it.
                         g_pending_level_water_present = false;
                         g_pending_level_water_scene = Level::WaterScene{};
-                        if (!res.ghf_path.empty()) {
-                            std::filesystem::path wp = res.ghf_path;
-                            wp.replace_extension(".water");
-                            std::string water_path = wp.string();
-                            std::vector<uint8_t> water_bytes;
-                            if (load_text_sibling(water_path, water_bytes) &&
-                                !water_bytes.empty())
-                            {
+                        {
+                            std::vector<std::string> water_candidates;
+                            auto add_unique_water = [&](const std::string& path) {
+                                if (path.empty()) return;
+                                const std::string norm = norm_path(path);
+                                for (const auto& existing : water_candidates) {
+                                    if (norm_path(existing) == norm) return;
+                                }
+                                water_candidates.push_back(path);
+                            };
+
+                            const std::string main_base =
+                                basename_no_ext(res.ehf_path.empty()
+                                    ? res.ghf_path : res.ehf_path);
+                            for (const auto& water_ref : all_water_refs) {
+                                if (!main_base.empty() &&
+                                    basename_no_ext(water_ref) == main_base) {
+                                    add_unique_water(water_ref);
+                                }
+                            }
+                            if (!res.ehf_path.empty()) {
+                                add_unique_water(with_ext(res.ehf_path, ".water"));
+                            }
+                            if (!res.ghf_path.empty()) {
+                                add_unique_water(with_ext(res.ghf_path, ".water"));
+                            }
+                            for (const auto& water_ref : all_water_refs) {
+                                add_unique_water(water_ref);
+                            }
+
+                            bool found_water_file = false;
+                            for (const auto& water_path : water_candidates) {
+                                std::vector<uint8_t> water_bytes;
+                                if (!load_text_sibling(water_path, water_bytes) ||
+                                    water_bytes.empty()) {
+                                    continue;
+                                }
+
+                                found_water_file = true;
                                 Level::WaterScene scene;
                                 if (Level::ParseWaterFile(water_bytes, scene)) {
                                     size_t total_tiles = 0;
@@ -3141,13 +3511,22 @@ bool Open(const FlatAssetEntry& entry)
                                         ".water parsed: " +
                                         std::to_string(scene.bodies.size()) +
                                         " bodies, " +
-                                        std::to_string(total_tiles) + " tiles");
+                                        std::to_string(total_tiles) + " tiles from " +
+                                        water_path);
                                     g_pending_level_water_scene = std::move(scene);
                                     g_pending_level_water_present = true;
-                                } else {
-                                    OutputLog::warn(
-                                        ".water sibling found but failed to parse");
+                                    break;
                                 }
+
+                                OutputLog::warn(
+                                    ".water sibling found but failed to parse: " +
+                                    water_path);
+                            }
+
+                            if (!found_water_file && !water_candidates.empty()) {
+                                OutputLog::info(
+                                    ".water not found in level BNK; first tried " +
+                                    water_candidates.front());
                             }
                         }
 
@@ -4513,7 +4892,9 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
                 parsed.chunks[size_t(cx) * parsed.chunk_h + cy];
 
             float accum_r = 0.f, accum_g = 0.f, accum_b = 0.f;
-            float accum_w = 0.f;
+            float accum_a = 0.f;
+            uint8_t first_rgb[3] = {0, 0, 0};
+            bool have_first_rgb = false;
 
             const float wu = world_x;
             const float wv = world_z;
@@ -4522,27 +4903,45 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
                 const float blend_px =
                     w00 * float(L.blend[0]) + w10 * float(L.blend[1]) +
                     w01 * float(L.blend[2]) + w11 * float(L.blend[3]);
-                const float weight = std::clamp(blend_px / kBlendMax,
-                                                0.f, 1.f)
-                                   * sample_mask(L, fx_in, fy_in);
-                if (weight < 1.f / 255.f) continue;
-
                 uint8_t rgb[3];
                 sample_mat(int(L.material_idx), wu, wv, rgb);
-                accum_r += float(rgb[0]) * weight;
-                accum_g += float(rgb[1]) * weight;
-                accum_b += float(rgb[2]) * weight;
-                accum_w += weight;
+                if (!have_first_rgb) {
+                    first_rgb[0] = rgb[0];
+                    first_rgb[1] = rgb[1];
+                    first_rgb[2] = rgb[2];
+                    have_first_rgb = true;
+                }
+
+                const float alpha = std::clamp(blend_px / kBlendMax,
+                                               0.f, 1.f)
+                                  * sample_mask(L, fx_in, fy_in);
+                if (alpha < 1.f / 255.f) continue;
+
+                const float keep = 1.0f - alpha;
+                accum_r = accum_r * keep + float(rgb[0]) * alpha;
+                accum_g = accum_g * keep + float(rgb[1]) * alpha;
+                accum_b = accum_b * keep + float(rgb[2]) * alpha;
+                accum_a = accum_a * keep + alpha;
             }
 
-            if (accum_w > 1e-4f) {
-                accum_r /= accum_w;
-                accum_g /= accum_w;
-                accum_b /= accum_w;
+            if (accum_a < 0.999f && have_first_rgb) {
+                const float fill = 1.0f - accum_a;
+                accum_r += float(first_rgb[0]) * fill;
+                accum_g += float(first_rgb[1]) * fill;
+                accum_b += float(first_rgb[2]) * fill;
+                accum_a = 1.0f;
+            }
+
+            if (accum_a > 1e-4f && accum_a < 0.999f) {
+                accum_r /= accum_a;
+                accum_g /= accum_a;
+                accum_b /= accum_a;
             } else {
                 uint8_t base[3];
                 sample_mat(first_decoded, wu, wv, base);
-                accum_r = base[0]; accum_g = base[1]; accum_b = base[2];
+                if (!have_first_rgb) {
+                    accum_r = base[0]; accum_g = base[1]; accum_b = base[2];
+                }
             }
 
             uint8_t* dst = out_rgba.data() + (size_t(y) * lm_w + x) * 4;

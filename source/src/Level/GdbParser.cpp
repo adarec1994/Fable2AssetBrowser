@@ -34,13 +34,16 @@ inline bool Finite3(float x, float y, float z) {
 
 constexpr uint32_t kFixedMarker  = 0x00004B40;
 constexpr uint32_t kVarMarker    = 0x00004B80;
-constexpr uint32_t kTagVec3      = 0x00000568;
+constexpr uint32_t kInlineVec3SchemaRel = 0x00000568;
 constexpr uint32_t kHashParent   = 0x5F6317D5;
 constexpr uint32_t kHashPosition = 0xBD7C27D4;
 constexpr uint32_t kHashRotation = 0x21EBC83B;
 constexpr uint32_t kHashTransformComponent = 0xF73572C4;
 constexpr uint32_t kHashModelResource = 0x29CF50D1;
 constexpr uint32_t kHashModelPathHash = 0x0C17DB4E;
+constexpr uint32_t kHashVecZ = 0x050C5D45;
+constexpr uint32_t kHashVecY = 0x050C5D46;
+constexpr uint32_t kHashVecX = 0x050C5D47;
 constexpr size_t   kFixedRecSize = 92;
 constexpr size_t   kHeaderSize   = 0x18;
 
@@ -172,6 +175,33 @@ struct GdbView {
         return false;
     }
 
+    bool readLocalFloat(size_t record, uint32_t field_hash, float& value) const {
+        size_t slot = 0;
+        if (!findLocal(record, field_hash, 3, slot, nullptr)) return false;
+        if (slot + 4 > body_end) return false;
+        value = ReadBeF32(bytes.data() + slot);
+        return std::isfinite(value);
+    }
+
+    bool readVectorFields(size_t record,
+                          float& vx,
+                          float& vy,
+                          float& vz) const {
+        // The first dword of an indexed GDB record is a schema-relative
+        // pointer.  Market's vector schema happens to live at 0x568, but other
+        // levels place the same x/y/z schema elsewhere.
+        return readLocalFloat(record, kHashVecX, vx) &&
+               readLocalFloat(record, kHashVecY, vy) &&
+               readLocalFloat(record, kHashVecZ, vz);
+    }
+
+    bool hasVectorSchema(size_t record) const {
+        float v = 0.0f;
+        return readLocalFloat(record, kHashVecZ, v) &&
+               readLocalFloat(record, kHashVecY, v) &&
+               readLocalFloat(record, kHashVecX, v);
+    }
+
     bool readVec3Record(size_t record,
                         float& x,
                         float& y,
@@ -179,18 +209,15 @@ struct GdbView {
                         float* raw_x = nullptr,
                         float* raw_y = nullptr,
                         float* raw_z = nullptr) const {
-        if (record + 16 > body_end) return false;
-        if (ReadBeU32(bytes.data() + record) != kTagVec3) return false;
-        const float rz = ReadBeF32(bytes.data() + record + 4);
-        const float ry = ReadBeF32(bytes.data() + record + 8);
-        const float rx = ReadBeF32(bytes.data() + record + 12);
-        if (!Finite3(rx, ry, rz)) return false;
-        x = rx;
-        y = ry;
-        z = rz;
-        if (raw_x) *raw_x = rx;
-        if (raw_y) *raw_y = ry;
-        if (raw_z) *raw_z = rz;
+        float vx = 0.0f, vy = 0.0f, vz = 0.0f;
+        if (!readVectorFields(record, vx, vy, vz)) return false;
+        if (!Finite3(vx, vy, vz)) return false;
+        x = vx;
+        y = vy;
+        z = vz;
+        if (raw_x) *raw_x = vx;
+        if (raw_y) *raw_y = vy;
+        if (raw_z) *raw_z = vz;
         return true;
     }
 
@@ -210,8 +237,8 @@ struct GdbView {
                              float& y,
                              float& z) const {
         size_t rec = 0;
-        if (!lookup(hash, rec) || rec + 16 > body_end) return false;
-        if (ReadBeU32(bytes.data() + rec) != kTagVec3) return false;
+        if (!lookup(hash, rec)) return false;
+        if (!hasVectorSchema(rec) || rec + 16 > body_end) return false;
         x = ReadBeF32(bytes.data() + rec + 4);
         y = ReadBeF32(bytes.data() + rec + 8);
         z = ReadBeF32(bytes.data() + rec + 12);
@@ -354,7 +381,7 @@ bool TryInlineTransform(const std::vector<uint8_t>& bytes,
                         float& rot_z,
                         bool& has_rotation) {
     for (size_t q = rs + 4; q + 16 <= re; q += 4) {
-        if (ReadBeU32(bytes.data() + q) != kTagVec3) continue;
+        if (ReadBeU32(bytes.data() + q) != kInlineVec3SchemaRel) continue;
 
         const float rz = ReadBeF32(bytes.data() + q + 4);
         const float ry = ReadBeF32(bytes.data() + q + 8);

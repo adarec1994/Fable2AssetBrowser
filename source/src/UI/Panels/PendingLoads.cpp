@@ -425,11 +425,6 @@ static std::string make_combined_prop_name(const std::string& model_path,
     const size_t sl = base.find_last_of("/\\");
     if (sl != std::string::npos) base = base.substr(sl + 1);
 
-    // Engine_level case-2 / case-21 props are NOT user-clickable in the
-    // render window (the picker filters by this exact "engine_level: "
-    // prefix in pick_level_mesh_at). Any other source — GDB, havok, etc.
-    // — gets a different prefix so the user can pick those meshes and
-    // see their textures in the Materials window.
     const bool is_engine_level = (block_type == 2u) || (block_type == 21u);
     std::string name =
         is_engine_level ? std::string("engine_level: ") + base
@@ -717,9 +712,11 @@ static void bind_generated_terrain_textures(
         m.srv_diffuse      = srv;
         m.diffuse_visible  = true;
         m.diffuse_tex_name = t.label;
-        if (t.mesh_index == 0 && TerrainSplat::Get().ok) {
+        if (t.mesh_index == 0) {
             m.is_terrain = true;
-            m.diffuse_tex_name = "ehf_splat_terrain";
+            if (TerrainSplat::Get().ok) {
+                m.diffuse_tex_name = "ehf_splat_terrain";
+            }
         }
 
         TerrainTextureRegistry::Register(t.label, t.rgba, t.width, t.height);
@@ -807,6 +804,14 @@ static bool stream_level_prop_batch(ID3D11Device* device)
             device,
             g_level_prop_stream.terrain_textures,
             "terrain texture rebound after prop upload");
+        size_t water_meshes = 0;
+        for (const auto& m : g_mp.meshes) {
+            if (m.is_water) ++water_meshes;
+        }
+        if (water_meshes > 0) {
+            OutputLog::success("water: " + std::to_string(water_meshes) +
+                               " mesh(es) active after prop upload");
+        }
         g_mp.no_tilt = true;
         S.terrain_mode = true;
         g_flycam = saved_cam;
@@ -1329,6 +1334,7 @@ void process_pending_loads() {
                 g.bone_weights[v * 4 + 0] = 1.0f;
             }
             g.name = "terrain";
+            g.is_terrain = true;
 
             MDLInfo info;
             info.MeshCount = 1;
@@ -1443,10 +1449,6 @@ void process_pending_loads() {
                 geoms.push_back(std::move(ag));
             }
 
-            // Emit one flat horizontal quad per .water tile so the render
-            // pipeline picks them up alongside the terrain mesh. The water
-            // shader (selected by `is_water` on MPPerMesh) animates the
-            // surface using the wave parameters baked into the .water file.
             size_t water_geom_first = geoms.size();
             size_t water_geom_count = 0;
             if (g_pending_level_water_present) {
@@ -1454,12 +1456,10 @@ void process_pending_loads() {
                     const auto& body = g_pending_level_water_scene.bodies[bi];
                     for (size_t ti = 0; ti < body.tiles.size(); ++ti) {
                         const auto& t = body.tiles[ti];
-                        // h_max appears to be the surface Y in the samples
-                        // we've seen; fall back to h_min then to the body's
-                        // base height when the tile values look degenerate.
-                        float y = t.h_max;
+
+                        float y = body.base_height;
                         if (!std::isfinite(y) || y == 0.0f) y = t.h_min;
-                        if (!std::isfinite(y) || y == 0.0f) y = body.base_height;
+                        if (!std::isfinite(y) || y == 0.0f) y = t.h_max;
 
                         const float x0 = t.cx - t.ex;
                         const float x1 = t.cx + t.ex;
@@ -1479,8 +1479,7 @@ void process_pending_loads() {
                             0.0f, 1.0f, 0.0f,
                             0.0f, 1.0f, 0.0f,
                         };
-                        // UVs in world units so the wave shader can keep
-                        // wavelengths consistent across tile sizes.
+
                         wg.uvs = {
                             x0, z0,
                             x1, z0,
@@ -1496,6 +1495,7 @@ void process_pending_loads() {
                         wg.name = "water: body" + std::to_string(bi) +
                                   ":tile" + std::to_string(ti);
                         wg.diffuse_tex_name = body.normal_map_path;
+                        wg.is_water = true;
                         geoms.push_back(std::move(wg));
                         ++water_geom_count;
                     }
@@ -1519,20 +1519,8 @@ void process_pending_loads() {
             MP_Build(device, geoms, info, g_mp);
             g_mp.no_tilt = true;
 
-            // Tag the freshly-built water meshes so the renderer routes
-            // them through the water (wave) pipeline state. `water_geom_first`
-            // tracks the index in `geoms` where water tiles were appended,
-            // and `MP_Build` preserves that ordering 1:1 into g_mp.meshes
-            // unless a geom was empty (we generated full geoms only, so
-            // that doesn't apply here).
-            for (size_t mi = water_geom_first;
-                 mi < water_geom_first + water_geom_count &&
-                 mi < g_mp.meshes.size();
-                 ++mi)
-            {
-                g_mp.meshes[mi].is_water = true;
-                g_mp.meshes[mi].has_alpha = true;
-            }
+            (void)water_geom_first;
+            (void)water_geom_count;
 
             S.terrain_mode = true;
 
@@ -1866,25 +1854,31 @@ void process_pending_loads() {
                         lm_w    = lm_entry->width;
                         lm_h    = lm_entry->height;
                     }
-                    const auto& fresh = EhfLodThumbnails::Get();
-                    if (TerrainSplat::Build(device, splat_parsed, fresh,
-                                            lm_rgba, lm_w, lm_h,
-                                            0.0f, 0.0f))
+                    const auto& fresh_thumbs = EhfLodThumbnails::Get();
+                    if (TerrainSplat::Build(
+                            device,
+                            splat_parsed,
+                            fresh_thumbs,
+                            lm_rgba,
+                            lm_w,
+                            lm_h,
+                            0.0f,
+                            0.0f))
                     {
                         if (!g_mp.meshes.empty()) {
                             g_mp.meshes[0].is_terrain = true;
                             g_mp.meshes[0].diffuse_tex_name =
                                 "ehf_splat_terrain";
                         }
-                        OutputLog::success("terrain SPLAT shader bound: "
-                            + std::to_string(splat_parsed.chunk_w) + "x"
-                            + std::to_string(splat_parsed.chunk_h)
-                            + " chunks, " + std::to_string(fresh.size())
-                            + " LODs");
+                        OutputLog::success(
+                            "terrain SPLAT shader bound: per-chunk EHF paint records");
                     } else {
-                        OutputLog::warn("terrain splat resources failed; "
-                                        "falling back to composite");
+                        OutputLog::warn(
+                            "terrain SPLAT shader unavailable; using EHF composite texture");
                     }
+                } else {
+                    OutputLog::warn(
+                        "terrain SPLAT parse failed; using EHF composite texture");
                 }
             }
 
@@ -1912,7 +1906,7 @@ void process_pending_loads() {
         g_pending_level_prop_blocks.clear();
         g_pending_level_prop_blocks.shrink_to_fit();
         g_pending_level_model_body_bnk.clear();
-        // Water has been baked into g_mp; the parsed scene can be released.
+
         g_pending_level_water_present = false;
         g_pending_level_water_scene = Level::WaterScene{};
     }
@@ -1940,6 +1934,7 @@ void process_pending_loads() {
                 g.bone_weights[v * 4 + 0] = 1.0f;
             }
             g.name = "terrain";
+            g.is_terrain = true;
 
             MDLInfo info;
             info.MeshCount = 1;

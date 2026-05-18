@@ -90,8 +90,7 @@ std::string          g_pending_heightmap_view_name;
 
 namespace UI {
 
-namespace {
-
+    namespace {
 
 void draw_placeholder() {
 
@@ -773,8 +772,7 @@ void draw_model_in_panel(ID3D11Device* device) {
         } else if (g_mp.no_tilt && ::g_selected_level_mesh_idx >= 0) {
             ::g_selected_level_mesh_idx = -1;
         } else if (g_mp.no_tilt) {
-            // In level/terrain mode, ESC with no selection is a no-op
-            // — we don't want to nuke the loaded level on a stray ESC.
+
         } else {
             MP_Release(g_mp);
             g_mp.has_model = false;

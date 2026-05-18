@@ -122,13 +122,13 @@ struct State {
 
     ImGuiKey key_forward       = ImGuiKey_W;
     ImGuiKey key_back          = ImGuiKey_S;
-    ImGuiKey key_left          = ImGuiKey_A;
-    ImGuiKey key_right         = ImGuiKey_D;
+    ImGuiKey key_left          = ImGuiKey_D;
+    ImGuiKey key_right         = ImGuiKey_A;
     ImGuiKey key_up            = ImGuiKey_E;
     ImGuiKey key_down          = ImGuiKey_Q;
     ImGuiKey key_rotate_mode   = ImGuiKey_R;
-    ImGuiKey key_close_preview = ImGuiKey_Escape;
     int      capturing_key_id  = -1;
+    bool     show_keybinds_window = false;
 
     std::string export_dir;
 

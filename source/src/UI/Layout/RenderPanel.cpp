@@ -765,16 +765,12 @@ void draw_model_in_panel(ID3D11Device* device) {
     }
 #endif
 
-    if (hovered && ImGui::IsKeyPressed(S.key_close_preview)) {
+    if (hovered && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         if (S.bone_rotate_mode) {
             cancel_rotate();
-        } else {
-            MP_Release(g_mp);
-            g_mp.has_model = false;
-            g_mp_initialized = false;
-            S.show_model_preview = false;
-            S.model_preview_open = false;
-            S.selected_bone = -1;
+        } else if (::g_highlight_mesh_idx != -1 || ::g_isolate_mesh_idx != -1) {
+            ::g_highlight_mesh_idx = -1;
+            ::g_isolate_mesh_idx   = -1;
         }
     }
 
@@ -2391,13 +2387,11 @@ void draw_model_in_panel_gl() {
                      ImVec2(1.0f, 0.0f));
     }
 
-    if (hovered && ImGui::IsKeyPressed(S.key_close_preview)) {
-        MP_Release(g_mp);
-        g_mp.has_model = false;
-        g_mp_initialized = false;
-        S.show_model_preview = false;
-        S.model_preview_open = false;
-        S.selected_bone = -1;
+    if (hovered && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (::g_highlight_mesh_idx != -1 || ::g_isolate_mesh_idx != -1) {
+            ::g_highlight_mesh_idx = -1;
+            ::g_isolate_mesh_idx   = -1;
+        }
     }
 
     dl->AddRectFilled(ImVec2(origin.x + 6, origin.y + 6),

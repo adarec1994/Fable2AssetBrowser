@@ -159,7 +159,6 @@ void settings_load() {
     load_key("key_up",            S.key_up);
     load_key("key_down",          S.key_down);
     load_key("key_rotate_mode",   S.key_rotate_mode);
-    load_key("key_close_preview", S.key_close_preview);
 }
 
 void settings_save() {
@@ -185,7 +184,6 @@ void settings_save() {
     save_key("key_up",            S.key_up);
     save_key("key_down",          S.key_down);
     save_key("key_rotate_mode",   S.key_rotate_mode);
-    save_key("key_close_preview", S.key_close_preview);
     write_config_kv(kv);
 }
 #ifdef _WIN32

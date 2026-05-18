@@ -94,9 +94,6 @@ void pick_bnk(const std::string &path) {
 
 void open_iso_logic(const std::string& iso_path) {
     if (iso_path.empty()) { show_error_box("No ISO selected"); return; }
-    S.root_dir = iso_path;
-    S.last_dir = std::filesystem::path(iso_path).parent_path().string();
-    save_last_dir(S.last_dir);
     try {
 
         S.bnk_paths = scan_bnks_recursive(iso_path);
@@ -130,13 +127,24 @@ void open_iso_logic(const std::string& iso_path) {
             return x < y;
         });
     } catch (...) {
+        S.bnk_paths.clear();
+        S.adb_paths.clear();
+        S.lua_files.clear();
+        ISO::IsoMount::instance().unmount();
         show_error_box("Error indexing BNK files in the ISO");
         return;
     }
     if (S.bnk_paths.empty()) {
+        S.adb_paths.clear();
+        S.lua_files.clear();
+        ISO::IsoMount::instance().unmount();
         show_error_box("No .bnk files found in the ISO.");
         return;
     }
+
+    S.root_dir = iso_path;
+    S.last_dir = std::filesystem::path(iso_path).parent_path().string();
+    save_last_dir(S.last_dir);
 
     start_tree_build_for_root(iso_path, S.bnk_paths);
 
@@ -161,9 +169,6 @@ void open_folder_logic(const std::string &sel) {
         show_error_box(std::string("Selected path is not a directory: ") + sel);
         return;
     }
-    S.root_dir = sel;
-    S.last_dir = sel;
-    save_last_dir(sel);
     try {
         S.bnk_paths = scan_bnks_recursive(sel);
         if (S.bnk_paths.empty()) S.bnk_paths = find_bnks(sel);
@@ -188,15 +193,24 @@ void open_folder_logic(const std::string &sel) {
             return x < y;
         });
     } catch (...) {
+        S.bnk_paths.clear();
+        S.adb_paths.clear();
+        S.lua_files.clear();
         show_error_box("Error searching for BNK files");
         return;
     }
     if (S.bnk_paths.empty()) {
+        S.adb_paths.clear();
+        S.lua_files.clear();
         show_error_box(
             std::string("No .bnk files found in:\n") + sel + std::string(
                 "\n\nPlease select a folder containing Fable 2 BNK files."));
         return;
     }
+
+    S.root_dir = sel;
+    S.last_dir = sel;
+    save_last_dir(sel);
 
     start_tree_build_for_root(sel, S.bnk_paths);
 

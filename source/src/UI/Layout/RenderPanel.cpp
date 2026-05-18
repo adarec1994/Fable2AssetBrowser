@@ -765,7 +765,7 @@ void draw_model_in_panel(ID3D11Device* device) {
     }
 #endif
 
-    if (hovered && ImGui::IsKeyPressed(S.key_close_preview)) {
+    if (hovered && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         if (S.bone_rotate_mode) {
             cancel_rotate();
         } else if (g_mp.no_tilt && ::g_selected_level_mesh_idx >= 0) {
@@ -2396,7 +2396,7 @@ void draw_model_in_panel_gl() {
                      ImVec2(1.0f, 0.0f));
     }
 
-    if (hovered && ImGui::IsKeyPressed(S.key_close_preview)) {
+    if (hovered && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         MP_Release(g_mp);
         g_mp.has_model = false;
         g_mp_initialized = false;

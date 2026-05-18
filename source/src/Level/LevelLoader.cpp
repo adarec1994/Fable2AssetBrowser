@@ -321,7 +321,6 @@ bool should_emit_gdb_render_entity(const std::string& entity_name)
         "townhouse",
         "house",
         "facade",
-        "cellar",
     };
     for (const char* needle : blocked) {
         if (key.find(needle) != std::string::npos) {
@@ -346,6 +345,9 @@ bool should_emit_gdb_render_entity(const std::string& entity_name)
         "tower",
         "lamp",
         "lantern",
+        "cellar",
+        "shop",
+        "room",
     };
     for (const char* needle : allowed) {
         if (key.find(needle) != std::string::npos) {
@@ -558,6 +560,62 @@ collect_streaming_model_candidates(const std::vector<std::string>& streaming_bnk
     return out;
 }
 
+struct ModelAlias { const char* entity; const char* model; int score; };
+static constexpr ModelAlias kModelAliases[] = {
+    { "smallwallpost",         "stonewallmediumpostspiked",     15000 },
+    { "wallpost",              "stonewallmediumpostspiked",     14500 },
+    { "smallwallstraight",     "stonewallmediumstraightspiked", 15000 },
+    { "smallwallcurved",       "stonewallmediumcurvedspiked",   15000 },
+    { "smallwallbroken",       "stonewallmediumbrokenspiked",   15000 },
+    { "shelflong",             "esashelflong",                  15000 },
+    { "woodenbucket",          "esabucketwooden",               15000 },
+    { "pubtable",              "esatabletavern",                14500 },
+    { "largesquareultradecorative","esaftableultradecorative",  13800 },
+    { "largesquareupgradeable","esaftabledecorative",           12500 },
+    { "standardultradecorative","esaftableultradecorative",     13600 },
+    { "standardupgradeable",   "esaftabledecorative",           12300 },
+    { "bookcaseultradecorative","esafbookcaseultradecorative",  15000 },
+    { "bookcaseworn",          "esafbookcaseworn",              14500 },
+    { "dresserupgradeable",    "esafdresserultradecorative",    13000 },
+    { "kitchensinkupgradeable", "esakitchensink",               12000 },
+    { "buildingsalesign",      "buildingsalesign",              14000 },
+    { "bsmarketbridge",        "bsmarketbridge",                16000 },
+    { "marketbridge",          "bsmarketbridge",                15800 },
+    { "bridge",                "bsmarketbridge",                12000 },
+    { "bsmarketclocktower",    "bsmarketclocktower",            16000 },
+    { "marketclocktower",      "bsmarketclocktower",            15800 },
+    { "clocktower",            "bsmarketclocktower",            14500 },
+    { "grandfatherclock",      "bsgrandfatherclock",            15500 },
+    { "wallclock",             "bswallclock",                   15500 },
+    { "bsmarketdockarch",      "bsmarketdocksarch",             15000 },
+    { "dockarch",              "bsmarketdocksarch",             14500 },
+    { "bsmarketarchway",       "bsmarketarchway",               15000 },
+    { "archway",               "bsmarketarchway",               13000 },
+    { "bsmarketgatehouse",     "bsmarketgatehouse",             15000 },
+    { "bsgatehouse",           "bsmarketgatehouse",             14500 },
+    { "bsmarketlockgate",      "bsmarketlockgates",             15000 },
+    { "lockgate",              "bsmarketlockgates",             14000 },
+    { "bsmarketwalltower",     "bsmarketwalltower",             15000 },
+    { "walltower",             "bsmarketwalltower",             13500 },
+    { "bsmarketwallgate",      "bsmarketwallgate",              15000 },
+    { "closedgate",            "bsmarketwallgate",              13000 },
+    { "guardpost",             "bsmarketguardpost",             14500 },
+    { "marketstairs",          "bsmarketstairs",                14500 },
+    { "scaffoldingstairs",     "bsmarketscaffoldingstairs",     14500 },
+    { "castlearch",            "bsmarketcastlearch",            14500 },
+    { "dockswall",             "bsmarketdockswall",             14500 },
+    { "oillanternsingle",      "bscemetaryoillampsingle",       13000 },
+    { "oillampsingle",         "bscemetaryoillampsingle",       13000 },
+    { "statue",                "okstatuedolphinv1",             12000 },
+    { "cellarlargeroom",       "cellarlargeroom",               15000 },
+    { "cellarsmallroom",       "cellarsmallroom",               15000 },
+    { "bsmarkettownhousesmall", "bstownhousebasicfacademid",    13500 },
+    { "bwsmarkettownhousesmall","bstownhousebasicfacademid",    13500 },
+    { "townhousev1",           "bstownhousev1facademid",        14000 },
+    { "townhousev2",           "bstownhousev2facademid",        14000 },
+    { "townhousev3",           "bstownhousev3exterior",         14500 },
+};
+
 int streaming_model_score(const std::string& entity_name,
                           const StreamingModelCandidate& c)
 {
@@ -585,62 +643,7 @@ int streaming_model_score(const std::string& entity_name,
         score = 7000 + int(c.key.size());
     }
 
-    struct Alias { const char* entity; const char* model; int score; };
-    static const Alias aliases[] = {
-        { "smallwallpost",         "stonewallmediumpostspiked",     15000 },
-        { "wallpost",              "stonewallmediumpostspiked",     14500 },
-        { "smallwallstraight",     "stonewallmediumstraightspiked", 15000 },
-        { "smallwallcurved",       "stonewallmediumcurvedspiked",   15000 },
-        { "smallwallbroken",       "stonewallmediumbrokenspiked",   15000 },
-        { "shelflong",             "esashelflong",                  15000 },
-        { "woodenbucket",          "esabucketwooden",               15000 },
-        { "pubtable",              "esatabletavern",                14500 },
-        { "largesquareultradecorative","esaftableultradecorative",  13800 },
-        { "largesquareupgradeable","esaftabledecorative",           12500 },
-        { "standardultradecorative","esaftableultradecorative",     13600 },
-        { "standardupgradeable",   "esaftabledecorative",           12300 },
-        { "bookcaseultradecorative","esafbookcaseultradecorative",  15000 },
-        { "bookcaseworn",          "esafbookcaseworn",              14500 },
-        { "dresserupgradeable",    "esafdresserultradecorative",    13000 },
-        { "kitchensinkupgradeable", "esakitchensink",               12000 },
-        { "buildingsalesign",      "buildingsalesign",              14000 },
-        { "bsmarketbridge",        "bsmarketbridge",                16000 },
-        { "marketbridge",          "bsmarketbridge",                15800 },
-        { "bridge",                "bsmarketbridge",                12000 },
-        { "bsmarketclocktower",    "bsmarketclocktower",            16000 },
-        { "marketclocktower",      "bsmarketclocktower",            15800 },
-        { "clocktower",            "bsmarketclocktower",            14500 },
-        { "grandfatherclock",      "bsgrandfatherclock",            15500 },
-        { "wallclock",             "bswallclock",                   15500 },
-        { "bsmarketdockarch",      "bsmarketdocksarch",             15000 },
-        { "dockarch",              "bsmarketdocksarch",             14500 },
-        { "bsmarketarchway",       "bsmarketarchway",               15000 },
-        { "archway",               "bsmarketarchway",               13000 },
-        { "bsmarketgatehouse",     "bsmarketgatehouse",             15000 },
-        { "bsgatehouse",           "bsmarketgatehouse",             14500 },
-        { "bsmarketlockgate",      "bsmarketlockgates",             15000 },
-        { "lockgate",              "bsmarketlockgates",             14000 },
-        { "bsmarketwalltower",     "bsmarketwalltower",             15000 },
-        { "walltower",             "bsmarketwalltower",             13500 },
-        { "bsmarketwallgate",      "bsmarketwallgate",              15000 },
-        { "closedgate",            "bsmarketwallgate",              13000 },
-        { "guardpost",             "bsmarketguardpost",             14500 },
-        { "marketstairs",          "bsmarketstairs",                14500 },
-        { "scaffoldingstairs",     "bsmarketscaffoldingstairs",     14500 },
-        { "castlearch",            "bsmarketcastlearch",            14500 },
-        { "dockswall",             "bsmarketdockswall",             14500 },
-        { "oillanternsingle",      "bscemetaryoillampsingle",       13000 },
-        { "oillampsingle",         "bscemetaryoillampsingle",       13000 },
-        { "statue",                "okstatuedolphinv1",             12000 },
-        { "cellarlargeroom",       "cellarlargeroom",               15000 },
-        { "cellarsmallroom",       "cellarsmallroom",               15000 },
-        { "bsmarkettownhousesmall", "bstownhousebasicfacademid",    13500 },
-        { "bwsmarkettownhousesmall","bstownhousebasicfacademid",    13500 },
-        { "townhousev1",           "bstownhousev1facademid",        14000 },
-        { "townhousev2",           "bstownhousev2facademid",        14000 },
-        { "townhousev3",           "bstownhousev3exterior",         14500 },
-    };
-    for (const auto& a : aliases) {
+    for (const auto& a : kModelAliases) {
         if (has(a.entity) && (cand_has(a.model) || cand_path_has(a.model))) {
             score = std::max(score, a.score);
         }
@@ -1554,6 +1557,63 @@ bool Open(const FlatAssetEntry& entry)
                         << " raw-only, " << absent << " absent from raw gdb";
                     OutputLog::info(sum.str());
                 }
+
+                auto dump_hex = [&](uint32_t hash, const std::string& name,
+                                    size_t max_occurrences) {
+                    const uint8_t a = uint8_t(hash >> 24);
+                    const uint8_t b = uint8_t(hash >> 16);
+                    const uint8_t c = uint8_t(hash >> 8);
+                    const uint8_t d = uint8_t(hash);
+                    size_t shown = 0;
+                    OutputLog::info(std::string("  raw-hash context: ") + name);
+                    for (size_t i = 0; i + 4 <= gdb_bytes.size(); ++i) {
+                        if (gdb_bytes[i] != a || gdb_bytes[i+1] != b ||
+                            gdb_bytes[i+2] != c || gdb_bytes[i+3] != d) continue;
+                        const size_t lo = (i >= 48) ? i - 48 : 0;
+                        const size_t hi = std::min(gdb_bytes.size(), i + 96);
+                        std::ostringstream hos;
+                        hos << "    @0x" << std::hex << std::uppercase << i
+                            << std::dec << "  (size=" << gdb_bytes.size()
+                            << ", header_words_to_hash="
+                            << ((i - lo) / 4) << ")";
+                        OutputLog::info(hos.str());
+                        for (size_t row = lo; row < hi; row += 16) {
+                            std::ostringstream rs;
+                            rs << "      +0x" << std::hex << std::uppercase
+                               << std::setw(4) << std::setfill('0') << (row - lo)
+                               << std::setfill(' ') << " ";
+                            for (size_t k = row; k < row + 16 && k < hi; ++k) {
+                                rs << " " << std::setw(2) << std::setfill('0')
+                                   << int(gdb_bytes[k]);
+                            }
+                            rs << "  ";
+                            for (size_t k = row; k < row + 16 && k < hi; ++k) {
+                                uint8_t bc = gdb_bytes[k];
+                                rs << char((bc >= 32 && bc < 127) ? bc : '.');
+                            }
+                            OutputLog::info(rs.str());
+                        }
+                        if (++shown >= max_occurrences) break;
+                    }
+                };
+
+                static const uint32_t kProbeHashes[] = {
+                    0xC4F8E223,
+                    0xEB70B0A1,
+                    0xAF024A9B,
+                    0x1B621778,
+                    0xBFDBE04E,
+                };
+                for (uint32_t h : kProbeHashes) {
+                    auto it = save_hash_to_name.end();
+                    for (auto kt = save_hash_to_name.begin();
+                         kt != save_hash_to_name.end(); ++kt) {
+                        if (kt->first == h) { it = kt; break; }
+                    }
+                    if (it == save_hash_to_name.end()) continue;
+                    if (parsed_by_hash.find(h) != parsed_by_hash.end()) continue;
+                    dump_hex(h, it->second, 2);
+                }
             }
 
             struct GdbArchetypeDiag {
@@ -1822,13 +1882,50 @@ bool Open(const FlatAssetEntry& entry)
                     }
                     return best;
                 };
+            auto resolve_via_alias = [&](const std::string& entity_name)
+                -> const FlatAssetEntry* {
+                const std::string ek = gdb_entity_key(entity_name);
+                if (ek.empty()) return nullptr;
+                const FlatAssetEntry* best = nullptr;
+                int best_score = INT_MIN;
+                for (const ModelAlias& a : kModelAliases) {
+                    if (ek.find(a.entity) == std::string::npos) continue;
+                    const std::string a_tok = canonicalize_for_match(a.model);
+                    if (a_tok.empty()) continue;
+                    const FlatAssetEntry* candidate = nullptr;
+                    if (auto it = mdl_by_token.find(a_tok); it != mdl_by_token.end()) {
+                        candidate = choose_model_candidate(it->second);
+                    } else {
+                        for (const auto& kv : mdl_by_token) {
+                            if (kv.first.size() < 4) continue;
+                            if (kv.first.find(a_tok) != std::string::npos ||
+                                a_tok.find(kv.first) != std::string::npos) {
+                                candidate = choose_model_candidate(kv.second);
+                                if (candidate) break;
+                            }
+                        }
+                    }
+                    if (!candidate) continue;
+                    const int score = a.score + model_bank_score(candidate);
+                    if (!best || score > best_score) {
+                        best = candidate;
+                        best_score = score;
+                    }
+                }
+                return best;
+            };
+
             auto resolve_model_for_entity = [&](const std::string& entity_name) {
                 std::string tok = canonicalize_for_match(entity_name);
-                if (tok.empty()) return static_cast<const FlatAssetEntry*>(nullptr);
+                if (!tok.empty()) {
+                    auto exact = mdl_by_token.find(tok);
+                    if (exact != mdl_by_token.end()) {
+                        return choose_model_candidate(exact->second);
+                    }
+                }
 
-                auto exact = mdl_by_token.find(tok);
-                if (exact != mdl_by_token.end()) {
-                    return choose_model_candidate(exact->second);
+                if (auto via_alias = resolve_via_alias(entity_name)) {
+                    return via_alias;
                 }
 
                 if (tok.size() < 5) {
@@ -1932,22 +2029,16 @@ bool Open(const FlatAssetEntry& entry)
                     emit_gdb_render_placements &&
                     should_emit_gdb_render_entity(p.entity_name);
 
-                const FlatAssetEntry* hit = nullptr;
-                if (!streaming_model_candidates.empty()) {
+                const FlatAssetEntry* hit = resolve_model_for_entity(p.entity_name);
+                if (!hit && !streaming_model_candidates.empty()) {
                     const StreamingModelCandidate* stream_hit =
                         choose_streaming_model_for_gdb(
                             p.entity_name, streaming_model_candidates);
-                    if (!stream_hit) continue;
-                    ++resolved;
-                    hit = stream_hit->entry;
-                    if (!emit_this_entity) continue;
-                    if (!hit) continue;
-                } else {
-                    hit = resolve_model_for_entity(p.entity_name);
-                    if (!hit) continue;
-                    ++resolved;
-                    if (!emit_this_entity) continue;
+                    if (stream_hit) hit = stream_hit->entry;
                 }
+                if (!hit) continue;
+                ++resolved;
+                if (!emit_this_entity) continue;
 
                 auto& pb = blocks_by_path[hit->full_path];
                 if (pb.model_path.empty()) {

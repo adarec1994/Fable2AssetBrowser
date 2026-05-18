@@ -209,6 +209,9 @@ void draw_dialogs() {
 void open_picker() {
     IGFD::FileDialogConfig cfg;
     cfg.path = pick_browse_base_dir();
+    cfg.flags = ImGuiFileDialogFlags_Modal |
+                ImGuiFileDialogFlags_HideColumnType |
+                ImGuiFileDialogFlags_OptionalFileName;
 
     ImGuiFileDialog::Instance()->OpenDialog("PickPath",
         "Select Fable 2 folder or .iso", ".iso,((.*))", cfg);

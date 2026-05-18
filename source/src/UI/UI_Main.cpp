@@ -179,6 +179,89 @@ void render_panel_handle_flycam(float dt) {
     handle_flycam_input(dt);
 }
 
+static void draw_keybinds_window() {
+    if (!S.show_keybinds_window) return;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(
+        ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+               vp->WorkPos.y + vp->WorkSize.y * 0.5f),
+        ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(380, 0), ImGuiCond_Appearing);
+
+    if (!ImGui::Begin("Keybinds", &S.show_keybinds_window,
+                      ImGuiWindowFlags_NoCollapse |
+                      ImGuiWindowFlags_NoSavedSettings)) {
+        ImGui::End();
+        return;
+    }
+
+    extern void settings_save();
+    struct KB { const char* label; ImGuiKey* k; };
+    KB rows[] = {
+        { "Move forward",   &S.key_forward       },
+        { "Move back",      &S.key_back          },
+        { "Move left",      &S.key_left          },
+        { "Move right",     &S.key_right         },
+        { "Move up",        &S.key_up            },
+        { "Move down",      &S.key_down          },
+        { "Bone rotate",    &S.key_rotate_mode   },
+    };
+    const int n = (int)(sizeof(rows) / sizeof(rows[0]));
+    for (int i = 0; i < n; ++i) {
+        ImGui::PushID(i);
+        ImGui::TextUnformatted(rows[i].label);
+        ImGui::SameLine(160);
+        const bool capturing = (S.capturing_key_id == i);
+        const char* keyname = ImGui::GetKeyName(*rows[i].k);
+        std::string btn = capturing
+            ? std::string("[press any key]")
+            : (keyname && *keyname ? std::string(keyname)
+                                   : std::string("<unset>"));
+        if (ImGui::Button(btn.c_str(), ImVec2(180, 0))) {
+            S.capturing_key_id = i;
+        }
+        ImGui::PopID();
+    }
+
+    if (S.capturing_key_id >= 0 && S.capturing_key_id < n) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            S.capturing_key_id = -1;
+        } else {
+            for (int k = ImGuiKey_NamedKey_BEGIN;
+                 k < ImGuiKey_NamedKey_END; ++k)
+            {
+                ImGuiKey key = (ImGuiKey)k;
+                if (key == ImGuiKey_LeftCtrl  || key == ImGuiKey_RightCtrl ||
+                    key == ImGuiKey_LeftShift || key == ImGuiKey_RightShift||
+                    key == ImGuiKey_LeftAlt   || key == ImGuiKey_RightAlt  ||
+                    key == ImGuiKey_LeftSuper || key == ImGuiKey_RightSuper)
+                    continue;
+                if (ImGui::IsKeyPressed(key)) {
+                    *rows[S.capturing_key_id].k = key;
+                    S.capturing_key_id = -1;
+                    settings_save();
+                    break;
+                }
+            }
+        }
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button("Reset to defaults")) {
+        S.key_forward       = ImGuiKey_W;
+        S.key_back          = ImGuiKey_S;
+        S.key_left          = ImGuiKey_D;
+        S.key_right         = ImGuiKey_A;
+        S.key_up            = ImGuiKey_E;
+        S.key_down          = ImGuiKey_Q;
+        S.key_rotate_mode   = ImGuiKey_R;
+        settings_save();
+    }
+
+    ImGui::End();
+}
+
 #ifdef _WIN32
 void draw_main(HWND hwnd, ID3D11Device* device) {
     g_hwnd = hwnd;
@@ -357,80 +440,8 @@ void draw_main(GLFWwindow* window) {
                 }
 
                 ImGui::Separator();
-                if (ImGui::BeginMenu("Keybinds")) {
-                    struct KB { const char* label; ImGuiKey* k; };
-                    KB rows[] = {
-                        { "Move forward",   &S.key_forward       },
-                        { "Move back",      &S.key_back          },
-                        { "Move left",      &S.key_left          },
-                        { "Move right",     &S.key_right         },
-                        { "Move up",        &S.key_up            },
-                        { "Move down",      &S.key_down          },
-                        { "Bone rotate",    &S.key_rotate_mode   },
-                        { "Close preview",  &S.key_close_preview },
-                    };
-                    const int n = (int)(sizeof(rows) / sizeof(rows[0]));
-                    for (int i = 0; i < n; ++i) {
-                        ImGui::PushID(i);
-                        ImGui::TextUnformatted(rows[i].label);
-                        ImGui::SameLine(150);
-                        const bool capturing =
-                            (S.capturing_key_id == i);
-                        const char* keyname =
-                            ImGui::GetKeyName(*rows[i].k);
-                        std::string btn = capturing
-                            ? std::string("[press any key]")
-                            : (keyname && *keyname
-                                   ? std::string(keyname)
-                                   : std::string("<unset>"));
-                        if (ImGui::Button(btn.c_str(),
-                                          ImVec2(150, 0))) {
-                            S.capturing_key_id = i;
-                        }
-                        ImGui::PopID();
-                    }
-
-                    if (S.capturing_key_id >= 0 &&
-                        S.capturing_key_id < n)
-                    {
-                        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-                            S.capturing_key_id = -1;
-                        } else {
-                            for (int k = ImGuiKey_NamedKey_BEGIN;
-                                 k < ImGuiKey_NamedKey_END; ++k)
-                            {
-                                ImGuiKey key = (ImGuiKey)k;
-                                if (key == ImGuiKey_LeftCtrl  ||
-                                    key == ImGuiKey_RightCtrl ||
-                                    key == ImGuiKey_LeftShift ||
-                                    key == ImGuiKey_RightShift||
-                                    key == ImGuiKey_LeftAlt   ||
-                                    key == ImGuiKey_RightAlt  ||
-                                    key == ImGuiKey_LeftSuper ||
-                                    key == ImGuiKey_RightSuper) continue;
-                                if (ImGui::IsKeyPressed(key)) {
-                                    *rows[S.capturing_key_id].k = key;
-                                    S.capturing_key_id = -1;
-                                    settings_save();
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    ImGui::Separator();
-                    if (ImGui::MenuItem("Reset to defaults")) {
-                        S.key_forward       = ImGuiKey_W;
-                        S.key_back          = ImGuiKey_S;
-                        S.key_left          = ImGuiKey_A;
-                        S.key_right         = ImGuiKey_D;
-                        S.key_up            = ImGuiKey_E;
-                        S.key_down          = ImGuiKey_Q;
-                        S.key_rotate_mode   = ImGuiKey_R;
-                        S.key_close_preview = ImGuiKey_Escape;
-                        settings_save();
-                    }
-                    ImGui::EndMenu();
+                if (ImGui::MenuItem("Keybinds...")) {
+                    S.show_keybinds_window = true;
                 }
 
                 ImGui::EndMenu();
@@ -469,6 +480,8 @@ void draw_main(GLFWwindow* window) {
 #else
     About::draw();
 #endif
+
+    draw_keybinds_window();
 
 #ifdef _WIN32
     if (S.pending_texture_load) {
@@ -513,6 +526,11 @@ void draw_main(GLFWwindow* window) {
 #else
     if (S.pending_texture_load) {
         S.pending_texture_load = false;
+        if (g_mp.has_model) {
+            MP_Release(g_mp);
+            g_mp.has_model = false;
+            g_mp_initialized = false;
+        }
         if (S.texture_window_gl) {
             glDeleteTextures(1, &S.texture_window_gl);
             S.texture_window_gl = 0;

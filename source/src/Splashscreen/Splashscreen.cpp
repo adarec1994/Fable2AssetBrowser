@@ -111,8 +111,9 @@ void load_textures_if_needed(ID3D11Device* device) {
 #else
 
 bool LoadTextureFromFile(const char* filename, unsigned int* out_tex, int* out_w, int* out_h) {
+    std::string resolved = resolve_asset_path(filename);
     int width, height, channels;
-    unsigned char* image_data = stbi_load(filename, &width, &height, &channels, 4);
+    unsigned char* image_data = stbi_load(resolved.c_str(), &width, &height, &channels, 4);
     if (!image_data) return false;
     glGenTextures(1, out_tex);
     glBindTexture(GL_TEXTURE_2D, *out_tex);
@@ -208,6 +209,9 @@ void draw_dialogs() {
 void open_picker() {
     IGFD::FileDialogConfig cfg;
     cfg.path = pick_browse_base_dir();
+    cfg.flags = ImGuiFileDialogFlags_Modal |
+                ImGuiFileDialogFlags_HideColumnType |
+                ImGuiFileDialogFlags_OptionalFileName;
 
     ImGuiFileDialog::Instance()->OpenDialog("PickPath",
         "Select Fable 2 folder or .iso", ".iso,((.*))", cfg);

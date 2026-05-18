@@ -3,6 +3,8 @@
 #include <vector>
 #include <filesystem>
 
+std::string resolve_asset_path(const std::string& rel);
+
 std::string load_last_dir();
 void save_last_dir(const std::string &p);
 std::vector<std::string> scan_bnks_recursive(const std::string &root);

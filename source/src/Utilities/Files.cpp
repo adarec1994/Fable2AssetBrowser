@@ -3,6 +3,45 @@
 #include <fstream>
 #include <algorithm>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <limits.h>
+#endif
+
+std::string resolve_asset_path(const std::string& rel) {
+    if (std::filesystem::exists(rel)) return rel;
+
+    std::string exe_dir;
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        std::string p(buf, buf + n);
+        size_t slash = p.find_last_of("\\/");
+        if (slash != std::string::npos) exe_dir = p.substr(0, slash);
+    }
+#else
+    char buf[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = '\0';
+        std::string p(buf);
+        size_t slash = p.find_last_of('/');
+        if (slash != std::string::npos) exe_dir = p.substr(0, slash);
+    }
+#endif
+
+    if (!exe_dir.empty()) {
+        for (const char* prefix : {"/", "/../", "/../source/"}) {
+            std::string p = exe_dir + prefix + rel;
+            if (std::filesystem::exists(p)) return p;
+        }
+    }
+    return rel;
+}
+
 std::string load_last_dir() {
     std::ifstream f("last_dir.txt");
     std::string s;

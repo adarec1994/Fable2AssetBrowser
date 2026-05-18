@@ -513,6 +513,11 @@ void draw_main(GLFWwindow* window) {
 #else
     if (S.pending_texture_load) {
         S.pending_texture_load = false;
+        if (g_mp.has_model) {
+            MP_Release(g_mp);
+            g_mp.has_model = false;
+            g_mp_initialized = false;
+        }
         if (S.texture_window_gl) {
             glDeleteTextures(1, &S.texture_window_gl);
             S.texture_window_gl = 0;

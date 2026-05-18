@@ -10,7 +10,6 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 #include <shlobj.h>
-#include "Audio/play_audio.h"
 #include "../resource.h"
 #else
 #include <GL/glew.h>
@@ -21,6 +20,7 @@
 #include <sys/stat.h>
 #include <pwd.h>
 #endif
+#include "Audio/play_audio.h"
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
 #include "Utilities/State.h"
@@ -299,8 +299,6 @@ int main() {
     ImGui::StyleColorsDark();
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
-
-    Splashscreen_init_icon_font_at_startup();
 #else
 int main() {
     glfwSetErrorCallback(glfw_error_callback);
@@ -325,6 +323,7 @@ int main() {
     ImGui_ImplGlfw_InitForOpenGL(g_window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 #endif
+    Splashscreen_init_icon_font_at_startup();
     build_theme();
     S.last_dir = load_last_dir();
 
@@ -334,10 +333,9 @@ int main() {
         IconFont::reload_at_size(S.font_size);
         S.pending_font_size = S.font_size;
     }
-#ifdef _WIN32
     bool audio_muted = load_audio_muted();
     BackgroundAudio::instance().set_muted(audio_muted);
-
+#ifdef _WIN32
     BackgroundAudio::instance().start_from_resource(IDR_MENU_INTERLUDE_WAV);
 #endif
     bool done = false;
@@ -378,7 +376,9 @@ int main() {
         ImGui::NewFrame();
 #ifdef _WIN32
         draw_main(hwnd, g_pd3dDevice);
-
+#else
+        draw_main(g_window);
+#endif
         if (!S.root_dir.empty()) {
             static bool audio_stopped = false;
             if (!audio_stopped) {
@@ -386,9 +386,6 @@ int main() {
                 audio_stopped = true;
             }
         }
-#else
-        draw_main(g_window);
-#endif
         draw_folder_dialog();
         if (S.show_progress.load()) ImGui::OpenPopup("progress_win");
         if (S.show_error) {
@@ -545,8 +542,8 @@ int main() {
     }
     S.exiting = true;
     AudioPlayer::shutdown();
-#ifdef _WIN32
     BackgroundAudio::instance().stop();
+#ifdef _WIN32
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
 #else

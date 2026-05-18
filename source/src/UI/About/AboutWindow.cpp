@@ -1,5 +1,6 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "AboutWindow.h"
+#include "../../Utilities/Files.h"
 
 #include "imgui.h"
 
@@ -8,6 +9,10 @@
 #include <windows.h>
 #include <shellapi.h>
 #include "../../../resource.h"
+#else
+#include <GL/glew.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #endif
 
 #include "stb_image.h"
@@ -55,6 +60,8 @@ bool g_open = false;
 
 #ifdef _WIN32
 ID3D11ShaderResourceView* g_image_srv = nullptr;
+#else
+unsigned int g_image_tex = 0;
 #endif
 int  g_image_w = 0;
 int  g_image_h = 0;
@@ -120,8 +127,33 @@ void open_url(const char* url) {
     ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
 }
 #else
-void load_image_if_needed() {  }
-void open_url(const char* ) {}
+void load_image_if_needed() {
+    if (g_image_tex) return;
+    std::string resolved = resolve_asset_path("include/image/ob_tarotcards.png");
+    int w = 0, h = 0, channels = 0;
+    unsigned char* rgba = stbi_load(resolved.c_str(),
+                                    &w, &h, &channels, 4);
+    if (!rgba) return;
+    glGenTextures(1, &g_image_tex);
+    glBindTexture(GL_TEXTURE_2D, g_image_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    stbi_image_free(rgba);
+    g_image_w = w;
+    g_image_h = h;
+}
+
+void open_url(const char* url) {
+    if (!url || !*url) return;
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("xdg-open", "xdg-open", url, (char*)nullptr);
+        _exit(127);
+    }
+}
 #endif
 
 ImVec2 fit_image_size(ImVec2 avail) {
@@ -189,8 +221,16 @@ void draw() {
         ImGui::TextDisabled("(image unavailable)");
     }
 #else
-    ImGui::Dummy(ImVec2(kImageMaxWidth, kImageMaxHeight));
-    ImGui::TextDisabled("(image preview is Win32-only)");
+    if (g_image_tex) {
+        ImVec2 fit = fit_image_size(ImVec2(kImageMaxWidth, kImageMaxHeight));
+        if (fit.x > 0 && fit.y > 0) {
+            ImGui::Image((ImTextureID)(intptr_t)g_image_tex, fit);
+        }
+    } else {
+
+        ImGui::Dummy(ImVec2(kImageMaxWidth, kImageMaxHeight));
+        ImGui::TextDisabled("(image unavailable)");
+    }
 #endif
 
     ImGui::EndGroup();
@@ -265,6 +305,11 @@ void release_resources() {
     if (g_image_srv) {
         g_image_srv->Release();
         g_image_srv = nullptr;
+    }
+#else
+    if (g_image_tex) {
+        glDeleteTextures(1, &g_image_tex);
+        g_image_tex = 0;
     }
 #endif
     g_image_w = 0;

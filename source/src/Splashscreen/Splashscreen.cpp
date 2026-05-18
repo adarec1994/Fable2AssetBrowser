@@ -111,8 +111,9 @@ void load_textures_if_needed(ID3D11Device* device) {
 #else
 
 bool LoadTextureFromFile(const char* filename, unsigned int* out_tex, int* out_w, int* out_h) {
+    std::string resolved = resolve_asset_path(filename);
     int width, height, channels;
-    unsigned char* image_data = stbi_load(filename, &width, &height, &channels, 4);
+    unsigned char* image_data = stbi_load(resolved.c_str(), &width, &height, &channels, 4);
     if (!image_data) return false;
     glGenTextures(1, out_tex);
     glBindTexture(GL_TEXTURE_2D, *out_tex);

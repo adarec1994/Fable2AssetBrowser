@@ -1,5 +1,6 @@
 #include "IconFont.h"
 #include "Splashscreen.h"
+#include "../Utilities/Files.h"
 #include "imgui.h"
 #include <vector>
 #include <cstring>
@@ -7,6 +8,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #include "../../resource.h"
+#else
+#include <cstdio>
+#include <string>
 #endif
 
 namespace IconFont {
@@ -35,6 +39,21 @@ bool load_rcdata(int resource_id, std::vector<unsigned char>& out) {
     out.assign((const unsigned char*)p, (const unsigned char*)p + sz);
     return true;
 }
+#else
+bool load_asset_bytes(const char* rel_path, std::vector<unsigned char>& out) {
+    std::string resolved = resolve_asset_path(rel_path);
+    FILE* f = std::fopen(resolved.c_str(), "rb");
+    if (!f) return false;
+    std::fseek(f, 0, SEEK_END);
+    long sz = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { std::fclose(f); return false; }
+    out.resize((size_t)sz);
+    size_t n = std::fread(out.data(), 1, (size_t)sz, f);
+    std::fclose(f);
+    if (n != (size_t)sz) { out.clear(); return false; }
+    return true;
+}
 #endif
 
 }
@@ -44,13 +63,20 @@ bool load_atlas_at_size(float size_px) {
     io.Fonts->Clear();
 
 #ifdef _WIN32
-
     if (g_roboto_bytes.empty()) {
         load_rcdata(IDR_ROBOTO_FONT, g_roboto_bytes);
     }
     if (g_fa_bytes.empty()) {
         load_rcdata(IDR_FA_FONT, g_fa_bytes);
     }
+#else
+    if (g_roboto_bytes.empty()) {
+        load_asset_bytes("include/font/Roboto-Regular.ttf", g_roboto_bytes);
+    }
+    if (g_fa_bytes.empty()) {
+        load_asset_bytes("include/image/fa-solid-900.ttf", g_fa_bytes);
+    }
+#endif
 
     if (g_roboto_bytes.empty()) {
         io.Fonts->AddFontDefault();
@@ -74,9 +100,6 @@ bool load_atlas_at_size(float size_px) {
             g_fa_bytes.data(), (int)g_fa_bytes.size(),
             size_px, &fa_cfg, icon_ranges);
     }
-#else
-    io.Fonts->AddFontDefault();
-#endif
 
     g_loaded_size_px = size_px;
     return true;

@@ -3339,6 +3339,14 @@ bool Open(const FlatAssetEntry& entry)
             std::unordered_map<std::string, size_t> gdb_shell_path_emit_counts;
             std::unordered_map<std::string, size_t>
                 gdb_shell_path_limit_skip_paths;
+            std::vector<std::string> gdb_interest_rows;
+            std::unordered_map<std::string, size_t>
+                gdb_interest_category_counts;
+            std::unordered_map<std::string, size_t>
+                gdb_interest_status_counts;
+            if (is_bwsmarket_level) {
+                gdb_interest_rows.reserve(info.placements.size());
+            }
             size_t gdb_clocktower_seen = 0;
             size_t gdb_clocktower_emitted = 0;
             size_t gdb_clocktower_companions_emitted = 0;
@@ -3444,6 +3452,85 @@ bool Open(const FlatAssetEntry& entry)
                     }
                     return pi;
                 };
+            auto classify_gdb_interest =
+                [](const std::string& entity_key,
+                   const std::string& token,
+                   const std::string* model_path) {
+                    std::string text = entity_key + " " + token;
+                    if (model_path) {
+                        text += " ";
+                        text += lower_slash(*model_path);
+                    }
+                    auto has = [&](const char* needle) {
+                        return text.find(needle) != std::string::npos;
+                    };
+                    if (has("openstall") || has("marketstall") ||
+                        has("tarotstall") || has("stall"))
+                    {
+                        return std::string("stall");
+                    }
+                    if (has("caravan") || has("coachhouse") ||
+                        has("coachouse") || has("coach"))
+                    {
+                        return std::string("caravan");
+                    }
+                    if (has("tavern") || has("pub") || has("inn")) {
+                        return std::string("tavern");
+                    }
+                    if (has("generalshop") || has("generalstore") ||
+                        has("largeshop") || has("smallshop") ||
+                        has("clotheshop") || has("shop"))
+                    {
+                        return std::string("shop");
+                    }
+                    if (has("townhouse") || has("slumstreethouse") ||
+                        has("house"))
+                    {
+                        return std::string("house");
+                    }
+                    return std::string();
+                };
+            auto tsv_clean = [](std::string s) {
+                for (char& c : s) {
+                    if (c == '\t' || c == '\r' || c == '\n') c = ' ';
+                }
+                return s;
+            };
+            auto hex32 = [](uint32_t v) {
+                std::ostringstream ss;
+                ss << "0x" << std::uppercase << std::hex
+                   << std::setw(8) << std::setfill('0') << v;
+                return ss.str();
+            };
+            auto add_gdb_interest_row =
+                [&](const Gdb::Placement& p,
+                    const std::string& entity_key,
+                    std::string category,
+                    const char* status,
+                    const std::string& model_path) {
+                    if (!is_bwsmarket_level) return;
+                    if (category.empty() && !model_path.empty()) {
+                        const std::string token =
+                            canonicalize_for_match(p.entity_name);
+                        category = classify_gdb_interest(
+                            entity_key, token, &model_path);
+                    }
+                    if (category.empty()) return;
+                    ++gdb_interest_category_counts[category];
+                    ++gdb_interest_status_counts[status ? status : ""];
+                    std::ostringstream row;
+                    row << category << '\t'
+                        << (status ? status : "") << '\t'
+                        << tsv_clean(p.entity_name) << '\t'
+                        << tsv_clean(entity_key) << '\t'
+                        << hex32(p.hash_a) << '\t'
+                        << hex32(p.parent_hash) << '\t'
+                        << hex32(p.model_path_hash) << '\t'
+                        << std::fixed << std::setprecision(3)
+                        << p.x << '\t' << p.y << '\t' << p.z << '\t'
+                        << tsv_clean(model_path);
+                    gdb_interest_rows.push_back(row.str());
+                };
             for (const auto& p : info.placements) {
                 if (!emit_gdb_render_placements) continue;
                 const bool has_model_hash = p.model_path_hash != 0;
@@ -3451,6 +3538,10 @@ bool Open(const FlatAssetEntry& entry)
                 std::string tok = canonicalize_for_match(p.entity_name);
                 if (tok.empty() && !has_model_hash) continue;
                 const std::string entity_key = gdb_entity_key(p.entity_name);
+                std::string gdb_interest_category =
+                    is_bwsmarket_level
+                        ? classify_gdb_interest(entity_key, tok, nullptr)
+                        : std::string();
                 const bool clocktower_probe =
                     p.parent_hash == 0xD55304DB ||
                     entity_key.find("clocktower") != std::string::npos ||
@@ -3516,6 +3607,9 @@ bool Open(const FlatAssetEntry& entry)
                 if (!matched_model) {
                     hit = resolve_model_for_entity(p.entity_name);
                     if (!hit) {
+                        add_gdb_interest_row(
+                            p, entity_key, gdb_interest_category,
+                            "unresolved", std::string());
                         if (clocktower_probe &&
                             gdb_clocktower_probe_lines.size() < 8)
                         {
@@ -3536,10 +3630,26 @@ bool Open(const FlatAssetEntry& entry)
                     matched_model = true;
                 }
 
-                if (!matched_model) continue;
+                if (!matched_model) {
+                    add_gdb_interest_row(
+                        p, entity_key, gdb_interest_category,
+                        "unmatched", std::string());
+                    continue;
+                }
+                if (hit) {
+                    const std::string path_category =
+                        classify_gdb_interest(
+                            entity_key, tok, &hit->full_path);
+                    if (!path_category.empty()) {
+                        gdb_interest_category = path_category;
+                    }
+                }
                 if (hit && is_bad_market_helper_substitution(
                         entity_key, tok, hit->full_path))
                 {
+                    add_gdb_interest_row(
+                        p, entity_key, gdb_interest_category,
+                        "rejected_helper_substitute", hit->full_path);
                     if (shop_probe) {
                         ++gdb_shop_unresolved;
                         if (gdb_shop_probe_lines.size() < 12) {
@@ -3556,6 +3666,9 @@ bool Open(const FlatAssetEntry& entry)
                     ++gdb_shop_seen;
                 }
                 if (hint_only || !hit) {
+                    add_gdb_interest_row(
+                        p, entity_key, gdb_interest_category,
+                        "hint_only", hit ? hit->full_path : std::string());
                     ++gdb_hint_only_skipped;
                     if (clocktower_probe &&
                         gdb_clocktower_probe_lines.size() < 8)
@@ -3594,6 +3707,9 @@ bool Open(const FlatAssetEntry& entry)
                 if (is_gdb_authored_level_shell_model(
                         hit->full_path, authored_level_model_paths))
                 {
+                    add_gdb_interest_row(
+                        p, entity_key, gdb_interest_category,
+                        "skipped_authored_shell", hit->full_path);
                     if (clocktower_probe &&
                         gdb_clocktower_probe_lines.size() < 8)
                     {
@@ -3667,6 +3783,9 @@ bool Open(const FlatAssetEntry& entry)
                 const bool unique_entity_shell =
                     is_gdb_unique_entity_shell_model(hit->full_path);
                 if (unique_entity_shell && !has_worldish_gdb_position(p)) {
+                    add_gdb_interest_row(
+                        p, entity_key, gdb_interest_category,
+                        "skipped_non_world_shell_position", hit->full_path);
                     ++gdb_shell_bad_position_skipped;
                     ++gdb_shell_bad_position_paths[hit->full_path];
                     if (clocktower_probe &&
@@ -3705,6 +3824,10 @@ bool Open(const FlatAssetEntry& entry)
                         if (!gdb_emitted_shell_entity_keys.insert(
                                 shell_key).second)
                         {
+                            add_gdb_interest_row(
+                                p, entity_key, gdb_interest_category,
+                                "skipped_repeated_shell_entity",
+                                hit->full_path);
                             ++gdb_shell_entity_duplicates_skipped;
                             ++gdb_shell_entity_duplicate_paths[
                                 hit->full_path];
@@ -3729,18 +3852,22 @@ bool Open(const FlatAssetEntry& entry)
                     }
                 }
 
-                const size_t shell_path_limit =
+                const int shell_path_limit =
                     is_bwsmarket_level
                         ? bwsmarket_shell_instance_limit(hit->full_path)
-                        : 0;
+                        : -1;
+                const bool has_shell_path_limit = shell_path_limit >= 0;
                 const std::string shell_path_count_key =
-                    shell_path_limit > 0
+                    has_shell_path_limit
                         ? lower_slash(hit->full_path)
                         : std::string();
-                if (shell_path_limit > 0 &&
+                if (has_shell_path_limit &&
                     gdb_shell_path_emit_counts[shell_path_count_key] >=
-                        shell_path_limit)
+                        static_cast<size_t>(shell_path_limit))
                 {
+                    add_gdb_interest_row(
+                        p, entity_key, gdb_interest_category,
+                        "skipped_shell_path_cap", hit->full_path);
                     ++gdb_shell_path_limit_skipped;
                     ++gdb_shell_path_limit_skip_paths[hit->full_path];
                     if (shop_probe) {
@@ -3757,6 +3884,9 @@ bool Open(const FlatAssetEntry& entry)
                 const std::string instance_key =
                     gdb_instance_key(p, hit->full_path);
                 if (!gdb_emitted_instance_keys.insert(instance_key).second) {
+                    add_gdb_interest_row(
+                        p, entity_key, gdb_interest_category,
+                        "skipped_duplicate_gdb_record", hit->full_path);
                     ++gdb_duplicate_instances_skipped;
                     ++gdb_duplicate_skip_paths[hit->full_path];
                     if (clocktower_probe &&
@@ -3828,6 +3958,9 @@ bool Open(const FlatAssetEntry& entry)
                 if (!emitted_prop_transform_keys.insert(
                         prop_instance_transform_key(pi, hit->full_path)).second)
                 {
+                    add_gdb_interest_row(
+                        p, entity_key, gdb_interest_category,
+                        "skipped_existing_prop_transform", hit->full_path);
                     ++gdb_duplicate_instances_skipped;
                     ++gdb_duplicate_skip_paths[hit->full_path];
                     if (clocktower_probe &&
@@ -3848,7 +3981,10 @@ bool Open(const FlatAssetEntry& entry)
                     continue;
                 }
                 pb.instances.push_back(pi);
-                if (shell_path_limit > 0) {
+                add_gdb_interest_row(
+                    p, entity_key, gdb_interest_category,
+                    "emitted", hit->full_path);
+                if (has_shell_path_limit) {
                     ++gdb_shell_path_emit_counts[shell_path_count_key];
                 }
                 if (clocktower_probe) {
@@ -3934,6 +4070,45 @@ bool Open(const FlatAssetEntry& entry)
                     }
                 }
                 ++gdb_instances_emitted;
+            }
+
+            if (is_bwsmarket_level && !gdb_interest_rows.empty()) {
+                const std::filesystem::path interest_path =
+                    std::filesystem::path("extracted") /
+                    "debug_bwsmarket_gdb_interest.tsv";
+                std::error_code ec;
+                std::filesystem::create_directories(
+                    interest_path.parent_path(), ec);
+                std::ofstream out(
+                    interest_path, std::ios::binary | std::ios::trunc);
+                if (out) {
+                    out << "category\tstatus\tentity\tentity_key\t"
+                           "entity_hash\tparent_hash\tmodel_path_hash\t"
+                           "x\ty\tz\tresolved_model\n";
+                    for (const auto& row : gdb_interest_rows) {
+                        out << row << '\n';
+                    }
+                    std::ostringstream summary;
+                    summary << "BWSMarket GDB interest dump: "
+                            << interest_path.string() << " ("
+                            << gdb_interest_rows.size() << " rows";
+                    const char* categories[] = {
+                        "shop", "tavern", "stall", "house", "caravan"
+                    };
+                    for (const char* category : categories) {
+                        auto it =
+                            gdb_interest_category_counts.find(category);
+                        if (it != gdb_interest_category_counts.end()) {
+                            summary << ", " << category << "=" << it->second;
+                        }
+                    }
+                    summary << ")";
+                    OutputLog::info(summary.str());
+                } else {
+                    OutputLog::warn(
+                        "BWSMarket GDB interest dump failed: " +
+                        interest_path.string());
+                }
             }
 
             std::ostringstream os3;
@@ -6346,10 +6521,16 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
             const int   cx       = std::min<int>(parsed.chunk_w - 1, int(fx_chunk));
             const float fx_in    = std::clamp(fx_chunk - float(cx), 0.f, 1.f);
 
-            const float w00 = (1.f - fx_in) * (1.f - fy_in);
-            const float w10 =        fx_in  * (1.f - fy_in);
-            const float w01 = (1.f - fx_in) *        fy_in;
-            const float w11 =        fx_in  *        fy_in;
+            float w00 = 0.0f, w10 = 0.0f, w01 = 0.0f, w11 = 0.0f;
+            if (fx_in + fy_in <= 1.0f) {
+                w00 = 1.0f - fx_in - fy_in;
+                w10 = fx_in;
+                w01 = fy_in;
+            } else {
+                w10 = 1.0f - fy_in;
+                w01 = 1.0f - fx_in;
+                w11 = fx_in + fy_in - 1.0f;
+            }
 
             const size_t chunk_index =
                 size_t(cy) * size_t(parsed.chunk_w) + size_t(cx);

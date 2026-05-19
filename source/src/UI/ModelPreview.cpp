@@ -1400,10 +1400,18 @@ float4 PS(VSOUT i) : SV_Target {
     float2 corner_uv = frac(chunk_clamped);
 
     float wx = corner_uv.x, wy = corner_uv.y;
-    float w00 = (1.0 - wx) * (1.0 - wy);
-    float w10 =        wx  * (1.0 - wy);
-    float w01 = (1.0 - wx) *        wy ;
-    float w11 =        wx  *        wy ;
+    float w00, w10, w01, w11;
+    if (wx + wy <= 1.0) {
+        w00 = 1.0 - wx - wy;
+        w10 = wx;
+        w01 = wy;
+        w11 = 0.0;
+    } else {
+        w00 = 0.0;
+        w10 = 1.0 - wy;
+        w01 = 1.0 - wx;
+        w11 = wx + wy - 1.0;
+    }
     float slope_w = saturate((0.82 - abs(normalize(i.n).y)) / 0.35);
 
     float3 final = float3(0.0, 0.0, 0.0);

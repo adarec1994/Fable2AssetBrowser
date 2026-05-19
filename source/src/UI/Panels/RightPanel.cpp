@@ -28,6 +28,9 @@ void draw_right_panel(ID3D11Device* device) {
 #else
 void draw_right_panel() {
 #endif
+#ifdef _WIN32
+    (void)device;
+#endif
     ImGui::BeginChild("right_panel", ImVec2(0, 0), false);
 
     ImGui::BeginChild("extract_box", ImVec2(0, 100), true, ImGuiWindowFlags_NoScrollbar);
@@ -361,9 +364,7 @@ if (!can_preview) {
             if (find_mdl_files_in_folder(g_tree_root, S.selected_folder_path, mdl_paths)) {
                 progress_open(0, "Loading preview...");
 
-                ID3D11Device* device_ptr = device;
-
-                std::thread([device_ptr, mdl_paths]() {
+                std::thread([mdl_paths]() {
                     std::vector<MDLMeshGeom> all_meshes;
                     MDLInfo combined_info;
                     bool any_success = false;
@@ -397,14 +398,10 @@ if (!can_preview) {
                         S.mdl_info = combined_info;
                         S.mdl_meshes = all_meshes;
 
-                        extern ModelPreview g_mp;
-                        MP_Release(g_mp);
-                        MP_Init(device_ptr, g_mp, 800, 520);
-                        MP_Build(device_ptr, all_meshes, combined_info, g_mp);
                         S.cam_yaw = 0.0f;
                         S.cam_pitch = 0.2f;
                         S.cam_dist = 3.0f;
-                        S.show_model_preview = true;
+                        S.pending_preview_build = true;
                     }
 
                     progress_done();
@@ -447,9 +444,7 @@ if (!can_preview) {
 
                     progress_open(0, "Loading preview...");
 
-                    ID3D11Device* device_ptr = device;
-
-                    std::thread([device_ptr, mdl_files]() {
+                    std::thread([mdl_files]() {
                         std::vector<MDLMeshGeom> all_meshes;
                         MDLInfo combined_info;
                         bool any_success = false;
@@ -483,14 +478,10 @@ if (!can_preview) {
                             S.mdl_info = combined_info;
                             S.mdl_meshes = all_meshes;
 
-                            extern ModelPreview g_mp;
-                            MP_Release(g_mp);
-                            MP_Init(device_ptr, g_mp, 800, 520);
-                            MP_Build(device_ptr, all_meshes, combined_info, g_mp);
                             S.cam_yaw = 0.0f;
                             S.cam_pitch = 0.2f;
                             S.cam_dist = 3.0f;
-                            S.show_model_preview = true;
+                            S.pending_preview_build = true;
                         }
 
                         progress_done();
@@ -547,7 +538,7 @@ if (!can_preview) {
             ? S.selected_nested_temp_path
             : S.selected_bnk;
 
-        std::thread([device, item, name, can_tex, can_mdl, bnk_to_use, nested_temp_copy, is_nested, preferred_for_tex]() {
+        std::thread([item, name, can_tex, can_mdl, bnk_to_use, nested_temp_copy, is_nested, preferred_for_tex]() {
             std::vector<unsigned char> buf;
             bool ok = false;
             try {
@@ -616,12 +607,8 @@ if (!can_preview) {
                     if (S.mdl_info_ok) {
                         S.mdl_meshes.clear();
                         parse_mdl_geometry(S.hex_data, S.mdl_info, S.mdl_meshes);
-                        extern ModelPreview g_mp;
-                        MP_Release(g_mp);
-                        MP_Init(device, g_mp, 800, 520);
-                        MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
                         S.cam_yaw = 0.0f; S.cam_pitch = 0.2f; S.cam_dist = 3.0f;
-                        S.show_model_preview = true;
+                        S.pending_preview_build = true;
                     }
                 }
             }
@@ -1039,12 +1026,7 @@ if (!can_preview) {
         }
 
         if (!bnk_to_use.empty()) {
-#ifdef _WIN32
-            ID3D11Device* device_ptr = device;
-            std::thread([device_ptr, item, name, parse_path, bnk_to_use, nested_temp_copy, is_nested]() {
-#else
             std::thread([item, name, parse_path, bnk_to_use, nested_temp_copy, is_nested]() {
-#endif
                 std::vector<unsigned char> buf;
                 bool ok = false;
 
@@ -1079,18 +1061,20 @@ if (!can_preview) {
                 }
 
                 if (ok && !buf.empty()) {
-                    S.mdl_info_ok = parse_mdl_info(buf, S.mdl_info, parse_path);
-                    if (S.mdl_info_ok) {
-                        S.mdl_meshes.clear();
-                        parse_mdl_geometry(buf, S.mdl_info, S.mdl_meshes);
-#ifdef _WIN32
-                        extern ModelPreview g_mp;
-                        MP_Release(g_mp);
-                        MP_Init(device_ptr, g_mp, 800, 600);
-                        MP_Build(device_ptr, S.mdl_meshes, S.mdl_info, g_mp);
-#else
-                        S.pending_preview_build = true;
-#endif
+                    try {
+                        S.mdl_info_ok = parse_mdl_info(buf, S.mdl_info, parse_path);
+                        if (S.mdl_info_ok) {
+                            S.mdl_meshes.clear();
+                            if (parse_mdl_geometry(buf, S.mdl_info, S.mdl_meshes)) {
+                                S.pending_preview_build = true;
+                            } else {
+                                ok = false;
+                            }
+                        } else {
+                            ok = false;
+                        }
+                    } catch (...) {
+                        ok = false;
                     }
                 }
             }).detach();

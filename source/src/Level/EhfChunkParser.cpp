@@ -99,8 +99,10 @@ bool skip_tex_blob(Walker& w) {
 
     if (pf == 98u) {
 
+
         w.pos = tex_start + mt + 4 + raw_size;
     } else {
+
 
         uint32_t comp_size = be_u32(w.p + tex_start + mt + 4);
         w.pos = tex_start + mt + 8 + comp_size;
@@ -116,6 +118,7 @@ bool skip_tex_blob(Walker& w) {
 }
 
 }
+
 
 bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
 {
@@ -217,15 +220,18 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
             out.error = "LOD base scale";
             return false;
         }
-        if (!w.u32(out.lods[k].material_flags)) {
-            out.error = "LOD material flags";
+        uint32_t mid_raw = 0;
+        if (!w.u32(mid_raw)) {
+            out.error = "LOD base intensity bits";
             return false;
         }
-        if (!w.f32(out.lods[k].params[0][1])) {
-            out.error = "LOD base intensity";
+        out.lods[k].material_flags = mid_raw;
+        std::memcpy(&out.lods[k].params[0][1], &mid_raw,
+                    sizeof(out.lods[k].params[0][1]));
+        if (!w.f32(out.lods[k].params[0][2])) {
+            out.error = "LOD base extra";
             return false;
         }
-        out.lods[k].params[0][2] = 0.0f;
         for (int s = 3; s < 6; ++s) {
             if (!w.null_str(out.lods[k].strs[s])) {
                 out.error = "LOD[" + std::to_string(k) + "].str["
@@ -315,15 +321,14 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
             if (!w.u32(L.name_idx))   { out.error = "layer name_idx"; return false; }
             if (!w.f32(L.tile_uv[0])) { out.error = "layer uv0"; return false; }
             if (!w.f32(L.tile_uv[1])) { out.error = "layer uv1"; return false; }
-            L.mask_scale[0] = 0.0f;
-            L.mask_scale[1] = 0.0f;
             if (L.name_idx < out.paint_resources.size()) {
-                const EhfPaintResource& res = out.paint_resources[L.name_idx];
+                const EhfPaintResource& res =
+                    out.paint_resources[size_t(L.name_idx)];
                 if (res.width > 0) {
-                    L.mask_scale[0] = 32.0f / float(res.width);
+                    L.mask_scale[0] = 16.0f / float(res.width);
                 }
                 if (res.height > 0) {
-                    L.mask_scale[1] = 32.0f / float(res.height);
+                    L.mask_scale[1] = 16.0f / float(res.height);
                 }
             }
             for (int i = 0; i < 4; ++i) {

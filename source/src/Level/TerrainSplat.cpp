@@ -26,22 +26,6 @@ uint32_t next_generation() {
     return g++;
 }
 
-float material_uv_multiplier(float tile_size_or_multiplier,
-                             float fallback = 0.125f)
-{
-    if (tile_size_or_multiplier > 0.0f &&
-        tile_size_or_multiplier < 1.0f)
-    {
-        return tile_size_or_multiplier;
-    }
-    if (tile_size_or_multiplier >= 1.0f &&
-        tile_size_or_multiplier < 1024.0f)
-    {
-        return 1.0f / tile_size_or_multiplier;
-    }
-    return fallback;
-}
-
 #ifdef _WIN32
 void release_srv(ID3D11ShaderResourceView*& srv) {
     if (srv) { srv->Release(); srv = nullptr; }
@@ -155,14 +139,11 @@ void Clear() {
     auto& s = storage();
     release_srv(s.lod_diffuse_array);
     release_srv(s.lod_detail_array);
-    release_srv(s.lod_normal_array);
-    release_srv(s.lod_detail_normal_array);
     release_srv(s.chunk_idx_array);
     release_srv(s.chunk_blend_array);
     release_srv(s.chunk_uv_array);
     release_srv(s.splat_mask);
     release_srv(s.lightmap);
-    release_srv(s.material_weight_array);
     s = Resources{};
 #endif
 }
@@ -194,25 +175,24 @@ bool Build(ID3D11Device*                                       device,
         R.material_params[i][0] = 0.125f;
         R.material_params[i][1] = 0.125f;
         R.material_params[i][2] = 1.0f;
-        R.material_params[i][3] = 0.0f;
+        R.material_params[i][3] = 1.0f;
     }
     for (size_t i = 0; i < lod_thumbs.size() && i < kMaxMaterials; ++i) {
         const auto& e = lod_thumbs[i];
-        const float base_scale = material_uv_multiplier(e.base_tile_scale);
-        const float detail_scale = (e.detail_tile_scale > 0.0f)
-            ? material_uv_multiplier(e.detail_tile_scale, base_scale)
-            : base_scale;
-        const float base_intensity =
-            (e.base_intensity > 0.0f && e.base_intensity < 16.0f)
-                ? e.base_intensity : 1.0f;
-        const float detail_weight =
-            (e.srv_detail_diffuse &&
-             e.detail_intensity > 0.0f && e.detail_intensity < 16.0f)
-                ? e.detail_intensity : 0.0f;
+        const float base_scale =
+            (e.base_tile_scale > 0.0f && e.base_tile_scale < 16.0f)
+                ? e.base_tile_scale : 0.125f;
+        const float detail_scale =
+            (e.detail_tile_scale > 0.0f && e.detail_tile_scale < 16.0f)
+                ? e.detail_tile_scale : base_scale;
         R.material_params[i][0] = base_scale;
         R.material_params[i][1] = detail_scale;
-        R.material_params[i][2] = base_intensity;
-        R.material_params[i][3] = detail_weight;
+        R.material_params[i][2] =
+            (e.base_intensity > 0.0f && e.base_intensity < 16.0f)
+                ? e.base_intensity : 1.0f;
+        R.material_params[i][3] =
+            (e.detail_intensity > 0.0f && e.detail_intensity < 16.0f)
+                ? e.detail_intensity : 1.0f;
         if (i == 0) R.tile_scale = base_scale;
     }
 
@@ -241,27 +221,8 @@ bool Build(ID3D11Device*                                       device,
             return neutral;
         };
 
-        auto make_neutral_normal = [&]() {
-
-            std::vector<uint8_t> neutral(size_t(W) * size_t(H) * 4, 0);
-            for (size_t i = 0; i < neutral.size(); i += 4) {
-                neutral[i + 0] = 0x80;
-                neutral[i + 1] = 0x80;
-                neutral[i + 2] = 0xFF;
-                neutral[i + 3] = 0xFF;
-            }
-            return neutral;
-        };
-
-        enum LodSlot {
-            kBaseDiffuse = 0,
-            kDetailDiffuse,
-            kBaseNormal,
-            kDetailNormal
-        };
-
         auto build_array = [&](const char* label,
-                               LodSlot slot,
+                               bool detail_array,
                                ID3D11ShaderResourceView*& out_srv,
                                int& out_seeded,
                                int& out_real_seeded) -> bool
@@ -269,11 +230,6 @@ bool Build(ID3D11Device*                                       device,
             out_srv = nullptr;
             out_seeded = 0;
             out_real_seeded = 0;
-
-            const bool is_detail = (slot == kDetailDiffuse ||
-                                    slot == kDetailNormal);
-            const bool is_normal = (slot == kBaseNormal ||
-                                    slot == kDetailNormal);
 
             D3D11_TEXTURE2D_DESC td{};
             td.Width            = W;
@@ -302,29 +258,15 @@ bool Build(ID3D11Device*                                       device,
             int fallback_seeded = 0;
             for (int s = 0; s < N; ++s) {
                 ID3D11ShaderResourceView* src_srv = nullptr;
-                switch (slot) {
-                    case kBaseDiffuse:
-                        src_srv = lod_thumbs[s].srv_base_diffuse
-                            ? lod_thumbs[s].srv_base_diffuse
-                            : lod_thumbs[s].srv_detail_diffuse;
-                        break;
-                    case kDetailDiffuse:
-                        src_srv = (lod_thumbs[s].srv_base_diffuse &&
-                                   lod_thumbs[s].srv_detail_diffuse)
-                            ? lod_thumbs[s].srv_detail_diffuse
-                            : nullptr;
-                        break;
-                    case kBaseNormal:
-                        src_srv = lod_thumbs[s].srv_base_normal
-                            ? lod_thumbs[s].srv_base_normal
-                            : lod_thumbs[s].srv_detail_normal;
-                        break;
-                    case kDetailNormal:
-                        src_srv = (lod_thumbs[s].srv_base_normal &&
-                                   lod_thumbs[s].srv_detail_normal)
-                            ? lod_thumbs[s].srv_detail_normal
-                            : nullptr;
-                        break;
+                if (detail_array) {
+                    src_srv = (lod_thumbs[s].srv_base_diffuse &&
+                               lod_thumbs[s].srv_detail_diffuse)
+                        ? lod_thumbs[s].srv_detail_diffuse
+                        : nullptr;
+                } else {
+                    src_srv = lod_thumbs[s].srv_base_diffuse
+                        ? lod_thumbs[s].srv_base_diffuse
+                        : lod_thumbs[s].srv_detail_diffuse;
                 }
 
                 std::vector<uint8_t> resized;
@@ -335,28 +277,18 @@ bool Build(ID3D11Device*                                       device,
                                           src_rgba, sw, sh) &&
                         !src_rgba.empty() && sw > 0 && sh > 0) {
                         resize_rgba8(src_rgba, sw, sh, resized, W, H);
-                        if (!is_detail && base_fallback.empty()) {
+                        if (!detail_array && base_fallback.empty()) {
                             base_fallback = resized;
                         }
                         ++out_real_seeded;
                     }
-                } else if (is_detail) {
-                    if (neutral.empty()) {
-                        neutral = is_normal
-                            ? make_neutral_normal()
-                            : make_neutral_detail();
-                    }
+                } else if (detail_array) {
+                    if (neutral.empty()) neutral = make_neutral_detail();
                     resized = neutral;
                 }
 
-                if (resized.empty() && !is_detail && !base_fallback.empty()) {
+                if (resized.empty() && !detail_array && !base_fallback.empty()) {
                     resized = base_fallback;
-                    ++fallback_seeded;
-                }
-                if (resized.empty() && is_normal) {
-
-                    if (neutral.empty()) neutral = make_neutral_normal();
-                    resized = neutral;
                     ++fallback_seeded;
                 }
                 if (resized.empty()) {
@@ -408,24 +340,15 @@ bool Build(ID3D11Device*                                       device,
 
         int base_seeded = 0, base_real = 0;
         int detail_seeded = 0, detail_real = 0;
-        int base_n_seeded = 0, base_n_real = 0;
-        int detail_n_seeded = 0, detail_n_real = 0;
-        if (!build_array("base diffuse", kBaseDiffuse, R.lod_diffuse_array,
+        if (!build_array("base diffuse", false, R.lod_diffuse_array,
                          base_seeded, base_real)) {
             return false;
         }
-        if (!build_array("detail diffuse", kDetailDiffuse, R.lod_detail_array,
+        if (!build_array("detail diffuse", true, R.lod_detail_array,
                          detail_seeded, detail_real)) {
             return false;
         }
-
-        build_array("base normal", kBaseNormal, R.lod_normal_array,
-                    base_n_seeded, base_n_real);
-        build_array("detail normal", kDetailNormal, R.lod_detail_normal_array,
-                    detail_n_seeded, detail_n_real);
     }
-
-    std::vector<const Level::EhfChunk*> grid_chunks;
 
     {
         if (parsed.chunk_w == 0 || parsed.chunk_h == 0) {
@@ -442,23 +365,9 @@ bool Build(ID3D11Device*                                       device,
 
         const int CW = R.chunk_w, CH = R.chunk_h;
         const int L  = kMaxLayers;
-        grid_chunks.assign(size_t(CW) * size_t(CH), nullptr);
-        auto chunk_grid_xy = [&](const Level::EhfChunk& c,
-                                 int& cx,
-                                 int& cy) -> bool
-        {
-            if (R.chunk_extent_x <= 0.0f || R.chunk_extent_z <= 0.0f) {
-                return false;
-            }
-            const float fx = (c.origin[0] - world_min_x) / R.chunk_extent_x;
-            const float fy = (c.origin[1] - world_min_z) / R.chunk_extent_z;
-            cx = std::clamp(int(std::lround(fx)), 0, CW - 1);
-            cy = std::clamp(int(std::lround(fy)), 0, CH - 1);
-            return true;
-        };
         std::vector<uint8_t> idx_data(size_t(CW) * CH * 4 * L, 0xFF);
         std::vector<uint8_t> bln_data(size_t(CW) * CH * 4 * L, 0);
-        std::vector<float> uv_data(size_t(CW) * CH * 2 * L, 0.0f);
+        std::vector<float> uv_data(size_t(CW) * CH * 4 * L, 0.0f);
         std::vector<uint8_t> material_used(
             size_t(std::max(0, R.lod_count)), 0);
 
@@ -469,10 +378,9 @@ bool Build(ID3D11Device*                                       device,
 
         const size_t expected_chunks = size_t(CW) * size_t(CH);
         for (size_t ci = 0; ci < parsed.chunks.size() && ci < expected_chunks; ++ci) {
+            const int cx = int(ci / size_t(CH));
+            const int cy = int(ci % size_t(CH));
             const auto& chunk = parsed.chunks[ci];
-            int cx = 0, cy = 0;
-            if (!chunk_grid_xy(chunk, cx, cy)) continue;
-            grid_chunks[size_t(cy) * size_t(CW) + size_t(cx)] = &chunk;
             total_records += chunk.layers.size();
 
             const int layer_count =
@@ -483,7 +391,7 @@ bool Build(ID3D11Device*                                       device,
                 const auto& layer = chunk.layers[size_t(li)];
                 const size_t texel = size_t(cy) * CW + size_t(cx);
                 const size_t base = (size_t(li) * CW * CH + texel) * 4;
-                const size_t uv_base = (size_t(li) * CW * CH + texel) * 2;
+                const size_t uv_base = (size_t(li) * CW * CH + texel) * 4;
                 const uint8_t material =
                     (layer.material_idx < 255u)
                         ? uint8_t(std::min<uint32_t>(
@@ -499,6 +407,8 @@ bool Build(ID3D11Device*                                       device,
                 }
                 uv_data[uv_base + 0] = layer.tile_uv[0];
                 uv_data[uv_base + 1] = layer.tile_uv[1];
+                uv_data[uv_base + 2] = layer.mask_scale[0];
+                uv_data[uv_base + 3] = layer.mask_scale[1];
                 atlas_min_u = std::min(atlas_min_u, layer.tile_uv[0]);
                 atlas_min_v = std::min(atlas_min_v, layer.tile_uv[1]);
                 atlas_max_u = std::max(atlas_max_u, layer.tile_uv[0]);
@@ -601,7 +511,7 @@ bool Build(ID3D11Device*                                       device,
         uvd.Height           = CH;
         uvd.MipLevels        = 1;
         uvd.ArraySize        = L;
-        uvd.Format           = DXGI_FORMAT_R32G32_FLOAT;
+        uvd.Format           = DXGI_FORMAT_R32G32B32A32_FLOAT;
         uvd.SampleDesc.Count = 1;
         uvd.Usage            = D3D11_USAGE_DEFAULT;
         uvd.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
@@ -609,8 +519,8 @@ bool Build(ID3D11Device*                                       device,
         std::vector<D3D11_SUBRESOURCE_DATA> uv_subs(L);
         for (int s = 0; s < L; ++s) {
             uv_subs[s].pSysMem = uv_data.data()
-                + size_t(s) * CW * CH * 2;
-            uv_subs[s].SysMemPitch = UINT(CW * 2 * sizeof(float));
+                + size_t(s) * CW * CH * 4;
+            uv_subs[s].SysMemPitch = UINT(CW * 4 * sizeof(float));
             uv_subs[s].SysMemSlicePitch = 0;
         }
         ID3D11Texture2D* uv_tex = nullptr;
@@ -620,7 +530,7 @@ bool Build(ID3D11Device*                                       device,
             return false;
         }
         D3D11_SHADER_RESOURCE_VIEW_DESC uv_sd{};
-        uv_sd.Format = DXGI_FORMAT_R32G32_FLOAT;
+        uv_sd.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         uv_sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
         uv_sd.Texture2DArray.MostDetailedMip = 0;
         uv_sd.Texture2DArray.MipLevels = 1;
@@ -710,212 +620,6 @@ bool Build(ID3D11Device*                                       device,
         } else {
             OutputLog::warn("TerrainSplat: no PF99 layer mask atlas");
         }
-    }
-
-    {
-        const int material_count =
-            std::clamp(R.lod_count, 1, kMaxMaterials);
-        R.weight_w = std::max(1, R.chunk_w * 32 + 1);
-        R.weight_h = std::max(1, R.chunk_h * 32 + 1);
-
-        const bool has_pf99 =
-            !parsed.splat_indices.empty() &&
-            parsed.splat_w > 0 && parsed.splat_h > 0 &&
-            parsed.splat_indices.size() ==
-                size_t(parsed.splat_w) * size_t(parsed.splat_h);
-
-        auto sample_mask = [&](const Level::EhfChunkLayer& L,
-                               float local_x,
-                               float local_z) -> float
-        {
-            if (!has_pf99) {
-                return 1.0f;
-            }
-
-            const float scale_u = (L.mask_scale[0] > 0.0f)
-                ? L.mask_scale[0]
-                : 32.0f / float(parsed.splat_w);
-            const float scale_v = (L.mask_scale[1] > 0.0f)
-                ? L.mask_scale[1]
-                : 32.0f / float(parsed.splat_h);
-
-            const float u = L.tile_uv[0]
-                + std::clamp(local_x, 0.0f, 1.0f)
-                * scale_u;
-            const float v = L.tile_uv[1]
-                + std::clamp(local_z, 0.0f, 1.0f)
-                * scale_v;
-
-            float px = u * float(parsed.splat_w) - 0.5f;
-            float py = v * float(parsed.splat_h) - 0.5f;
-            px = std::clamp(px, 0.0f, float(parsed.splat_w - 1));
-            py = std::clamp(py, 0.0f, float(parsed.splat_h - 1));
-
-            const int x0 = int(px);
-            const int y0 = int(py);
-            const int x1 = std::min<int>(x0 + 1, int(parsed.splat_w) - 1);
-            const int y1 = std::min<int>(y0 + 1, int(parsed.splat_h) - 1);
-            const float dx = px - float(x0);
-            const float dy = py - float(y0);
-            auto at = [&](int x, int y) -> float {
-                return parsed.splat_indices[
-                    size_t(y) * size_t(parsed.splat_w) + size_t(x)] / 255.0f;
-            };
-            const float w00 = (1.0f - dx) * (1.0f - dy);
-            const float w10 =         dx  * (1.0f - dy);
-            const float w01 = (1.0f - dx) *         dy;
-            const float w11 =         dx  *         dy;
-            return std::clamp(at(x0, y0) * w00 + at(x1, y0) * w10
-                            + at(x0, y1) * w01 + at(x1, y1) * w11,
-                              0.0f, 1.0f);
-        };
-
-        std::vector<uint8_t> weight_data(
-            size_t(material_count) * size_t(R.weight_w) * size_t(R.weight_h),
-            0);
-
-        constexpr float kBlendMax = 3.0f;
-        const size_t expected_chunks =
-            size_t(R.chunk_w) * size_t(R.chunk_h);
-
-        for (int y = 0; y < R.weight_h; ++y) {
-            const float v_norm = (R.weight_h > 1)
-                ? float(y) / float(R.weight_h - 1)
-                : 0.0f;
-            const float fy_chunk = v_norm * float(R.chunk_h);
-            const int cy = std::min<int>(R.chunk_h - 1, int(fy_chunk));
-            const float fy_in = std::clamp(fy_chunk - float(cy), 0.0f, 1.0f);
-
-            for (int x = 0; x < R.weight_w; ++x) {
-                const float u_norm = (R.weight_w > 1)
-                    ? float(x) / float(R.weight_w - 1)
-                    : 0.0f;
-                const float fx_chunk = u_norm * float(R.chunk_w);
-                const int cx = std::min<int>(R.chunk_w - 1, int(fx_chunk));
-                const float fx_in =
-                    std::clamp(fx_chunk - float(cx), 0.0f, 1.0f);
-
-                const size_t chunk_idx =
-                    size_t(cy) * size_t(R.chunk_w) + size_t(cx);
-                if (chunk_idx >= expected_chunks ||
-                    chunk_idx >= grid_chunks.size() ||
-                    !grid_chunks[chunk_idx])
-                {
-                    weight_data[size_t(y) * size_t(R.weight_w) + size_t(x)] =
-                        255;
-                    continue;
-                }
-
-                const float w00 = (1.0f - fx_in) * (1.0f - fy_in);
-                const float w10 =         fx_in  * (1.0f - fy_in);
-                const float w01 = (1.0f - fx_in) *         fy_in;
-                const float w11 =         fx_in  *         fy_in;
-
-                float weights[kMaxMaterials] = {};
-                float coverage = 0.0f;
-                int first_material = 0;
-                bool found_material = false;
-
-                const auto& chunk = *grid_chunks[chunk_idx];
-                for (const auto& L : chunk.layers) {
-                    const int material =
-                        (L.material_idx < uint32_t(material_count))
-                            ? int(L.material_idx)
-                            : -1;
-                    if (material < 0) {
-                        continue;
-                    }
-                    if (!found_material) {
-                        first_material = material;
-                        found_material = true;
-                    }
-                    const float blend_px =
-                        w00 * float(L.blend[0]) + w10 * float(L.blend[1]) +
-                        w01 * float(L.blend[2]) + w11 * float(L.blend[3]);
-                    const float alpha =
-                        std::clamp(blend_px / kBlendMax, 0.0f, 1.0f)
-                        * sample_mask(L, fx_in, fy_in);
-                    if (alpha <= 0.0f) {
-                        continue;
-                    }
-                    const float keep = 1.0f - alpha;
-                    for (int m = 0; m < material_count; ++m) {
-                        weights[m] *= keep;
-                    }
-                    weights[material] += alpha;
-                    coverage = coverage * keep + alpha;
-                }
-
-                if (coverage < 0.999f && found_material) {
-                    weights[first_material] += 1.0f - coverage;
-                    coverage = 1.0f;
-                }
-
-                if (coverage <= 1e-6f) {
-                    weights[first_material] = 1.0f;
-                    coverage = 1.0f;
-                }
-
-                const size_t texel =
-                    size_t(y) * size_t(R.weight_w) + size_t(x);
-                for (int m = 0; m < material_count; ++m) {
-                    const float n = std::clamp(weights[m] / coverage,
-                                               0.0f, 1.0f);
-                    weight_data[size_t(m) * size_t(R.weight_w) *
-                                size_t(R.weight_h) + texel] =
-                        uint8_t(std::clamp(int(std::round(n * 255.0f)),
-                                           0, 255));
-                }
-            }
-        }
-
-        D3D11_TEXTURE2D_DESC td{};
-        td.Width            = UINT(R.weight_w);
-        td.Height           = UINT(R.weight_h);
-        td.MipLevels        = 1;
-        td.ArraySize        = UINT(material_count);
-        td.Format           = DXGI_FORMAT_R8_UNORM;
-        td.SampleDesc.Count = 1;
-        td.Usage            = D3D11_USAGE_DEFAULT;
-        td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
-
-        std::vector<D3D11_SUBRESOURCE_DATA> subs(
-            static_cast<size_t>(material_count));
-        for (int m = 0; m < material_count; ++m) {
-            subs[size_t(m)].pSysMem =
-                weight_data.data() + size_t(m) * size_t(R.weight_w) *
-                                     size_t(R.weight_h);
-            subs[size_t(m)].SysMemPitch = UINT(R.weight_w);
-            subs[size_t(m)].SysMemSlicePitch = 0;
-        }
-
-        ID3D11Texture2D* tex = nullptr;
-        if (FAILED(device->CreateTexture2D(&td, subs.data(), &tex))) {
-            OutputLog::warn("TerrainSplat: failed to create material weights");
-            return false;
-        }
-
-        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
-        sd.Format = DXGI_FORMAT_R8_UNORM;
-        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-        sd.Texture2DArray.MostDetailedMip = 0;
-        sd.Texture2DArray.MipLevels = 1;
-        sd.Texture2DArray.FirstArraySlice = 0;
-        sd.Texture2DArray.ArraySize = UINT(material_count);
-
-        if (FAILED(device->CreateShaderResourceView(
-                tex, &sd, &R.material_weight_array))) {
-            tex->Release();
-            OutputLog::warn(
-                "TerrainSplat: failed to create material weight SRV");
-            return false;
-        }
-        tex->Release();
-
-        OutputLog::info("TerrainSplat: global material weights "
-            + std::to_string(R.weight_w) + "x"
-            + std::to_string(R.weight_h) + " x "
-            + std::to_string(material_count) + " materials");
     }
 
     if (!lightmap_rgba.empty() && lightmap_w > 0 && lightmap_h > 0) {

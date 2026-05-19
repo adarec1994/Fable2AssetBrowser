@@ -201,6 +201,17 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
                 comp_tag  = 7u;
                 body_size = sz_bc3_padded;
                 matched   = true;
+            } else if (prefix_ok && (size_t)size_prefix == sz_bc3 &&
+                       (out.PixelFormat == 40)) {
+                comp_tag  = 7u;
+                body_size = sz_bc3;
+                matched   = true;
+            } else if (prefix_ok && (size_t)size_prefix == sz_bc3_padded &&
+                       sz_bc3_padded != sz_bc3 &&
+                       (out.PixelFormat == 40)) {
+                comp_tag  = 7u;
+                body_size = sz_bc3_padded;
+                matched   = true;
             }
 
             if (matched) {

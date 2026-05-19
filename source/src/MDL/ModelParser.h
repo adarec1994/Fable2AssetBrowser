@@ -90,3 +90,9 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
 
 bool reparse_mdl_buffers_via_polymsh_scan(const std::vector<unsigned char>& data,
                                           MDLInfo& info);
+
+bool reparse_mdl_missing_buffers_optstr(const std::vector<unsigned char>& data,
+                                        MDLInfo& info);
+
+bool reparse_mdl_as_foliage_48b(const std::vector<unsigned char>& data,
+                                MDLInfo& info);

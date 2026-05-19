@@ -216,6 +216,9 @@ struct StreamingModelCandidate {
     std::string hint_path;
     std::string resolved_path;
     std::string key;
+    std::string path_key;
+    std::string hint_lower;
+    std::string resolved_lower;
     std::string display_name;
     const FlatAssetEntry* entry = nullptr;
     bool from_gmd = false;
@@ -297,6 +300,9 @@ choose_streaming_model_for_gdb(const std::string& entity_name,
                                uint32_t parent_hash = 0);
 std::vector<StreamingModelCandidate>
 collect_streaming_model_candidates(const std::vector<std::string>& streaming_bnks);
+void dump_bwsmarket_market_model_debug(
+    const std::string& level_path,
+    const std::vector<StreamingModelCandidate>& candidates);
 
 std::string lower_slash(std::string s)
 {
@@ -376,6 +382,164 @@ bool is_gdb_shell_audit_model(const std::string& model_path)
            p.find("/structures/") != std::string::npos;
 }
 
+bool is_gdb_unique_entity_shell_model(const std::string& model_path)
+{
+    const std::string p = lower_slash(model_path);
+    if (p.find("/buildings/") == std::string::npos &&
+        p.find("/structures/") == std::string::npos)
+    {
+        return false;
+    }
+
+    return p.find("/exterior.mdl") != std::string::npos ||
+           p.find("/interior.mdl") != std::string::npos ||
+           p.find("bs_market_gatehouse") != std::string::npos ||
+           p.find("bs_market_clocktower") != std::string::npos ||
+           p.find("bs_market_platform") != std::string::npos ||
+           p.find("bs_market_largeshop") != std::string::npos ||
+           p.find("bs_market_smallshop") != std::string::npos ||
+           p.find("bs_market_generalshop") != std::string::npos ||
+           p.find("bs_market_tavern") != std::string::npos ||
+           p.find("bs_townhouse") != std::string::npos;
+}
+
+int bwsmarket_shell_instance_limit(const std::string& model_path)
+{
+    const std::string p = lower_slash(model_path);
+    const bool shell =
+        p.find("/exterior.mdl") != std::string::npos ||
+        p.find("/interior.mdl") != std::string::npos;
+    if (!shell) return -1;
+    if (p.find("bs_market_tavern/") != std::string::npos) {
+        return 0;
+    }
+    if (p.find("bs_market_generalshop/") != std::string::npos) {
+        return 3;
+    }
+    return -1;
+}
+
+bool is_lowpoly_house_proxy_model(const std::string& model_path)
+{
+    const std::string p = lower_slash(model_path);
+    return p.find("/structures/dotxsi/bs_market_lowpoly_house") !=
+           std::string::npos;
+}
+
+bool compact_key_is_or_numbered(const std::string& key, const char* base)
+{
+    const size_t n = std::strlen(base);
+    if (key == base) return true;
+    if (key.size() <= n || key.compare(0, n, base) != 0) {
+        return false;
+    }
+    for (size_t i = n; i < key.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(key[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool compact_key_is_or_variant(const std::string& key, const char* base)
+{
+    if (compact_key_is_or_numbered(key, base)) return true;
+    const size_t n = std::strlen(base);
+    if (key.size() <= n + 1 || key.compare(0, n, base) != 0 ||
+        key[n] != 'v')
+    {
+        return false;
+    }
+    for (size_t i = n + 1; i < key.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(key[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool is_bad_market_helper_substitution(const std::string& entity_key,
+                                       const std::string& raw_key,
+                                       const std::string& model_path)
+{
+    const std::string model_key = compact_match_key(model_path);
+
+    const bool sign_entity =
+        entity_key.find("sign") != std::string::npos ||
+        raw_key.find("sign") != std::string::npos;
+    const bool door_entity =
+        entity_key.find("door") != std::string::npos ||
+        raw_key.find("door") != std::string::npos;
+
+    const bool general_store_building =
+        compact_key_is_or_numbered(entity_key, "generalstore") ||
+        compact_key_is_or_numbered(raw_key, "objectbuildinggeneralstore") ||
+        compact_key_is_or_numbered(raw_key, "newobjectbuildinggeneralstore");
+    if (model_key.find("bsmarketgeneralshop") != std::string::npos &&
+        (model_key.find("exterior") != std::string::npos ||
+         model_key.find("interior") != std::string::npos) &&
+        !general_store_building)
+    {
+        return true;
+    }
+    if (general_store_building && !sign_entity &&
+        model_key.find("signgeneralstore") != std::string::npos)
+    {
+        return true;
+    }
+
+    const bool tavern_building =
+        entity_key.find("bsmarkettavern") != std::string::npos ||
+        entity_key.find("markettavern") != std::string::npos ||
+        raw_key.find("objectbuildingbsmarkettavern") != std::string::npos ||
+        raw_key.find("newobjectbuildingbsmarkettavern") != std::string::npos;
+    if (model_key.find("bsmarkettavern") != std::string::npos &&
+        !tavern_building)
+    {
+        return true;
+    }
+    if (tavern_building && !sign_entity &&
+        (model_key.find("botavernsign") != std::string::npos ||
+         model_key.find("tavernsign") != std::string::npos))
+    {
+        return true;
+    }
+
+    const bool tarot_stall_building =
+        entity_key.find("tarotstall") != std::string::npos ||
+        raw_key.find("tarotstall") != std::string::npos;
+    if (tarot_stall_building && !door_entity &&
+        model_key.find("tarotstalldoors") != std::string::npos)
+    {
+        return true;
+    }
+
+    const bool market_stall_building =
+        compact_key_is_or_variant(entity_key, "bsopenstall") ||
+        compact_key_is_or_variant(entity_key, "bsmarketopenstall") ||
+        compact_key_is_or_variant(entity_key, "bsmarketstall") ||
+        raw_key.find("objectbuildingbsopenstall") != std::string::npos ||
+        raw_key.find("objectbuildingbsmarketstall") != std::string::npos ||
+        raw_key.find("newobjectbuildingbsmarketstall") != std::string::npos;
+    const bool bs_market_stall_shell =
+        (model_key.find("bsmarketmarketstall") != std::string::npos ||
+         model_key.find("bsmarketopenstall") != std::string::npos ||
+         model_key.find("bsopenstall") != std::string::npos) &&
+        model_key.find("esashopmarketstall") == std::string::npos;
+    if (bs_market_stall_shell && !market_stall_building) {
+        return true;
+    }
+    if ((general_store_building || tavern_building ||
+         market_stall_building || tarot_stall_building) &&
+        (model_key.find("bstownhouse") != std::string::npos ||
+         model_key.find("townhouse") != std::string::npos))
+    {
+        return true;
+    }
+
+    return false;
+}
+
 std::string hex_u32(uint32_t v)
 {
     std::ostringstream os;
@@ -415,6 +579,22 @@ std::string gdb_instance_key(
     return os.str();
 }
 
+std::string prop_instance_transform_key(
+    const Level::PropInstance& inst,
+    const std::string& model_path)
+{
+    auto q = [](float v) -> long long {
+        if (!std::isfinite(v)) return 0;
+        return static_cast<long long>(std::llround(v * 100.0f));
+    };
+    std::ostringstream os;
+    os << lower_slash(model_path);
+    for (int i = 0; i < 12; ++i) {
+        os << '|' << q(inst.values[i]);
+    }
+    return os.str();
+}
+
 std::string companion_interior_path(const std::string& model_path)
 {
     std::string p = lower_slash(model_path);
@@ -438,10 +618,44 @@ std::string house_facade_companion_exterior_path(const std::string& model_path)
     static const Map maps[] = {
         { "bs_townhouse_basic_facade_mid", "bs_townhouse_basic" },
         { "bs_townhouse_basic_facade",     "bs_townhouse_basic" },
+        { "bs_townhouse_basic_facade_snow_v2", "bs_townhouse_basic_snow_v2" },
+        { "bs_townhouse_basic_facade_snow", "bs_townhouse_basic_snow" },
         { "bs_townhouse_v1_facade_mid",    "bs_townhouse_v1" },
         { "bs_townhouse_v1_facade",        "bs_townhouse_v1" },
+        { "bs_townhouse_v1_facade_snow",   "bs_townhouse_v1_snow" },
         { "bs_townhouse_v2_facade_mid",    "bs_townhouse_v2" },
         { "bs_townhouse_v2_facade",        "bs_townhouse_v2" },
+        { "bs_townhouse_v2_facade_snow",   "bs_townhouse_v2_snow" },
+        { "bs_townhouse_v3_facade_snow",   "bs_townhouse_v3_snow" },
+    };
+    for (const Map& map : maps) {
+        const std::string needle =
+            std::string("/buildings/dotxsi/") + map.facade + "/" +
+            map.facade + ".mdl";
+        const size_t pos = p.find(needle);
+        if (pos == std::string::npos) continue;
+
+        const std::string exterior =
+            std::string("/buildings/dotxsi/") + map.shell + "/" +
+            map.shell + "/exterior.mdl";
+        p.replace(pos, needle.size(), exterior);
+        return p;
+    }
+    return {};
+}
+
+std::string shop_facade_companion_exterior_path(const std::string& model_path)
+{
+    std::string p = lower_slash(model_path);
+    struct Map {
+        const char* facade;
+        const char* shell;
+    };
+    static const Map maps[] = {
+        { "bs_market_largeshop_facade_mid", "bs_market_largeshop" },
+        { "bs_market_largeshop_facade",     "bs_market_largeshop" },
+        { "bs_market_smallshop_facade_mid", "bs_market_smallshop" },
+        { "bs_market_smallshop_facade",     "bs_market_smallshop" },
     };
     for (const Map& map : maps) {
         const std::string needle =
@@ -696,6 +910,7 @@ collect_streaming_model_candidates(const std::vector<std::string>& streaming_bnk
 
                 StreamingModelCandidate c;
                 c.hint_path = std::move(hint);
+                c.hint_lower = norm;
                 c.display_name = model_name_from_path(c.hint_path);
                 c.key = compact_match_key(c.display_name);
                 c.from_gmd = from_gmd;
@@ -703,6 +918,9 @@ collect_streaming_model_candidates(const std::vector<std::string>& streaming_bnk
                 if (c.entry) {
                     c.resolved_path = c.entry->full_path;
                 }
+                c.resolved_lower = lower_slash(c.resolved_path);
+                c.path_key =
+                    compact_match_key(c.hint_path + " " + c.resolved_path);
                 out.push_back(std::move(c));
             };
 
@@ -741,13 +959,142 @@ int streaming_model_score(const std::string& entity_name,
     auto cand_has = [&](const char* needle) {
         return c.key.find(needle) != std::string::npos;
     };
-    const std::string path_key = compact_match_key(c.hint_path + " " +
-                                                   c.resolved_path);
+    const std::string& path_key = c.path_key;
     auto cand_path_has = [&](const char* needle) {
         return path_key.find(needle) != std::string::npos;
     };
+    auto key_is_or_numbered = [&](const char* base) {
+        const size_t n = std::strlen(base);
+        if (entity_key == base) return true;
+        if (entity_key.size() <= n ||
+            entity_key.compare(0, n, base) != 0)
+        {
+            return false;
+        }
+        for (size_t i = n; i < entity_key.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(entity_key[i]))) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto key_is_or_variant = [&](const char* base) {
+        if (key_is_or_numbered(base)) return true;
+        const size_t n = std::strlen(base);
+        if (entity_key.size() <= n + 1 ||
+            entity_key.compare(0, n, base) != 0 ||
+            entity_key[n] != 'v')
+        {
+            return false;
+        }
+        for (size_t i = n + 1; i < entity_key.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(entity_key[i]))) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    if (key_is_or_numbered("generalstore") &&
+        (cand_has("signgeneralstore") || cand_path_has("signgeneralstore")))
+    {
+        return INT_MIN;
+    }
 
     int score = INT_MIN;
+
+    const bool bare_general_store = key_is_or_numbered("generalstore");
+    const bool market_tavern_shell =
+        key_is_or_numbered("bsmarkettavern") ||
+        key_is_or_numbered("markettavern");
+    const bool market_openstall_shell =
+        key_is_or_variant("bsopenstall") ||
+        key_is_or_variant("bsmarketopenstall");
+    const bool market_stall_shell =
+        key_is_or_variant("bsmarketstall") ||
+        key_is_or_variant("marketstall") ||
+        key_is_or_numbered("bstarotstall") ||
+        key_is_or_numbered("tarotstall");
+
+    auto path_has_any = [&](std::initializer_list<const char*> needles) {
+        for (const char* needle : needles) {
+            if (cand_path_has(needle)) return true;
+        }
+        return false;
+    };
+    if ((bare_general_store || market_tavern_shell ||
+         market_openstall_shell || market_stall_shell) &&
+        path_has_any({"bstownhouse", "townhouse"}))
+    {
+        return INT_MIN;
+    }
+    auto same_variant_bonus = [&](int base_score) {
+        int adjusted = base_score;
+        for (const char* v :
+             {"v1", "v2", "v3", "v4", "v5", "v6"})
+        {
+            if (entity_key.find(v) != std::string::npos &&
+                path_key.find(v) != std::string::npos)
+            {
+                adjusted += 500;
+            }
+        }
+        return adjusted;
+    };
+
+    if (bare_general_store) {
+        if (path_has_any({"signgeneralstore", "canopy", "counter",
+                          "stairsfloor"}))
+        {
+            return INT_MIN;
+        }
+        if (cand_path_has("bsmarketgeneralshop") ||
+            cand_path_has("bsmarketgeneralstore"))
+        {
+            score = std::max(score, 19000);
+            if (path_has_any({"exterior", "interior"})) score += 750;
+        }
+    }
+    if (market_tavern_shell) {
+        if (path_has_any({"esatabletavern", "table"})) return INT_MIN;
+        if (cand_path_has("bsmarkettavern") ||
+            cand_path_has("markettavern"))
+        {
+            score = std::max(score, 19000);
+            if (path_has_any({"exterior", "interior"})) score += 750;
+        }
+    }
+    if (market_openstall_shell) {
+        if (cand_path_has("esashopmarketstall") ||
+            cand_path_has("signstall"))
+        {
+            return INT_MIN;
+        }
+        if (cand_path_has("bsopenstall") ||
+            cand_path_has("bsmarketopenstall") ||
+            cand_path_has("openstall"))
+        {
+            score = std::max(score, same_variant_bonus(18500));
+        }
+    }
+    if (market_stall_shell) {
+        if (cand_path_has("esashopmarketstall") ||
+            cand_path_has("signstall"))
+        {
+            return INT_MIN;
+        }
+        if (entity_key.find("tarotstall") != std::string::npos &&
+            cand_path_has("tarotstall"))
+        {
+            score = std::max(score, same_variant_bonus(19000));
+        } else if ((cand_path_has("bsmarketstall") ||
+                    cand_path_has("marketstall")) &&
+                   !cand_path_has("esashopmarketstall"))
+        {
+            score = std::max(score, same_variant_bonus(18500));
+        }
+    }
+
     if (entity_key == c.key) {
         score = 12000;
     } else if (c.key.find(entity_key) != std::string::npos) {
@@ -807,8 +1154,16 @@ int streaming_model_score(const std::string& entity_name,
         { "closedgate",            "bsmarketwallgate",              13000 },
         { "guardpost",             "bsmarketguardpost",             14500 },
         { "marketstairs",          "bsmarketstairs",                14500 },
+        { "generalstore",          "bsmarketgeneralshop",           13500 },
         { "generalstorestairsfloor","bsmarketgeneralshopstairsfloor",14500 },
         { "generalshopstairsfloor", "bsmarketgeneralshopstairsfloor",14500 },
+        { "bsmarkettavern",        "bsmarkettavern",                15000 },
+        { "markettavern",          "bsmarkettavern",                15000 },
+        { "bsopenstall",           "openstall",                     14500 },
+        { "openstall",             "openstall",                     14000 },
+        { "bsmarketstall",         "bsmarketstall",                 14500 },
+        { "marketstall",           "marketstall",                   14000 },
+        { "tarotstall",            "tarotstall",                    15000 },
         { "scaffoldingstairs",     "bsmarketscaffoldingstairs",     14500 },
         { "scaffoldstairs",        "bsmarketscaffoldingstairs",     14500 },
         { "scaffoldstraight",      "bsmarketscaffoldingstraight",   14000 },
@@ -885,8 +1240,8 @@ choose_streaming_model_for_gdb(const std::string& entity_name,
             int best_score = INT_MIN;
             for (const auto& c : candidates) {
                 int score = INT_MIN;
-                const std::string resolved_lower = lower_slash(c.resolved_path);
-                const std::string hint_lower = lower_slash(c.hint_path);
+                const std::string& resolved_lower = c.resolved_lower;
+                const std::string& hint_lower = c.hint_lower;
                 if (resolved_lower == target_lower) {
                     score = std::max(score, 50000);
                 } else if (path_suffix_matches(resolved_lower, target_lower)) {
@@ -901,9 +1256,7 @@ choose_streaming_model_for_gdb(const std::string& entity_name,
                     if (c.key == target_key) {
                         score = std::max(score, 46000);
                     }
-                    const std::string path_key =
-                        compact_match_key(c.hint_path + " " +
-                                          c.resolved_path);
+                    const std::string& path_key = c.path_key;
                     if (path_key.find(target_key) != std::string::npos) {
                         score = std::max(score, 44000);
                     }
@@ -948,6 +1301,249 @@ choose_streaming_model_for_gdb(const std::string& entity_name,
     }
     if (out_score) *out_score = best_score;
     return (best_score >= 6500) ? best : nullptr;
+}
+
+bool bwsmarket_debug_model_path_match(const std::string& lower_path)
+{
+    static constexpr const char* kNeedles[] = {
+        "bs_market_largeshop",
+        "bs_market_smallshop",
+        "bs_market_generalshop",
+        "bs_market_generalstore",
+        "generalstore",
+        "bs_market_tavern",
+        "markettavern",
+        "bs_openstall",
+        "bs_market_openstall",
+        "openstall",
+        "bs_marketstall",
+        "bs_market_stall",
+        "marketstall",
+        "tarotstall",
+        "bs_market_clocktower",
+        "bs_market_platform",
+    };
+    for (const char* needle : kNeedles) {
+        if (lower_path.find(needle) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool bwsmarket_debug_dump_blob_path_match(const std::string& lower_path)
+{
+    if (!bwsmarket_debug_model_path_match(lower_path)) return false;
+    return lower_path.find("/regions/bowerstone/") != std::string::npos ||
+           lower_path.find("/shared assets/") != std::string::npos;
+}
+
+std::string bwsmarket_debug_safe_filename(const std::string& path)
+{
+    std::string out;
+    out.reserve(std::min<size_t>(path.size(), 180));
+    for (unsigned char c : path) {
+        if (std::isalnum(c) || c == '.' || c == '_' || c == '-') {
+            out.push_back(char(c));
+        } else {
+            out.push_back('_');
+        }
+    }
+    if (out.size() > 180) {
+        out = out.substr(out.size() - 180);
+    }
+    if (out.empty()) out = "model";
+    return out;
+}
+
+void dump_bwsmarket_market_model_debug(
+    const std::string& level_path,
+    const std::vector<StreamingModelCandidate>& candidates)
+{
+    if (lower_slash(level_path).find("bwsmarket") == std::string::npos) {
+        return;
+    }
+
+    std::error_code ec;
+    const std::filesystem::path root = "extracted";
+    const std::filesystem::path blob_dir = root / "debug_bwsmarket_mdls";
+    std::filesystem::create_directories(blob_dir, ec);
+
+    const std::filesystem::path index_path =
+        root / "debug_bwsmarket_model_index.txt";
+    std::ofstream out(index_path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        OutputLog::warn("BWSMarket .mdl debug dump failed to open " +
+                        index_path.string());
+        return;
+    }
+
+    out << "BWSMarket market model debug\n";
+    out << "level=" << level_path << "\n";
+    out << "all_mdl_files=" << S.all_mdl_files.size() << "\n";
+    out << "streaming_candidates=" << candidates.size() << "\n\n";
+
+    std::vector<const FlatAssetEntry*> matched_models;
+    std::unordered_set<std::string> matched_paths;
+    matched_models.reserve(128);
+    for (const auto& m : S.all_mdl_files) {
+        const std::string lower = lower_slash(m.full_path);
+        if (!bwsmarket_debug_model_path_match(lower)) continue;
+        if (matched_paths.insert(lower).second) {
+            matched_models.push_back(&m);
+        }
+        out << "MODEL\tpath=" << m.full_path
+            << "\tbnk=" << m.bnk_path
+            << "\tfile_index=" << m.file_index
+            << "\tsize=" << m.size
+            << "\tnested=" << (m.from_nested ? "yes" : "no")
+            << "\thash=0x" << std::hex << std::uppercase
+            << std::setw(8) << std::setfill('0')
+            << fnv1_model_path_hash(m.full_path)
+            << std::dec << std::nouppercase << std::setfill(' ')
+            << "\n";
+    }
+
+    out << "\nSTREAMING_CANDIDATES\n";
+    for (const auto& c : candidates) {
+        const std::string combined =
+            lower_slash(c.hint_path + " " + c.resolved_path);
+        if (!bwsmarket_debug_model_path_match(combined)) continue;
+        out << "STREAM\thint=" << c.hint_path
+            << "\tresolved=" << c.resolved_path
+            << "\tentry=" << (c.entry ? "yes" : "no")
+            << "\tfrom_gmd=" << (c.from_gmd ? "yes" : "no")
+            << "\tkey=" << c.key
+            << "\tpath_key=" << c.path_key
+            << "\n";
+    }
+
+    struct Probe {
+        const char* name;
+        uint32_t parent_hash;
+    };
+    static constexpr Probe kProbes[] = {
+        { "ObjectBuildingGeneralStore", 0 },
+        { "NewObjectBuildingGeneralStore_1", 0 },
+        { "NewObjectBuildingBSMarketTavern", 0 },
+        { "ObjectBuildingBSOpenstall_V1", 0 },
+        { "ObjectBuildingBSOpenstall_V2", 0 },
+        { "ObjectBuildingBSOpenstall_V3", 0 },
+        { "ObjectBuildingBSOpenstall_V4", 0 },
+        { "ObjectBuildingBSOpenstall_V5", 0 },
+        { "ObjectBuildingBSOpenstall_V6", 0 },
+        { "ObjectBuildingBSTarotStall", 0 },
+        { "ObjectBuildingBSMarketstall_V4", 0 },
+        { "ObjectBuildingBSMarketstall_V6", 0 },
+        { "QO700_ClockTowerBase", 0xD55304DBu },
+    };
+
+    out << "\nRESOLVER_PROBES\n";
+    for (const Probe& probe : kProbes) {
+        int best_score = INT_MIN;
+        const StreamingModelCandidate* best =
+            choose_streaming_model_for_gdb(
+                probe.name, candidates, &best_score, probe.parent_hash);
+        out << "CHOICE\tentity=" << probe.name
+            << "\tparent=0x" << std::hex << std::uppercase
+            << std::setw(8) << std::setfill('0') << probe.parent_hash
+            << std::dec << std::nouppercase << std::setfill(' ')
+            << "\tscore=" << best_score;
+        if (best) {
+            out << "\thint=" << best->hint_path
+                << "\tresolved=" << best->resolved_path
+                << "\tentry=" << (best->entry ? "yes" : "no");
+        } else {
+            out << "\t<none>";
+        }
+        out << "\n";
+
+        std::vector<std::pair<int, const StreamingModelCandidate*>> ranked;
+        ranked.reserve(candidates.size());
+        for (const auto& c : candidates) {
+            const int score = streaming_model_score(probe.name, c);
+            if (score == INT_MIN) continue;
+            ranked.emplace_back(score, &c);
+        }
+        std::sort(ranked.begin(), ranked.end(),
+                  [](const auto& a, const auto& b) {
+                      return a.first > b.first;
+                  });
+        const size_t limit = std::min<size_t>(ranked.size(), 12);
+        for (size_t i = 0; i < limit; ++i) {
+            const StreamingModelCandidate* c = ranked[i].second;
+            out << "  RANK\t" << (i + 1)
+                << "\tscore=" << ranked[i].first
+                << "\thint=" << c->hint_path
+                << "\tresolved=" << c->resolved_path
+                << "\tentry=" << (c->entry ? "yes" : "no")
+                << "\n";
+        }
+    }
+
+    out << "\nBLOB_DUMPS\n";
+    size_t dumped = 0;
+    size_t failed = 0;
+    constexpr size_t kDumpLimit = 96;
+    for (const FlatAssetEntry* m : matched_models) {
+        if (!m) continue;
+        const std::string lower = lower_slash(m->full_path);
+        if (!bwsmarket_debug_dump_blob_path_match(lower)) continue;
+        if (dumped >= kDumpLimit) {
+            out << "DUMP\tSKIP\tlimit reached at " << kDumpLimit << "\n";
+            break;
+        }
+
+        std::vector<unsigned char> bytes;
+        const bool ok =
+            build_mdl_buffer_for_name_with_body(
+                m->full_path, m->bnk_path, bytes);
+        if (!ok || bytes.empty()) {
+            ++failed;
+            out << "DUMP\tFAIL\tpath=" << m->full_path
+                << "\tbnk=" << m->bnk_path
+                << "\tfile_index=" << m->file_index
+                << "\n";
+            continue;
+        }
+
+        MDLInfo info;
+        const bool parsed = parse_mdl_info(bytes, info, m->full_path);
+        std::ostringstream filename;
+        filename << std::setw(3) << std::setfill('0') << dumped
+                 << "_" << bwsmarket_debug_safe_filename(m->full_path);
+        std::filesystem::path blob_path = blob_dir / filename.str();
+        if (blob_path.extension() != ".mdl") {
+            blob_path += ".mdl";
+        }
+        std::ofstream blob(blob_path, std::ios::binary | std::ios::trunc);
+        if (!blob) {
+            ++failed;
+            out << "DUMP\tFAIL_WRITE\tpath=" << m->full_path
+                << "\tbytes=" << bytes.size()
+                << "\tfile=" << blob_path.string()
+                << "\n";
+            continue;
+        }
+        blob.write(reinterpret_cast<const char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+        ++dumped;
+        out << "DUMP\tOK\tpath=" << m->full_path
+            << "\tfile=" << blob_path.string()
+            << "\tbytes=" << bytes.size()
+            << "\tparse=" << (parsed ? "ok" : "fail")
+            << "\tmagic=" << info.Magic
+            << "\tmeshes=" << info.MeshCount
+            << "\tbuffers=" << info.MeshBuffers.size()
+            << "\n";
+    }
+
+    out.flush();
+    OutputLog::info(
+        "BWSMarket .mdl debug dump: " + index_path.string() +
+        " (" + std::to_string(matched_models.size()) +
+        " indexed match(es), " + std::to_string(dumped) +
+        " blob(s), " + std::to_string(failed) + " failed)");
 }
 
 constexpr char kEngineLevelMagic[]  = "LevelGraphicsFile";
@@ -1301,6 +1897,30 @@ bool Open(const FlatAssetEntry& entry)
     if (bail_if_cancelled("after-parse")) return false;
 
     info.source_path = entry.full_path;
+
+    size_t lowpoly_house_proxy_blocks = 0;
+    size_t lowpoly_house_proxy_instances = 0;
+    info.prop_blocks.erase(
+        std::remove_if(
+            info.prop_blocks.begin(),
+            info.prop_blocks.end(),
+            [&](const Level::PropBlock& block) {
+                if (!is_lowpoly_house_proxy_model(block.model_path)) {
+                    return false;
+                }
+                ++lowpoly_house_proxy_blocks;
+                lowpoly_house_proxy_instances += block.instances.size();
+                return true;
+            }),
+        info.prop_blocks.end());
+    if (lowpoly_house_proxy_blocks > 0) {
+        OutputLog::info(
+            "level props: culled " +
+            std::to_string(lowpoly_house_proxy_instances) +
+            " low-poly market house proxy instance(s) across " +
+            std::to_string(lowpoly_house_proxy_blocks) +
+            " block(s)");
+    }
 
     int n_t2 = 0, n_t4 = 0, n_t5 = 0, n_t21 = 0, n_t32 = 0, n_other = 0;
     for (const auto& e : info.entries) {
@@ -1724,6 +2344,8 @@ bool Open(const FlatAssetEntry& entry)
                         " streaming hint path(s), " + std::to_string(indexed) +
                         " resolved through global .mdl index");
     }
+    dump_bwsmarket_market_model_debug(entry.full_path,
+                                      streaming_model_candidates);
     g_level_gdb_placements.clear();
     {
         std::vector<std::pair<uint32_t, std::string>> save_hash_to_name;
@@ -1847,6 +2469,7 @@ bool Open(const FlatAssetEntry& entry)
             }
         }
 
+        const auto& level_prop_blocks = info.prop_blocks;
         std::vector<uint8_t> gdb_bytes;
         const std::string gdb_path = sibling_with_ext(".gdb");
         if (load_text_sibling(gdb_path, gdb_bytes)) {
@@ -1883,7 +2506,44 @@ bool Open(const FlatAssetEntry& entry)
                << model_hash_count << " with model path hashes)";
             OutputLog::success(os.str());
 
-            {
+            constexpr bool verbose_gdb_diagnostics = false;
+            struct GdbStreamingChoiceCacheValue {
+                const StreamingModelCandidate* hit = nullptr;
+                int score = INT_MIN;
+            };
+            std::unordered_map<std::string, GdbStreamingChoiceCacheValue>
+                gdb_streaming_choice_cache;
+            auto choose_streaming_cached =
+                [&](const std::string& entity_name,
+                    uint32_t parent_hash,
+                    int* out_score) -> const StreamingModelCandidate* {
+                    if (streaming_model_candidates.empty()) {
+                        if (out_score) *out_score = INT_MIN;
+                        return nullptr;
+                    }
+                    std::string cache_key = std::to_string(parent_hash);
+                    cache_key.push_back('|');
+                    cache_key += entity_name;
+                    auto cached =
+                        gdb_streaming_choice_cache.find(cache_key);
+                    if (cached != gdb_streaming_choice_cache.end()) {
+                        if (out_score) *out_score = cached->second.score;
+                        return cached->second.hit;
+                    }
+
+                    int score = INT_MIN;
+                    const StreamingModelCandidate* hit =
+                        choose_streaming_model_for_gdb(
+                            entity_name, streaming_model_candidates,
+                            &score, parent_hash);
+                    gdb_streaming_choice_cache.emplace(
+                        std::move(cache_key),
+                        GdbStreamingChoiceCacheValue{hit, score});
+                    if (out_score) *out_score = score;
+                    return hit;
+                };
+
+            if (verbose_gdb_diagnostics) {
                 std::unordered_map<uint32_t, const Gdb::Placement*> parsed_by_hash;
                 parsed_by_hash.reserve(info.placements.size() * 2);
                 for (const auto& p : info.placements) {
@@ -1970,27 +2630,34 @@ bool Open(const FlatAssetEntry& entry)
                       [](const auto& a, const auto& b) {
                           return a.second->count > b.second->count;
                       });
-            OutputLog::info("gdb archetype groups: " +
-                            std::to_string(archetypes.size()) +
-                            " parent hashes (top 24)");
-            const size_t archetype_log_count =
-                std::min<size_t>(archetypes.size(), 24);
-            for (size_t ai = 0; ai < archetype_log_count; ++ai) {
-                const auto& kv = archetypes[ai];
-                std::ostringstream aos;
-                aos << "  0x" << std::hex << std::uppercase
-                    << std::setw(8) << std::setfill('0') << kv.first
-                    << std::dec << "  " << kv.second->count << " instance(s)";
-                if (!kv.second->examples.empty()) {
-                    aos << "  e.g. ";
-                    for (size_t ei = 0; ei < kv.second->examples.size(); ++ei) {
-                        if (ei) aos << ", ";
-                        aos << kv.second->examples[ei];
+            if (verbose_gdb_diagnostics) {
+                OutputLog::info("gdb archetype groups: " +
+                                std::to_string(archetypes.size()) +
+                                " parent hashes (top 24)");
+                const size_t archetype_log_count =
+                    std::min<size_t>(archetypes.size(), 24);
+                for (size_t ai = 0; ai < archetype_log_count; ++ai) {
+                    const auto& kv = archetypes[ai];
+                    std::ostringstream aos;
+                    aos << "  0x" << std::hex << std::uppercase
+                        << std::setw(8) << std::setfill('0') << kv.first
+                        << std::dec << "  " << kv.second->count
+                        << " instance(s)";
+                    if (!kv.second->examples.empty()) {
+                        aos << "  e.g. ";
+                        for (size_t ei = 0; ei < kv.second->examples.size();
+                             ++ei)
+                        {
+                            if (ei) aos << ", ";
+                            aos << kv.second->examples[ei];
+                        }
                     }
+                    OutputLog::info(aos.str());
                 }
-                OutputLog::info(aos.str());
             }
-            if (!streaming_model_candidates.empty()) {
+            if (verbose_gdb_diagnostics &&
+                !streaming_model_candidates.empty())
+            {
                 auto best_gdb_name_for_examples =
                     [&](const std::vector<std::string>& examples,
                         uint32_t parent_hash) {
@@ -2002,9 +2669,8 @@ bool Open(const FlatAssetEntry& entry)
                                 gdb_representative_name(std::vector<std::string>{ex});
                             int score = INT_MIN;
                             const StreamingModelCandidate* hit =
-                                choose_streaming_model_for_gdb(
-                                    repr, streaming_model_candidates, &score,
-                                    parent_hash);
+                                choose_streaming_cached(
+                                    repr, parent_hash, &score);
                             if (hit && score > best_score) {
                                 best_name = repr;
                                 best_score = score;
@@ -2013,6 +2679,8 @@ bool Open(const FlatAssetEntry& entry)
                         return best_name;
                     };
                 OutputLog::info("gdb archetype -> streaming .mdl.gmd candidates (top 24):");
+                const size_t archetype_log_count =
+                    std::min<size_t>(archetypes.size(), 24);
                 for (size_t ai = 0; ai < archetype_log_count; ++ai) {
                     const auto& kv = archetypes[ai];
                     const std::string repr =
@@ -2020,9 +2688,7 @@ bool Open(const FlatAssetEntry& entry)
                                                    kv.first);
                     int score = INT_MIN;
                     const StreamingModelCandidate* hit =
-                        choose_streaming_model_for_gdb(
-                            repr, streaming_model_candidates, &score,
-                            kv.first);
+                        choose_streaming_cached(repr, kv.first, &score);
                     std::ostringstream mos;
                     mos << "  0x" << std::hex << std::uppercase
                         << std::setw(8) << std::setfill('0') << kv.first
@@ -2065,9 +2731,7 @@ bool Open(const FlatAssetEntry& entry)
                     if (!interesting) continue;
                     int score = INT_MIN;
                     const StreamingModelCandidate* hit =
-                        choose_streaming_model_for_gdb(
-                            repr, streaming_model_candidates, &score,
-                            kv.first);
+                        choose_streaming_cached(repr, kv.first, &score);
                     std::ostringstream kos;
                     kos << "  0x" << std::hex << std::uppercase
                         << std::setw(8) << std::setfill('0') << kv.first
@@ -2141,9 +2805,8 @@ bool Open(const FlatAssetEntry& entry)
                             gdb_representative_name(std::vector<std::string>{ex});
                         int score = INT_MIN;
                         const StreamingModelCandidate* hit =
-                            choose_streaming_model_for_gdb(
-                                repr, streaming_model_candidates, &score,
-                                parent_hash);
+                            choose_streaming_cached(
+                                repr, parent_hash, &score);
                         if (hit && score > best_score) {
                             best_name = repr;
                             best_score = score;
@@ -2160,9 +2823,8 @@ bool Open(const FlatAssetEntry& entry)
                         best_gdb_name_for_examples_for_matching(
                             kv.second.examples, kv.first);
                     if (repr.empty()) continue;
-                    if (choose_streaming_model_for_gdb(
-                            repr, streaming_model_candidates, nullptr,
-                            kv.first)) {
+                    if (choose_streaming_cached(
+                            repr, kv.first, nullptr)) {
                         parent_match_names.emplace(kv.first, std::move(repr));
                     }
                 }
@@ -2269,41 +2931,141 @@ bool Open(const FlatAssetEntry& entry)
                     .push_back(&m);
                 mdl_by_lower_path[lower_slash(m.full_path)].push_back(&m);
             }
+            auto path_suffix_matches_local =
+                [](const std::string& path, const std::string& target) {
+                    if (path.empty() || target.empty()) return false;
+                    if (path == target) return true;
+                    return path.size() > target.size() &&
+                           path.compare(path.size() - target.size(),
+                                        target.size(), target) == 0 &&
+                           path[path.size() - target.size() - 1] == '/';
+                };
+            std::unordered_map<uint32_t, const FlatAssetEntry*>
+                model_path_hash_cache;
+            model_path_hash_cache.reserve(info.placements.size());
             auto resolve_model_by_path_hash = [&](uint32_t model_path_hash) {
                 if (model_path_hash == 0) {
                     return static_cast<const FlatAssetEntry*>(nullptr);
                 }
-                auto it = mdl_by_model_path_hash.find(model_path_hash);
-                if (it == mdl_by_model_path_hash.end()) {
-                    return static_cast<const FlatAssetEntry*>(nullptr);
+                auto cached = model_path_hash_cache.find(model_path_hash);
+                if (cached != model_path_hash_cache.end()) {
+                    return cached->second;
                 }
-                return choose_model_candidate(it->second);
+                const FlatAssetEntry* hit = nullptr;
+                auto it = mdl_by_model_path_hash.find(model_path_hash);
+                if (it != mdl_by_model_path_hash.end()) {
+                    hit = choose_model_candidate(it->second);
+                }
+                model_path_hash_cache.emplace(model_path_hash, hit);
+                return hit;
             };
+            std::unordered_map<std::string, const FlatAssetEntry*>
+                lower_path_model_cache;
             auto resolve_model_by_lower_path =
                 [&](const std::string& lower_path) {
                     if (lower_path.empty()) {
                         return static_cast<const FlatAssetEntry*>(nullptr);
                     }
-                    auto it = mdl_by_lower_path.find(lower_path);
-                    if (it == mdl_by_lower_path.end()) {
-                        return static_cast<const FlatAssetEntry*>(nullptr);
+                    auto cached = lower_path_model_cache.find(lower_path);
+                    if (cached != lower_path_model_cache.end()) {
+                        return cached->second;
                     }
-                    return choose_model_candidate(it->second);
+                    const FlatAssetEntry* hit = nullptr;
+                    auto it = mdl_by_lower_path.find(lower_path);
+                    if (it != mdl_by_lower_path.end()) {
+                        hit = choose_model_candidate(it->second);
+                    }
+                    if (!hit) {
+                        std::vector<const FlatAssetEntry*> suffix_hits;
+                        for (const auto& kv : mdl_by_lower_path) {
+                            if (path_suffix_matches_local(kv.first,
+                                                          lower_path)) {
+                                suffix_hits.insert(suffix_hits.end(),
+                                                   kv.second.begin(),
+                                                   kv.second.end());
+                            }
+                        }
+                        if (!suffix_hits.empty()) {
+                            hit = choose_model_candidate(suffix_hits);
+                        }
+                    }
+                    if (!hit) {
+                        const std::string leaf_key =
+                            canonicalize_for_match(
+                                model_name_from_path(lower_path));
+                        if (!leaf_key.empty() &&
+                            leaf_key != "interior" &&
+                            leaf_key != "exterior")
+                        {
+                            auto tok = mdl_by_token.find(leaf_key);
+                            if (tok != mdl_by_token.end()) {
+                                hit = choose_model_candidate(tok->second);
+                            }
+                        }
+                    }
+                    lower_path_model_cache.emplace(lower_path, hit);
+                    return hit;
                 };
+            std::unordered_map<std::string, const FlatAssetEntry*>
+                entity_model_cache;
             auto resolve_model_for_entity = [&](const std::string& entity_name) {
                 std::string tok = canonicalize_for_match(entity_name);
                 if (tok.empty()) return static_cast<const FlatAssetEntry*>(nullptr);
+                auto token_is_or_numbered = [&](const char* base) {
+                    const size_t n = std::strlen(base);
+                    if (tok == base) return true;
+                    if (tok.size() <= n || tok.compare(0, n, base) != 0) {
+                        return false;
+                    }
+                    for (size_t i = n; i < tok.size(); ++i) {
+                        if (!std::isdigit(static_cast<unsigned char>(tok[i]))) {
+                            return false;
+                        }
+                    }
+                    return true;
+                };
+                const bool general_store_building =
+                    token_is_or_numbered("generalstore");
+                auto is_bad_general_store_fallback =
+                    [&](const std::string& model_key,
+                        const FlatAssetEntry* candidate) {
+                        if (!general_store_building) return false;
+                        if (model_key.find("signgeneralstore") !=
+                            std::string::npos)
+                        {
+                            return true;
+                        }
+                        return candidate &&
+                               compact_match_key(candidate->full_path).find(
+                                   "signgeneralstore") != std::string::npos;
+                    };
 
-                auto exact = mdl_by_token.find(tok);
-                if (exact != mdl_by_token.end()) {
-                    return choose_model_candidate(exact->second);
-                }
-
-                if (tok.size() < 5) {
-                    return static_cast<const FlatAssetEntry*>(nullptr);
+                auto cached = entity_model_cache.find(tok);
+                if (cached != entity_model_cache.end()) {
+                    return cached->second;
                 }
 
                 const FlatAssetEntry* best = nullptr;
+                const std::string entity_lookup_key =
+                    gdb_entity_key(entity_name);
+                auto exact = mdl_by_token.find(tok);
+                if (exact != mdl_by_token.end()) {
+                    best = choose_model_candidate(exact->second);
+                    if (is_bad_general_store_fallback(tok, best) ||
+                        (best && is_bad_market_helper_substitution(
+                            entity_lookup_key, tok, best->full_path)))
+                    {
+                        best = nullptr;
+                    }
+                    entity_model_cache.emplace(tok, best);
+                    return best;
+                }
+
+                if (tok.size() < 5) {
+                    entity_model_cache.emplace(tok, nullptr);
+                    return static_cast<const FlatAssetEntry*>(nullptr);
+                }
+
                 int best_score = INT_MIN;
                 for (const auto& kv : mdl_by_token) {
                     const std::string& mk = kv.first;
@@ -2323,18 +3085,171 @@ bool Open(const FlatAssetEntry& entry)
 
                     const FlatAssetEntry* candidate =
                         choose_model_candidate(kv.second);
+                    if (is_bad_general_store_fallback(mk, candidate) ||
+                        (candidate && is_bad_market_helper_substitution(
+                            entity_lookup_key, tok, candidate->full_path)))
+                    {
+                        continue;
+                    }
                     const int score = relation + model_bank_score(candidate);
                     if (!best || score > best_score) {
                         best = candidate;
                         best_score = score;
                     }
                 }
+                entity_model_cache.emplace(tok, best);
                 return best;
             };
 
             constexpr bool emit_gdb_render_placements = true;
             constexpr bool emit_derived_render_placements = false;
             std::unordered_map<std::string, Level::PropBlock> blocks_by_path;
+            std::unordered_set<std::string> emitted_prop_transform_keys;
+            emitted_prop_transform_keys.reserve(level_prop_blocks.size() * 64);
+            for (const auto& block : level_prop_blocks) {
+                if (block.model_path.empty()) continue;
+                for (const auto& inst : block.instances) {
+                    emitted_prop_transform_keys.insert(
+                        prop_instance_transform_key(inst, block.model_path));
+                }
+            }
+            auto append_prop_instance_for_model =
+                [&](const FlatAssetEntry* model_hit,
+                    const Level::PropInstance& inst) {
+                    if (!model_hit || model_hit->full_path.empty()) {
+                        return false;
+                    }
+                    if (!emitted_prop_transform_keys.insert(
+                            prop_instance_transform_key(
+                                inst, model_hit->full_path)).second)
+                    {
+                        return false;
+                    }
+                    auto& pb = blocks_by_path[model_hit->full_path];
+                    if (pb.model_path.empty()) {
+                        pb.type = 0xB1;
+                        pb.model_path = model_hit->full_path;
+                    }
+                    pb.instances.push_back(inst);
+                    return true;
+                };
+            auto append_prop_instance_for_model_path =
+                [&](const std::string& lower_path,
+                    const Level::PropInstance& inst) {
+                    const FlatAssetEntry* model_hit =
+                        resolve_model_by_lower_path(lower_path);
+                    return append_prop_instance_for_model(model_hit, inst);
+                };
+
+            size_t authored_shop_companions_emitted = 0;
+            size_t authored_shop_companion_misses = 0;
+            std::unordered_map<std::string, size_t>
+                authored_shop_companion_paths;
+            for (const auto& block : level_prop_blocks) {
+                std::string exterior_path =
+                    shop_facade_companion_exterior_path(block.model_path);
+                if (exterior_path.empty()) continue;
+
+                std::array<std::string, 2> companions = {
+                    exterior_path,
+                    companion_interior_path(exterior_path),
+                };
+                for (const auto& inst : block.instances) {
+                    for (const std::string& companion_path : companions) {
+                        if (companion_path.empty()) continue;
+                        const std::string lower_path =
+                            lower_slash(companion_path);
+                        if (append_prop_instance_for_model_path(
+                                lower_path, inst))
+                        {
+                            ++authored_shop_companions_emitted;
+                            ++authored_shop_companion_paths[lower_path];
+                        } else if (!resolve_model_by_lower_path(lower_path)) {
+                            ++authored_shop_companion_misses;
+                        }
+                    }
+                }
+            }
+            if (authored_shop_companions_emitted > 0 ||
+                authored_shop_companion_misses > 0)
+            {
+                OutputLog::info(
+                    "authored shop companions: emitted " +
+                    std::to_string(authored_shop_companions_emitted) +
+                    " instance(s), missing-path " +
+                    std::to_string(authored_shop_companion_misses));
+                std::vector<std::pair<std::string, size_t>> paths(
+                    authored_shop_companion_paths.begin(),
+                    authored_shop_companion_paths.end());
+                std::sort(paths.begin(), paths.end(),
+                          [](const auto& a, const auto& b) {
+                              return a.second > b.second;
+                          });
+                const size_t n = std::min<size_t>(paths.size(), 6);
+                for (size_t i = 0; i < n; ++i) {
+                    OutputLog::info(
+                        "  authored shop companion: " +
+                        std::to_string(paths[i].second) + "x  " +
+                        paths[i].first);
+                }
+            }
+            const bool is_bwsmarket_level =
+                lower_slash(entry.full_path).find("bwsmarket") !=
+                std::string::npos;
+            if (is_bwsmarket_level)
+            {
+                auto log_catalog_probe =
+                    [&](const char* label,
+                        std::initializer_list<const char*> needles,
+                        size_t limit) {
+                        size_t count = 0;
+                        std::vector<std::string> examples;
+                        for (const auto& m : S.all_mdl_files) {
+                            const std::string p = lower_slash(m.full_path);
+                            bool match = false;
+                            for (const char* needle : needles) {
+                                if (p.find(needle) != std::string::npos) {
+                                    match = true;
+                                    break;
+                                }
+                            }
+                            if (!match) continue;
+                            ++count;
+                            if (examples.size() < limit) {
+                                examples.push_back(m.full_path);
+                            }
+                        }
+                        std::ostringstream cat;
+                        cat << "model catalog probe: " << label << " "
+                            << count << " hit(s)";
+                        if (!examples.empty()) {
+                            cat << " e.g. ";
+                            for (size_t i = 0; i < examples.size(); ++i) {
+                                if (i) cat << " | ";
+                                cat << examples[i];
+                            }
+                        }
+                        OutputLog::info(cat.str());
+                    };
+                log_catalog_probe("clocktower", {"clocktower"}, 6);
+                log_catalog_probe("market shops",
+                                  {"bs_market_largeshop",
+                                   "bs_market_smallshop",
+                                   "bs_market_generalshop"},
+                                  20);
+                log_catalog_probe("market shells",
+                                  {"bs_market_tavern",
+                                   "bs_market_generalstore",
+                                   "bs_market_openstall",
+                                   "bs_market_marketstall",
+                                   "openstall",
+                                   "tarotstall"},
+                                  20);
+                log_catalog_probe("tavern/pub",
+                                  {"tavern", "pub", "inn"},
+                                  20);
+            }
+
             size_t save_physics_instances_emitted = 0;
             if (emit_derived_render_placements) {
                 for (const auto& p : save_physics_placements) {
@@ -2398,6 +3313,7 @@ bool Open(const FlatAssetEntry& entry)
             size_t gdb_model_hash_hits = 0;
             size_t gdb_model_hash_misses = 0;
             size_t gdb_authored_shell_skipped = 0;
+            size_t gdb_authored_shop_companion_skipped = 0;
             size_t gdb_duplicate_instances_skipped = 0;
             size_t gdb_companion_interiors_emitted = 0;
             std::unordered_map<std::string, size_t>
@@ -2412,6 +3328,33 @@ bool Open(const FlatAssetEntry& entry)
                 gdb_companion_interior_paths;
             std::unordered_map<std::string, size_t>
                 gdb_duplicate_skip_paths;
+            size_t gdb_shell_entity_duplicates_skipped = 0;
+            size_t gdb_shell_bad_position_skipped = 0;
+            std::unordered_set<std::string> gdb_emitted_shell_entity_keys;
+            std::unordered_map<std::string, size_t>
+                gdb_shell_entity_duplicate_paths;
+            std::unordered_map<std::string, size_t>
+                gdb_shell_bad_position_paths;
+            size_t gdb_shell_path_limit_skipped = 0;
+            std::unordered_map<std::string, size_t> gdb_shell_path_emit_counts;
+            std::unordered_map<std::string, size_t>
+                gdb_shell_path_limit_skip_paths;
+            size_t gdb_clocktower_seen = 0;
+            size_t gdb_clocktower_emitted = 0;
+            size_t gdb_clocktower_companions_emitted = 0;
+            std::vector<std::string> gdb_clocktower_probe_lines;
+            size_t gdb_shop_seen = 0;
+            size_t gdb_shop_emitted = 0;
+            size_t gdb_shop_authored_skipped = 0;
+            size_t gdb_shop_duplicates = 0;
+            size_t gdb_shop_unresolved = 0;
+            size_t gdb_shop_hint_only = 0;
+            size_t gdb_shop_companions_emitted = 0;
+            size_t gdb_shop_companion_misses = 0;
+            size_t gdb_shop_companion_invalid_positions = 0;
+            std::unordered_map<std::string, size_t>
+                gdb_shop_companion_paths;
+            std::vector<std::string> gdb_shop_probe_lines;
             struct HouseCompanionProbe {
                 size_t skipped = 0;
                 size_t exterior_hits = 0;
@@ -2426,12 +3369,100 @@ bool Open(const FlatAssetEntry& entry)
                 gdb_house_companion_probes;
             std::unordered_set<std::string> gdb_emitted_instance_keys;
             gdb_emitted_instance_keys.reserve(info.placements.size() * 2);
+            auto is_market_shop_key = [](const std::string& key) {
+                return key.find("largeshop") != std::string::npos ||
+                       key.find("smallshop") != std::string::npos ||
+                       key.find("generalshop") != std::string::npos ||
+                       key.find("generalstore") != std::string::npos ||
+                       key.find("tavern") != std::string::npos ||
+                       key.find("openstall") != std::string::npos ||
+                       key.find("marketstall") != std::string::npos ||
+                       key.find("tarotstall") != std::string::npos ||
+                       key.find("pub") != std::string::npos ||
+                       key.find("inn") != std::string::npos;
+            };
+            auto is_market_shop_path = [](const std::string& model_path) {
+                const std::string p = lower_slash(model_path);
+                return p.find("bs_market_largeshop") != std::string::npos ||
+                       p.find("bs_market_smallshop") != std::string::npos ||
+                       p.find("bs_market_generalshop") != std::string::npos ||
+                       p.find("bs_market_tavern") != std::string::npos ||
+                       p.find("openstall") != std::string::npos ||
+                       p.find("marketstall") != std::string::npos ||
+                       p.find("tarotstall") != std::string::npos ||
+                       p.find("tavern") != std::string::npos ||
+                       p.find("/pub") != std::string::npos ||
+                       p.find("_pub") != std::string::npos ||
+                       p.find("/inn") != std::string::npos ||
+                       p.find("_inn") != std::string::npos;
+            };
+            auto has_worldish_gdb_position = [](const Gdb::Placement& p) {
+                if (!std::isfinite(p.x) || !std::isfinite(p.y) ||
+                    !std::isfinite(p.z))
+                {
+                    return false;
+                }
+                if (p.x < -64.0f || p.x > 512.0f ||
+                    p.y < -64.0f || p.y > 512.0f ||
+                    p.z < -64.0f || p.z > 256.0f)
+                {
+                    return false;
+                }
+                constexpr float kPiLocal = 3.14159265358979323846f;
+                const bool looks_like_rotation_triplet =
+                    std::fabs(p.x) < 10.0f &&
+                    ((std::fabs(p.y) < 0.02f && std::fabs(p.z) < 0.02f) ||
+                     (std::fabs(p.y + kPiLocal) < 0.02f &&
+                      std::fabs(p.z + kPiLocal) < 0.02f));
+                return !looks_like_rotation_triplet;
+            };
+            auto make_gdb_prop_instance_no_count =
+                [](const Gdb::Placement& p) {
+                    Level::PropInstance pi;
+                    pi.hash = p.hash_a;
+                    pi.values[0] = p.x;
+                    pi.values[1] = p.y;
+                    pi.values[2] = p.z;
+                    const float scale =
+                        (std::isfinite(p.scale) && p.scale > 0.01f &&
+                         p.scale < 100.0f)
+                            ? p.scale : 1.0f;
+                    if (p.has_rotation) {
+                        fill_gdb_rotation_matrix(
+                            pi, p.rot_x, p.rot_y, p.rot_z, scale);
+                    } else {
+                        const float s_yaw = std::sin(p.yaw);
+                        const float c_yaw = std::cos(p.yaw);
+                        if (std::isfinite(s_yaw) && std::isfinite(c_yaw)) {
+                            pi.values[6] = s_yaw;
+                            pi.values[7] = c_yaw;
+                        } else {
+                            pi.values[6] = 0.0f;
+                            pi.values[7] = 1.0f;
+                        }
+                        pi.values[9] = pi.values[10] = pi.values[11] = scale;
+                    }
+                    return pi;
+                };
             for (const auto& p : info.placements) {
                 if (!emit_gdb_render_placements) continue;
                 const bool has_model_hash = p.model_path_hash != 0;
                 if (p.entity_name.empty() && !has_model_hash) continue;
                 std::string tok = canonicalize_for_match(p.entity_name);
                 if (tok.empty() && !has_model_hash) continue;
+                const std::string entity_key = gdb_entity_key(p.entity_name);
+                const bool clocktower_probe =
+                    p.parent_hash == 0xD55304DB ||
+                    entity_key.find("clocktower") != std::string::npos ||
+                    tok.find("clocktower") != std::string::npos;
+                if (clocktower_probe) {
+                    ++gdb_clocktower_seen;
+                }
+                bool shop_probe = is_market_shop_key(entity_key) ||
+                                  is_market_shop_key(tok);
+                if (shop_probe) {
+                    ++gdb_shop_seen;
+                }
                 auto parent_name_it = parent_match_names.find(p.parent_hash);
                 const std::string* parent_match_name =
                     (parent_name_it == parent_match_names.end())
@@ -2454,8 +3485,8 @@ bool Open(const FlatAssetEntry& entry)
                     const char* curated_path =
                         GdbModelHashlist::LookupParentHash(p.parent_hash);
                     if (!curated_path) {
-                        curated_path = GdbModelHashlist::LookupEntityKey(
-                            gdb_entity_key(p.entity_name));
+                        curated_path =
+                            GdbModelHashlist::LookupEntityKey(entity_key);
                     }
                     if (curated_path && *curated_path) {
                         hit = resolve_model_by_lower_path(
@@ -2468,36 +3499,130 @@ bool Open(const FlatAssetEntry& entry)
 
                 if (!matched_model && !streaming_model_candidates.empty()) {
                     const StreamingModelCandidate* stream_hit =
-                        choose_streaming_model_for_gdb(
-                            p.entity_name, streaming_model_candidates,
-                            nullptr, p.parent_hash);
+                        choose_streaming_cached(
+                            p.entity_name, p.parent_hash, nullptr);
                     if (!stream_hit && parent_match_name) {
-                        stream_hit = choose_streaming_model_for_gdb(
-                            *parent_match_name, streaming_model_candidates,
-                            nullptr, p.parent_hash);
+                        stream_hit = choose_streaming_cached(
+                            *parent_match_name, p.parent_hash, nullptr);
                     }
-                    if (!stream_hit) continue;
-                    matched_model = true;
-                    hit = stream_hit->entry;
-                    if (!hit) {
-                        hint_only = true;
+                    if (stream_hit) {
+                        matched_model = true;
+                        hit = stream_hit->entry;
+                        if (!hit) {
+                            hint_only = true;
+                        }
                     }
-                } else if (!matched_model) {
+                }
+                if (!matched_model) {
                     hit = resolve_model_for_entity(p.entity_name);
-                    if (!hit) continue;
+                    if (!hit) {
+                        if (clocktower_probe &&
+                            gdb_clocktower_probe_lines.size() < 8)
+                        {
+                            gdb_clocktower_probe_lines.push_back(
+                                "clocktower probe unresolved: " +
+                                gdb_shell_sample_text(p, "<no model>"));
+                        }
+                        if (shop_probe) {
+                            ++gdb_shop_unresolved;
+                            if (gdb_shop_probe_lines.size() < 12) {
+                                gdb_shop_probe_lines.push_back(
+                                    "shop probe unresolved: " +
+                                    gdb_shell_sample_text(p, "<no model>"));
+                            }
+                        }
+                        continue;
+                    }
                     matched_model = true;
                 }
 
                 if (!matched_model) continue;
+                if (hit && is_bad_market_helper_substitution(
+                        entity_key, tok, hit->full_path))
+                {
+                    if (shop_probe) {
+                        ++gdb_shop_unresolved;
+                        if (gdb_shop_probe_lines.size() < 12) {
+                            gdb_shop_probe_lines.push_back(
+                                "shop probe rejected helper substitute: " +
+                                gdb_shell_sample_text(p, hit->full_path));
+                        }
+                    }
+                    continue;
+                }
                 ++resolved;
+                if (!shop_probe && hit && is_market_shop_path(hit->full_path)) {
+                    shop_probe = true;
+                    ++gdb_shop_seen;
+                }
                 if (hint_only || !hit) {
                     ++gdb_hint_only_skipped;
+                    if (clocktower_probe &&
+                        gdb_clocktower_probe_lines.size() < 8)
+                    {
+                        gdb_clocktower_probe_lines.push_back(
+                            "clocktower probe hint-only: " +
+                            gdb_shell_sample_text(p, "<hint only>"));
+                    }
+                    if (shop_probe) {
+                        ++gdb_shop_hint_only;
+                        if (gdb_shop_probe_lines.size() < 12) {
+                            gdb_shop_probe_lines.push_back(
+                                "shop probe hint-only: " +
+                                gdb_shell_sample_text(p, "<hint only>"));
+                        }
+                    }
                     continue;
+                }
+                const FlatAssetEntry* clocktower_platform_companion = nullptr;
+                if (clocktower_probe) {
+                    const std::string primary_path = lower_slash(hit->full_path);
+                    if (primary_path.find("bs_market_platform") !=
+                        std::string::npos)
+                    {
+                        const char* tower_path =
+                            GdbModelHashlist::LookupParentHash(0xD55304DB);
+                        const FlatAssetEntry* tower_hit =
+                            resolve_model_by_lower_path(
+                                lower_slash(tower_path ? tower_path : ""));
+                        if (tower_hit) {
+                            clocktower_platform_companion = hit;
+                            hit = tower_hit;
+                        }
+                    }
                 }
                 if (is_gdb_authored_level_shell_model(
                         hit->full_path, authored_level_model_paths))
                 {
+                    if (clocktower_probe &&
+                        gdb_clocktower_probe_lines.size() < 8)
+                    {
+                        gdb_clocktower_probe_lines.push_back(
+                            "clocktower probe skipped as authored shell: " +
+                            gdb_shell_sample_text(p, hit->full_path));
+                    }
+                    if (shop_probe) {
+                        ++gdb_shop_authored_skipped;
+                        if (gdb_shop_probe_lines.size() < 12) {
+                            gdb_shop_probe_lines.push_back(
+                                "shop probe skipped as authored shell: " +
+                                gdb_shell_sample_text(p, hit->full_path));
+                        }
+                    }
                     const std::string authored_path = hit->full_path;
+                    const std::string shop_companion_exterior =
+                        shop_facade_companion_exterior_path(authored_path);
+                    if (!shop_companion_exterior.empty()) {
+                        ++gdb_authored_shop_companion_skipped;
+                        if (shop_probe &&
+                            gdb_shop_probe_lines.size() < 12)
+                        {
+                            gdb_shop_probe_lines.push_back(
+                                "shop companion skipped on GDB authored shell duplicate: " +
+                                gdb_shell_sample_text(
+                                    p, shop_companion_exterior));
+                        }
+                    }
                     const std::string companion_exterior =
                         house_facade_companion_exterior_path(authored_path);
                     if (!companion_exterior.empty()) {
@@ -2539,11 +3664,116 @@ bool Open(const FlatAssetEntry& entry)
                     continue;
                 }
 
+                const bool unique_entity_shell =
+                    is_gdb_unique_entity_shell_model(hit->full_path);
+                if (unique_entity_shell && !has_worldish_gdb_position(p)) {
+                    ++gdb_shell_bad_position_skipped;
+                    ++gdb_shell_bad_position_paths[hit->full_path];
+                    if (clocktower_probe &&
+                        gdb_clocktower_probe_lines.size() < 8)
+                    {
+                        gdb_clocktower_probe_lines.push_back(
+                            "clocktower probe skipped non-world shell position: " +
+                            gdb_shell_sample_text(p, hit->full_path));
+                    }
+                    if (shop_probe) {
+                        ++gdb_shop_duplicates;
+                        if (gdb_shop_probe_lines.size() < 12) {
+                            gdb_shop_probe_lines.push_back(
+                                "shop probe skipped non-world shell position: " +
+                                gdb_shell_sample_text(p, hit->full_path));
+                        }
+                    }
+                    continue;
+                }
+
+                if (unique_entity_shell) {
+                    std::string shell_entity_key = entity_key;
+                    if (shell_entity_key.empty()) {
+                        shell_entity_key =
+                            p.entity_name.empty()
+                                ? std::string()
+                                : compact_match_key(p.entity_name);
+                    }
+                    if (shell_entity_key.empty() && p.hash_a != 0) {
+                        shell_entity_key = hex_u32(p.hash_a);
+                    }
+                    if (!shell_entity_key.empty()) {
+                        const std::string shell_key =
+                            lower_slash(hit->full_path) + "|" +
+                            shell_entity_key;
+                        if (!gdb_emitted_shell_entity_keys.insert(
+                                shell_key).second)
+                        {
+                            ++gdb_shell_entity_duplicates_skipped;
+                            ++gdb_shell_entity_duplicate_paths[
+                                hit->full_path];
+                            if (clocktower_probe &&
+                                gdb_clocktower_probe_lines.size() < 8)
+                            {
+                                gdb_clocktower_probe_lines.push_back(
+                                    "clocktower probe skipped repeated shell entity: " +
+                                    gdb_shell_sample_text(p, hit->full_path));
+                            }
+                            if (shop_probe) {
+                                ++gdb_shop_duplicates;
+                                if (gdb_shop_probe_lines.size() < 12) {
+                                    gdb_shop_probe_lines.push_back(
+                                        "shop probe skipped repeated shell entity: " +
+                                        gdb_shell_sample_text(
+                                            p, hit->full_path));
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                const size_t shell_path_limit =
+                    is_bwsmarket_level
+                        ? bwsmarket_shell_instance_limit(hit->full_path)
+                        : 0;
+                const std::string shell_path_count_key =
+                    shell_path_limit > 0
+                        ? lower_slash(hit->full_path)
+                        : std::string();
+                if (shell_path_limit > 0 &&
+                    gdb_shell_path_emit_counts[shell_path_count_key] >=
+                        shell_path_limit)
+                {
+                    ++gdb_shell_path_limit_skipped;
+                    ++gdb_shell_path_limit_skip_paths[hit->full_path];
+                    if (shop_probe) {
+                        ++gdb_shop_duplicates;
+                        if (gdb_shop_probe_lines.size() < 12) {
+                            gdb_shop_probe_lines.push_back(
+                                "shop probe skipped BWSMarket shell path cap: " +
+                                gdb_shell_sample_text(p, hit->full_path));
+                        }
+                    }
+                    continue;
+                }
+
                 const std::string instance_key =
                     gdb_instance_key(p, hit->full_path);
                 if (!gdb_emitted_instance_keys.insert(instance_key).second) {
                     ++gdb_duplicate_instances_skipped;
                     ++gdb_duplicate_skip_paths[hit->full_path];
+                    if (clocktower_probe &&
+                        gdb_clocktower_probe_lines.size() < 8)
+                    {
+                        gdb_clocktower_probe_lines.push_back(
+                            "clocktower probe skipped duplicate gdb record: " +
+                            gdb_shell_sample_text(p, hit->full_path));
+                    }
+                    if (shop_probe) {
+                        ++gdb_shop_duplicates;
+                        if (gdb_shop_probe_lines.size() < 12) {
+                            gdb_shop_probe_lines.push_back(
+                                "shop probe skipped duplicate gdb record: " +
+                                gdb_shell_sample_text(p, hit->full_path));
+                        }
+                    }
                     continue;
                 }
 
@@ -2595,7 +3825,88 @@ bool Open(const FlatAssetEntry& entry)
                         ++gdb_identity_rotations;
                     }
                 }
+                if (!emitted_prop_transform_keys.insert(
+                        prop_instance_transform_key(pi, hit->full_path)).second)
+                {
+                    ++gdb_duplicate_instances_skipped;
+                    ++gdb_duplicate_skip_paths[hit->full_path];
+                    if (clocktower_probe &&
+                        gdb_clocktower_probe_lines.size() < 8)
+                    {
+                        gdb_clocktower_probe_lines.push_back(
+                            "clocktower probe skipped existing prop transform: " +
+                            gdb_shell_sample_text(p, hit->full_path));
+                    }
+                    if (shop_probe) {
+                        ++gdb_shop_duplicates;
+                        if (gdb_shop_probe_lines.size() < 12) {
+                            gdb_shop_probe_lines.push_back(
+                                "shop probe skipped existing prop transform: " +
+                                gdb_shell_sample_text(p, hit->full_path));
+                        }
+                    }
+                    continue;
+                }
                 pb.instances.push_back(pi);
+                if (shell_path_limit > 0) {
+                    ++gdb_shell_path_emit_counts[shell_path_count_key];
+                }
+                if (clocktower_probe) {
+                    ++gdb_clocktower_emitted;
+                    if (gdb_clocktower_probe_lines.size() < 8) {
+                        gdb_clocktower_probe_lines.push_back(
+                            "clocktower probe emitted: " +
+                            gdb_shell_sample_text(p, hit->full_path));
+                    }
+                    const std::string primary_path =
+                        lower_slash(hit->full_path);
+                    if (clocktower_platform_companion) {
+                        if (append_prop_instance_for_model(
+                                clocktower_platform_companion, pi))
+                        {
+                            ++gdb_clocktower_companions_emitted;
+                            if (gdb_clocktower_probe_lines.size() < 8) {
+                                gdb_clocktower_probe_lines.push_back(
+                                    "clocktower platform companion emitted: " +
+                                    gdb_shell_sample_text(
+                                        p,
+                                        clocktower_platform_companion->full_path));
+                            }
+                        }
+                    } else if (primary_path.find("bs_market_clocktower") ==
+                               std::string::npos)
+                    {
+                        const char* tower_path =
+                            GdbModelHashlist::LookupParentHash(0xD55304DB);
+                        const FlatAssetEntry* tower_hit =
+                            resolve_model_by_lower_path(
+                                lower_slash(tower_path ? tower_path : ""));
+                        if (append_prop_instance_for_model(tower_hit, pi)) {
+                            ++gdb_clocktower_companions_emitted;
+                            if (gdb_clocktower_probe_lines.size() < 8) {
+                                gdb_clocktower_probe_lines.push_back(
+                                    "clocktower companion emitted: " +
+                                    gdb_shell_sample_text(
+                                        p, tower_hit->full_path));
+                            }
+                        } else if (!tower_hit &&
+                                   gdb_clocktower_probe_lines.size() < 8)
+                        {
+                            gdb_clocktower_probe_lines.push_back(
+                                "clocktower companion unresolved: " +
+                                gdb_shell_sample_text(
+                                    p, tower_path ? tower_path : "<no path>"));
+                        }
+                    }
+                }
+                if (shop_probe) {
+                    ++gdb_shop_emitted;
+                    if (gdb_shop_probe_lines.size() < 12) {
+                        gdb_shop_probe_lines.push_back(
+                            "shop probe emitted: " +
+                            gdb_shell_sample_text(p, hit->full_path));
+                    }
+                }
                 if (const FlatAssetEntry* interior_hit =
                         resolve_model_by_lower_path(
                             companion_interior_path(hit->full_path)))
@@ -2605,9 +3916,14 @@ bool Open(const FlatAssetEntry& entry)
                         interior_pb.type = 0xB1;
                         interior_pb.model_path = interior_hit->full_path;
                     }
-                    interior_pb.instances.push_back(pi);
-                    ++gdb_companion_interiors_emitted;
-                    ++gdb_companion_interior_paths[interior_hit->full_path];
+                    if (emitted_prop_transform_keys.insert(
+                            prop_instance_transform_key(
+                                pi, interior_hit->full_path)).second)
+                    {
+                        interior_pb.instances.push_back(pi);
+                        ++gdb_companion_interiors_emitted;
+                        ++gdb_companion_interior_paths[interior_hit->full_path];
+                    }
                 }
                 if (is_gdb_shell_audit_model(hit->full_path)) {
                     ++gdb_emitted_shell_paths[hit->full_path];
@@ -2647,6 +3963,142 @@ bool Open(const FlatAssetEntry& entry)
                     OutputLog::info(
                         "gdb-derived skipped after model match: hint-only=" +
                         std::to_string(gdb_hint_only_skipped));
+                }
+                if (gdb_clocktower_seen > 0 ||
+                    !gdb_clocktower_probe_lines.empty())
+                {
+                    OutputLog::info(
+                        "gdb clocktower probe: seen=" +
+                        std::to_string(gdb_clocktower_seen) +
+                        ", emitted=" +
+                        std::to_string(gdb_clocktower_emitted) +
+                        ", companion=" +
+                        std::to_string(gdb_clocktower_companions_emitted));
+                    for (const auto& line : gdb_clocktower_probe_lines) {
+                        OutputLog::info("  " + line);
+                    }
+                }
+                if (gdb_shop_seen > 0 || !gdb_shop_probe_lines.empty()) {
+                    OutputLog::info(
+                        "gdb market shop probe: seen=" +
+                        std::to_string(gdb_shop_seen) +
+                        ", emitted=" +
+                        std::to_string(gdb_shop_emitted) +
+                        ", authored-skip=" +
+                        std::to_string(gdb_shop_authored_skipped) +
+                        ", duplicate=" +
+                        std::to_string(gdb_shop_duplicates) +
+                        ", unresolved=" +
+                        std::to_string(gdb_shop_unresolved) +
+                        ", hint-only=" +
+                        std::to_string(gdb_shop_hint_only) +
+                        ", companions=" +
+                        std::to_string(gdb_shop_companions_emitted) +
+                        ", gdb-authored-companion-skip=" +
+                        std::to_string(gdb_authored_shop_companion_skipped) +
+                        ", companion-miss=" +
+                        std::to_string(gdb_shop_companion_misses) +
+                        ", bad-pos=" +
+                        std::to_string(gdb_shop_companion_invalid_positions));
+                    for (const auto& line : gdb_shop_probe_lines) {
+                        OutputLog::info("  " + line);
+                    }
+                }
+                if (gdb_shop_companions_emitted > 0) {
+                    OutputLog::info(
+                        "gdb shop companions: " +
+                        std::to_string(gdb_shop_companions_emitted) +
+                        " instance(s) across " +
+                        std::to_string(gdb_shop_companion_paths.size()) +
+                        " model(s)");
+                    std::vector<std::pair<std::string, size_t>> shop_paths(
+                        gdb_shop_companion_paths.begin(),
+                        gdb_shop_companion_paths.end());
+                    std::sort(shop_paths.begin(), shop_paths.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second != b.second) {
+                                      return a.second > b.second;
+                                  }
+                                  return a.first < b.first;
+                              });
+                    const size_t n =
+                        std::min<size_t>(shop_paths.size(), 8);
+                    for (size_t i = 0; i < n; ++i) {
+                        OutputLog::info(
+                            "  shop companion: " +
+                            std::to_string(shop_paths[i].second) +
+                            "x  " + shop_paths[i].first);
+                    }
+                }
+                if (gdb_shell_bad_position_skipped > 0) {
+                    OutputLog::info(
+                        "gdb-derived skipped non-world shell positions: " +
+                        std::to_string(gdb_shell_bad_position_skipped));
+                    std::vector<std::pair<std::string, size_t>> bad_paths(
+                        gdb_shell_bad_position_paths.begin(),
+                        gdb_shell_bad_position_paths.end());
+                    std::sort(bad_paths.begin(), bad_paths.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second != b.second) {
+                                      return a.second > b.second;
+                                  }
+                                  return a.first < b.first;
+                              });
+                    const size_t n =
+                        std::min<size_t>(bad_paths.size(), 8);
+                    for (size_t i = 0; i < n; ++i) {
+                        OutputLog::info(
+                            "  skip non-world shell: " +
+                            std::to_string(bad_paths[i].second) +
+                            "x  " + bad_paths[i].first);
+                    }
+                }
+                if (gdb_shell_entity_duplicates_skipped > 0) {
+                    OutputLog::info(
+                        "gdb-derived skipped repeated shell entity/model records: " +
+                        std::to_string(
+                            gdb_shell_entity_duplicates_skipped));
+                    std::vector<std::pair<std::string, size_t>> shell_dups(
+                        gdb_shell_entity_duplicate_paths.begin(),
+                        gdb_shell_entity_duplicate_paths.end());
+                    std::sort(shell_dups.begin(), shell_dups.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second != b.second) {
+                                      return a.second > b.second;
+                                  }
+                                  return a.first < b.first;
+                              });
+                    const size_t n =
+                        std::min<size_t>(shell_dups.size(), 8);
+                    for (size_t i = 0; i < n; ++i) {
+                        OutputLog::info(
+                            "  skip repeated shell entity: " +
+                            std::to_string(shell_dups[i].second) +
+                            "x  " + shell_dups[i].first);
+                    }
+                }
+                if (gdb_shell_path_limit_skipped > 0) {
+                    OutputLog::info(
+                        "gdb-derived skipped BWSMarket shell path cap: " +
+                        std::to_string(gdb_shell_path_limit_skipped));
+                    std::vector<std::pair<std::string, size_t>> cap_paths(
+                        gdb_shell_path_limit_skip_paths.begin(),
+                        gdb_shell_path_limit_skip_paths.end());
+                    std::sort(cap_paths.begin(), cap_paths.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second != b.second) {
+                                      return a.second > b.second;
+                                  }
+                                  return a.first < b.first;
+                              });
+                    const size_t n =
+                        std::min<size_t>(cap_paths.size(), 8);
+                    for (size_t i = 0; i < n; ++i) {
+                        OutputLog::info(
+                            "  skip shell path cap: " +
+                            std::to_string(cap_paths[i].second) +
+                            "x  " + cap_paths[i].first);
+                    }
                 }
                 if (gdb_duplicate_instances_skipped > 0) {
                     OutputLog::info(
@@ -2713,7 +4165,7 @@ bool Open(const FlatAssetEntry& entry)
                         total += kv.second.skipped;
                     }
                     OutputLog::info(
-                        "gdb-derived skipped house facade companion probe: " +
+                        "gdb-derived authored house companion probe (not emitted): " +
                         std::to_string(total) +
                         " instance(s) across " +
                         std::to_string(gdb_house_companion_probes.size()) +
@@ -2734,7 +4186,7 @@ bool Open(const FlatAssetEntry& entry)
                     for (size_t i = 0; i < n; ++i) {
                         const HouseCompanionProbe& probe = probes[i].second;
                         OutputLog::info(
-                            "  house companion probe: " +
+                            "  authored house companion candidate: " +
                             std::to_string(probe.skipped) +
                             "x  " + probes[i].first);
                         OutputLog::info(
@@ -4846,10 +6298,10 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
 
         const float u = L.tile_uv[0]
             + std::clamp(local_x, 0.0f, 1.0f)
-            * scale_u;
+            * scale_u * 2.0f;
         const float v = L.tile_uv[1]
             + std::clamp(local_z, 0.0f, 1.0f)
-            * scale_v;
+            * scale_v * 2.0f;
 
         float px = u * float(parsed.splat_w) - 0.5f;
         float py = v * float(parsed.splat_h) - 0.5f;
@@ -4915,11 +6367,49 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
             const float wv = world_z;
 
             for (const auto& L : chunk.layers) {
-                const float blend_px =
-                    w00 * float(L.blend[0]) + w10 * float(L.blend[1]) +
-                    w01 * float(L.blend[2]) + w11 * float(L.blend[3]);
+                auto corner_material = [&](int corner) -> int {
+                    const uint32_t layer_idx = L.texture_idx[corner];
+                    uint32_t mat_idx = L.material_idx;
+                    if (layer_idx < chunk.layers.size()) {
+                        mat_idx = chunk.layers[size_t(layer_idx)].material_idx;
+                    }
+                    if (mat_idx < mats.size()) return int(mat_idx);
+                    if (L.material_idx < mats.size()) return int(L.material_idx);
+                    return -1;
+                };
+                const int material_ids[4] = {
+                    corner_material(0), corner_material(1),
+                    corner_material(2), corner_material(3),
+                };
+                const float corner_alpha[4] = {
+                    w00 * float(L.blend[0]) / kBlendMax,
+                    w10 * float(L.blend[1]) / kBlendMax,
+                    w01 * float(L.blend[2]) / kBlendMax,
+                    w11 * float(L.blend[3]) / kBlendMax,
+                };
+                const float blend_px = corner_alpha[0] + corner_alpha[1] +
+                                       corner_alpha[2] + corner_alpha[3];
+                if (blend_px <= 1e-6f) continue;
+
+                float rgb_f[3] = {0.0f, 0.0f, 0.0f};
+                bool have_corner_rgb = false;
+                for (int ci = 0; ci < 4; ++ci) {
+                    if (material_ids[ci] < 0 || corner_alpha[ci] <= 0.0f) {
+                        continue;
+                    }
+                    uint8_t corner_rgb[3];
+                    sample_mat(material_ids[ci], wu, wv, corner_rgb);
+                    const float w = corner_alpha[ci] / blend_px;
+                    rgb_f[0] += float(corner_rgb[0]) * w;
+                    rgb_f[1] += float(corner_rgb[1]) * w;
+                    rgb_f[2] += float(corner_rgb[2]) * w;
+                    have_corner_rgb = true;
+                }
+                if (!have_corner_rgb) continue;
                 uint8_t rgb[3];
-                sample_mat(int(L.material_idx), wu, wv, rgb);
+                rgb[0] = uint8_t(std::clamp(int(std::round(rgb_f[0])), 0, 255));
+                rgb[1] = uint8_t(std::clamp(int(std::round(rgb_f[1])), 0, 255));
+                rgb[2] = uint8_t(std::clamp(int(std::round(rgb_f[2])), 0, 255));
                 if (!have_first_rgb) {
                     first_rgb[0] = rgb[0];
                     first_rgb[1] = rgb[1];
@@ -4927,8 +6417,7 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
                     have_first_rgb = true;
                 }
 
-                const float alpha = std::clamp(blend_px / kBlendMax,
-                                               0.f, 1.f)
+                const float alpha = std::clamp(blend_px, 0.f, 1.f)
                                   * sample_mask(L, fx_in, fy_in);
                 if (alpha < 1.f / 255.f) continue;
 

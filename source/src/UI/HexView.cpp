@@ -665,7 +665,9 @@ void draw_hex_window() {
                     }
 
                     size_t blocks_x = (w + 3) / 4;
-                    UINT pitch = (UINT)(blocks_x * (fmt == DXGI_FORMAT_BC3_UNORM ? 16 : 8));
+                    const UINT block_bytes =
+                        (fmt == DXGI_FORMAT_BC1_UNORM) ? 8u : 16u;
+                    UINT pitch = (UINT)(blocks_x * block_bytes);
 
                     D3D11_TEXTURE2D_DESC td{};
                     td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1; td.Format = fmt;

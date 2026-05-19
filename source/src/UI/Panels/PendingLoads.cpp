@@ -93,23 +93,45 @@ static bool parse_prop_model_buffer(const std::vector<unsigned char>& buf,
                                     std::string* reason = nullptr)
 {
     CachedPropModel tmp;
-    if (!parse_mdl_info(buf, tmp.info, model_path)) {
+    const bool main_ok = parse_mdl_info(buf, tmp.info, model_path);
+
+    auto missing_count = [&]() -> size_t {
+        size_t empty = 0;
+        if (tmp.info.MeshBuffers.size() < tmp.info.MeshCount) {
+            empty += tmp.info.MeshCount - tmp.info.MeshBuffers.size();
+        }
+        for (const auto& mb : tmp.info.MeshBuffers) {
+            if (mb.VertexCount == 0) ++empty;
+        }
+        return empty;
+    };
+
+    if (main_ok) {
+        bool all_empty = !tmp.info.MeshBuffers.empty();
+        for (const auto& mb : tmp.info.MeshBuffers) {
+            if (mb.VertexCount > 0) {
+                all_empty = false;
+                break;
+            }
+        }
+        if (all_empty) {
+            reparse_mdl_buffers_via_polymsh_scan(buf, tmp.info);
+        }
+    }
+
+    if (missing_count() > 0) {
+        reparse_mdl_missing_buffers_optstr(buf, tmp.info);
+    }
+    if (missing_count() > 0) {
+        reparse_mdl_as_foliage_48b(buf, tmp.info);
+    }
+
+    if (!main_ok && missing_count() >= tmp.info.MeshCount) {
         if (reason) {
             *reason = "parse_mdl_info failed, bytes=" +
                       std::to_string(buf.size());
         }
         return false;
-    }
-
-    bool all_empty = !tmp.info.MeshBuffers.empty();
-    for (const auto& mb : tmp.info.MeshBuffers) {
-        if (mb.VertexCount > 0) {
-            all_empty = false;
-            break;
-        }
-    }
-    if (all_empty) {
-        reparse_mdl_buffers_via_polymsh_scan(buf, tmp.info);
     }
 
     parse_mdl_geometry(buf, tmp.info, tmp.geoms);
@@ -1152,7 +1174,20 @@ void process_pending_loads() {
                 if (!S.mdl_info_ok) {
                     OutputLog::error("MDL: parse_mdl_info FAILED for '" + name +
                                      "' (buf=" + std::to_string(buf.size()) + " bytes)");
-                } else {
+                    if (S.mdl_info.MeshCount > 0) {
+                        if (reparse_mdl_missing_buffers_optstr(buf, S.mdl_info)) {
+                            OutputLog::info("MDL: optstr-scan fallback recovered after parse failure");
+                            S.mdl_info_ok = true;
+                        }
+                    }
+                    if (!S.mdl_info_ok) {
+                        if (reparse_mdl_as_foliage_48b(buf, S.mdl_info)) {
+                            OutputLog::info("MDL: foliage-48b fallback recovered after parse failure");
+                            S.mdl_info_ok = true;
+                        }
+                    }
+                }
+                if (S.mdl_info_ok) {
                     OutputLog::info("MDL: parsed '" + name + "' meshes=" +
                                     std::to_string(S.mdl_info.MeshCount) +
                                     " buffers=" + std::to_string(S.mdl_info.MeshBuffers.size()));
@@ -1180,6 +1215,28 @@ void process_pending_loads() {
                                                 " mesh buffer(s)");
                             } else {
                                 OutputLog::warn("MDL: all buffers empty AND polymsh-scan fallback found nothing");
+                            }
+                        }
+                    }
+                    {
+                        auto missing = [&]() -> size_t {
+                            size_t n = 0;
+                            if (S.mdl_info.MeshBuffers.size() < S.mdl_info.MeshCount) {
+                                n += S.mdl_info.MeshCount - S.mdl_info.MeshBuffers.size();
+                            }
+                            for (const auto& mb : S.mdl_info.MeshBuffers) {
+                                if (mb.VertexCount == 0) ++n;
+                            }
+                            return n;
+                        };
+                        if (missing() > 0) {
+                            if (reparse_mdl_missing_buffers_optstr(buf, S.mdl_info)) {
+                                OutputLog::info("MDL: optstr-scan fallback filled missing buffer(s)");
+                            }
+                        }
+                        if (missing() > 0) {
+                            if (reparse_mdl_as_foliage_48b(buf, S.mdl_info)) {
+                                OutputLog::info("MDL: foliage-48b fallback filled the buffer");
                             }
                         }
                     }

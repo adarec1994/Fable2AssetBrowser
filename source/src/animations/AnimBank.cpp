@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <fstream>
 #include <string_view>
 #include <unordered_map>
@@ -120,11 +121,12 @@ bool load_toc_bytes(const uint8_t* data, size_t size,
     out_clips.reserve(num_anim_records);
     for (uint32_t i = 0; i < num_anim_records; ++i) {
         AnimClip c;
-        c.key0        = r.u32();
-        c.key1        = r.u32();
-        c.data_offset = r.u32();
-        c.data_length = r.u32();
-        c.fps         = r.f32();
+        c.key0            = r.u32();
+        c.key1            = r.u32();
+        c.data_offset     = r.u32();
+        c.toc_frame_count = r.u32();
+        c.data_length     = c.toc_frame_count;
+        c.fps             = r.f32();
         uint32_t n_events = r.u32();
         if (!r.ok) {
             OutputLog::error("AnimBank: record header truncated at #" +
@@ -153,6 +155,24 @@ bool load_toc_bytes(const uint8_t* data, size_t size,
         c.name = nbuf;
 
         out_clips.push_back(std::move(c));
+    }
+
+    std::vector<size_t> order(out_clips.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(),
+              [&](size_t a, size_t b) {
+                  return out_clips[a].data_offset < out_clips[b].data_offset;
+              });
+    for (size_t i = 0; i < order.size(); ++i) {
+        AnimClip& c = out_clips[order[i]];
+        if (i + 1 < order.size()) {
+            const uint32_t next = out_clips[order[i + 1]].data_offset;
+            c.data_size_bytes = next > c.data_offset
+                ? (next - c.data_offset)
+                : 0;
+        } else {
+            c.data_size_bytes = 0;
+        }
     }
 
     for (uint32_t i = 0; i < num_special; ++i) {
@@ -245,10 +265,15 @@ bool load_toc_for_root(const std::string& root,
 
 float clip_duration_seconds(const AnimClip& clip) {
     if (clip.fps <= 0.0f) return 0.0f;
-    if (!global_data_file().is_open()) return 0.0f;
-    auto h = global_data_file().parse_clip_header(clip);
-    if (!h.ok || h.field_C == 0) return 0.0f;
-    return (float)h.field_C / clip.fps;
+    uint32_t frames = clip.toc_frame_count;
+    if (global_data_file().is_open()) {
+        auto h = global_data_file().parse_clip_header(clip);
+        if (h.ok && h.frame_count != 0) {
+            frames = h.frame_count;
+        }
+    }
+    if (frames == 0) return 0.0f;
+    return (float)frames / clip.fps;
 }
 
 std::string read_lua_file_content(const std::string& path);

@@ -16,6 +16,7 @@ set(APP_SOURCES
         src/animations/AnimBank.cpp
         src/animations/AnimDataFile.cpp
         src/animations/AnimDecoder.cpp
+        src/animations/Locomotion.cpp
         src/animations/AnimPlayer.cpp
         src/textures/export/TextureExport.cpp
         src/textures/export/PngExport.cpp

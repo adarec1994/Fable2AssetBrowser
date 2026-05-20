@@ -10,7 +10,7 @@ namespace Level {
 struct EhfLodEntry {
     std::string strs[6];
     uint32_t    material_flags = 0;
-    float       params[2][3] = {{0.0f, 1.0f, 0.0f},
+    float       params[2][3] = {{0.0f, 0.0f, 0.0f},
                                 {0.0f, 1.0f, 0.0f}};
 };
 

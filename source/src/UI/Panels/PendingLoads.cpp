@@ -1346,9 +1346,9 @@ void process_pending_loads() {
             }
             if (g_mp_initialized) {
                 MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
-                S.show_model_preview = true;
-                S.model_preview_open = true;
-                S.model_materials_open = true;
+                S.show_model_preview = false;
+                S.model_preview_open = false;
+                S.model_materials_open = false;
                 S.terrain_mode = false;
                 g_mp.no_tilt = false;
                 S.cam_yaw = 3.14159265f;
@@ -1366,9 +1366,9 @@ void process_pending_loads() {
         g_mp_initialized = MP_Init(g_mp, 800, 600);
         if (g_mp_initialized) {
             MP_Build(S.mdl_meshes, S.mdl_info, g_mp);
-            S.show_model_preview = true;
-            S.model_preview_open = true;
-            S.model_materials_open = true;
+            S.show_model_preview = false;
+            S.model_preview_open = false;
+            S.model_materials_open = false;
             S.terrain_mode = false;
             g_mp.no_tilt = false;
             S.cam_yaw = 3.14159265f;
@@ -2062,7 +2062,7 @@ void process_pending_loads() {
                                 "ehf_splat_terrain";
                         }
                         OutputLog::success(
-                            "terrain SPLAT shader bound: per-chunk EHF paint records");
+                            "terrain SPLAT shader bound: global EHF material weights");
                     } else {
                         OutputLog::warn(
                             "terrain SPLAT shader unavailable; using EHF composite texture");
@@ -2237,9 +2237,9 @@ void process_pending_loads() {
                 MP_Build(geoms, info, g_mp);
                 g_mp.no_tilt = true;
                 S.terrain_mode = true;
-                S.show_model_preview = true;
-                S.model_preview_open = true;
-                S.model_materials_open = true;
+                S.show_model_preview = false;
+                S.model_preview_open = false;
+                S.model_materials_open = false;
 
                 float minx = 1e30f, miny = 1e30f, minz = 1e30f;
                 float maxx = -1e30f, maxy = -1e30f, maxz = -1e30f;

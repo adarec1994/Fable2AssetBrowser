@@ -140,8 +140,15 @@ static void decode_bc4_block(const uint8_t* b, uint8_t* out16) {
     for (int i = 0; i < 6; ++i) abits |= (uint64_t)b[2+i] << (8*i);
     uint8_t atab[8];
     atab[0] = a0; atab[1] = a1;
-    for (int i = 1; i <= 6; i++)
-        atab[i+1] = (uint8_t)(((7-i)*a0 + i*a1 + 3) / 7);
+    if (a0 > a1) {
+        for (int i = 1; i <= 6; i++)
+            atab[i+1] = (uint8_t)(((7-i)*a0 + i*a1 + 3) / 7);
+    } else {
+        for (int i = 1; i <= 4; i++)
+            atab[i+1] = (uint8_t)(((5-i)*a0 + i*a1 + 2) / 5);
+        atab[6] = 0;
+        atab[7] = 255;
+    }
     for (int i = 0; i < 16; ++i) {
         uint8_t ai = (uint8_t)((abits >> (3*i)) & 7);
         out16[i] = atab[ai];
@@ -1350,6 +1357,7 @@ cbuffer TerrainCB : register(b2){
     float4 chunk_grid_size;
     float4 splat_params;
     float4 mesh_xform;
+    float4 weight_size;
     float4 material_params[32];
 }
 Texture2DArray  lod_array     : register(t0);
@@ -1359,6 +1367,7 @@ Texture2DArray  chunk_uv      : register(t3);
 Texture2D       splat_mask    : register(t4);
 Texture2D       lightmap      : register(t5);
 Texture2DArray  lod_detail_array : register(t6);
+Texture2DArray  material_weight  : register(t7);
 SamplerState    smp_wrap      : register(s0);
 SamplerState    smp_point     : register(s1);
 
@@ -1375,13 +1384,12 @@ float3 sample_material(int slice, float2 world_xy, float slope_w){
     float4 mp = material_params[s];
     float base_scale = (mp.x > 0.0) ? mp.x : splat_params.y;
     float detail_scale = (mp.y > 0.0) ? mp.y : base_scale;
-    float base_intensity = (mp.z > 0.0) ? mp.z : 1.0;
     float3 base = lod_array.Sample(
         smp_wrap, float3(world_xy * base_scale, s)).rgb;
     float3 detail = lod_detail_array.Sample(
         smp_wrap, float3(world_xy * detail_scale, s)).rgb;
-    float detail_w = slope_w * saturate(mp.w);
-    return lerp(base * base_intensity, detail, detail_w);
+    float detail_w = slope_w * saturate(mp.z) * saturate(mp.w);
+    return lerp(base, detail, detail_w);
 }
 
 float4 PS(VSOUT i) : SV_Target {
@@ -1396,57 +1404,23 @@ float4 PS(VSOUT i) : SV_Target {
     float2 chunk_clamped = clamp(chunk_co,
                                  float2(0, 0),
                                  float2(CW - 0.001, CH - 0.001));
-    int2   chunk_xy = int2(floor(chunk_clamped));
-    float2 corner_uv = frac(chunk_clamped);
-
-    float wx = corner_uv.x, wy = corner_uv.y;
-    float w00, w10, w01, w11;
-    if (wx + wy <= 1.0) {
-        w00 = 1.0 - wx - wy;
-        w10 = wx;
-        w01 = wy;
-        w11 = 0.0;
-    } else {
-        w00 = 0.0;
-        w10 = 1.0 - wy;
-        w01 = 1.0 - wx;
-        w11 = wx + wy - 1.0;
-    }
     float slope_w = saturate((0.82 - abs(normalize(i.n).y)) / 0.35);
 
     float3 final = float3(0.0, 0.0, 0.0);
     float  weight_sum = 0.0;
+    float2 inv_weight_size = weight_size.zw;
+    float2 weight_uv = (chunk_clamped * 32.0 + 0.5) * inv_weight_size;
+    float2 edge_uv = 0.5 * inv_weight_size;
+    weight_uv = clamp(weight_uv, edge_uv, 1.0 - edge_uv);
 
     [loop]
-    for (int layer = 0; layer < 16; ++layer) {
-        float4 idx_norm = chunk_idx.Load(int4(chunk_xy, layer, 0));
-        float4 idx255   = round(idx_norm * 255.0);
-        if (idx255.x > 254.5) break;
-
-        float4 bln_norm = chunk_blend.Load(int4(chunk_xy, layer, 0));
-        float4 mask_info = chunk_uv.Load(int4(chunk_xy, layer, 0));
-        float2 mask_origin = mask_info.xy;
-        float2 mask_scale = (mask_info.z > 0.0 && mask_info.w > 0.0)
-            ? mask_info.zw
-            : splat_params.zw;
-        float4 bln = saturate((bln_norm * 255.0) / splat_params.x);
-        float2 mask_uv = mask_origin + corner_uv * (mask_scale * 2.0);
-        float mask_w = splat_mask.SampleLevel(smp_point, mask_uv, 0).r;
-        if (mask_w <= 0.001) continue;
-
-        float3 c00 = sample_material((int)idx255.x, world_xy, slope_w);
-        float3 c10 = sample_material((int)idx255.y, world_xy, slope_w);
-        float3 c01 = sample_material((int)idx255.z, world_xy, slope_w);
-        float3 c11 = sample_material((int)idx255.w, world_xy, slope_w);
-
-        float3 lc = c00 * w00 + c10 * w10 + c01 * w01 + c11 * w11;
-        float lw = mask_w * saturate(
-              bln.x * w00 + bln.y * w10
-            + bln.z * w01 + bln.w * w11);
-
-        if (lw <= 0.001) continue;
-        final += lc * lw;
-        weight_sum += lw;
+    for (int mat = 0; mat < 32; ++mat) {
+        if (mat >= (int)chunk_grid_size.z) break;
+        float w = material_weight.SampleLevel(
+            smp_point, float3(weight_uv, mat), 0).r;
+        if (w <= 0.001) continue;
+        final += sample_material(mat, world_xy, slope_w) * w;
+        weight_sum += w;
     }
 
     if (weight_sum > 0.001) {
@@ -2390,7 +2364,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             m.is_terrain && R.ok &&
             R.lod_diffuse_array && R.lod_detail_array &&
             R.chunk_idx_array && R.chunk_blend_array && R.chunk_uv_array &&
-            R.splat_mask && R.lightmap &&
+            R.splat_mask && R.lightmap && R.material_weight_array &&
             mp.vs_terrain && mp.ps_terrain && mp.cbuffer_terrain;
 
         if (use_terrain_shader) {
@@ -2410,6 +2384,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                     float grid_size[4];
                     float splat_params[4];
                     float mesh_xform[4];
+                    float weight_size[4];
                     float material_params[32][4];
                 } t{};
                 t.origin_extent[0] = R.world_origin_x;
@@ -2431,6 +2406,12 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 t.mesh_xform[1] = 1.0f;
                 t.mesh_xform[2] = R.mesh_to_world_x;
                 t.mesh_xform[3] = R.mesh_to_world_z;
+                t.weight_size[0] = (float)R.weight_w;
+                t.weight_size[1] = (float)R.weight_h;
+                t.weight_size[2] = (R.weight_w > 0)
+                    ? 1.0f / (float)R.weight_w : 1.0f;
+                t.weight_size[3] = (R.weight_h > 0)
+                    ? 1.0f / (float)R.weight_h : 1.0f;
                 for (int mi = 0; mi < 32; ++mi) {
                     for (int mj = 0; mj < 4; ++mj) {
                         t.material_params[mi][mj] =
@@ -2446,23 +2427,25 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             ctx->VSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
             ctx->PSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
 
-            ID3D11ShaderResourceView* srvs[7] = {
+            ID3D11ShaderResourceView* srvs[8] = {
                 R.lod_diffuse_array,
                 R.chunk_idx_array,
                 R.chunk_blend_array,
                 R.chunk_uv_array,
                 R.splat_mask,
                 R.lightmap,
-                R.lod_detail_array
+                R.lod_detail_array,
+                R.material_weight_array
             };
-            ctx->PSSetShaderResources(0, 7, srvs);
+            ctx->PSSetShaderResources(0, 8, srvs);
 
             ctx->DrawIndexed(m.index_count, 0, 0);
 
-            ID3D11ShaderResourceView* nulls[7] = {
-                nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr
+            ID3D11ShaderResourceView* nulls[8] = {
+                nullptr, nullptr, nullptr, nullptr,
+                nullptr, nullptr, nullptr, nullptr
             };
-            ctx->PSSetShaderResources(0, 7, nulls);
+            ctx->PSSetShaderResources(0, 8, nulls);
             ID3D11Buffer* null_cb = nullptr;
             ctx->VSSetConstantBuffers(2, 1, &null_cb);
             ctx->PSSetConstantBuffers(2, 1, &null_cb);

@@ -222,16 +222,15 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
         }
         uint32_t mid_raw = 0;
         if (!w.u32(mid_raw)) {
-            out.error = "LOD base intensity bits";
+            out.error = "LOD material flags";
             return false;
         }
         out.lods[k].material_flags = mid_raw;
-        std::memcpy(&out.lods[k].params[0][1], &mid_raw,
-                    sizeof(out.lods[k].params[0][1]));
-        if (!w.f32(out.lods[k].params[0][2])) {
-            out.error = "LOD base extra";
+        if (!w.f32(out.lods[k].params[0][1])) {
+            out.error = "LOD base weight";
             return false;
         }
+        out.lods[k].params[0][2] = 0.0f;
         for (int s = 3; s < 6; ++s) {
             if (!w.null_str(out.lods[k].strs[s])) {
                 out.error = "LOD[" + std::to_string(k) + "].str["

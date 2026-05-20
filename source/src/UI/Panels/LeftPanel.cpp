@@ -6,6 +6,8 @@
 
 #include "../../ISO/IsoDump.h"
 #include "../../Level/LevelLoader.h"
+#include "../../animations/AnimDataFile.h"
+#include "../../animations/AnimPlayer.h"
 
 #include "../../Lua.h"
 #include "../../Utilities/Progress.h"
@@ -67,14 +69,17 @@ void load_flat_asset_entry(const FlatAssetEntry& e, int kind) {
         if (S.files[i].index == e.file_index) {
             S.selected_file_index = (int)i;
             if (kind == 0) {
+                S.show_gdb_render = false;
                 g_pending_mdl_full_path = e.full_path;
                 g_pending_mdl_load = true;
                 g_pending_mdl_index = (int)i;
             } else if (kind == 1) {
+                S.show_gdb_render = false;
                 g_pending_tex_load = true;
                 g_pending_tex_index = (int)i;
             } else if (kind == 2) {
 
+                S.show_gdb_render = false;
                 open_audio_player_for_selected((int)i);
             }
             break;
@@ -99,6 +104,7 @@ struct DrillState {
 };
 
 DrillState g_bnk_drill;
+DrillState g_tree_drill;
 
 void drill_step_anim(DrillState& d, float dt) {
     constexpr float kSpeed = 7.0f;
@@ -184,6 +190,38 @@ bool drill_settled(const DrillState& d) {
     return std::abs(d.anim_t - d.target_t) < 0.001f;
 }
 
+}
+
+void open_tree_bnk_drill_from_entry(const std::string& parent_bnk_path,
+                                    int file_index,
+                                    const std::string& entry_name) {
+    if (parent_bnk_path.empty() || file_index < 0) return;
+
+    const std::filesystem::path tmpdir =
+        std::filesystem::temp_directory_path() / "f2_tree_bnk_drill";
+    std::error_code ec;
+    std::filesystem::create_directories(tmpdir, ec);
+
+    const std::string temp_name =
+        std::to_string(std::hash<std::string>{}(
+            parent_bnk_path + "::" + entry_name + "::" +
+            std::to_string(file_index))) + ".bnk";
+    const std::filesystem::path tmp_bnk = tmpdir / temp_name;
+
+    try {
+        extract_one(parent_bnk_path, file_index, tmp_bnk.string());
+        drill_open_bnk(g_tree_drill, tmp_bnk.string(), true);
+        const std::string title =
+            std::filesystem::path(entry_name).filename().string();
+        if (!title.empty()) {
+            g_tree_drill.title = title;
+        }
+    } catch (const std::exception& e) {
+        OutputLog::error(std::string("File tree BNK open failed: ") +
+                         e.what());
+    } catch (...) {
+        OutputLog::error("File tree BNK open failed.");
+    }
 }
 
 #ifdef _WIN32
@@ -665,16 +703,25 @@ void draw_left_panel() {
                                                    ln.begin(), ::tolower);
                                     if (ln.size() >= 4 &&
                                         ln.rfind(".mdl") == ln.size() - 4) {
+                                        S.show_gdb_render = false;
                                         g_pending_mdl_full_path = it.name;
                                         g_pending_mdl_load = true;
                                         g_pending_mdl_index = (int)j;
                                     } else if (ln.size() >= 4 &&
                                                ln.rfind(".tex") == ln.size() - 4) {
+                                        S.show_gdb_render = false;
                                         g_pending_tex_load = true;
                                         g_pending_tex_index = (int)j;
                                     } else if (ln.size() >= 4 &&
+                                               ln.rfind(".gdb") == ln.size() - 4) {
+                                        open_gdb_viewer_for_bnk_entry(
+                                            g_bnk_drill.bnk_path,
+                                            it.index,
+                                            it.name);
+                                    } else if (ln.size() >= 4 &&
                                                ln.rfind(".wav") == ln.size() - 4) {
 
+                                        S.show_gdb_render = false;
                                         open_audio_player_for_selected((int)j);
                                     }
                                     break;
@@ -683,6 +730,7 @@ void draw_left_panel() {
                         } else if (g_bnk_drill.kind == DrillKind::Adb) {
                             S.viewing_adb = true;
                             S.viewing_lua = false;
+                            S.show_gdb_render = false;
                             S.selected_bnk.clear();
                             S.global_search.clear();
                             S.files.clear();
@@ -698,6 +746,7 @@ void draw_left_panel() {
 
                             S.viewing_lua = true;
                             S.viewing_adb = false;
+                            S.show_gdb_render = false;
                             S.selected_bnk.clear();
                             S.global_search.clear();
                             S.files.clear();
@@ -729,12 +778,13 @@ void draw_left_panel() {
 #endif
 
                                 S.lua_preview_selected = idx;
-                                S.lua_preview_title    = lua_title;
-                                S.lua_preview_content.clear();
-                                S.lua_preview_loading = true;
-                                S.show_lua_render = true;
+                            S.lua_preview_title    = lua_title;
+                            S.lua_preview_content.clear();
+                            S.lua_preview_loading = true;
+                            S.show_lua_render = true;
+                            S.show_gdb_render = false;
 
-                                progress_open(
+                            progress_open(
                                     0,
                                     "Decompiling " + lua_title + "...");
                                 std::thread([lua_path]() {
@@ -771,51 +821,199 @@ void draw_left_panel() {
         }
 
         if (s_active_tab == 1) {
+            drill_step_anim(g_tree_drill, ImGui::GetIO().DeltaTime);
+
+            const ImVec2 avail = ImGui::GetContentRegionAvail();
+            const float page_w = avail.x;
+            const float page_h = avail.y;
+            const float kVisEps = 0.0001f;
+            const bool a_visible = g_tree_drill.anim_t < 1.0f - kVisEps;
+            const bool b_visible = g_tree_drill.anim_t > 0.0f + kVisEps;
+
             ImGui::BeginChild("file_tree", ImVec2(0, 0), false);
+            ImGui::BeginChild("##tree_drill_container",
+                              ImVec2(page_w, page_h),
+                              false,
+                              ImGuiWindowFlags_NoScrollbar |
+                              ImGuiWindowFlags_NoScrollWithMouse);
+            ImGui::SetScrollX(g_tree_drill.anim_t * page_w);
 
-            if (g_tree_last_root_dir != S.root_dir && !S.bnk_paths.empty()
-                && !g_tree_building.load() && !g_tree_built.load())
-            {
-                start_tree_build_for_root(S.root_dir, S.bnk_paths);
-            }
-
-            TreeNode& tree_render_root = g_tree_root;
-
-            if (g_tree_building.load()) {
+            ImGui::BeginChild("##tree_page_a", ImVec2(page_w, page_h), false);
+            if (a_visible) {
+                if (g_tree_last_root_dir != S.root_dir && !S.bnk_paths.empty()
+                    && !g_tree_building.load() && !g_tree_built.load())
                 {
-                    ImVec2 avail = ImGui::GetContentRegionAvail();
-                    float elapsed = (float)ImGui::GetTime() - g_tree_build_start_time;
+                    start_tree_build_for_root(S.root_dir, S.bnk_paths);
+                }
+
+                TreeNode& tree_render_root = g_tree_root;
+
+                if (g_tree_building.load()) {
+                    ImVec2 inner_avail = ImGui::GetContentRegionAvail();
+                    float elapsed =
+                        (float)ImGui::GetTime() - g_tree_build_start_time;
 
                     float dot_cycle = fmodf(elapsed * 2.0f, 4.0f);
                     int dot_count = (int)dot_cycle;
                     std::string dots(dot_count, '.');
                     std::string loading_text = "Loading file tree" + dots;
 
-                    ImVec2 text_size = ImGui::CalcTextSize(loading_text.c_str());
-                    ImVec2 pos((avail.x - text_size.x) * 0.5f, (avail.y - text_size.y) * 0.5f);
+                    ImVec2 text_size =
+                        ImGui::CalcTextSize(loading_text.c_str());
+                    ImVec2 pos((inner_avail.x - text_size.x) * 0.5f,
+                               (inner_avail.y - text_size.y) * 0.5f);
                     if (pos.x < 0) pos.x = 0;
                     if (pos.y < 0) pos.y = 0;
                     ImGui::SetCursorPos(pos);
                     ImGui::TextUnformatted(loading_text.c_str());
 
                     if (elapsed > 10.0f) {
-                        ImVec2 warning_size = ImGui::CalcTextSize("(this may take some time)");
-                        ImVec2 warning_pos((avail.x - warning_size.x) * 0.5f, pos.y + text_size.y + 10.0f);
+                        ImVec2 warning_size =
+                            ImGui::CalcTextSize("(this may take some time)");
+                        ImVec2 warning_pos(
+                            (inner_avail.x - warning_size.x) * 0.5f,
+                            pos.y + text_size.y + 10.0f);
                         if (warning_pos.x < 0) warning_pos.x = 0;
                         ImGui::SetCursorPos(warning_pos);
                         ImGui::TextUnformatted("(this may take some time)");
                     }
-                }
-            } else if (g_tree_built.load()) {
-                for (auto& pair : tree_render_root.children) {
+                } else if (g_tree_built.load()) {
+                    for (auto& pair : tree_render_root.children) {
 #ifdef _WIN32
-                    draw_tree_node(pair.second, device);
+                        draw_tree_node(pair.second, device);
 #else
-                    draw_tree_node(pair.second);
+                        draw_tree_node(pair.second);
 #endif
+                    }
                 }
             }
+            ImGui::EndChild();
 
+            ImGui::SameLine(0.0f, 0.0f);
+
+            ImGui::BeginChild("##tree_page_b", ImVec2(page_w, page_h), false);
+            if (b_visible) {
+                const bool b_can_click =
+                    (g_tree_drill.target_t == 1.0f) &&
+                    drill_settled(g_tree_drill);
+
+                ImGui::PushStyleColor(ImGuiCol_Button,
+                                      ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                                      ImVec4(0.30f, 0.45f, 0.65f, 0.40f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                                      ImVec4(0.40f, 0.60f, 0.90f, 0.55f));
+                if (ImGui::Button(ICON_FA_ARROW_LEFT "##tree_drill_back")) {
+                    drill_back(g_tree_drill);
+                }
+                ImGui::PopStyleColor(3);
+                ImGui::SameLine();
+                ImGui::TextUnformatted(g_tree_drill.title.c_str());
+
+                ImGui::SetNextItemWidth(-1);
+                ImGui::InputTextWithHint("##tree_drill_filter", "Filter",
+                                         &g_tree_drill.filter);
+
+                std::string flt = g_tree_drill.filter;
+                std::transform(flt.begin(), flt.end(), flt.begin(),
+                               ::tolower);
+                std::vector<int> vis;
+                vis.reserve(g_tree_drill.items.size());
+                for (size_t i = 0; i < g_tree_drill.items.size(); ++i) {
+                    if (flt.empty()) {
+                        vis.push_back((int)i);
+                    } else {
+                        std::string n =
+                            std::filesystem::path(g_tree_drill.items[i].name)
+                                .filename().string();
+                        std::transform(n.begin(), n.end(), n.begin(),
+                                       ::tolower);
+                        if (n.find(flt) != std::string::npos) {
+                            vis.push_back((int)i);
+                        }
+                    }
+                }
+
+                ImGui::BeginChild("##tree_drill_list", ImVec2(0, 0), false);
+                ImGuiListClipper drill_clipper;
+                drill_clipper.Begin((int)vis.size());
+                while (drill_clipper.Step()) {
+                    for (int r = drill_clipper.DisplayStart;
+                         r < drill_clipper.DisplayEnd; ++r) {
+                        int idx = vis[(size_t)r];
+                        const BNKItemUI& it =
+                            g_tree_drill.items[(size_t)idx];
+                        ImGui::PushID(r);
+
+                        std::string label =
+                            std::filesystem::path(it.name).filename().string();
+                        const bool selected =
+                            (S.selected_bnk == g_tree_drill.bnk_path &&
+                             S.selected_file_index >= 0 &&
+                             S.selected_file_index < (int)S.files.size() &&
+                             S.files[(size_t)S.selected_file_index].index ==
+                                 it.index);
+                        if (ImGui::Selectable(
+                                label.c_str(), selected,
+                                ImGuiSelectableFlags_SpanAllColumns) &&
+                            b_can_click) {
+                            if (S.selected_bnk != g_tree_drill.bnk_path) {
+                                S.viewing_adb = false;
+                                S.viewing_lua = false;
+                                S.global_search.clear();
+                                S.selected_nested_bnk.clear();
+                                S.selected_nested_index = -1;
+                                pick_bnk(g_tree_drill.bnk_path);
+                            }
+                            if (g_tree_drill.from_nested) {
+                                S.selected_nested_temp_path =
+                                    g_tree_drill.bnk_path;
+                                S.selected_nested_index = 0;
+                            }
+
+                            for (size_t j = 0; j < S.files.size(); ++j) {
+                                if (S.files[j].index == it.index) {
+                                    S.selected_file_index = (int)j;
+                                    std::string ln = it.name;
+                                    std::transform(ln.begin(), ln.end(),
+                                                   ln.begin(), ::tolower);
+                                    if (ln.size() >= 4 &&
+                                        ln.rfind(".mdl") == ln.size() - 4) {
+                                        g_pending_mdl_full_path = it.name;
+                                        g_pending_mdl_load = true;
+                                        g_pending_mdl_index = (int)j;
+                                    } else if (ln.size() >= 4 &&
+                                               ln.rfind(".tex") ==
+                                                   ln.size() - 4) {
+                                        g_pending_tex_load = true;
+                                        g_pending_tex_index = (int)j;
+                                    } else if (ln.size() >= 4 &&
+                                               ln.rfind(".wav") ==
+                                                   ln.size() - 4) {
+                                        open_audio_player_for_selected((int)j);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+
+                        file_hex_context_menu(g_tree_drill.bnk_path,
+                                              it.index,
+                                              g_tree_drill.from_nested,
+                                              it.name);
+                        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                            ImGui::BeginTooltip();
+                            ImGui::TextUnformatted(it.name.c_str());
+                            ImGui::EndTooltip();
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                drill_clipper.End();
+                ImGui::EndChild();
+            }
+            ImGui::EndChild();
+            ImGui::EndChild();
             ImGui::EndChild();
         }
 
@@ -946,11 +1144,36 @@ void draw_left_panel() {
             ImGui::InputTextWithHint("##anim_filter", "Filter",
                                      &S.anim_filter);
 
+            const uint32_t want_bones = g_mp.bone_count;
+            const bool can_filter_by_skeleton =
+                Anim::global_data_file().is_open() &&
+                g_mp.has_model && want_bones > 0;
+            if (can_filter_by_skeleton) {
+                ImGui::Checkbox("Same track count",
+                                &S.anim_compatible_only);
+                if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Show clips whose decoded track count matches this "
+                        "model's %u bones. This is only a size gate, not a "
+                        "proof that the clip belongs to this rig.",
+                        want_bones);
+                }
+            } else {
+                ImGui::TextDisabled("Load a skinned model to filter clips");
+            }
+            const bool filter_by_bones =
+                S.anim_compatible_only && can_filter_by_skeleton;
+
             std::vector<int> vis;
             vis.reserve(S.anim_clips.size());
             std::string flow = S.anim_filter;
             std::transform(flow.begin(), flow.end(), flow.begin(), ::tolower);
             for (size_t i = 0; i < S.anim_clips.size(); ++i) {
+                if (filter_by_bones) {
+                    auto h = Anim::global_data_file().parse_clip_header(
+                        S.anim_clips[i]);
+                    if (!h.ok || h.bone_count != want_bones) continue;
+                }
                 if (flow.empty()) {
                     vis.push_back((int)i);
                 } else {
@@ -961,10 +1184,18 @@ void draw_left_panel() {
                     }
                 }
             }
-            if (S.dev_mode) {
-                ImGui::TextDisabled("%d / %zu", (int)vis.size(),
-                                    S.anim_clips.size());
-                ImGui::Separator();
+            {
+                ImGui::TextDisabled("%d / %zu%s",
+                                    (int)vis.size(),
+                                    S.anim_clips.size(),
+                                    filter_by_bones ? " track-count match" : "");
+                if (filter_by_bones) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(%u bones)", want_bones);
+                }
+                if (S.dev_mode) {
+                    ImGui::Separator();
+                }
             }
             ImGui::BeginChild("anim_list", ImVec2(0, 0), false);
             if (S.anim_clips.empty()) {
@@ -986,16 +1217,30 @@ void draw_left_panel() {
                         if (ImGui::Selectable(label, selected,
                                               ImGuiSelectableFlags_SpanAllColumns)) {
                             S.anim_selected_clip = vis[(size_t)row];
+                            Anim::global_player().play(
+                                &S.anim_clips[(size_t)vis[(size_t)row]],
+                                Anim::global_player().is_loop());
                         }
                         if (!S.hide_tooltips && ImGui::IsItemHovered()) {
                             ImGui::BeginTooltip();
                             ImGui::TextUnformatted(c.name.c_str());
                             ImGui::Text("Duration: %.3f s  (%.0f fps)",
                                         dur_s, c.fps);
+                            if (Anim::global_data_file().is_open()) {
+                                auto h = Anim::global_data_file().parse_clip_header(c);
+                                if (h.ok) {
+                                    ImGui::Text("Tracks: %u / model bones: %u%s",
+                                                h.bone_count, want_bones,
+                                                h.bone_count == want_bones
+                                                    ? "  track-count match"
+                                                    : "");
+                                }
+                            }
                             ImGui::Text("Events: %zu", c.events.size());
                             if (S.dev_mode) {
-                                ImGui::Text("offset=0x%08X len=%u",
-                                            c.data_offset, c.data_length);
+                                ImGui::Text("offset=0x%08X frames=%u bytes=%u",
+                                            c.data_offset, c.toc_frame_count,
+                                            c.data_size_bytes);
                                 ImGui::Text("key0=0x%08X key1=0x%08X",
                                             c.key0, c.key1);
                             }

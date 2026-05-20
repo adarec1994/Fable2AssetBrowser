@@ -65,16 +65,30 @@ void draw_file_table() {
                 if (ImGui::Selectable(base.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick)) {
                     S.selected_file_index = i;
                     if (is_mdl(S.files[i].name) && !S.viewing_adb && !S.viewing_lua) {
+                        S.show_gdb_render = false;
                         g_pending_mdl_load = true;
                         g_pending_mdl_index = i;
                     }
+                    if (is_gdb_file(S.files[i].name) &&
+                        !S.viewing_adb && !S.viewing_lua)
+                    {
+                        bool is_nested = (S.selected_nested_index != -1 &&
+                                          !S.selected_nested_temp_path.empty());
+                        const std::string& bp =
+                            is_nested ? S.selected_nested_temp_path
+                                      : S.selected_bnk;
+                        open_gdb_viewer_for_bnk_entry(
+                            bp, S.files[i].index, S.files[i].name);
+                    }
                     if (ImGui::IsMouseDoubleClicked(0) && is_tex(S.files[i].name)) {
+                        S.show_gdb_render = false;
                         g_pending_tex_load = true;
                         g_pending_tex_index = i;
                     }
 
                     if (ImGui::IsMouseDoubleClicked(0) && is_audio_file(S.files[i].name)
                         && !S.viewing_adb && !S.viewing_lua) {
+                        S.show_gdb_render = false;
                         open_audio_player_for_selected(i);
                     }
                 }

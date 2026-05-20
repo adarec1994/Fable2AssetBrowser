@@ -144,6 +144,7 @@ void Clear() {
     release_srv(s.chunk_uv_array);
     release_srv(s.splat_mask);
     release_srv(s.lightmap);
+    release_srv(s.material_weight_array);
     s = Resources{};
 #endif
 }
@@ -174,7 +175,7 @@ bool Build(ID3D11Device*                                       device,
     for (int i = 0; i < kMaxMaterials; ++i) {
         R.material_params[i][0] = 0.125f;
         R.material_params[i][1] = 0.125f;
-        R.material_params[i][2] = 1.0f;
+        R.material_params[i][2] = 0.0f;
         R.material_params[i][3] = 1.0f;
     }
     for (size_t i = 0; i < lod_thumbs.size() && i < kMaxMaterials; ++i) {
@@ -187,9 +188,7 @@ bool Build(ID3D11Device*                                       device,
                 ? e.detail_tile_scale : base_scale;
         R.material_params[i][0] = base_scale;
         R.material_params[i][1] = detail_scale;
-        R.material_params[i][2] =
-            (e.base_intensity > 0.0f && e.base_intensity < 16.0f)
-                ? e.base_intensity : 1.0f;
+        R.material_params[i][2] = e.srv_detail_diffuse ? 1.0f : 0.0f;
         R.material_params[i][3] =
             (e.detail_intensity > 0.0f && e.detail_intensity < 16.0f)
                 ? e.detail_intensity : 1.0f;
@@ -375,6 +374,9 @@ bool Build(ID3D11Device*                                       device,
         size_t truncated_records = 0;
         float atlas_min_u =  1e30f, atlas_min_v =  1e30f;
         float atlas_max_u = -1e30f, atlas_max_v = -1e30f;
+        size_t corner_refs_resolved = 0;
+        size_t corner_refs_remapped = 0;
+        size_t corner_refs_oob = 0;
 
         const size_t expected_chunks = size_t(CW) * size_t(CH);
         for (size_t ci = 0; ci < parsed.chunks.size() && ci < expected_chunks; ++ci) {
@@ -392,13 +394,25 @@ bool Build(ID3D11Device*                                       device,
                 const size_t texel = size_t(cy) * CW + size_t(cx);
                 const size_t base = (size_t(li) * CW * CH + texel) * 4;
                 const size_t uv_base = (size_t(li) * CW * CH + texel) * 4;
-                const uint8_t material =
-                    (layer.material_idx < 255u)
-                        ? uint8_t(std::min<uint32_t>(
-                              layer.material_idx,
-                              uint32_t(std::max(0, R.lod_count - 1))))
-                        : 0xFFu;
                 for (int i = 0; i < 4; ++i) {
+                    uint32_t mat_idx = layer.material_idx;
+                    const uint32_t corner_layer_idx = layer.texture_idx[i];
+                    if (corner_layer_idx < chunk.layers.size()) {
+                        ++corner_refs_resolved;
+                        mat_idx = chunk.layers[size_t(corner_layer_idx)].material_idx;
+                        if (mat_idx != layer.material_idx) {
+                            ++corner_refs_remapped;
+                        }
+                    } else {
+                        ++corner_refs_oob;
+                    }
+
+                    const uint8_t material =
+                        (mat_idx < 255u)
+                            ? uint8_t(std::min<uint32_t>(
+                                  mat_idx,
+                                  uint32_t(std::max(0, R.lod_count - 1))))
+                            : 0xFFu;
                     idx_data[base + i] = material;
                     bln_data[base + i] = layer.blend[i];
                     if (material < material_used.size()) {
@@ -444,6 +458,14 @@ bool Build(ID3D11Device*                                       device,
                 s << (used_count == 1 ? " " : ", ") << i;
             }
             s << " (" << used_count << "/" << material_used.size() << ")";
+            OutputLog::info(s.str());
+        }
+        {
+            std::ostringstream s;
+            s << "TerrainSplat: corner layer refs resolved="
+              << corner_refs_resolved
+              << " remapped=" << corner_refs_remapped
+              << " oob=" << corner_refs_oob;
             OutputLog::info(s.str());
         }
         if (truncated_records) {
@@ -620,6 +642,195 @@ bool Build(ID3D11Device*                                       device,
         } else {
             OutputLog::warn("TerrainSplat: no PF99 layer mask atlas");
         }
+    }
+
+    {
+        const bool has_pf99 =
+            !parsed.splat_indices.empty() &&
+            parsed.splat_w > 0 && parsed.splat_h > 0 &&
+            parsed.splat_indices.size() ==
+                size_t(parsed.splat_w) * size_t(parsed.splat_h);
+        if (!has_pf99) {
+            OutputLog::warn(
+                "TerrainSplat: cannot build global material weights without PF99 mask");
+            Clear();
+            return false;
+        }
+
+        const int CW = R.chunk_w;
+        const int CH = R.chunk_h;
+        const int N = std::min<int>(std::max(0, R.lod_count),
+                                    kMaxMaterials);
+        if (CW <= 0 || CH <= 0 || N <= 0) {
+            Clear();
+            return false;
+        }
+
+        R.weight_w = CW * 32 + 1;
+        R.weight_h = CH * 32 + 1;
+        const size_t area =
+            size_t(R.weight_w) * size_t(R.weight_h);
+        std::vector<float> weights(size_t(N) * area, 0.0f);
+
+        const auto mask_sample = [&](const Level::EhfChunkLayer& layer,
+                                     int px,
+                                     int py) -> float
+        {
+            const int ox = std::clamp(
+                int(std::floor(layer.tile_uv[0] *
+                               float(parsed.splat_w))),
+                0, int(parsed.splat_w) - 1);
+            const int oy = std::clamp(
+                int(std::floor(layer.tile_uv[1] *
+                               float(parsed.splat_h))),
+                0, int(parsed.splat_h) - 1);
+            const int sx = std::clamp(ox + px, 0,
+                                      int(parsed.splat_w) - 1);
+            const int sy = std::clamp(oy + py, 0,
+                                      int(parsed.splat_h) - 1);
+            return float(parsed.splat_indices[
+                       size_t(sy) * size_t(parsed.splat_w) + size_t(sx)])
+                 / 255.0f;
+        };
+
+        size_t global_contribs = 0;
+        const size_t expected_chunks = size_t(CW) * size_t(CH);
+        for (size_t ci = 0;
+             ci < parsed.chunks.size() && ci < expected_chunks;
+             ++ci)
+        {
+            const int cx = int(ci / size_t(CH));
+            const int cy = int(ci % size_t(CH));
+            const auto& chunk = parsed.chunks[ci];
+            const int layer_count =
+                std::min<int>((int)chunk.layers.size(), kMaxLayers);
+
+            for (int li = 0; li < layer_count; ++li) {
+                const auto& layer = chunk.layers[size_t(li)];
+                int mat_corner[4] = {};
+                for (int i = 0; i < 4; ++i) {
+                    uint32_t mat_idx = layer.material_idx;
+                    const uint32_t corner_layer_idx = layer.texture_idx[i];
+                    if (corner_layer_idx < chunk.layers.size()) {
+                        mat_idx =
+                            chunk.layers[size_t(corner_layer_idx)]
+                                .material_idx;
+                    }
+                    mat_corner[i] = std::clamp<int>(
+                        int(mat_idx), 0, N - 1);
+                }
+
+                for (int py = 0; py <= 32; ++py) {
+                    const float fy = float(py) / 32.0f;
+                    for (int px = 0; px <= 32; ++px) {
+                        const float fx = float(px) / 32.0f;
+                        const float cwx[4] = {
+                            (1.0f - fx) * (1.0f - fy),
+                                      fx  * (1.0f - fy),
+                            (1.0f - fx) *        fy,
+                                      fx  *        fy
+                        };
+                        const float blend =
+                            (float(layer.blend[0]) * cwx[0] +
+                             float(layer.blend[1]) * cwx[1] +
+                             float(layer.blend[2]) * cwx[2] +
+                             float(layer.blend[3]) * cwx[3]) / 3.0f;
+                        const float layer_w = mask_sample(layer, px, py) *
+                            std::clamp(blend, 0.0f, 1.0f);
+                        if (layer_w <= 0.0001f) continue;
+
+                        const int gx = cx * 32 + px;
+                        const int gy = cy * 32 + py;
+                        if (gx < 0 || gy < 0 ||
+                            gx >= R.weight_w || gy >= R.weight_h) {
+                            continue;
+                        }
+                        const size_t dst =
+                            size_t(gy) * size_t(R.weight_w) + size_t(gx);
+                        for (int k = 0; k < 4; ++k) {
+                            if (cwx[k] <= 0.0001f) continue;
+                            weights[size_t(mat_corner[k]) * area + dst] +=
+                                layer_w * cwx[k];
+                        }
+                        ++global_contribs;
+                    }
+                }
+            }
+        }
+
+        size_t normalized_pixels = 0;
+        size_t empty_pixels = 0;
+        for (size_t p = 0; p < area; ++p) {
+            float sum = 0.0f;
+            for (int m = 0; m < N; ++m) {
+                sum += weights[size_t(m) * area + p];
+            }
+            if (sum > 0.00001f) {
+                const float inv = 1.0f / sum;
+                for (int m = 0; m < N; ++m) {
+                    weights[size_t(m) * area + p] *= inv;
+                }
+                ++normalized_pixels;
+            } else {
+                weights[p] = 1.0f;
+                ++empty_pixels;
+            }
+        }
+
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width            = UINT(R.weight_w);
+        td.Height           = UINT(R.weight_h);
+        td.MipLevels        = 1;
+        td.ArraySize        = UINT(N);
+        td.Format           = DXGI_FORMAT_R32_FLOAT;
+        td.SampleDesc.Count = 1;
+        td.Usage            = D3D11_USAGE_DEFAULT;
+        td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+
+        std::vector<D3D11_SUBRESOURCE_DATA> subs(static_cast<size_t>(N));
+        for (int s = 0; s < N; ++s) {
+            subs[size_t(s)].pSysMem =
+                weights.data() + size_t(s) * area;
+            subs[size_t(s)].SysMemPitch =
+                UINT(R.weight_w * sizeof(float));
+            subs[size_t(s)].SysMemSlicePitch = 0;
+        }
+
+        ID3D11Texture2D* tex = nullptr;
+        if (FAILED(device->CreateTexture2D(&td, subs.data(), &tex))) {
+            OutputLog::warn(
+                "TerrainSplat: failed to create global material weights");
+            Clear();
+            return false;
+        }
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = DXGI_FORMAT_R32_FLOAT;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        sd.Texture2DArray.MostDetailedMip = 0;
+        sd.Texture2DArray.MipLevels = 1;
+        sd.Texture2DArray.FirstArraySlice = 0;
+        sd.Texture2DArray.ArraySize = UINT(N);
+        if (FAILED(device->CreateShaderResourceView(
+                tex, &sd, &R.material_weight_array))) {
+            tex->Release();
+            OutputLog::warn(
+                "TerrainSplat: failed to create global material weight SRV");
+            Clear();
+            return false;
+        }
+        tex->Release();
+
+        OutputLog::info("TerrainSplat: global material weights "
+            + std::to_string(R.weight_w) + "x"
+            + std::to_string(R.weight_h) + " x "
+            + std::to_string(N) + " materials ("
+            + std::to_string(global_contribs)
+            + " layer samples, "
+            + std::to_string(normalized_pixels)
+            + " painted pixels, "
+            + std::to_string(empty_pixels)
+            + " fallback pixels)");
     }
 
     if (!lightmap_rgba.empty() && lightmap_w > 0 && lightmap_h > 0) {

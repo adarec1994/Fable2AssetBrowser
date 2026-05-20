@@ -9,6 +9,7 @@
 #include "imgui_hex.h"
 #include "../MDL/ModelParser.h"
 #include "../animations/AnimBank.h"
+#include "../Level/GdbParser.h"
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -69,6 +70,36 @@ struct FlatAssetEntry {
     int file_index;
     uint32_t size;
     bool from_nested;
+};
+
+struct GdbViewerRow {
+    std::string name;
+    std::string hash_name;
+    std::string parent_name;
+    std::string model_path_name;
+    std::string skeleton_file_name;
+    std::string retarget_skeleton_file_name;
+    std::vector<std::string> model_path_names;
+    std::vector<uint32_t> model_path_hashes;
+    std::vector<Gdb::DebugNode> debug_tree;
+    uint32_t marker = 0;
+    uint32_t record_index = 0;
+    uint32_t hash = 0;
+    uint32_t parent_hash = 0;
+    uint32_t model_path_hash = 0;
+    uint32_t skeleton_file_hash = 0;
+    uint32_t retarget_skeleton_file_hash = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float yaw = 0.0f;
+    float rot_x = 0.0f;
+    float rot_y = 0.0f;
+    float rot_z = 0.0f;
+    float scale = 1.0f;
+    bool has_rotation = false;
+    bool indexed_record = false;
+    bool transform_from_indexed_record = false;
 };
 
 struct State {
@@ -217,8 +248,14 @@ struct State {
 
     bool show_lua_render = false;
 
+    std::string gdb_view_title;
+    std::string gdb_view_filter;
+    std::vector<GdbViewerRow> gdb_view_rows;
+    bool show_gdb_render = false;
+
     std::vector<Anim::AnimClip> anim_clips;
     std::string                 anim_filter;
+    bool                        anim_compatible_only = true;
     int                         anim_selected_clip = -1;
 };
 

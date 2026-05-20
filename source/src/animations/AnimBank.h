@@ -19,6 +19,10 @@ struct AnimClip {
     uint32_t key1           = 0;
 
     uint32_t data_offset    = 0;
+    uint32_t toc_frame_count = 0;
+    uint32_t data_size_bytes = 0;
+
+    // Legacy UI alias. IDA shows this TOC field is frame count, not bytes.
     uint32_t data_length    = 0;
 
     float    fps            = 0.0f;

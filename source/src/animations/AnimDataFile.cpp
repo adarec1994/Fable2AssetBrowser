@@ -3,6 +3,7 @@
 #include "../UI/OutputLog.h"
 #include "../ISO/IsoMount.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 
@@ -136,19 +137,22 @@ AnimDataFile::ClipHeader AnimDataFile::parse_clip_header(const AnimClip& clip) c
     h.version       = read_u32_be(sp.data + 0x04);
     h.field_8       = read_u32_be(sp.data + 0x08);
     h.field_C       = read_u32_be(sp.data + 0x0C);
-    h.bone_count    = read_u32_be(sp.data + 0x10);
+    h.track_count   = h.field_C;
+    h.bone_count    = h.track_count;
+    h.frame_count   = read_u32_be(sp.data + 0x10);
     h.bone_idx_bits = read_u32_be(sp.data + 0x14);
     if (h.magic != kExpectedMagic || h.version != kExpectedVersion) {
 
         return h;
     }
 
-    if (h.field_C == 0) return h;
+    if (h.bone_count == 0 || h.frame_count == 0) return h;
     const size_t dir_off = 24;
-    const size_t dir_end = dir_off + (size_t)h.field_C * 4;
+    const size_t dir_end = dir_off + (size_t)h.bone_count * 4;
     if (dir_end > sp.size) return h;
-    h.bone_offsets.reserve(h.field_C);
-    for (uint32_t i = 0; i < h.field_C; ++i) {
+    h.packed_body_offset = dir_end;
+    h.bone_offsets.reserve(h.bone_count);
+    for (uint32_t i = 0; i < h.bone_count; ++i) {
         h.bone_offsets.push_back(read_u32_be(sp.data + dir_off + i * 4));
     }
     h.ok = true;
@@ -160,7 +164,11 @@ AnimDataFile::Span AnimDataFile::clip_bytes(const AnimClip& clip) const {
 
     if (clip.data_offset >= blob_.size()) return {nullptr, 0};
     const size_t remaining = blob_.size() - clip.data_offset;
-    return {blob_.data() + clip.data_offset, remaining};
+    size_t span = remaining;
+    if (clip.data_size_bytes != 0) {
+        span = std::min<size_t>(clip.data_size_bytes, remaining);
+    }
+    return {blob_.data() + clip.data_offset, span};
 }
 
 AnimDataFile& global_data_file() {

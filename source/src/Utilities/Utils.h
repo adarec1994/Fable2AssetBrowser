@@ -6,6 +6,7 @@
 bool is_audio_file(const std::string &n);
 bool is_tex_file(const std::string &n);
 bool is_mdl_file(const std::string &n);
+bool is_gdb_file(const std::string &n);
 bool is_texture_bnk_selected();
 bool is_model_bnk_selected();
 std::vector<std::string> filtered_bnk_paths();

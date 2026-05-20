@@ -8,6 +8,7 @@
 #include "GdbModelHashlist.h"
 #include "GdbParser.h"
 #include "../Havok/HavokPackfileReader.h"
+#include "../ISO/IsoMount.h"
 
 #include "../Utilities/State.h"
 #include "../Utilities/Utils.h"
@@ -37,6 +38,7 @@ extern const std::string& mp_last_decode_info();
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <thread>
 #include <iomanip>
 #include <climits>
@@ -222,6 +224,36 @@ struct StreamingModelCandidate {
     std::string display_name;
     const FlatAssetEntry* entry = nullptr;
     bool from_gmd = false;
+    std::string gmd_bnk_path;
+    int gmd_file_index = -1;
+};
+
+struct Vec3f {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
+struct Mat3f {
+    float m[9] = {
+        1.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 1.0f,
+    };
+};
+
+struct Xform3f {
+    Mat3f r;
+    Vec3f t;
+};
+
+struct GmdLayoutChild {
+    std::string raw_path;
+    std::string asset_key;
+    std::string resolved_path;
+    std::string resolved_key;
+    Xform3f local;
+    size_t offset = 0;
 };
 
 void mat3_mul(const float a[9], const float b[9], float out[9])
@@ -238,6 +270,186 @@ void mat3_mul(const float a[9], const float b[9], float out[9])
     for (int i = 0; i < 9; ++i) {
         out[i] = r[i];
     }
+}
+
+Vec3f vec3_add(const Vec3f& a, const Vec3f& b)
+{
+    return {a.x + b.x, a.y + b.y, a.z + b.z};
+}
+
+Vec3f vec3_sub(const Vec3f& a, const Vec3f& b)
+{
+    return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+float vec3_len2(const Vec3f& v)
+{
+    return v.x * v.x + v.y * v.y + v.z * v.z;
+}
+
+Vec3f mat3_apply(const Mat3f& a, const Vec3f& v)
+{
+    return {
+        a.m[0] * v.x + a.m[1] * v.y + a.m[2] * v.z,
+        a.m[3] * v.x + a.m[4] * v.y + a.m[5] * v.z,
+        a.m[6] * v.x + a.m[7] * v.y + a.m[8] * v.z,
+    };
+}
+
+Mat3f mat3_mul3(const Mat3f& a, const Mat3f& b)
+{
+    Mat3f out;
+    mat3_mul(a.m, b.m, out.m);
+    return out;
+}
+
+bool mat3_inverse(const Mat3f& a, Mat3f& out)
+{
+    const float* m = a.m;
+    const float c00 =  m[4] * m[8] - m[5] * m[7];
+    const float c01 = -m[3] * m[8] + m[5] * m[6];
+    const float c02 =  m[3] * m[7] - m[4] * m[6];
+    const float c10 = -m[1] * m[8] + m[2] * m[7];
+    const float c11 =  m[0] * m[8] - m[2] * m[6];
+    const float c12 = -m[0] * m[7] + m[1] * m[6];
+    const float c20 =  m[1] * m[5] - m[2] * m[4];
+    const float c21 = -m[0] * m[5] + m[2] * m[3];
+    const float c22 =  m[0] * m[4] - m[1] * m[3];
+    const float det = m[0] * c00 + m[1] * c01 + m[2] * c02;
+    if (!std::isfinite(det) || std::fabs(det) < 1e-8f) {
+        return false;
+    }
+    const float inv_det = 1.0f / det;
+    out.m[0] = c00 * inv_det;
+    out.m[1] = c10 * inv_det;
+    out.m[2] = c20 * inv_det;
+    out.m[3] = c01 * inv_det;
+    out.m[4] = c11 * inv_det;
+    out.m[5] = c21 * inv_det;
+    out.m[6] = c02 * inv_det;
+    out.m[7] = c12 * inv_det;
+    out.m[8] = c22 * inv_det;
+    return true;
+}
+
+Xform3f xform_compose(const Xform3f& a, const Xform3f& b)
+{
+    Xform3f out;
+    out.r = mat3_mul3(a.r, b.r);
+    out.t = vec3_add(a.t, mat3_apply(a.r, b.t));
+    return out;
+}
+
+bool xform_inverse(const Xform3f& a, Xform3f& out)
+{
+    if (!mat3_inverse(a.r, out.r)) return false;
+    out.t = mat3_apply(out.r, {-a.t.x, -a.t.y, -a.t.z});
+    return true;
+}
+
+Vec3f xform_apply_point(const Xform3f& a, const Vec3f& p)
+{
+    return vec3_add(a.t, mat3_apply(a.r, p));
+}
+
+Mat3f mat3_from_quat(float qx, float qy, float qz, float qw)
+{
+    const float len =
+        std::sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+    Mat3f out;
+    if (!std::isfinite(len) || len < 1e-6f) {
+        return out;
+    }
+    qx /= len;
+    qy /= len;
+    qz /= len;
+    qw /= len;
+
+    const float xx = qx * qx;
+    const float yy = qy * qy;
+    const float zz = qz * qz;
+    const float xy = qx * qy;
+    const float xz = qx * qz;
+    const float yz = qy * qz;
+    const float wx = qw * qx;
+    const float wy = qw * qy;
+    const float wz = qw * qz;
+
+    out.m[0] = 1.0f - 2.0f * (yy + zz);
+    out.m[1] = 2.0f * (xy - wz);
+    out.m[2] = 2.0f * (xz + wy);
+    out.m[3] = 2.0f * (xy + wz);
+    out.m[4] = 1.0f - 2.0f * (xx + zz);
+    out.m[5] = 2.0f * (yz - wx);
+    out.m[6] = 2.0f * (xz - wy);
+    out.m[7] = 2.0f * (yz + wx);
+    out.m[8] = 1.0f - 2.0f * (xx + yy);
+    return out;
+}
+
+Vec3f game_vec_to_xform_axes(float x, float y, float z)
+{
+    return {x, z, y};
+}
+
+Mat3f game_mat_to_xform_axes(const Mat3f& game)
+{
+    Mat3f out;
+    const int axis_map[3] = {0, 2, 1};
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            out.m[row * 3 + col] =
+                game.m[axis_map[row] * 3 + axis_map[col]];
+        }
+    }
+    return out;
+}
+
+Xform3f prop_instance_xform(const Level::PropInstance& inst)
+{
+    Xform3f out;
+    out.t = game_vec_to_xform_axes(
+        inst.values[0], inst.values[1], inst.values[2]);
+    if (inst.has_full_transform) {
+        float scale = inst.values[12];
+        if (!std::isfinite(scale) || scale == 0.0f) scale = 1.0f;
+        for (int i = 0; i < 9; ++i) {
+            out.r.m[i] = inst.values[3 + i] * scale;
+        }
+        return out;
+    }
+
+    const float s  = inst.values[6];
+    const float c  = inst.values[7];
+    const float sx = inst.values[9]  == 0.0f ? 1.0f : inst.values[9];
+    const float sy = inst.values[10] == 0.0f ? sx   : inst.values[10];
+    const float sz = inst.values[11] == 0.0f ? sx   : inst.values[11];
+    out.r.m[0] = c * sx;
+    out.r.m[1] = 0.0f;
+    out.r.m[2] = s * sy;
+    out.r.m[3] = 0.0f;
+    out.r.m[4] = sz;
+    out.r.m[5] = 0.0f;
+    out.r.m[6] = -s * sx;
+    out.r.m[7] = 0.0f;
+    out.r.m[8] = c * sy;
+    return out;
+}
+
+Level::PropInstance prop_instance_from_xform(const Xform3f& xf,
+                                             uint32_t hash = 0)
+{
+    Level::PropInstance pi;
+    pi.hash = hash;
+    pi.values[0] = xf.t.x;
+    pi.values[1] = xf.t.z;
+    pi.values[2] = xf.t.y;
+    for (int i = 0; i < 9; ++i) {
+        pi.values[3 + i] = xf.r.m[i];
+    }
+    pi.values[12] = 1.0f;
+    pi.has_full_transform = true;
+    return pi;
 }
 
 bool is_gdb_pi_pair_yaw_rotation(float rx, float ry)
@@ -360,6 +572,194 @@ std::string model_name_from_path(const std::string& path)
     return (slash == std::string::npos) ? p : p.substr(slash + 1);
 }
 
+bool read_be_f32_at(const std::vector<uint8_t>& bytes,
+                    size_t off,
+                    float& out)
+{
+    if (off + 4 > bytes.size()) return false;
+    const uint32_t u =
+        (uint32_t(bytes[off + 0]) << 24) |
+        (uint32_t(bytes[off + 1]) << 16) |
+        (uint32_t(bytes[off + 2]) << 8) |
+         uint32_t(bytes[off + 3]);
+    std::memcpy(&out, &u, sizeof(out));
+    return std::isfinite(out);
+}
+
+std::string gmd_asset_key_from_raw_path(const std::string& raw_path)
+{
+    std::string p = lower_slash(raw_path);
+    const std::string marker = "layout.instance.";
+    if (const size_t pos = p.find(marker); pos != std::string::npos) {
+        p.erase(0, pos + marker.size());
+    }
+    const size_t art = p.find("art/");
+    if (art != std::string::npos) {
+        p = p.substr(art);
+    }
+    const size_t slash = p.find_last_of('/');
+    std::string name = (slash == std::string::npos) ? p : p.substr(slash + 1);
+    auto strip_suffix = [](std::string& s, const char* suffix) {
+        const size_t n = std::strlen(suffix);
+        if (s.size() >= n && s.compare(s.size() - n, n, suffix) == 0) {
+            s.resize(s.size() - n);
+        }
+    };
+    strip_suffix(name, ".emdl");
+    strip_suffix(name, ".mdl");
+    strip_suffix(name, "_asset");
+    strip_suffix(name, "asset");
+    return compact_match_key(name);
+}
+
+bool parse_gmd_payload_transform(const std::vector<uint8_t>& bytes,
+                                 size_t payload_start,
+                                 size_t payload_end,
+                                 Xform3f& out)
+{
+    struct Candidate {
+        float score = std::numeric_limits<float>::infinity();
+        float qx = 0.0f;
+        float qy = 0.0f;
+        float qz = 0.0f;
+        float qw = 1.0f;
+        float tx = 0.0f;
+        float ty = 0.0f;
+        float tz = 0.0f;
+    };
+    Candidate best;
+
+    for (size_t align = 0; align < 4; ++align) {
+        std::vector<float> floats;
+        for (size_t off = payload_start + align;
+             off + 4 <= payload_end;
+             off += 4)
+        {
+            float f = 0.0f;
+            if (!read_be_f32_at(bytes, off, f)) {
+                floats.push_back(std::numeric_limits<float>::quiet_NaN());
+            } else {
+                floats.push_back(f);
+            }
+        }
+        if (floats.size() < 7) continue;
+
+        for (size_t i = 0; i + 7 <= floats.size(); ++i) {
+            const float qx = floats[i + 0];
+            const float qy = floats[i + 1];
+            const float qz = floats[i + 2];
+            const float qw = floats[i + 3];
+            const float tx = floats[i + 4];
+            const float ty = floats[i + 5];
+            const float tz = floats[i + 6];
+            const float vals[] = {qx, qy, qz, qw, tx, ty, tz};
+            bool finite = true;
+            for (float v : vals) {
+                if (!std::isfinite(v)) {
+                    finite = false;
+                    break;
+                }
+            }
+            if (!finite) continue;
+            if (std::fabs(tx) > 512.0f || std::fabs(ty) > 512.0f ||
+                std::fabs(tz) > 512.0f)
+            {
+                continue;
+            }
+            const float qmag =
+                std::sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+            if (!std::isfinite(qmag) || qmag < 0.6f || qmag > 1.4f) {
+                continue;
+            }
+            const float pos_mag =
+                std::sqrt(tx * tx + ty * ty + tz * tz);
+            const float score =
+                std::fabs(qmag - 1.0f) * 100.0f +
+                (pos_mag < 1e-4f ? 20.0f : 0.0f) +
+                float(i) * 0.01f + float(align) * 0.001f;
+            if (score < best.score) {
+                best = {score, qx, qy, qz, qw, tx, ty, tz};
+            }
+        }
+    }
+
+    if (!std::isfinite(best.score)) {
+        return false;
+    }
+    out.r = game_mat_to_xform_axes(
+        mat3_from_quat(best.qx, best.qy, best.qz, best.qw));
+    out.t = game_vec_to_xform_axes(best.tx, best.ty, best.tz);
+    return true;
+}
+
+std::vector<GmdLayoutChild>
+parse_gmd_layout_children(const std::vector<uint8_t>& bytes)
+{
+    std::vector<GmdLayoutChild> out;
+    static constexpr const char* kMarkers[] = {
+        "Prop.Layout.Instance.",
+        "Light.Layout.Instance.",
+        "Environment.Layout.Instance.",
+    };
+    size_t pos = 0;
+    while (pos < bytes.size()) {
+        auto best_it = bytes.end();
+        const char* best_marker = nullptr;
+        for (const char* marker : kMarkers) {
+            const size_t marker_len = std::strlen(marker);
+            if (pos + marker_len >= bytes.size()) continue;
+            const auto it = std::search(
+                bytes.begin() +
+                    static_cast<std::vector<uint8_t>::difference_type>(pos),
+                bytes.end(),
+                marker,
+                marker + marker_len);
+            if (it != bytes.end() &&
+                (best_it == bytes.end() || it < best_it))
+            {
+                best_it = it;
+                best_marker = marker;
+            }
+        }
+        const auto it = best_it;
+        if (it == bytes.end()) break;
+        (void)best_marker;
+        const size_t start =
+            static_cast<size_t>(std::distance(bytes.begin(), it));
+        size_t str_end = start;
+        while (str_end < bytes.size() && bytes[str_end] != 0) {
+            ++str_end;
+        }
+        if (str_end >= bytes.size()) break;
+
+        std::string raw(reinterpret_cast<const char*>(&bytes[start]),
+                        str_end - start);
+        size_t payload_start = str_end + 1;
+        size_t payload_end = std::min(bytes.size(), payload_start + 160);
+        for (size_t s = payload_start; s + 4 <= payload_end; ++s) {
+            if (bytes[s + 0] == 0xff && bytes[s + 1] == 0xff &&
+                bytes[s + 2] == 0xff && bytes[s + 3] == 0xff)
+            {
+                payload_end = s;
+                break;
+            }
+        }
+
+        GmdLayoutChild child;
+        child.raw_path = raw;
+        child.asset_key = gmd_asset_key_from_raw_path(raw);
+        child.offset = start;
+        if (!child.asset_key.empty() &&
+            parse_gmd_payload_transform(
+                bytes, payload_start, payload_end, child.local))
+        {
+            out.push_back(std::move(child));
+        }
+        pos = str_end + 1;
+    }
+    return out;
+}
+
 bool is_gdb_authored_level_shell_model(
     const std::string& model_path,
     const std::unordered_set<std::string>& authored_level_model_paths)
@@ -382,6 +782,14 @@ bool is_gdb_shell_audit_model(const std::string& model_path)
            p.find("/structures/") != std::string::npos;
 }
 
+bool is_gdb_static_prop_reject_model(const std::string& model_path)
+{
+    const std::string p = lower_slash(model_path);
+    return p.find("art/characters/") == 0 ||
+           p.find("/art/characters/") != std::string::npos ||
+           p.find("/characters/heros/") != std::string::npos;
+}
+
 bool is_gdb_unique_entity_shell_model(const std::string& model_path)
 {
     const std::string p = lower_slash(model_path);
@@ -400,18 +808,24 @@ bool is_gdb_unique_entity_shell_model(const std::string& model_path)
            p.find("bs_market_smallshop") != std::string::npos ||
            p.find("bs_market_generalshop") != std::string::npos ||
            p.find("bs_market_tavern") != std::string::npos ||
+           p.find("bs_market_tarotstall") != std::string::npos ||
            p.find("bs_townhouse") != std::string::npos;
 }
 
 int bwsmarket_shell_instance_limit(const std::string& model_path)
 {
     const std::string p = lower_slash(model_path);
+    if (p.find("bs_market_tarotstall/") != std::string::npos &&
+        p.find("bs_market_tarotstall_doors") == std::string::npos)
+    {
+        return 1;
+    }
     const bool shell =
         p.find("/exterior.mdl") != std::string::npos ||
         p.find("/interior.mdl") != std::string::npos;
     if (!shell) return -1;
     if (p.find("bs_market_tavern/") != std::string::npos) {
-        return 0;
+        return 1;
     }
     if (p.find("bs_market_generalshop/") != std::string::npos) {
         return 3;
@@ -424,6 +838,16 @@ bool is_lowpoly_house_proxy_model(const std::string& model_path)
     const std::string p = lower_slash(model_path);
     return p.find("/structures/dotxsi/bs_market_lowpoly_house") !=
            std::string::npos;
+}
+
+bool is_bwsmarket_clocktower_authored_model(const std::string& model_path)
+{
+    const std::string p = lower_slash(model_path);
+    return p.find("bs_market_clocktower/bs_market_clocktower.mdl") !=
+               std::string::npos ||
+           p.find("bs_market_clocktower_cogs/") != std::string::npos ||
+           p.find("bs_market_clocktower_hourhand/") != std::string::npos ||
+           p.find("bs_market_clocktower_minutehand/") != std::string::npos;
 }
 
 bool compact_key_is_or_numbered(const std::string& key, const char* base)
@@ -540,6 +964,33 @@ bool is_bad_market_helper_substitution(const std::string& entity_key,
     return false;
 }
 
+bool is_unindexed_shell_fallback_entity(const std::string& entity_key,
+                                        const std::string& raw_key)
+{
+    const std::string text = entity_key + " " + raw_key;
+    auto has = [&](const char* needle) {
+        return text.find(needle) != std::string::npos;
+    };
+
+    if (has("canopy") || has("counter") || has("stairsfloor") ||
+        has("door") || has("sign"))
+    {
+        return false;
+    }
+
+    return has("objectbuilding") ||
+           has("newobjectbuilding") ||
+           has("bsmarkettavern") ||
+           has("generalstore") ||
+           has("generalshop") ||
+           has("largeshop") ||
+           has("smallshop") ||
+           has("townhouse") ||
+           has("slumstreethouse") ||
+           has("gatehouse") ||
+           has("clocktower");
+}
+
 std::string hex_u32(uint32_t v)
 {
     std::ostringstream os;
@@ -646,30 +1097,7 @@ std::string house_facade_companion_exterior_path(const std::string& model_path)
 
 std::string shop_facade_companion_exterior_path(const std::string& model_path)
 {
-    std::string p = lower_slash(model_path);
-    struct Map {
-        const char* facade;
-        const char* shell;
-    };
-    static const Map maps[] = {
-        { "bs_market_largeshop_facade_mid", "bs_market_largeshop" },
-        { "bs_market_largeshop_facade",     "bs_market_largeshop" },
-        { "bs_market_smallshop_facade_mid", "bs_market_smallshop" },
-        { "bs_market_smallshop_facade",     "bs_market_smallshop" },
-    };
-    for (const Map& map : maps) {
-        const std::string needle =
-            std::string("/buildings/dotxsi/") + map.facade + "/" +
-            map.facade + ".mdl";
-        const size_t pos = p.find(needle);
-        if (pos == std::string::npos) continue;
-
-        const std::string exterior =
-            std::string("/buildings/dotxsi/") + map.shell + "/" +
-            map.shell + "/exterior.mdl";
-        p.replace(pos, needle.size(), exterior);
-        return p;
-    }
+    (void)model_path;
     return {};
 }
 
@@ -893,7 +1321,9 @@ collect_streaming_model_candidates(const std::vector<std::string>& streaming_bnk
         try {
             BnkCache::Entry& bnk = BnkCache::get(mounted);
             const auto& files = bnk.reader->list_files();
-            auto add_candidate = [&](std::string hint, bool from_gmd) {
+            auto add_candidate = [&](std::string hint,
+                                      bool from_gmd,
+                                      int gmd_index) {
                 std::string norm = lower_slash(hint);
                 auto [seen_it, inserted] = seen.insert(norm);
                 if (!inserted) {
@@ -901,6 +1331,8 @@ collect_streaming_model_candidates(const std::vector<std::string>& streaming_bnk
                         for (auto& existing : out) {
                             if (lower_slash(existing.hint_path) == norm) {
                                 existing.from_gmd = true;
+                                existing.gmd_bnk_path = mounted;
+                                existing.gmd_file_index = gmd_index;
                                 break;
                             }
                         }
@@ -914,6 +1346,10 @@ collect_streaming_model_candidates(const std::vector<std::string>& streaming_bnk
                 c.display_name = model_name_from_path(c.hint_path);
                 c.key = compact_match_key(c.display_name);
                 c.from_gmd = from_gmd;
+                if (from_gmd) {
+                    c.gmd_bnk_path = mounted;
+                    c.gmd_file_index = gmd_index;
+                }
                 c.entry = choose_global_model(c.hint_path);
                 if (c.entry) {
                     c.resolved_path = c.entry->full_path;
@@ -924,13 +1360,14 @@ collect_streaming_model_candidates(const std::vector<std::string>& streaming_bnk
                 out.push_back(std::move(c));
             };
 
-            for (const auto& f : files) {
+            for (size_t file_i = 0; file_i < files.size(); ++file_i) {
+                const auto& f = files[file_i];
                 std::string lower = lower_slash(f.name);
                 if (lower.size() >= 8 &&
                     lower.compare(lower.size() - 8, 8, ".mdl.gmd") == 0) {
                     std::string mdl = f.name;
                     mdl.resize(mdl.size() - 4);
-                    add_candidate(std::move(mdl), true);
+                    add_candidate(std::move(mdl), true, int(file_i));
                     continue;
                 }
                 if (lower.size() >= 4 &&
@@ -938,7 +1375,7 @@ collect_streaming_model_candidates(const std::vector<std::string>& streaming_bnk
                     std::string mdl = f.name;
                     mdl.resize(mdl.size() - 4);
                     mdl += ".mdl";
-                    add_candidate(std::move(mdl), false);
+                    add_candidate(std::move(mdl), false, -1);
                 }
             }
         } catch (...) {
@@ -1043,26 +1480,10 @@ int streaming_model_score(const std::string& entity_name,
     };
 
     if (bare_general_store) {
-        if (path_has_any({"signgeneralstore", "canopy", "counter",
-                          "stairsfloor"}))
-        {
-            return INT_MIN;
-        }
-        if (cand_path_has("bsmarketgeneralshop") ||
-            cand_path_has("bsmarketgeneralstore"))
-        {
-            score = std::max(score, 19000);
-            if (path_has_any({"exterior", "interior"})) score += 750;
-        }
+        return INT_MIN;
     }
     if (market_tavern_shell) {
-        if (path_has_any({"esatabletavern", "table"})) return INT_MIN;
-        if (cand_path_has("bsmarkettavern") ||
-            cand_path_has("markettavern"))
-        {
-            score = std::max(score, 19000);
-            if (path_has_any({"exterior", "interior"})) score += 750;
-        }
+        return INT_MIN;
     }
     if (market_openstall_shell) {
         if (cand_path_has("esashopmarketstall") ||
@@ -1154,11 +1575,8 @@ int streaming_model_score(const std::string& entity_name,
         { "closedgate",            "bsmarketwallgate",              13000 },
         { "guardpost",             "bsmarketguardpost",             14500 },
         { "marketstairs",          "bsmarketstairs",                14500 },
-        { "generalstore",          "bsmarketgeneralshop",           13500 },
         { "generalstorestairsfloor","bsmarketgeneralshopstairsfloor",14500 },
         { "generalshopstairsfloor", "bsmarketgeneralshopstairsfloor",14500 },
-        { "bsmarkettavern",        "bsmarkettavern",                15000 },
-        { "markettavern",          "bsmarkettavern",                15000 },
         { "bsopenstall",           "openstall",                     14500 },
         { "openstall",             "openstall",                     14000 },
         { "bsmarketstall",         "bsmarketstall",                 14500 },
@@ -1236,6 +1654,8 @@ choose_streaming_model_for_gdb(const std::string& entity_name,
             const std::string target_lower = lower_slash(target_model_path);
             const std::string target_key =
                 compact_match_key(model_name_from_path(target_model_path));
+            const bool generic_shell_target =
+                target_key == "exterior" || target_key == "interior";
             const StreamingModelCandidate* best = nullptr;
             int best_score = INT_MIN;
             for (const auto& c : candidates) {
@@ -1252,13 +1672,9 @@ choose_streaming_model_for_gdb(const std::string& entity_name,
                 } else if (path_suffix_matches(hint_lower, target_lower)) {
                     score = std::max(score, 48250);
                 }
-                if (!target_key.empty()) {
+                if (!target_key.empty() && !generic_shell_target) {
                     if (c.key == target_key) {
                         score = std::max(score, 46000);
-                    }
-                    const std::string& path_key = c.path_key;
-                    if (path_key.find(target_key) != std::string::npos) {
-                        score = std::max(score, 44000);
                     }
                 }
                 if (score == INT_MIN) continue;
@@ -1322,6 +1738,12 @@ bool bwsmarket_debug_model_path_match(const std::string& lower_path)
         "tarotstall",
         "bs_market_clocktower",
         "bs_market_platform",
+        "bs_light_ceiling",
+        "bs_candleholder",
+        "bs_cemetary_oillamp",
+        "oillamp",
+        "lantern",
+        "candleholder",
     };
     for (const char* needle : kNeedles) {
         if (lower_path.find(needle) != std::string::npos) {
@@ -1413,6 +1835,8 @@ void dump_bwsmarket_market_model_debug(
             << "\tresolved=" << c.resolved_path
             << "\tentry=" << (c.entry ? "yes" : "no")
             << "\tfrom_gmd=" << (c.from_gmd ? "yes" : "no")
+            << "\tgmd_bnk=" << c.gmd_bnk_path
+            << "\tgmd_index=" << c.gmd_file_index
             << "\tkey=" << c.key
             << "\tpath_key=" << c.path_key
             << "\n";
@@ -1897,20 +2321,31 @@ bool Open(const FlatAssetEntry& entry)
     if (bail_if_cancelled("after-parse")) return false;
 
     info.source_path = entry.full_path;
+    const bool is_bwsmarket_engine_level =
+        lower_slash(entry.full_path).find("bwsmarket") != std::string::npos;
 
     size_t lowpoly_house_proxy_blocks = 0;
     size_t lowpoly_house_proxy_instances = 0;
+    size_t authored_clocktower_blocks = 0;
+    size_t authored_clocktower_instances = 0;
     info.prop_blocks.erase(
         std::remove_if(
             info.prop_blocks.begin(),
             info.prop_blocks.end(),
             [&](const Level::PropBlock& block) {
-                if (!is_lowpoly_house_proxy_model(block.model_path)) {
-                    return false;
+                if (is_lowpoly_house_proxy_model(block.model_path)) {
+                    ++lowpoly_house_proxy_blocks;
+                    lowpoly_house_proxy_instances += block.instances.size();
+                    return true;
                 }
-                ++lowpoly_house_proxy_blocks;
-                lowpoly_house_proxy_instances += block.instances.size();
-                return true;
+                if (is_bwsmarket_engine_level &&
+                    is_bwsmarket_clocktower_authored_model(block.model_path))
+                {
+                    ++authored_clocktower_blocks;
+                    authored_clocktower_instances += block.instances.size();
+                    return true;
+                }
+                return false;
             }),
         info.prop_blocks.end());
     if (lowpoly_house_proxy_blocks > 0) {
@@ -1919,6 +2354,14 @@ bool Open(const FlatAssetEntry& entry)
             std::to_string(lowpoly_house_proxy_instances) +
             " low-poly market house proxy instance(s) across " +
             std::to_string(lowpoly_house_proxy_blocks) +
+            " block(s)");
+    }
+    if (authored_clocktower_blocks > 0) {
+        OutputLog::info(
+            "level props: culled " +
+            std::to_string(authored_clocktower_instances) +
+            " authored clocktower part instance(s) across " +
+            std::to_string(authored_clocktower_blocks) +
             " block(s)");
     }
 
@@ -2170,6 +2613,73 @@ bool Open(const FlatAssetEntry& entry)
             if (bnk_path == entry.bnk_path) continue;
             if (try_bnk_path(bnk_path, key, leaf)) {
                 return true;
+            }
+        }
+
+        if (key.compare(0, 5, "data/") == 0) {
+            auto try_iso_file = [&](const std::string& virtual_path) -> bool {
+                if (!ISO::IsoMount::instance().is_mounted()) return false;
+                std::string vp = virtual_path;
+                std::replace(vp.begin(), vp.end(), '\\', '/');
+                auto bytes = ISO::IsoMount::instance().read_file(vp);
+                if (bytes.empty()) return false;
+                out_bytes = std::move(bytes);
+                return true;
+            };
+            if (try_iso_file(key)) {
+                return true;
+            }
+
+            std::vector<std::filesystem::path> game_roots;
+            auto add_game_root = [&](const std::filesystem::path& root) {
+                if (root.empty()) return;
+                if (ISO::IsoMount::is_iso_path(root.string())) return;
+                std::error_code ec;
+                const auto abs = std::filesystem::absolute(root, ec);
+                const auto candidate = ec ? root : abs;
+                for (const auto& existing : game_roots) {
+                    if (existing == candidate) return;
+                }
+                game_roots.push_back(candidate);
+            };
+            auto add_root_from_path = [&](const std::string& p) {
+                if (p.empty()) return;
+                if (ISO::IsoMount::is_iso_path(p)) return;
+                std::string norm = p;
+                std::replace(norm.begin(), norm.end(), '\\', '/');
+                std::string low = norm;
+                std::transform(low.begin(), low.end(), low.begin(),
+                               [](unsigned char c){ return std::tolower(c); });
+                const size_t data_pos = low.find("/data/");
+                if (data_pos != std::string::npos) {
+                    add_game_root(norm.substr(0, data_pos));
+                }
+            };
+            add_game_root(S.root_dir);
+            add_root_from_path(entry.bnk_path);
+            for (const auto& bnk_path : S.bnk_paths) {
+                add_root_from_path(bnk_path);
+            }
+            for (const auto& bnk_path : S.nested_bnk_paths) {
+                add_root_from_path(bnk_path);
+            }
+
+            const std::string without_data = key.substr(5);
+            for (const auto& root : game_roots) {
+                if (try_file(root / std::filesystem::path(key))) {
+                    return true;
+                }
+                if (try_file(root / "data" /
+                             std::filesystem::path(without_data))) {
+                    return true;
+                }
+                if (lower_slash(root.string()).size() >= 4 &&
+                    lower_slash(root.string()).compare(
+                        lower_slash(root.string()).size() - 4, 4,
+                        "data") == 0 &&
+                    try_file(root / std::filesystem::path(without_data))) {
+                    return true;
+                }
             }
         }
 
@@ -2469,11 +2979,220 @@ bool Open(const FlatAssetEntry& entry)
             }
         }
 
+        struct SupplementalGdb {
+            std::string path;
+            std::vector<uint8_t> bytes;
+        };
+        std::vector<SupplementalGdb> supplemental_gdbs;
+        {
+            const char* game_gdb_paths[] = {
+                "data\\Globals\\Globals.gdb",
+                "data\\Globals\\SpeechAction.gdb",
+                "data\\InteractiveCutscenes\\InteractiveCutscenes.gdb",
+                "data\\Entity\\Entity.gdb",
+            };
+            for (const char* game_gdb_path : game_gdb_paths) {
+                std::vector<uint8_t> bytes;
+                if (load_text_sibling(game_gdb_path, bytes)) {
+                    supplemental_gdbs.push_back(
+                        SupplementalGdb{game_gdb_path, std::move(bytes)});
+                }
+            }
+            if (!supplemental_gdbs.empty()) {
+                OutputLog::info(
+                    "gdb supplemental resolver: loaded " +
+                    std::to_string(supplemental_gdbs.size()) +
+                    " game DB(s)");
+                for (const auto& db : supplemental_gdbs) {
+                    OutputLog::info("  gdb-supplement: " + db.path +
+                                    " (" + std::to_string(db.bytes.size()) +
+                                    " bytes)");
+                }
+            }
+        }
+
         const auto& level_prop_blocks = info.prop_blocks;
         std::vector<uint8_t> gdb_bytes;
         const std::string gdb_path = sibling_with_ext(".gdb");
         if (load_text_sibling(gdb_path, gdb_bytes)) {
             auto info = Gdb::ParseWithSaveMap(gdb_bytes, save_hash_to_name);
+            if (!supplemental_gdbs.empty()) {
+                size_t supplemental_model_hits = 0;
+                size_t supplemental_parent_hits = 0;
+                size_t supplemental_misses = 0;
+                for (auto& p : info.placements) {
+                    if (p.hash_a == 0 || p.model_path_hash != 0) {
+                        continue;
+                    }
+                    uint32_t model_hash = 0;
+                    uint32_t parent_hash = 0;
+                    bool found = false;
+                    for (const auto& db : supplemental_gdbs) {
+                        if (Gdb::LookupModelPathHash(
+                                db.bytes, p.hash_a, model_hash,
+                                &parent_hash))
+                        {
+                            found = true;
+                            break;
+                        }
+                        if (p.parent_hash != 0 &&
+                            Gdb::LookupModelPathHash(
+                                db.bytes, p.parent_hash, model_hash,
+                                nullptr))
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (found && model_hash != 0) {
+                        p.model_path_hash = model_hash;
+                        ++supplemental_model_hits;
+                        if (p.parent_hash == 0 && parent_hash != 0) {
+                            p.parent_hash = parent_hash;
+                            ++supplemental_parent_hits;
+                        }
+                    } else if (!p.indexed_record) {
+                        ++supplemental_misses;
+                    }
+                }
+                if (supplemental_model_hits > 0 ||
+                    supplemental_misses > 0)
+                {
+                    OutputLog::info(
+                        "gdb supplemental model path hashes: hit=" +
+                        std::to_string(supplemental_model_hits) +
+                        ", miss=" + std::to_string(supplemental_misses) +
+                        ", parent-filled=" +
+                        std::to_string(supplemental_parent_hits));
+                }
+            }
+
+            if (!supplemental_gdbs.empty())
+            {
+                std::unordered_set<uint32_t> existing_hashes;
+                existing_hashes.reserve(info.placements.size() * 2);
+                for (const auto& p : info.placements) {
+                    if (p.hash_a != 0) existing_hashes.insert(p.hash_a);
+                }
+
+                size_t supplemental_entity_hits = 0;
+                size_t supplemental_entity_parts = 0;
+                size_t supplemental_entity_misses = 0;
+                for (const auto& kv : save_hash_to_name) {
+                    if (kv.first == 0 ||
+                        existing_hashes.find(kv.first) !=
+                            existing_hashes.end())
+                    {
+                        continue;
+                    }
+
+                    Gdb::Placement supplemental;
+                    bool found = false;
+                    for (const auto& db : supplemental_gdbs) {
+                        if (Gdb::LookupPlacement(db.bytes, kv.first,
+                                                 kv.second, supplemental) &&
+                            !supplemental.model_path_hashes.empty())
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        ++supplemental_entity_misses;
+                        continue;
+                    }
+
+                    ++supplemental_entity_hits;
+                    existing_hashes.insert(kv.first);
+                    if (supplemental.model_path_hashes.size() > 1) {
+                        const std::vector<uint32_t> hashes =
+                            supplemental.model_path_hashes;
+                        for (uint32_t h : hashes) {
+                            Gdb::Placement part = supplemental;
+                            part.model_path_hash = h;
+                            part.model_path_hashes.clear();
+                            part.model_path_hashes.push_back(h);
+                            info.placements.push_back(std::move(part));
+                            ++supplemental_entity_parts;
+                        }
+                    } else {
+                        info.placements.push_back(std::move(supplemental));
+                        ++supplemental_entity_parts;
+                    }
+                }
+                if (supplemental_entity_hits > 0 ||
+                    supplemental_entity_misses > 0)
+                {
+                    OutputLog::info(
+                        "gdb supplemental direct entity records: hit=" +
+                        std::to_string(supplemental_entity_hits) +
+                        ", parts=" +
+                        std::to_string(supplemental_entity_parts) +
+                        ", miss=" +
+                        std::to_string(supplemental_entity_misses));
+                }
+            }
+            const bool is_bwsmarket_debug_level =
+                lower_slash(entry.full_path).find("bwsmarket") !=
+                std::string::npos;
+            if (is_bwsmarket_debug_level) {
+                std::unordered_set<uint32_t> debug_hash_set;
+                for (const auto& p : info.placements) {
+                    if (p.hash_a == 0 || p.model_path_hash != 0 ||
+                        p.entity_name.empty())
+                    {
+                        continue;
+                    }
+                    const std::string key = gdb_entity_key(p.entity_name);
+                    const std::string tok =
+                        compact_match_key(p.entity_name);
+                    const std::string text = key + " " + tok;
+                    const bool interesting =
+                        text.find("generalstore") != std::string::npos ||
+                        text.find("generalshop") != std::string::npos ||
+                        text.find("bsmarkettavern") != std::string::npos ||
+                        text.find("tavern") != std::string::npos ||
+                        text.find("largeshop") != std::string::npos ||
+                        text.find("smallshop") != std::string::npos ||
+                        text.find("tarotstall") != std::string::npos ||
+                        text.find("openstall") != std::string::npos ||
+                        text.find("marketstall") != std::string::npos ||
+                        text.find("caravan") != std::string::npos ||
+                        text.find("coach") != std::string::npos;
+                    if (interesting) {
+                        debug_hash_set.insert(p.hash_a);
+                    }
+                }
+                if (!debug_hash_set.empty()) {
+                    std::vector<uint32_t> debug_hashes(
+                        debug_hash_set.begin(), debug_hash_set.end());
+                    std::sort(debug_hashes.begin(), debug_hashes.end());
+                    const std::string dump =
+                        Gdb::DebugDumpRecordChains(
+                            gdb_bytes, save_hash_to_name, debug_hashes,
+                            8, 12);
+                    const std::filesystem::path debug_path =
+                        std::filesystem::path("extracted") /
+                        "debug_bwsmarket_gdb_records.txt";
+                    std::error_code ec;
+                    std::filesystem::create_directories(
+                        debug_path.parent_path(), ec);
+                    std::ofstream out(
+                        debug_path, std::ios::binary | std::ios::trunc);
+                    if (out) {
+                        out << dump;
+                        OutputLog::info(
+                            "BWSMarket GDB record-chain dump: " +
+                            debug_path.string() + " (" +
+                            std::to_string(debug_hashes.size()) +
+                            " target hash(es))");
+                    } else {
+                        OutputLog::warn(
+                            "BWSMarket GDB record-chain dump failed: " +
+                            debug_path.string());
+                    }
+                }
+            }
             g_level_gdb_placements.reserve(info.placements.size());
 
             size_t fixed_count = 0, var_count = 0, named_count = 0;
@@ -3119,6 +3838,9 @@ bool Open(const FlatAssetEntry& entry)
                     if (!model_hit || model_hit->full_path.empty()) {
                         return false;
                     }
+                    if (is_gdb_static_prop_reject_model(model_hit->full_path)) {
+                        return false;
+                    }
                     if (!emitted_prop_transform_keys.insert(
                             prop_instance_transform_key(
                                 inst, model_hit->full_path)).second)
@@ -3196,6 +3918,27 @@ bool Open(const FlatAssetEntry& entry)
             const bool is_bwsmarket_level =
                 lower_slash(entry.full_path).find("bwsmarket") !=
                 std::string::npos;
+            const uint32_t bwsmarket_clocktower_base_hash =
+                fnv1_model_path_hash(
+                    "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\"
+                    "BS_Market_ClockTower\\BS_Market_ClockTower.mdl");
+            bool bwsmarket_has_explicit_clocktower_base_record = false;
+            if (is_bwsmarket_level) {
+                for (const auto& p : info.placements) {
+                    if (p.model_path_hash == bwsmarket_clocktower_base_hash) {
+                        bwsmarket_has_explicit_clocktower_base_record = true;
+                        break;
+                    }
+                    if (std::find(p.model_path_hashes.begin(),
+                                  p.model_path_hashes.end(),
+                                  bwsmarket_clocktower_base_hash) !=
+                        p.model_path_hashes.end())
+                    {
+                        bwsmarket_has_explicit_clocktower_base_record = true;
+                        break;
+                    }
+                }
+            }
             if (is_bwsmarket_level)
             {
                 auto log_catalog_probe =
@@ -3248,6 +3991,16 @@ bool Open(const FlatAssetEntry& entry)
                 log_catalog_probe("tavern/pub",
                                   {"tavern", "pub", "inn"},
                                   20);
+                log_catalog_probe("lights",
+                                  {"lamp", "lantern", "candleholder",
+                                   "light_ceiling", "lightceiling",
+                                   "oil_lamp", "oillamp"},
+                                  20);
+                if (bwsmarket_has_explicit_clocktower_base_record) {
+                    OutputLog::info(
+                        "BWSMarket clocktower: explicit GDB model hash found; "
+                        "legacy platform->tower companion disabled");
+                }
             }
 
             size_t save_physics_instances_emitted = 0;
@@ -3260,6 +4013,9 @@ bool Open(const FlatAssetEntry& entry)
                     const FlatAssetEntry* hit =
                         resolve_model_for_entity(p.entity_name);
                     if (!hit) continue;
+                    if (is_gdb_static_prop_reject_model(hit->full_path)) {
+                        continue;
+                    }
 
                     auto& pb = blocks_by_path[hit->full_path];
                     if (pb.model_path.empty()) {
@@ -3344,6 +4100,9 @@ bool Open(const FlatAssetEntry& entry)
                 gdb_interest_category_counts;
             std::unordered_map<std::string, size_t>
                 gdb_interest_status_counts;
+            std::unordered_map<std::string,
+                               std::unordered_map<std::string, size_t>>
+                gdb_interest_category_status_counts;
             if (is_bwsmarket_level) {
                 gdb_interest_rows.reserve(info.placements.size());
             }
@@ -3360,9 +4119,29 @@ bool Open(const FlatAssetEntry& entry)
             size_t gdb_shop_companions_emitted = 0;
             size_t gdb_shop_companion_misses = 0;
             size_t gdb_shop_companion_invalid_positions = 0;
+            size_t gdb_nohash_shell_companions_emitted = 0;
+            size_t gdb_nohash_shell_companion_misses = 0;
+            size_t gdb_gmd_layout_children_emitted = 0;
+            size_t gdb_gmd_layout_children_missing = 0;
+            size_t gdb_gmd_layout_sidecars_loaded = 0;
+            size_t gdb_gmd_layout_sidecars_missing = 0;
+            std::unordered_map<std::string, size_t>
+                gdb_gmd_layout_child_paths;
+            std::unordered_map<std::string, size_t>
+                gdb_gmd_layout_sidecar_sources;
             std::unordered_map<std::string, size_t>
                 gdb_shop_companion_paths;
+            std::unordered_map<std::string, size_t>
+                gdb_nohash_shell_companion_paths;
             std::vector<std::string> gdb_shop_probe_lines;
+            struct NoHashShellCandidate {
+                Gdb::Placement placement;
+                std::string entity_key;
+                std::string category;
+            };
+            std::vector<NoHashShellCandidate> gdb_nohash_shell_candidates;
+            std::vector<Level::PropInstance> gdb_generalshop_floor_anchors;
+            std::vector<Level::PropInstance> gdb_tavern_pub_anchors;
             struct HouseCompanionProbe {
                 size_t skipped = 0;
                 size_t exterior_hits = 0;
@@ -3404,6 +4183,12 @@ bool Open(const FlatAssetEntry& entry)
                        p.find("/inn") != std::string::npos ||
                        p.find("_inn") != std::string::npos;
             };
+            auto is_nohash_market_shell_key =
+                [](const std::string& entity_key) {
+                    return entity_key == "bsmarkettavern" ||
+                           entity_key == "generalstore" ||
+                           entity_key == "generalstore1";
+                };
             auto has_worldish_gdb_position = [](const Gdb::Placement& p) {
                 if (!std::isfinite(p.x) || !std::isfinite(p.y) ||
                     !std::isfinite(p.z))
@@ -3469,6 +4254,13 @@ bool Open(const FlatAssetEntry& entry)
                     {
                         return std::string("stall");
                     }
+                    if (has("lamp") || has("lantern") ||
+                        has("candleholder") || has("candle") ||
+                        has("lightfixing") || has("lightceiling") ||
+                        has("oillamp") || has("oillantern"))
+                    {
+                        return std::string("light");
+                    }
                     if (has("caravan") || has("coachhouse") ||
                         has("coachouse") || has("coach"))
                     {
@@ -3517,7 +4309,9 @@ bool Open(const FlatAssetEntry& entry)
                     }
                     if (category.empty()) return;
                     ++gdb_interest_category_counts[category];
-                    ++gdb_interest_status_counts[status ? status : ""];
+                    const std::string status_key = status ? status : "";
+                    ++gdb_interest_status_counts[status_key];
+                    ++gdb_interest_category_status_counts[category][status_key];
                     std::ostringstream row;
                     row << category << '\t'
                         << (status ? status : "") << '\t'
@@ -3528,8 +4322,495 @@ bool Open(const FlatAssetEntry& entry)
                         << hex32(p.model_path_hash) << '\t'
                         << std::fixed << std::setprecision(3)
                         << p.x << '\t' << p.y << '\t' << p.z << '\t'
+                        << p.rot_x << '\t' << p.rot_y << '\t'
+                        << p.rot_z << '\t'
+                        << (p.has_rotation ? 1 : 0) << '\t'
                         << tsv_clean(model_path);
                     gdb_interest_rows.push_back(row.str());
+                };
+
+            std::unordered_map<std::string,
+                               std::vector<const FlatAssetEntry*>>
+                mdl_by_gmd_asset_key;
+            mdl_by_gmd_asset_key.reserve(S.all_mdl_files.size());
+            for (const auto& m : S.all_mdl_files) {
+                const std::string key =
+                    compact_match_key(model_name_from_path(m.full_path));
+                if (!key.empty()) {
+                    mdl_by_gmd_asset_key[key].push_back(&m);
+                }
+            }
+            auto choose_gmd_layout_child_model =
+                [&](const std::string& asset_key) {
+                    if (asset_key.empty()) {
+                        return static_cast<const FlatAssetEntry*>(nullptr);
+                    }
+                    if (const char* curated =
+                            GdbModelHashlist::LookupEntityKey(asset_key))
+                    {
+                        if (const FlatAssetEntry* hit =
+                                resolve_model_by_lower_path(
+                                    lower_slash(curated)))
+                        {
+                            return hit;
+                        }
+                    }
+                    auto choose_best =
+                        [&](const std::vector<const FlatAssetEntry*>& hits) {
+                            const FlatAssetEntry* best = nullptr;
+                            int best_score = INT_MIN;
+                            for (const FlatAssetEntry* e : hits) {
+                                if (!e) continue;
+                                const std::string p =
+                                    lower_slash(e->full_path);
+                                int score = model_bank_score(e);
+                                if (e->from_nested) score += 250;
+                                if (p.find("/doors_windows/") !=
+                                    std::string::npos)
+                                {
+                                    score += 400;
+                                }
+                                if (p.find("/props/") != std::string::npos) {
+                                    score += 200;
+                                }
+                                if (p.find("/buildings/") !=
+                                    std::string::npos)
+                                {
+                                    score += 100;
+                                }
+                                score -= int(std::min<size_t>(
+                                    e->full_path.size(), 240));
+                                if (!best || score > best_score) {
+                                    best = e;
+                                    best_score = score;
+                                }
+                            }
+                            return best;
+                        };
+                    if (auto it = mdl_by_gmd_asset_key.find(asset_key);
+                        it != mdl_by_gmd_asset_key.end())
+                    {
+                        return choose_best(it->second);
+                    }
+                    std::vector<const FlatAssetEntry*> fuzzy;
+                    for (const auto& kv : mdl_by_gmd_asset_key) {
+                        const std::string& model_key = kv.first;
+                        if (model_key.size() < 5) continue;
+                        if (model_key.find(asset_key) == std::string::npos &&
+                            asset_key.find(model_key) == std::string::npos)
+                        {
+                            continue;
+                        }
+                        fuzzy.insert(fuzzy.end(),
+                                     kv.second.begin(),
+                                     kv.second.end());
+                    }
+                    return choose_best(fuzzy);
+                };
+
+            using GmdSidecarHit = std::pair<std::string, int>;
+            std::unordered_map<std::string, std::vector<GmdSidecarHit>>
+                global_gmd_sidecar_index;
+            bool global_gmd_sidecar_index_built = false;
+            size_t global_gmd_sidecar_index_bnks = 0;
+            auto build_global_gmd_sidecar_index = [&]() {
+                if (global_gmd_sidecar_index_built) return;
+                global_gmd_sidecar_index_built = true;
+
+                std::vector<std::string> candidate_bnks;
+                auto add_unique_bnk = [&](const std::string& path) {
+                    if (path.empty()) return;
+                    const std::string norm = lower_slash(path);
+                    for (const auto& existing : candidate_bnks) {
+                        if (lower_slash(existing) == norm) return;
+                    }
+                    candidate_bnks.push_back(path);
+                };
+                auto is_streaming_bnk = [](const std::string& path) {
+                    std::string p = lower_slash(path);
+                    const size_t slash = p.find_last_of('/');
+                    const std::string leaf = slash == std::string::npos
+                        ? p
+                        : p.substr(slash + 1);
+                    return leaf.find("streaming") != std::string::npos;
+                };
+                for (const auto& p : S.bnk_paths) {
+                    if (is_streaming_bnk(p)) add_unique_bnk(p);
+                }
+                for (const auto& p : S.nested_bnk_paths) {
+                    if (is_streaming_bnk(p)) add_unique_bnk(p);
+                }
+
+                for (const auto& bnk_path : candidate_bnks) {
+                    try {
+                        BnkCache::Entry& bnk = BnkCache::get(bnk_path);
+                        const auto& files = bnk.reader->list_files();
+                        bool had_gmd = false;
+                        for (size_t i = 0; i < files.size(); ++i) {
+                            std::string key = lower_slash(files[i].name);
+                            if (key.size() < 8 ||
+                                key.compare(key.size() - 8, 8,
+                                            ".mdl.gmd") != 0)
+                            {
+                                continue;
+                            }
+                            global_gmd_sidecar_index[key].push_back(
+                                {bnk_path, static_cast<int>(i)});
+                            had_gmd = true;
+                        }
+                        if (had_gmd) ++global_gmd_sidecar_index_bnks;
+                    } catch (...) {
+                    }
+                }
+            };
+            auto find_global_gmd_sidecar =
+                [&](const std::string& key,
+                    const std::string& preferred_model_bnk)
+                    -> const GmdSidecarHit* {
+                    build_global_gmd_sidecar_index();
+                    auto it = global_gmd_sidecar_index.find(lower_slash(key));
+                    if (it == global_gmd_sidecar_index.end() ||
+                        it->second.empty())
+                    {
+                        return nullptr;
+                    }
+                    const std::string preferred =
+                        lower_slash(preferred_model_bnk);
+                    const bool prefer_globals =
+                        preferred.find("/globals/") != std::string::npos ||
+                        preferred.find("globals_models.bnk") !=
+                            std::string::npos;
+                    if (prefer_globals) {
+                        for (const auto& hit : it->second) {
+                            const std::string bnk = lower_slash(hit.first);
+                            if (bnk.find("/globals/") != std::string::npos ||
+                                bnk.find("globals_streaming.bnk") !=
+                                    std::string::npos)
+                            {
+                                return &hit;
+                            }
+                        }
+                    }
+                    return &it->second.front();
+                };
+
+            std::unordered_map<std::string, std::vector<GmdLayoutChild>>
+                gmd_layout_child_cache;
+            std::unordered_set<std::string> gmd_layout_child_missing;
+            auto load_gmd_layout_children_for_model =
+                [&](const FlatAssetEntry* model_hit)
+                    -> const std::vector<GmdLayoutChild>* {
+                    if (!model_hit || model_hit->full_path.empty()) {
+                        return static_cast<const std::vector<GmdLayoutChild>*>(
+                            nullptr);
+                    }
+                    const std::string model_lower =
+                        lower_slash(model_hit->full_path);
+                    if (auto it = gmd_layout_child_cache.find(model_lower);
+                        it != gmd_layout_child_cache.end())
+                    {
+                        return &it->second;
+                    }
+                    if (gmd_layout_child_missing.find(model_lower) !=
+                        gmd_layout_child_missing.end())
+                    {
+                        return static_cast<const std::vector<GmdLayoutChild>*>(
+                            nullptr);
+                    }
+
+                    std::vector<uint8_t> bytes;
+                    std::string gmd_source_bnk;
+                    auto leaf_of_lower_slash_path =
+                        [](const std::string& path) {
+                            std::string p = lower_slash(path);
+                            const size_t slash = p.find_last_of('/');
+                            return slash == std::string::npos
+                                ? p
+                                : p.substr(slash + 1);
+                        };
+                    auto sibling_with_leaf =
+                        [](const std::string& path,
+                           const std::string& leaf) {
+                            if (path.empty() || leaf.empty()) return std::string();
+                            std::string p = path;
+                            std::replace(p.begin(), p.end(), '\\', '/');
+                            const size_t slash = p.find_last_of('/');
+                            if (slash == std::string::npos) return leaf;
+                            return p.substr(0, slash + 1) + leaf;
+                        };
+                    auto add_unique_bnk =
+                        [](std::vector<std::string>& out,
+                           const std::string& path) {
+                            if (path.empty()) return;
+                            const std::string norm = lower_slash(path);
+                            for (const auto& existing : out) {
+                                if (lower_slash(existing) == norm) return;
+                            }
+                            out.push_back(path);
+                        };
+                    auto add_virtual_match =
+                        [&](std::vector<std::string>& out,
+                            const std::string& path) {
+                            if (path.empty()) return;
+                            std::string p = path;
+                            std::replace(p.begin(), p.end(), '\\', '/');
+                            std::string low = lower_slash(p);
+                            const size_t data_pos = low.find("data/");
+                            if (data_pos == std::string::npos) return;
+                            if (auto found = find_bnk_by_virtual_path(
+                                    p.substr(data_pos)))
+                            {
+                                add_unique_bnk(out, *found);
+                            }
+                        };
+                    auto derived_streaming_leaf_for_model_bnk =
+                        [](const std::string& bnk_path) {
+                            const std::string leaf =
+                                [&]() {
+                                    std::string p = lower_slash(bnk_path);
+                                    const size_t slash = p.find_last_of('/');
+                                    return slash == std::string::npos
+                                        ? p
+                                        : p.substr(slash + 1);
+                                }();
+                            if (leaf == "globals_models.bnk") {
+                                return std::string("globals_streaming.bnk");
+                            }
+                            static constexpr const char* suffix =
+                                "_models.bnk";
+                            const size_t n = std::strlen(suffix);
+                            if (leaf.size() > n &&
+                                leaf.compare(leaf.size() - n, n, suffix) == 0)
+                            {
+                                return leaf.substr(0, leaf.size() - n) +
+                                       "_streaming.bnk";
+                            }
+                            return std::string();
+                        };
+                    auto add_model_streaming_sidecars =
+                        [&](std::vector<std::string>& out,
+                            const std::string& model_bnk_path) {
+                            const std::string stream_leaf =
+                                derived_streaming_leaf_for_model_bnk(
+                                    model_bnk_path);
+                            if (stream_leaf.empty()) return;
+
+                            const std::string sibling =
+                                sibling_with_leaf(
+                                    model_bnk_path, stream_leaf);
+                            add_unique_bnk(out, sibling);
+                            add_virtual_match(out, sibling);
+
+                            auto leaf_matches =
+                                [&](const std::string& candidate_path) {
+                                    const std::string leaf =
+                                        leaf_of_lower_slash_path(
+                                            candidate_path);
+                                    if (leaf == stream_leaf) return true;
+                                    if (leaf.size() <= stream_leaf.size() + 1) {
+                                        return false;
+                                    }
+                                    const size_t off =
+                                        leaf.size() - stream_leaf.size();
+                                    return leaf.compare(
+                                               off,
+                                               stream_leaf.size(),
+                                               stream_leaf) == 0 &&
+                                           leaf[off - 1] == '_';
+                                };
+                            for (const auto& p : S.bnk_paths) {
+                                if (leaf_matches(p)) add_unique_bnk(out, p);
+                            }
+                            for (const auto& p : S.nested_bnk_paths) {
+                                if (leaf_matches(p)) add_unique_bnk(out, p);
+                            }
+                        };
+                    auto try_extract =
+                        [&](const std::string& bnk_path,
+                            const std::string& key,
+                            bool allow_leaf_match) {
+                            if (!bytes.empty() || bnk_path.empty() ||
+                                key.empty())
+                            {
+                                return;
+                            }
+                            int idx = BnkCache::find_index(bnk_path, key);
+                            if (idx < 0 && allow_leaf_match) {
+                                idx = BnkCache::find_index(
+                                    bnk_path, leaf_of_lower_slash_path(key));
+                            }
+                            if (idx < 0) return;
+                            try {
+                                bytes = BnkCache::extract_bytes(bnk_path, idx);
+                                if (!bytes.empty()) {
+                                    gmd_source_bnk = bnk_path;
+                                }
+                            } catch (...) {
+                                bytes.clear();
+                                gmd_source_bnk.clear();
+                            }
+                        };
+
+                    const std::string gmd_key = model_lower + ".gmd";
+                    const std::string gmd_leaf =
+                        leaf_of_lower_slash_path(gmd_key);
+                    const bool generic_leaf =
+                        gmd_leaf == "exterior.mdl.gmd" ||
+                        gmd_leaf == "interior.mdl.gmd";
+                    std::vector<std::string> gmd_sidecar_bnks;
+                    add_unique_bnk(gmd_sidecar_bnks, model_hit->bnk_path);
+                    add_model_streaming_sidecars(
+                        gmd_sidecar_bnks, model_hit->bnk_path);
+                    if (auto nested_it =
+                            S.nested_bnk_virtual_paths.find(
+                                model_hit->bnk_path);
+                        nested_it != S.nested_bnk_virtual_paths.end())
+                    {
+                        add_model_streaming_sidecars(
+                            gmd_sidecar_bnks, nested_it->second);
+                    }
+                    for (const auto& p : g_level_vfs_streaming_bnks) {
+                        add_unique_bnk(
+                            gmd_sidecar_bnks,
+                            resolve_streaming_bnk_path(p));
+                    }
+
+                    for (const auto& bnk_path : gmd_sidecar_bnks) {
+                        try_extract(bnk_path, gmd_key, false);
+                        if (!bytes.empty()) break;
+                    }
+                    for (const auto& c : streaming_model_candidates) {
+                        if (!bytes.empty()) break;
+                        if (!c.from_gmd || c.gmd_file_index < 0 ||
+                            c.gmd_bnk_path.empty())
+                        {
+                            continue;
+                        }
+                        if (c.resolved_lower == model_lower ||
+                            c.hint_lower == model_lower)
+                        {
+                            try {
+                                bytes = BnkCache::extract_bytes(
+                                    c.gmd_bnk_path, c.gmd_file_index);
+                                if (!bytes.empty()) {
+                                    gmd_source_bnk = c.gmd_bnk_path;
+                                }
+                            } catch (...) {
+                                bytes.clear();
+                                gmd_source_bnk.clear();
+                            }
+                        }
+                    }
+                    if (bytes.empty()) {
+                        if (const GmdSidecarHit* global_hit =
+                                find_global_gmd_sidecar(
+                                    gmd_key, model_hit->bnk_path))
+                        {
+                            try {
+                                bytes = BnkCache::extract_bytes(
+                                    global_hit->first, global_hit->second);
+                                if (!bytes.empty()) {
+                                    gmd_source_bnk = global_hit->first;
+                                }
+                            } catch (...) {
+                                bytes.clear();
+                                gmd_source_bnk.clear();
+                            }
+                        }
+                    }
+                    if (bytes.empty() && !generic_leaf) {
+                        for (const auto& bnk_path : gmd_sidecar_bnks) {
+                            try_extract(bnk_path, gmd_key, true);
+                            if (!bytes.empty()) break;
+                        }
+                    }
+
+                    if (bytes.empty()) {
+                        gmd_layout_child_missing.insert(model_lower);
+                        ++gdb_gmd_layout_sidecars_missing;
+                        return static_cast<const std::vector<GmdLayoutChild>*>(
+                            nullptr);
+                    }
+                    ++gdb_gmd_layout_sidecars_loaded;
+                    if (!gmd_source_bnk.empty()) {
+                        ++gdb_gmd_layout_sidecar_sources[gmd_source_bnk];
+                    }
+                    std::vector<GmdLayoutChild> children =
+                        parse_gmd_layout_children(bytes);
+                    for (auto& child : children) {
+                        if (const FlatAssetEntry* hit =
+                                choose_gmd_layout_child_model(
+                                    child.asset_key))
+                        {
+                            child.resolved_path = hit->full_path;
+                            child.resolved_key =
+                                compact_match_key(
+                                    model_name_from_path(hit->full_path));
+                        }
+                    }
+                    auto [it, _] = gmd_layout_child_cache.emplace(
+                        model_lower, std::move(children));
+                    return &it->second;
+                };
+
+            auto should_emit_gmd_layout_child =
+                [](const GmdLayoutChild& child) {
+                    std::string text =
+                        lower_slash(child.raw_path + " " +
+                                    child.resolved_path);
+                    return text.find("door") != std::string::npos ||
+                           text.find("window") != std::string::npos ||
+                           text.find("win_") != std::string::npos ||
+                           text.find("_win") != std::string::npos ||
+                           text.find("sign") != std::string::npos ||
+                           text.find("lamp") != std::string::npos ||
+                           text.find("lantern") != std::string::npos ||
+                           text.find("candle") != std::string::npos ||
+                           text.find("light") != std::string::npos;
+                };
+            auto emit_gmd_layout_children_for_model =
+                [&](const FlatAssetEntry* parent_model,
+                    const Level::PropInstance& parent_inst) {
+                    if (!parent_model) return size_t(0);
+                    const std::string parent_lower =
+                        lower_slash(parent_model->full_path);
+                    const bool shell_parent =
+                        parent_lower.find("/exterior.mdl") !=
+                            std::string::npos ||
+                        parent_lower.find("bs_market_tarotstall/") !=
+                            std::string::npos;
+                    if (!shell_parent) return size_t(0);
+
+                    const std::vector<GmdLayoutChild>* children =
+                        load_gmd_layout_children_for_model(parent_model);
+                    if (!children || children->empty()) return size_t(0);
+
+                    size_t emitted = 0;
+                    const Xform3f parent_xf =
+                        prop_instance_xform(parent_inst);
+                    for (const auto& child : *children) {
+                        if (!should_emit_gmd_layout_child(child)) continue;
+                        const FlatAssetEntry* child_model =
+                            choose_gmd_layout_child_model(child.asset_key);
+                        if (!child_model) {
+                            ++gdb_gmd_layout_children_missing;
+                            continue;
+                        }
+                        const Xform3f child_world =
+                            xform_compose(parent_xf, child.local);
+                        Level::PropInstance child_inst =
+                            prop_instance_from_xform(
+                                child_world, parent_inst.hash);
+                        if (append_prop_instance_for_model(
+                                child_model, child_inst))
+                        {
+                            ++emitted;
+                            ++gdb_gmd_layout_children_emitted;
+                            ++gdb_gmd_layout_child_paths[
+                                child_model->full_path];
+                        }
+                    }
+                    return emitted;
                 };
             for (const auto& p : info.placements) {
                 if (!emit_gdb_render_placements) continue;
@@ -3554,6 +4835,45 @@ bool Open(const FlatAssetEntry& entry)
                 if (shop_probe) {
                     ++gdb_shop_seen;
                 }
+                if (is_bwsmarket_level &&
+                    p.model_path_hash == 0 &&
+                    has_worldish_gdb_position(p) &&
+                    is_nohash_market_shell_key(entity_key))
+                {
+                    gdb_nohash_shell_candidates.push_back(
+                        {p, entity_key, gdb_interest_category});
+                    add_gdb_interest_row(
+                        p, entity_key, gdb_interest_category,
+                        "candidate_nohash_shell",
+                        std::string());
+                    continue;
+                }
+                if (!p.indexed_record && p.model_path_hash == 0 &&
+                    p.parent_hash == 0 &&
+                    is_unindexed_shell_fallback_entity(entity_key, tok))
+                {
+                    add_gdb_interest_row(
+                        p, entity_key, gdb_interest_category,
+                        "skipped_unindexed_shell_fallback",
+                        std::string());
+                    if (clocktower_probe &&
+                        gdb_clocktower_probe_lines.size() < 8)
+                    {
+                        gdb_clocktower_probe_lines.push_back(
+                            "clocktower probe skipped unindexed shell fallback: " +
+                            gdb_shell_sample_text(p, "<no indexed record>"));
+                    }
+                    if (shop_probe) {
+                        ++gdb_shop_unresolved;
+                        if (gdb_shop_probe_lines.size() < 12) {
+                            gdb_shop_probe_lines.push_back(
+                                "shop probe skipped unindexed shell fallback: " +
+                                gdb_shell_sample_text(
+                                    p, "<no indexed record>"));
+                        }
+                    }
+                    continue;
+                }
                 auto parent_name_it = parent_match_names.find(p.parent_hash);
                 const std::string* parent_match_name =
                     (parent_name_it == parent_match_names.end())
@@ -3561,11 +4881,13 @@ bool Open(const FlatAssetEntry& entry)
 
                 const FlatAssetEntry* hit = nullptr;
                 bool matched_model = false;
+                bool matched_model_path_hash = false;
                 bool hint_only = false;
                 if (p.model_path_hash != 0) {
                     hit = resolve_model_by_path_hash(p.model_path_hash);
                     if (hit) {
                         matched_model = true;
+                        matched_model_path_hash = true;
                         ++gdb_model_hash_hits;
                     } else {
                         ++gdb_model_hash_misses;
@@ -3604,9 +4926,30 @@ bool Open(const FlatAssetEntry& entry)
                         }
                     }
                 }
+                if (!matched_model &&
+                    (entity_key == "bsmarkettavern" ||
+                     tok.find("bsmarkettavern") != std::string::npos))
+                {
+                    if (has_worldish_gdb_position(p)) {
+                        gdb_nohash_shell_candidates.push_back(
+                            {p, "bsmarkettavern", gdb_interest_category});
+                    }
+                    add_gdb_interest_row(
+                        p, entity_key, gdb_interest_category,
+                        "skipped_unverified_tavern_shell_guess",
+                        std::string());
+                    continue;
+                }
                 if (!matched_model) {
                     hit = resolve_model_for_entity(p.entity_name);
                     if (!hit) {
+                        if (is_bwsmarket_level && has_worldish_gdb_position(p) &&
+                            (entity_key == "generalstore" ||
+                             entity_key == "generalstore1"))
+                        {
+                            gdb_nohash_shell_candidates.push_back(
+                                {p, entity_key, gdb_interest_category});
+                        }
                         add_gdb_interest_row(
                             p, entity_key, gdb_interest_category,
                             "unresolved", std::string());
@@ -3644,7 +4987,14 @@ bool Open(const FlatAssetEntry& entry)
                         gdb_interest_category = path_category;
                     }
                 }
-                if (hit && is_bad_market_helper_substitution(
+                if (hit && is_gdb_static_prop_reject_model(hit->full_path)) {
+                    add_gdb_interest_row(
+                        p, entity_key, gdb_interest_category,
+                        "rejected_non_static_model", hit->full_path);
+                    continue;
+                }
+                if (hit && !matched_model_path_hash &&
+                    is_bad_market_helper_substitution(
                         entity_key, tok, hit->full_path))
                 {
                     add_gdb_interest_row(
@@ -3690,8 +5040,9 @@ bool Open(const FlatAssetEntry& entry)
                 const FlatAssetEntry* clocktower_platform_companion = nullptr;
                 if (clocktower_probe) {
                     const std::string primary_path = lower_slash(hit->full_path);
-                    if (primary_path.find("bs_market_platform") !=
-                        std::string::npos)
+                    if (!bwsmarket_has_explicit_clocktower_base_record &&
+                        primary_path.find("bs_market_platform") !=
+                            std::string::npos)
                     {
                         const char* tower_path =
                             GdbModelHashlist::LookupParentHash(0xD55304DB);
@@ -3780,6 +5131,28 @@ bool Open(const FlatAssetEntry& entry)
                     continue;
                 }
 
+                const std::string matched_lower_path =
+                    lower_slash(hit->full_path);
+                const bool bwsmarket_tarotstall_shell =
+                    is_bwsmarket_level &&
+                    matched_lower_path.find("bs_market_tarotstall/") !=
+                        std::string::npos &&
+                    matched_lower_path.find("bs_market_tarotstall_doors") ==
+                        std::string::npos;
+                if (bwsmarket_tarotstall_shell &&
+                    p.parent_hash == 0 &&
+                    p.model_path_hash == 0 &&
+                    !p.indexed_record)
+                {
+                    add_gdb_interest_row(
+                        p, entity_key, gdb_interest_category,
+                        "skipped_unindexed_tarot_shell_fallback",
+                        hit->full_path);
+                    ++gdb_duplicate_instances_skipped;
+                    ++gdb_duplicate_skip_paths[hit->full_path];
+                    continue;
+                }
+
                 const bool unique_entity_shell =
                     is_gdb_unique_entity_shell_model(hit->full_path);
                 if (unique_entity_shell && !has_worldish_gdb_position(p)) {
@@ -3806,7 +5179,7 @@ bool Open(const FlatAssetEntry& entry)
                     continue;
                 }
 
-                if (unique_entity_shell) {
+                if (unique_entity_shell && !has_model_hash) {
                     std::string shell_entity_key = entity_key;
                     if (shell_entity_key.empty()) {
                         shell_entity_key =
@@ -3981,9 +5354,25 @@ bool Open(const FlatAssetEntry& entry)
                     continue;
                 }
                 pb.instances.push_back(pi);
+                emit_gmd_layout_children_for_model(hit, pi);
                 add_gdb_interest_row(
                     p, entity_key, gdb_interest_category,
                     "emitted", hit->full_path);
+                if (is_bwsmarket_level) {
+                    const std::string emitted_path =
+                        lower_slash(hit->full_path);
+                    if (emitted_path.find(
+                            "bs_market_generalshop_stairs_floor") !=
+                        std::string::npos)
+                    {
+                        gdb_generalshop_floor_anchors.push_back(pi);
+                    }
+                    if (emitted_path.find("esa_table_tavern") !=
+                        std::string::npos)
+                    {
+                        gdb_tavern_pub_anchors.push_back(pi);
+                    }
+                }
                 if (has_shell_path_limit) {
                     ++gdb_shell_path_emit_counts[shell_path_count_key];
                 }
@@ -3996,42 +5385,89 @@ bool Open(const FlatAssetEntry& entry)
                     }
                     const std::string primary_path =
                         lower_slash(hit->full_path);
-                    if (clocktower_platform_companion) {
-                        if (append_prop_instance_for_model(
-                                clocktower_platform_companion, pi))
+                    const bool primary_is_clocktower_base =
+                        primary_path.find(
+                            "bs_market_clocktower/"
+                            "bs_market_clocktower.mdl") !=
+                            std::string::npos;
+                    const bool primary_is_platform =
+                        primary_path.find(
+                            "bs_market_platform/"
+                            "bs_market_platform.mdl") !=
+                            std::string::npos;
+                    const bool clocktower_base_primary =
+                        primary_is_clocktower_base ||
+                        (primary_is_platform &&
+                         !bwsmarket_has_explicit_clocktower_base_record);
+                    if (clocktower_base_primary) {
+                        if (clocktower_platform_companion) {
+                            if (append_prop_instance_for_model(
+                                    clocktower_platform_companion, pi))
+                            {
+                                ++gdb_clocktower_companions_emitted;
+                                if (gdb_clocktower_probe_lines.size() < 8) {
+                                    gdb_clocktower_probe_lines.push_back(
+                                        "clocktower platform companion emitted: " +
+                                        gdb_shell_sample_text(
+                                            p,
+                                            clocktower_platform_companion->full_path));
+                                }
+                            }
+                        } else if (!bwsmarket_has_explicit_clocktower_base_record &&
+                                   primary_path.find("bs_market_clocktower") ==
+                                       std::string::npos)
                         {
-                            ++gdb_clocktower_companions_emitted;
-                            if (gdb_clocktower_probe_lines.size() < 8) {
+                            const char* tower_path =
+                                GdbModelHashlist::LookupParentHash(0xD55304DB);
+                            const FlatAssetEntry* tower_hit =
+                                resolve_model_by_lower_path(
+                                    lower_slash(tower_path ? tower_path : ""));
+                            if (append_prop_instance_for_model(tower_hit, pi)) {
+                                ++gdb_clocktower_companions_emitted;
+                                if (gdb_clocktower_probe_lines.size() < 8) {
+                                    gdb_clocktower_probe_lines.push_back(
+                                        "clocktower companion emitted: " +
+                                        gdb_shell_sample_text(
+                                            p, tower_hit->full_path));
+                                }
+                            } else if (!tower_hit &&
+                                       gdb_clocktower_probe_lines.size() < 8)
+                            {
                                 gdb_clocktower_probe_lines.push_back(
-                                    "clocktower platform companion emitted: " +
+                                    "clocktower companion unresolved: " +
                                     gdb_shell_sample_text(
-                                        p,
-                                        clocktower_platform_companion->full_path));
+                                        p, tower_path ? tower_path : "<no path>"));
                             }
                         }
-                    } else if (primary_path.find("bs_market_clocktower") ==
-                               std::string::npos)
-                    {
-                        const char* tower_path =
-                            GdbModelHashlist::LookupParentHash(0xD55304DB);
-                        const FlatAssetEntry* tower_hit =
-                            resolve_model_by_lower_path(
-                                lower_slash(tower_path ? tower_path : ""));
-                        if (append_prop_instance_for_model(tower_hit, pi)) {
-                            ++gdb_clocktower_companions_emitted;
-                            if (gdb_clocktower_probe_lines.size() < 8) {
-                                gdb_clocktower_probe_lines.push_back(
-                                    "clocktower companion emitted: " +
-                                    gdb_shell_sample_text(
-                                        p, tower_hit->full_path));
+
+                        const std::array<const char*, 3> clocktower_parts = {
+                            "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_ClockTower_Cogs\\BS_Market_ClockTower_Cogs.mdl",
+                            "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_ClockTower_HourHand\\BS_Market_ClockTower_HourHand.mdl",
+                            "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_ClockTower_MinuteHand\\BS_Market_ClockTower_MinuteHand.mdl",
+                        };
+                        for (const char* part_path : clocktower_parts) {
+                            const std::string part_lower =
+                                lower_slash(part_path);
+                            if (primary_path == part_lower) {
+                                continue;
                             }
-                        } else if (!tower_hit &&
-                                   gdb_clocktower_probe_lines.size() < 8)
-                        {
-                            gdb_clocktower_probe_lines.push_back(
-                                "clocktower companion unresolved: " +
-                                gdb_shell_sample_text(
-                                    p, tower_path ? tower_path : "<no path>"));
+                            const FlatAssetEntry* part_hit =
+                                resolve_model_by_lower_path(part_lower);
+                            if (append_prop_instance_for_model(part_hit, pi)) {
+                                ++gdb_clocktower_companions_emitted;
+                                if (gdb_clocktower_probe_lines.size() < 8) {
+                                    gdb_clocktower_probe_lines.push_back(
+                                        "clocktower part emitted: " +
+                                        gdb_shell_sample_text(
+                                            p, part_hit->full_path));
+                                }
+                            } else if (!part_hit &&
+                                       gdb_clocktower_probe_lines.size() < 8)
+                            {
+                                gdb_clocktower_probe_lines.push_back(
+                                    "clocktower part unresolved: " +
+                                    gdb_shell_sample_text(p, part_path));
+                            }
                         }
                     }
                 }
@@ -4072,6 +5508,631 @@ bool Open(const FlatAssetEntry& entry)
                 ++gdb_instances_emitted;
             }
 
+            if (is_bwsmarket_level) {
+                struct WorldAnchor {
+                    std::string model_path;
+                    std::string key;
+                    Xform3f xf;
+                };
+                std::unordered_map<std::string, std::vector<WorldAnchor>>
+                    world_anchors_by_key;
+                auto add_world_anchor =
+                    [&](const std::string& model_path,
+                        const Level::PropInstance& inst) {
+                        const std::string key =
+                            compact_match_key(model_name_from_path(model_path));
+                        if (key.empty()) return;
+                        world_anchors_by_key[key].push_back(
+                            {model_path, key, prop_instance_xform(inst)});
+                    };
+                for (const auto& block : level_prop_blocks) {
+                    for (const auto& inst : block.instances) {
+                        add_world_anchor(block.model_path, inst);
+                    }
+                }
+                for (const auto& kv : blocks_by_path) {
+                    const auto& block = kv.second;
+                    for (const auto& inst : block.instances) {
+                        add_world_anchor(block.model_path, inst);
+                    }
+                }
+
+                std::unordered_map<std::string,
+                                   std::vector<const FlatAssetEntry*>>
+                    mdl_by_asset_key;
+                mdl_by_asset_key.reserve(S.all_mdl_files.size());
+                for (const auto& m : S.all_mdl_files) {
+                    const std::string key =
+                        compact_match_key(model_name_from_path(m.full_path));
+                    if (!key.empty()) {
+                        mdl_by_asset_key[key].push_back(&m);
+                    }
+                }
+                auto choose_model_for_gmd_asset =
+                    [&](const std::string& key) {
+                    if (key.empty()) {
+                        return static_cast<const FlatAssetEntry*>(nullptr);
+                    }
+                    auto choose_best =
+                        [](const std::vector<const FlatAssetEntry*>& hits) {
+                        const FlatAssetEntry* best = nullptr;
+                        int best_score = INT_MIN;
+                        for (const FlatAssetEntry* e : hits) {
+                            if (!e) continue;
+                            int score = 0;
+                            const std::string p = lower_slash(e->full_path);
+                            if (p.find("/globals_models.bnk") ==
+                                std::string::npos)
+                            {
+                                score += 500;
+                            }
+                            if (e->from_nested) score += 250;
+                            if (p.find("/doors_windows/") !=
+                                std::string::npos)
+                            {
+                                score += 200;
+                            }
+                            if (p.find("/props/") != std::string::npos) {
+                                score += 100;
+                            }
+                            score -= int(std::min<size_t>(
+                                e->full_path.size(), 240));
+                            if (!best || score > best_score) {
+                                best = e;
+                                best_score = score;
+                            }
+                        }
+                        return best;
+                    };
+                    if (auto it = mdl_by_asset_key.find(key);
+                        it != mdl_by_asset_key.end())
+                    {
+                        return choose_best(it->second);
+                    }
+                    std::vector<const FlatAssetEntry*> fuzzy;
+                    for (const auto& kv : mdl_by_asset_key) {
+                        const std::string& mk = kv.first;
+                        if (mk.size() < 5) continue;
+                        if (mk.find(key) == std::string::npos &&
+                            key.find(mk) == std::string::npos)
+                        {
+                            continue;
+                        }
+                        fuzzy.insert(fuzzy.end(),
+                                     kv.second.begin(),
+                                     kv.second.end());
+                    }
+                    return choose_best(fuzzy);
+                };
+
+                auto shell_candidate_for_path =
+                    [&](const char* exterior_path) {
+                    const std::string target = lower_slash(exterior_path);
+                    const StreamingModelCandidate* best = nullptr;
+                    for (const auto& c : streaming_model_candidates) {
+                        if (!c.from_gmd || c.gmd_file_index < 0 ||
+                            c.gmd_bnk_path.empty())
+                        {
+                            continue;
+                        }
+                        if (c.hint_lower == target ||
+                            c.resolved_lower == target)
+                        {
+                            return &c;
+                        }
+                        if (c.hint_lower.size() > target.size() &&
+                            c.hint_lower.compare(
+                                c.hint_lower.size() - target.size(),
+                                target.size(), target) == 0)
+                        {
+                            best = &c;
+                        }
+                    }
+                    return best;
+                };
+
+                struct GmdShellSolution {
+                    Xform3f xf;
+                    int matches = 0;
+                    int distinct_matches = 0;
+                    float error = 0.0f;
+                    std::string seed;
+                };
+                std::vector<std::string> gmd_layout_rows;
+                std::vector<std::string> gmd_solve_rows;
+                auto is_distinct_anchor_key =
+                    [&](const std::string& key) {
+                    auto it = world_anchors_by_key.find(key);
+                    const size_t count =
+                        (it == world_anchors_by_key.end())
+                            ? 0 : it->second.size();
+                    return count <= 16 ||
+                           key.find("sign") != std::string::npos ||
+                           key.find("door") != std::string::npos ||
+                           key.find("counter") != std::string::npos ||
+                           key.find("stairs") != std::string::npos ||
+                           key.find("tarot") != std::string::npos;
+                };
+                auto plausible_shell_xform =
+                    [](const Xform3f& xf) {
+                    return std::isfinite(xf.t.x) &&
+                           std::isfinite(xf.t.y) &&
+                           std::isfinite(xf.t.z) &&
+                           xf.t.x >= -96.0f && xf.t.x <= 512.0f &&
+                           xf.t.z >= -96.0f && xf.t.z <= 512.0f &&
+                           xf.t.y >= -96.0f && xf.t.y <= 256.0f;
+                };
+                auto score_gmd_shell_seed =
+                    [&](const Xform3f& seed,
+                        const std::vector<GmdLayoutChild>& children,
+                        const std::string& seed_label) {
+                    GmdShellSolution sol;
+                    sol.xf = seed;
+                    sol.seed = seed_label;
+                    if (!plausible_shell_xform(seed)) {
+                        sol.error = std::numeric_limits<float>::infinity();
+                        return sol;
+                    }
+                    for (const auto& child : children) {
+                        if (child.resolved_key.empty()) continue;
+                        auto it =
+                            world_anchors_by_key.find(child.resolved_key);
+                        if (it == world_anchors_by_key.end() ||
+                            it->second.empty())
+                        {
+                            continue;
+                        }
+                        const Vec3f predicted =
+                            xform_apply_point(seed, child.local.t);
+                        float best_d2 =
+                            std::numeric_limits<float>::infinity();
+                        for (const auto& anchor : it->second) {
+                            const float d2 =
+                                vec3_len2(vec3_sub(predicted, anchor.xf.t));
+                            if (d2 < best_d2) best_d2 = d2;
+                        }
+                        if (!std::isfinite(best_d2)) continue;
+                        const float d = std::sqrt(best_d2);
+                        if (d <= 2.5f) {
+                            ++sol.matches;
+                            sol.error += d;
+                            if (is_distinct_anchor_key(child.resolved_key)) {
+                                ++sol.distinct_matches;
+                            }
+                        }
+                    }
+                    return sol;
+                };
+                auto solve_gmd_shell =
+                    [&](const char* exterior_path,
+                        const char* label,
+                        size_t max_solutions) {
+                    std::vector<GmdShellSolution> selected;
+                    const StreamingModelCandidate* cand =
+                        shell_candidate_for_path(exterior_path);
+                    if (!cand) {
+                        gmd_solve_rows.push_back(
+                            std::string(label) +
+                            "\tmissing_gmd_candidate\t0\t0\t0\t0\t0\t0\t0\t");
+                        return selected;
+                    }
+
+                    std::vector<uint8_t> bytes;
+                    try {
+                        bytes = BnkCache::extract_bytes(
+                            cand->gmd_bnk_path, cand->gmd_file_index);
+                    } catch (...) {
+                    }
+                    std::vector<GmdLayoutChild> children =
+                        parse_gmd_layout_children(bytes);
+                    for (auto& child : children) {
+                        if (const FlatAssetEntry* hit =
+                                choose_model_for_gmd_asset(child.asset_key))
+                        {
+                            child.resolved_path = hit->full_path;
+                            child.resolved_key =
+                                compact_match_key(
+                                    model_name_from_path(hit->full_path));
+                        }
+                        std::ostringstream row;
+                        row << label << '\t'
+                            << cand->hint_path << '\t'
+                            << child.offset << '\t'
+                            << child.asset_key << '\t'
+                            << child.local.t.x << '\t'
+                            << child.local.t.y << '\t'
+                            << child.local.t.z << '\t'
+                            << child.resolved_path << '\t'
+                            << child.raw_path;
+                        gmd_layout_rows.push_back(row.str());
+                    }
+
+                    std::vector<GmdShellSolution> scored;
+                    for (const auto& child : children) {
+                        if (child.resolved_key.empty()) continue;
+                        auto it =
+                            world_anchors_by_key.find(child.resolved_key);
+                        if (it == world_anchors_by_key.end() ||
+                            it->second.empty())
+                        {
+                            continue;
+                        }
+                        Xform3f local_inv;
+                        if (!xform_inverse(child.local, local_inv)) {
+                            continue;
+                        }
+                        const bool distinct =
+                            is_distinct_anchor_key(child.resolved_key);
+                        const size_t max_seed_count = distinct ? 512 : 96;
+                        const size_t stride =
+                            (it->second.size() > max_seed_count)
+                                ? std::max<size_t>(
+                                      1, it->second.size() / max_seed_count)
+                                : 1;
+                        size_t used = 0;
+                        for (size_t i = 0; i < it->second.size();
+                             i += stride)
+                        {
+                            if (used++ >= max_seed_count) break;
+                            const auto& anchor = it->second[i];
+                            const Xform3f seed =
+                                xform_compose(anchor.xf, local_inv);
+                            const std::string seed_label =
+                                child.resolved_key + " -> " +
+                                anchor.model_path;
+                            GmdShellSolution sol =
+                                score_gmd_shell_seed(
+                                    seed, children, seed_label);
+                            if (sol.matches <= 0) continue;
+                            scored.push_back(std::move(sol));
+                        }
+                    }
+
+                    std::sort(scored.begin(), scored.end(),
+                              [](const auto& a, const auto& b) {
+                                  const int as = a.distinct_matches * 2000 +
+                                                 a.matches * 1000;
+                                  const int bs = b.distinct_matches * 2000 +
+                                                 b.matches * 1000;
+                                  if (as != bs) return as > bs;
+                                  return a.error < b.error;
+                              });
+
+                    for (const auto& sol : scored) {
+                        if (sol.matches < 2 && sol.distinct_matches < 1) {
+                            continue;
+                        }
+                        bool duplicate = false;
+                        for (const auto& prev : selected) {
+                            const Vec3f d =
+                                vec3_sub(sol.xf.t, prev.xf.t);
+                            if (d.x * d.x + d.z * d.z < 16.0f &&
+                                std::fabs(d.y) < 6.0f)
+                            {
+                                duplicate = true;
+                                break;
+                            }
+                        }
+                        if (duplicate) continue;
+                        selected.push_back(sol);
+                        if (selected.size() >= max_solutions) break;
+                    }
+
+                    size_t rank = 0;
+                    for (const auto& sol : selected) {
+                        ++rank;
+                        std::ostringstream row;
+                        row << label << '\t'
+                            << "selected" << '\t'
+                            << rank << '\t'
+                            << sol.matches << '\t'
+                            << sol.distinct_matches << '\t'
+                            << std::fixed << std::setprecision(3)
+                            << sol.error << '\t'
+                            << sol.xf.t.x << '\t'
+                            << sol.xf.t.z << '\t'
+                            << sol.xf.t.y << '\t'
+                            << sol.seed;
+                        gmd_solve_rows.push_back(row.str());
+                    }
+                    if (selected.empty()) {
+                        std::ostringstream row;
+                        row << label << '\t'
+                            << "no_strong_solution\t0\t0\t0\t0\t0\t0\t0\t"
+                            << "children=" << children.size();
+                        gmd_solve_rows.push_back(row.str());
+                    }
+                    return selected;
+                };
+
+                auto emit_gmd_solved_shells =
+                    [&](const char* exterior_path,
+                        const char* label,
+                        size_t max_solutions) {
+                    size_t emitted = 0;
+                    std::vector<GmdShellSolution> solutions =
+                        solve_gmd_shell(exterior_path, label, max_solutions);
+                    const std::string exterior_lower =
+                        lower_slash(exterior_path);
+                    const std::array<std::string, 2> shell_paths = {
+                        exterior_lower,
+                        companion_interior_path(exterior_lower),
+                    };
+                    for (const auto& sol : solutions) {
+                        const Level::PropInstance shell_pi =
+                            prop_instance_from_xform(sol.xf);
+                        bool emitted_any = false;
+                        for (const std::string& shell_path : shell_paths) {
+                            if (shell_path.empty()) continue;
+                            if (append_prop_instance_for_model_path(
+                                    shell_path, shell_pi))
+                            {
+                                emitted_any = true;
+                                ++gdb_nohash_shell_companions_emitted;
+                                ++gdb_nohash_shell_companion_paths[shell_path];
+                            } else if (!resolve_model_by_lower_path(
+                                           shell_path))
+                            {
+                                ++gdb_nohash_shell_companion_misses;
+                            }
+                        }
+                        if (emitted_any) {
+                            ++emitted;
+                            ++gdb_instances_emitted;
+                        }
+                    }
+                    return emitted;
+                };
+
+                constexpr bool enable_gmd_shell_solve = false;
+                const size_t solved_general =
+                    enable_gmd_shell_solve
+                        ? emit_gmd_solved_shells(
+                              "art/environment/regions/bowerstone/buildings/"
+                              "dotxsi/bs_market_generalshop/"
+                              "bs_market_generalshop/exterior.mdl",
+                              "generalshop",
+                              2)
+                        : 0;
+                const size_t solved_tavern =
+                    enable_gmd_shell_solve
+                        ? emit_gmd_solved_shells(
+                              "art/environment/regions/bowerstone/buildings/"
+                              "dotxsi/bs_market_tavern/"
+                              "bs_market_tavern/exterior.mdl",
+                              "tavern",
+                              1)
+                        : 0;
+                if (solved_general > 0 || solved_tavern > 0) {
+                    OutputLog::info(
+                        "GDB .gmd shell solve: generalshop=" +
+                        std::to_string(solved_general) +
+                        ", tavern=" +
+                        std::to_string(solved_tavern));
+                }
+
+                auto write_debug_rows =
+                    [&](const char* filename,
+                        const char* header,
+                        const std::vector<std::string>& rows) {
+                    if (rows.empty()) return;
+                    const std::filesystem::path path =
+                        std::filesystem::path("extracted") / filename;
+                    std::error_code ec;
+                    std::filesystem::create_directories(
+                        path.parent_path(), ec);
+                    std::ofstream out(
+                        path, std::ios::binary | std::ios::trunc);
+                    if (!out) return;
+                    out << header << '\n';
+                    for (const auto& row : rows) {
+                        out << row << '\n';
+                    }
+                    OutputLog::info("BWSMarket .gmd shell debug: " +
+                                    path.string() + " (" +
+                                    std::to_string(rows.size()) + " rows)");
+                };
+                write_debug_rows(
+                    "debug_bwsmarket_gmd_layout.tsv",
+                    "shell\tgmd_hint\toffset\tasset_key\tlocal_x\tlocal_y\t"
+                    "local_z\tresolved_model\traw_path",
+                    gmd_layout_rows);
+                write_debug_rows(
+                    "debug_bwsmarket_gmd_shell_solve.tsv",
+                    "shell\tstatus\trank\tmatches\tdistinct_matches\t"
+                    "error\tx\tz\ty\tseed",
+                    gmd_solve_rows);
+            }
+
+            const bool allow_legacy_nohash_shell_anchor = false;
+            if (allow_legacy_nohash_shell_anchor &&
+                is_bwsmarket_level && !gdb_nohash_shell_candidates.empty()) {
+                std::unordered_set<size_t> used_nohash_shell_candidates;
+                auto find_nearest_nohash_shell =
+                    [&](const std::initializer_list<const char*> entity_keys,
+                        float x,
+                        float y,
+                        float z,
+                        float max_dist,
+                        float max_dz,
+                        bool prefer_parent_backed) -> size_t {
+                        size_t best = static_cast<size_t>(-1);
+                        float best_score =
+                            std::numeric_limits<float>::infinity();
+                        auto consider = [&](bool require_parent_backed) {
+                            for (size_t i = 0;
+                                 i < gdb_nohash_shell_candidates.size(); ++i)
+                            {
+                                if (used_nohash_shell_candidates.find(i) !=
+                                    used_nohash_shell_candidates.end())
+                                {
+                                    continue;
+                                }
+                                const NoHashShellCandidate& c =
+                                    gdb_nohash_shell_candidates[i];
+                                if (require_parent_backed &&
+                                    c.placement.parent_hash == 0)
+                                {
+                                    continue;
+                                }
+                                bool key_match = false;
+                                for (const char* key : entity_keys) {
+                                    if (c.entity_key == key) {
+                                        key_match = true;
+                                        break;
+                                    }
+                                }
+                                if (!key_match) continue;
+                                const float dx = c.placement.x - x;
+                                const float dy = c.placement.y - y;
+                                const float dz = c.placement.z - z;
+                                if (std::fabs(dz) > max_dz) continue;
+                                const float dxy2 = dx * dx + dy * dy;
+                                if (dxy2 > max_dist * max_dist) continue;
+                                const float score = dxy2 + dz * dz * 9.0f;
+                                if (score < best_score) {
+                                    best_score = score;
+                                    best = i;
+                                }
+                            }
+                        };
+                        if (prefer_parent_backed) {
+                            consider(true);
+                        }
+                        if (best == static_cast<size_t>(-1)) {
+                            consider(false);
+                        }
+                        return best;
+                    };
+                auto nohash_shell_placement_with_rotation =
+                    [&](const NoHashShellCandidate& candidate) {
+                        Gdb::Placement placement = candidate.placement;
+                        if (placement.has_rotation) return placement;
+
+                        float best_d2 = 64.0f;
+                        const NoHashShellCandidate* best = nullptr;
+                        for (const NoHashShellCandidate& other :
+                             gdb_nohash_shell_candidates)
+                        {
+                            if (other.entity_key != candidate.entity_key ||
+                                !other.placement.has_rotation)
+                            {
+                                continue;
+                            }
+                            const float dx =
+                                other.placement.x - placement.x;
+                            const float dy =
+                                other.placement.y - placement.y;
+                            const float d2 = dx * dx + dy * dy;
+                            if (d2 < best_d2) {
+                                best_d2 = d2;
+                                best = &other;
+                            }
+                        }
+                        if (best) {
+                            placement.rot_x = best->placement.rot_x;
+                            placement.rot_y = best->placement.rot_y;
+                            placement.rot_z = best->placement.rot_z;
+                            placement.yaw = best->placement.yaw;
+                            placement.has_rotation = true;
+                        }
+                        return placement;
+                    };
+                auto emit_nohash_shell_pair =
+                    [&](const NoHashShellCandidate& candidate,
+                        const char* exterior_path) {
+                        if (!exterior_path || !*exterior_path) return;
+                        const Gdb::Placement shell_placement =
+                            nohash_shell_placement_with_rotation(candidate);
+                        const Level::PropInstance shell_pi =
+                            make_gdb_prop_instance_no_count(
+                                shell_placement);
+                        const std::string exterior_lower =
+                            lower_slash(exterior_path);
+                        std::array<std::string, 2> shell_paths = {
+                            exterior_lower,
+                            companion_interior_path(exterior_lower),
+                        };
+                        bool emitted_any = false;
+                        for (const std::string& shell_path : shell_paths) {
+                            if (shell_path.empty()) continue;
+                            const FlatAssetEntry* shell_hit =
+                                resolve_model_by_lower_path(shell_path);
+                            if (append_prop_instance_for_model(
+                                    shell_hit, shell_pi))
+                            {
+                                emitted_any = true;
+                                emit_gmd_layout_children_for_model(
+                                    shell_hit, shell_pi);
+                                ++gdb_nohash_shell_companions_emitted;
+                                ++gdb_nohash_shell_companion_paths[shell_path];
+                                add_gdb_interest_row(
+                                    shell_placement,
+                                    candidate.entity_key,
+                                    candidate.category,
+                                    "emitted_nohash_shell_companion",
+                                    shell_path);
+                            } else if (!shell_hit)
+                            {
+                                ++gdb_nohash_shell_companion_misses;
+                            }
+                        }
+                        if (emitted_any) {
+                            ++gdb_instances_emitted;
+                        }
+                    };
+
+                for (const auto& anchor : gdb_generalshop_floor_anchors) {
+                    const size_t idx = find_nearest_nohash_shell(
+                        {"generalstore", "generalstore1"},
+                        anchor.values[0], anchor.values[1], anchor.values[2],
+                        18.0f, 5.0f, true);
+                    if (idx == static_cast<size_t>(-1)) continue;
+                    used_nohash_shell_candidates.insert(idx);
+                    emit_nohash_shell_pair(
+                        gdb_nohash_shell_candidates[idx],
+                        "art/environment/regions/bowerstone/buildings/"
+                        "dotxsi/bs_market_generalshop/"
+                        "bs_market_generalshop/exterior.mdl");
+                }
+
+                if (!gdb_tavern_pub_anchors.empty()) {
+                    float tavern_x = 0.0f;
+                    float tavern_y = 0.0f;
+                    float tavern_z = 0.0f;
+                    size_t tavern_anchor_count = 0;
+                    for (const auto& anchor : gdb_tavern_pub_anchors) {
+                        if (anchor.values[2] > 43.0f) continue;
+                        tavern_x += anchor.values[0];
+                        tavern_y += anchor.values[1];
+                        tavern_z += anchor.values[2];
+                        ++tavern_anchor_count;
+                    }
+                    if (tavern_anchor_count == 0) {
+                        for (const auto& anchor : gdb_tavern_pub_anchors) {
+                            tavern_x += anchor.values[0];
+                            tavern_y += anchor.values[1];
+                            tavern_z += anchor.values[2];
+                            ++tavern_anchor_count;
+                        }
+                    }
+                    tavern_x /= static_cast<float>(tavern_anchor_count);
+                    tavern_y /= static_cast<float>(tavern_anchor_count);
+                    tavern_z /= static_cast<float>(tavern_anchor_count);
+                    const size_t idx = find_nearest_nohash_shell(
+                        {"bsmarkettavern"}, tavern_x, tavern_y, tavern_z,
+                        25.0f, 4.0f, false);
+                    if (idx != static_cast<size_t>(-1)) {
+                        used_nohash_shell_candidates.insert(idx);
+                        emit_nohash_shell_pair(
+                            gdb_nohash_shell_candidates[idx],
+                            "art/environment/regions/bowerstone/buildings/"
+                            "dotxsi/bs_market_tavern/"
+                            "bs_market_tavern/exterior.mdl");
+                    }
+                }
+            }
+
             if (is_bwsmarket_level && !gdb_interest_rows.empty()) {
                 const std::filesystem::path interest_path =
                     std::filesystem::path("extracted") /
@@ -4084,7 +6145,8 @@ bool Open(const FlatAssetEntry& entry)
                 if (out) {
                     out << "category\tstatus\tentity\tentity_key\t"
                            "entity_hash\tparent_hash\tmodel_path_hash\t"
-                           "x\ty\tz\tresolved_model\n";
+                           "x\ty\tz\trot_x\trot_y\trot_z\thas_rotation\t"
+                           "resolved_model\n";
                     for (const auto& row : gdb_interest_rows) {
                         out << row << '\n';
                     }
@@ -4093,7 +6155,8 @@ bool Open(const FlatAssetEntry& entry)
                             << interest_path.string() << " ("
                             << gdb_interest_rows.size() << " rows";
                     const char* categories[] = {
-                        "shop", "tavern", "stall", "house", "caravan"
+                        "shop", "tavern", "stall", "house", "caravan",
+                        "light"
                     };
                     for (const char* category : categories) {
                         auto it =
@@ -4179,6 +6242,31 @@ bool Open(const FlatAssetEntry& entry)
                         OutputLog::info("  " + line);
                     }
                 }
+                if (auto light_cat =
+                        gdb_interest_category_status_counts.find("light");
+                    light_cat != gdb_interest_category_status_counts.end())
+                {
+                    auto count_status = [&](const char* key) {
+                        auto it = light_cat->second.find(key);
+                        return it == light_cat->second.end()
+                                   ? size_t(0)
+                                   : it->second;
+                    };
+                    OutputLog::info(
+                        "gdb light probe: emitted=" +
+                        std::to_string(count_status("emitted")) +
+                        ", duplicate=" +
+                        std::to_string(
+                            count_status("skipped_duplicate_gdb_record") +
+                            count_status("skipped_existing_prop_transform")) +
+                        ", rejected=" +
+                        std::to_string(
+                            count_status("rejected_non_static_model") +
+                            count_status("rejected_helper_substitute")) +
+                        ", unresolved=" +
+                        std::to_string(count_status("unresolved") +
+                                       count_status("hint_only")));
+                }
                 if (gdb_shop_companions_emitted > 0) {
                     OutputLog::info(
                         "gdb shop companions: " +
@@ -4203,6 +6291,103 @@ bool Open(const FlatAssetEntry& entry)
                             "  shop companion: " +
                             std::to_string(shop_paths[i].second) +
                             "x  " + shop_paths[i].first);
+                    }
+                }
+                if (gdb_nohash_shell_companions_emitted > 0 ||
+                    gdb_nohash_shell_companion_misses > 0)
+                {
+                    OutputLog::info(
+                        "gdb nohash shell companions: emitted " +
+                        std::to_string(
+                            gdb_nohash_shell_companions_emitted) +
+                        " instance(s) across " +
+                        std::to_string(
+                            gdb_nohash_shell_companion_paths.size()) +
+                        " model(s), missing-path " +
+                        std::to_string(
+                            gdb_nohash_shell_companion_misses));
+                    std::vector<std::pair<std::string, size_t>> nohash_paths(
+                        gdb_nohash_shell_companion_paths.begin(),
+                        gdb_nohash_shell_companion_paths.end());
+                    std::sort(nohash_paths.begin(), nohash_paths.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second != b.second) {
+                                      return a.second > b.second;
+                                  }
+                                  return a.first < b.first;
+                              });
+                    const size_t n =
+                        std::min<size_t>(nohash_paths.size(), 8);
+                    for (size_t i = 0; i < n; ++i) {
+                        OutputLog::info(
+                            "  nohash shell companion: " +
+                            std::to_string(nohash_paths[i].second) +
+                            "x  " + nohash_paths[i].first);
+                    }
+                }
+                if (gdb_gmd_layout_children_emitted > 0 ||
+                    gdb_gmd_layout_children_missing > 0)
+                {
+                    OutputLog::info(
+                        "gdb .gmd layout children: emitted " +
+                        std::to_string(gdb_gmd_layout_children_emitted) +
+                        " instance(s) across " +
+                        std::to_string(gdb_gmd_layout_child_paths.size()) +
+                        " model(s), unresolved " +
+                        std::to_string(gdb_gmd_layout_children_missing));
+                    std::vector<std::pair<std::string, size_t>> child_paths(
+                        gdb_gmd_layout_child_paths.begin(),
+                        gdb_gmd_layout_child_paths.end());
+                    std::sort(child_paths.begin(), child_paths.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second != b.second) {
+                                      return a.second > b.second;
+                                  }
+                                  return a.first < b.first;
+                              });
+                    const size_t n =
+                        std::min<size_t>(child_paths.size(), 8);
+                    for (size_t i = 0; i < n; ++i) {
+                        OutputLog::info(
+                            "  .gmd child: " +
+                            std::to_string(child_paths[i].second) +
+                            "x  " + child_paths[i].first);
+                    }
+                }
+                if (gdb_gmd_layout_sidecars_loaded > 0 ||
+                    gdb_gmd_layout_sidecars_missing > 0)
+                {
+                    OutputLog::info(
+                        "gdb .gmd sidecars: loaded " +
+                        std::to_string(gdb_gmd_layout_sidecars_loaded) +
+                        ", missing " +
+                        std::to_string(gdb_gmd_layout_sidecars_missing));
+                    if (global_gmd_sidecar_index_built) {
+                        OutputLog::info(
+                            "gdb .gmd global index: " +
+                            std::to_string(
+                                global_gmd_sidecar_index.size()) +
+                            " exact sidecar path(s) across " +
+                            std::to_string(
+                                global_gmd_sidecar_index_bnks) +
+                            " streaming BNK(s)");
+                    }
+                    std::vector<std::pair<std::string, size_t>> sources(
+                        gdb_gmd_layout_sidecar_sources.begin(),
+                        gdb_gmd_layout_sidecar_sources.end());
+                    std::sort(sources.begin(), sources.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second != b.second) {
+                                      return a.second > b.second;
+                                  }
+                                  return a.first < b.first;
+                              });
+                    const size_t n = std::min<size_t>(sources.size(), 6);
+                    for (size_t i = 0; i < n; ++i) {
+                        OutputLog::info(
+                            "  .gmd source: " +
+                            std::to_string(sources[i].second) +
+                            "x  " + sources[i].first);
                     }
                 }
                 if (gdb_shell_bad_position_skipped > 0) {
@@ -6521,16 +8706,10 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
             const int   cx       = std::min<int>(parsed.chunk_w - 1, int(fx_chunk));
             const float fx_in    = std::clamp(fx_chunk - float(cx), 0.f, 1.f);
 
-            float w00 = 0.0f, w10 = 0.0f, w01 = 0.0f, w11 = 0.0f;
-            if (fx_in + fy_in <= 1.0f) {
-                w00 = 1.0f - fx_in - fy_in;
-                w10 = fx_in;
-                w01 = fy_in;
-            } else {
-                w10 = 1.0f - fy_in;
-                w01 = 1.0f - fx_in;
-                w11 = fx_in + fy_in - 1.0f;
-            }
+            const float w00 = (1.f - fx_in) * (1.f - fy_in);
+            const float w10 =        fx_in  * (1.f - fy_in);
+            const float w01 = (1.f - fx_in) *        fy_in;
+            const float w11 =        fx_in  *        fy_in;
 
             const size_t chunk_index =
                 size_t(cy) * size_t(parsed.chunk_w) + size_t(cx);

@@ -6,6 +6,7 @@
 #include "../../Utilities/operations.h"
 #include "../../ISO/IsoMount.h"
 #include "../../BNKCore.cpp"
+#include "../../Level/GdbParser.h"
 #include "../UI_Main.h"
 #include "../AudioPlayerWindow.h"
 #include "../OutputLog.h"
@@ -18,13 +19,17 @@
 
 #include "../../animations/AnimBank.h"
 #include "../../animations/AnimDataFile.h"
+#include "../../animations/Locomotion.h"
 #include "imgui.h"
 #include <filesystem>
 #include <algorithm>
+#include <cctype>
 #include <ctime>
 #include <cstring>
 #include <optional>
+#include <sstream>
 #include <thread>
+#include <unordered_map>
 
 void refresh_file_table() { S.selected_file_index = -1; }
 
@@ -60,12 +65,243 @@ bool open_audio_player_for_selected(int file_index) {
     return UI::open_audio_player_for(item.name, bytes);
 }
 
+namespace {
+
+std::string gdb_lower_slash(std::string s)
+{
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return char(std::tolower(c)); });
+    std::replace(s.begin(), s.end(), '\\', '/');
+    return s;
+}
+
+uint32_t gdb_fnv1_model_path_hash(std::string s)
+{
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return char(std::tolower(c)); });
+    std::replace(s.begin(), s.end(), '/', '\\');
+
+    uint32_t h = 0x811C9DC5u;
+    for (unsigned char c : s) {
+        h *= 0x01000193u;
+        h ^= uint32_t(c);
+    }
+    return h;
+}
+
+std::vector<std::pair<uint32_t, std::string>>
+parse_save_hash_to_name(const std::vector<uint8_t>& save_bytes)
+{
+    std::vector<std::pair<uint32_t, std::string>> out;
+    if (save_bytes.empty()) return out;
+    std::string xml(reinterpret_cast<const char*>(save_bytes.data()),
+                    save_bytes.size());
+    const std::string tag_open = "<Entity name=\"";
+    const std::string tag_close = "</Entity>";
+    size_t pos = 0;
+    while (true) {
+        size_t a = xml.find(tag_open, pos);
+        if (a == std::string::npos) break;
+        a += tag_open.size();
+        size_t name_end = xml.find('"', a);
+        if (name_end == std::string::npos) break;
+        std::string name = xml.substr(a, name_end - a);
+        size_t hash_start = xml.find("0x", name_end);
+        if (hash_start == std::string::npos) break;
+        size_t hash_end = xml.find('<', hash_start);
+        if (hash_end == std::string::npos) break;
+        std::string hex =
+            xml.substr(hash_start + 2, hash_end - hash_start - 2);
+        size_t entity_close = xml.find(tag_close, hash_end);
+        if (entity_close == std::string::npos) break;
+
+        uint32_t h = 0;
+        bool ok = true;
+        for (char c : hex) {
+            h <<= 4;
+            if (c >= '0' && c <= '9') h |= uint32_t(c - '0');
+            else if (c >= 'A' && c <= 'F') h |= uint32_t(c - 'A' + 10);
+            else if (c >= 'a' && c <= 'f') h |= uint32_t(c - 'a' + 10);
+            else {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) {
+            out.emplace_back(h, std::move(name));
+        }
+        pos = entity_close + tag_close.size();
+    }
+    return out;
+}
+
+bool find_save_sibling_bytes(const std::string& bnk_path,
+                             const std::string& gdb_file_name,
+                             std::vector<uint8_t>& out)
+{
+    std::string save_key = gdb_lower_slash(gdb_file_name);
+    const size_t dot = save_key.find_last_of('.');
+    if (dot != std::string::npos) {
+        save_key.resize(dot);
+    }
+    save_key += ".save";
+    const std::string save_leaf =
+        std::filesystem::path(save_key).filename().string();
+
+    auto try_bnk = [&](const std::string& candidate_bnk) -> bool {
+        if (candidate_bnk.empty()) return false;
+        int idx = BnkCache::find_index(candidate_bnk, save_key);
+        if (idx < 0) idx = BnkCache::find_index(candidate_bnk, save_leaf);
+        if (idx < 0) return false;
+        try {
+            out = BnkCache::extract_bytes(candidate_bnk, idx);
+        } catch (...) {
+            out.clear();
+            return false;
+        }
+        return !out.empty();
+    };
+
+    if (try_bnk(bnk_path)) return true;
+
+    if (auto other_bnk = find_bnk_by_virtual_path(save_key)) {
+        if (try_bnk(*other_bnk)) return true;
+    }
+
+    return false;
+}
+
+}
+
+bool open_gdb_viewer_for_bnk_entry(const std::string& bnk_path,
+                                   int file_index,
+                                   const std::string& file_name)
+{
+    if (bnk_path.empty() || file_index < 0) return false;
+
+    std::vector<uint8_t> gdb_bytes;
+    try {
+        gdb_bytes = BnkCache::extract_bytes(bnk_path, file_index);
+    } catch (const std::exception& ex) {
+        OutputLog::error("GDB viewer: failed to extract " + file_name +
+                         " (" + ex.what() + ")");
+        return false;
+    } catch (...) {
+        OutputLog::error("GDB viewer: failed to extract " + file_name);
+        return false;
+    }
+    if (gdb_bytes.empty()) {
+        OutputLog::warn("GDB viewer: empty GDB " + file_name);
+        return false;
+    }
+
+    std::vector<uint8_t> save_bytes;
+    std::vector<std::pair<uint32_t, std::string>> save_hash_to_name;
+    if (find_save_sibling_bytes(bnk_path, file_name, save_bytes)) {
+        save_hash_to_name = parse_save_hash_to_name(save_bytes);
+    }
+
+    std::vector<Gdb::RecordRow> records =
+        Gdb::Build010RecordRows(gdb_bytes, save_hash_to_name, 0, 512);
+
+    std::unordered_map<uint32_t, std::string> save_name_by_hash;
+    save_name_by_hash.reserve(save_hash_to_name.size() * 2);
+    for (const auto& kv : save_hash_to_name) {
+        save_name_by_hash.emplace(kv.first, kv.second);
+    }
+
+    std::unordered_map<uint32_t, std::string> model_name_by_hash;
+    model_name_by_hash.reserve(S.all_mdl_files.size() * 2);
+    for (const FlatAssetEntry& e : S.all_mdl_files) {
+        if (e.full_path.empty()) continue;
+        model_name_by_hash.emplace(gdb_fnv1_model_path_hash(e.full_path),
+                                   e.full_path);
+    }
+
+    S.gdb_view_rows.clear();
+    S.gdb_view_rows.reserve(records.size());
+    size_t named = 0;
+    size_t parent_named = 0;
+    size_t model_named = 0;
+    size_t skeleton_refs = 0;
+    for (const Gdb::RecordRow& rec : records) {
+        GdbViewerRow row;
+        row.record_index = rec.index;
+        row.name = rec.name;
+        auto hash_it = save_name_by_hash.find(rec.hash);
+        if (hash_it != save_name_by_hash.end()) {
+            row.hash_name = hash_it->second;
+            if (row.name.empty()) row.name = row.hash_name;
+        }
+        if (!row.name.empty() || !row.hash_name.empty()) ++named;
+        if (rec.parent_hash != 0) {
+            auto parent_it = save_name_by_hash.find(rec.parent_hash);
+            if (parent_it != save_name_by_hash.end()) {
+                row.parent_name = parent_it->second;
+                ++parent_named;
+            }
+        }
+        row.hash = rec.hash;
+        row.parent_hash = rec.parent_hash;
+        row.model_path_hash = rec.model_path_hash;
+        row.skeleton_file_hash = rec.skeleton_file_hash;
+        row.retarget_skeleton_file_hash = rec.retarget_skeleton_file_hash;
+        row.skeleton_file_name = rec.skeleton_file_name;
+        row.retarget_skeleton_file_name = rec.retarget_skeleton_file_name;
+        if (row.skeleton_file_hash != 0 ||
+            row.retarget_skeleton_file_hash != 0) {
+            ++skeleton_refs;
+        }
+        row.model_path_hashes = rec.model_path_hashes;
+        row.debug_tree = rec.debug_tree;
+        for (uint32_t model_hash : row.model_path_hashes) {
+            auto model_it = model_name_by_hash.find(model_hash);
+            if (model_it != model_name_by_hash.end()) {
+                if (row.model_path_name.empty()) {
+                    row.model_path_name = model_it->second;
+                }
+                row.model_path_names.push_back(model_it->second);
+                ++model_named;
+            } else {
+                row.model_path_names.emplace_back();
+            }
+        }
+        row.indexed_record = true;
+        S.gdb_view_rows.push_back(std::move(row));
+    }
+
+    std::ostringstream title;
+    title << std::filesystem::path(file_name).filename().string()
+          << "  rows=" << S.gdb_view_rows.size()
+          << "  row-names=" << named
+          << "  parent-names=" << parent_named
+          << "  model-names=" << model_named
+          << "  skeleton-refs=" << skeleton_refs
+          << "  save-map=" << save_hash_to_name.size();
+    S.gdb_view_title = title.str();
+    S.gdb_view_filter.clear();
+    S.show_gdb_render = true;
+    S.show_lua_render = false;
+
+    OutputLog::success("GDB viewer opened: " + file_name + " (" +
+                       std::to_string(S.gdb_view_rows.size()) + " rows)");
+    if (save_hash_to_name.empty()) {
+        OutputLog::warn("GDB viewer: no .save sibling names resolved for " +
+                        file_name);
+    }
+    return true;
+}
+
 void pick_bnk(const std::string &path) {
     S.selected_bnk = path;
     S.viewing_lua = false;
     S.lua_preview_content.clear();
     S.lua_preview_title.clear();
     S.lua_preview_selected = -1;
+    S.show_gdb_render = false;
+    S.gdb_view_rows.clear();
+    S.gdb_view_title.clear();
+    S.gdb_view_filter.clear();
     S.selected_nested_temp_path.clear();
     S.files.clear();
     S.file_filter.clear();
@@ -154,6 +390,7 @@ void open_iso_logic(const std::string& iso_path) {
 
         Anim::resolve_clip_names_from_luas(S.anim_clips);
     }
+    Anim::load_locomotion_for_root(iso_path);
 }
 
 void open_folder_logic(const std::string &sel) {
@@ -219,6 +456,7 @@ void open_folder_logic(const std::string &sel) {
 
         Anim::resolve_clip_names_from_luas(S.anim_clips);
     }
+    Anim::load_locomotion_for_root(sel);
 
     auto get_filename = [](const std::string& p) -> std::string {
         size_t pos = p.find_last_of("/\\");

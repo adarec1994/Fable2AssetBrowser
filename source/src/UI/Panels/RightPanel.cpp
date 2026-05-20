@@ -342,18 +342,6 @@ void draw_right_panel() {
         can_preview = can_folder_preview;
     }
 
-    {
-        bool m_open = S.model_materials_open;
-        if (ImGui::Checkbox("Materials Window", &m_open)) {
-            S.model_materials_open = m_open;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Open Now")) {
-            S.model_materials_open = true;
-            S.model_preview_open   = true;
-        }
-    }
-
 if (!can_preview) {
         ImGui::BeginDisabled();
     }
@@ -943,6 +931,7 @@ if (!can_preview) {
                 S.lua_preview_title = S.lua_files[S.selected_file_index].filename;
                 S.lua_preview_content.clear();
                 S.lua_preview_loading = true;
+                S.show_gdb_render = false;
 
                 std::string path = S.lua_files[S.selected_file_index].path;
                 std::string title = S.lua_preview_title;
@@ -1137,9 +1126,9 @@ if (!can_preview) {
         g_mp_initialized = MP_Init(g_mp, 800, 600);
         if (g_mp_initialized) {
             MP_Build(S.mdl_meshes, S.mdl_info, g_mp);
-            S.show_model_preview = true;
-            S.model_preview_open = true;
-            S.model_materials_open = true;
+            S.show_model_preview = false;
+            S.model_preview_open = false;
+            S.model_materials_open = false;
             S.terrain_mode = false;
             g_mp.no_tilt = false;
             S.cam_yaw = 3.14159265f;

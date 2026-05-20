@@ -396,7 +396,13 @@ void draw_hex_window() {
 
         if(has_sel){
             if(cached_sel_index != S.selected_file_index){
-                reset_preview_resources();
+                const std::string& sel_name =
+                    S.files[(size_t)S.selected_file_index].name;
+                const bool hex_data_matches_selection =
+                    !S.hex_file_path.empty() && sel_name == S.hex_file_path;
+                if (hex_data_matches_selection) {
+                    reset_preview_resources();
+                }
                 cached_sel_index = S.selected_file_index;
             }
 
@@ -701,13 +707,11 @@ void draw_hex_window() {
 
     {
 
-        if (S.show_model_preview) {
+        if (S.show_model_preview || S.model_preview_open ||
+            S.model_materials_open) {
             S.show_model_preview = false;
-            S.model_preview_open = true;
-            S.model_materials_open = true;
-            ImGuiViewport* vp_t = ImGui::GetMainViewport();
-            ImGui::SetNextWindowPos(ImVec2(vp_t->GetCenter().x, vp_t->GetCenter().y),
-                                    ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
+            S.model_preview_open = false;
+            S.model_materials_open = false;
         }
 
         const ImVec2 canvas(960, 640);
@@ -785,9 +789,6 @@ void draw_hex_window() {
             ImGui::Dummy(ImVec2(0,4));
             if(ImGui::Button("Reset Camera", ImVec2(120,0)))
                 FlyCam_Reset(g_flycam, g_mp.center[0], g_mp.center[1], g_mp.center[2], g_mp.radius);
-            ImGui::SameLine();
-            if(ImGui::Button("Materials...", ImVec2(120,0)))
-                S.model_materials_open = true;
             ImGui::SameLine();
             if(ImGui::Button("Close", ImVec2(-1,0))) {
                 S.model_preview_open = false;

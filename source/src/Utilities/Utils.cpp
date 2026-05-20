@@ -41,6 +41,12 @@ bool is_mdl_file(const std::string &n) {
     return s.size() >= 4 && s.rfind(".mdl") == s.size() - 4;
 }
 
+bool is_gdb_file(const std::string &n) {
+    std::string s = n;
+    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    return s.size() >= 4 && s.rfind(".gdb") == s.size() - 4;
+}
+
 bool is_model_bnk_selected() {
     if (S.selected_bnk.empty()) return false;
     std::string b = std::filesystem::path(S.selected_bnk).filename().string();

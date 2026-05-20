@@ -57,6 +57,9 @@ extern std::string            g_last_global_search;
 extern int                    g_selected_global;
 
 bool open_audio_player_for_selected(int file_index);
+bool open_gdb_viewer_for_bnk_entry(const std::string& bnk_path,
+                                   int file_index,
+                                   const std::string& file_name);
 bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index,
                             std::vector<unsigned char>& out);
 bool is_in_audio_folder(const std::string& path);
@@ -73,3 +76,7 @@ void draw_tree_node(TreeNode& node, ID3D11Device* device);
 #else
 void draw_tree_node(TreeNode& node);
 #endif
+
+void open_tree_bnk_drill_from_entry(const std::string& parent_bnk_path,
+                                    int file_index,
+                                    const std::string& entry_name);

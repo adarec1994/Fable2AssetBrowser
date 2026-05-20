@@ -23,6 +23,11 @@ void draw_tree_node(TreeNode& node) {
         std::transform(l.begin(), l.end(), l.begin(), ::tolower);
         return l.size() >= 4 && l.rfind(".tex") == l.size() - 4;
     };
+    auto is_bnk = [](const std::string& name) -> bool {
+        std::string l = name;
+        std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+        return l.size() >= 4 && l.rfind(".bnk") == l.size() - 4;
+    };
 
     if (node.is_file) {
         ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
@@ -50,6 +55,13 @@ void draw_tree_node(TreeNode& node) {
         if (ImGui::IsItemClicked()) {
             S.selected_folder_path.clear();
 
+            if (is_bnk(node.name)) {
+                open_tree_bnk_drill_from_entry(node.bnk_source,
+                                               node.bnk_index,
+                                               node.full_path);
+                return;
+            }
+
             if (S.selected_bnk != node.bnk_source) {
                 S.viewing_adb = false;
                 S.global_search.clear();
@@ -68,16 +80,23 @@ void draw_tree_node(TreeNode& node) {
                     S.selected_file_index = (int)i;
 
                     if (is_mdl(node.name)) {
+                        S.show_gdb_render = false;
                         g_pending_mdl_full_path = node.full_path;
                         g_pending_mdl_load = true;
                         g_pending_mdl_index = (int)i;
                     }
                     if (is_tex(node.name)) {
+                        S.show_gdb_render = false;
                         g_pending_tex_load = true;
                         g_pending_tex_index = (int)i;
                     }
+                    if (is_gdb_file(node.name)) {
+                        open_gdb_viewer_for_bnk_entry(
+                            node.bnk_source, node.bnk_index, node.name);
+                    }
 
                     if (is_audio_file(node.name) && ImGui::IsMouseDoubleClicked(0)) {
+                        S.show_gdb_render = false;
                         open_audio_player_for_selected((int)i);
                     }
                     break;

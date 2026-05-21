@@ -77,6 +77,12 @@ static std::string asset_leaf(std::string s)
     return s;
 }
 
+static bool is_shell_pair_model_path(const std::string& model_path)
+{
+    std::string leaf = normalized_asset_path(asset_leaf(model_path));
+    return leaf == "exterior.mdl" || leaf == "interior.mdl";
+}
+
 static std::string asset_parent_key(const std::string& bnk_path)
 {
     auto it = S.nested_bnk_parents.find(bnk_path);
@@ -261,12 +267,79 @@ static bool load_cached_prop_model(const std::string& model_path,
                                    const std::string& preferred_body_bnk,
                                    CachedPropModel& cached)
 {
+    const bool shell_pair_model = is_shell_pair_model_path(model_path);
+    const std::string want_full = normalized_asset_path(model_path);
+
+    if (shell_pair_model) {
+        std::vector<const FlatAssetEntry*> candidates =
+            collect_prop_model_candidates(model_path, preferred_body_bnk);
+        std::vector<std::string> exact_failures;
+        exact_failures.reserve(4);
+        for (const FlatAssetEntry* candidate : candidates) {
+            if (!candidate ||
+                normalized_asset_path(candidate->full_path) != want_full) {
+                continue;
+            }
+            const FlatAssetEntry& entry = *candidate;
+
+            std::string method;
+            std::string fail_reason;
+            if (try_prop_model_candidate(entry, model_path, cached, method,
+                                         &fail_reason)) {
+                std::ostringstream os;
+                os << "prop model exact shell loaded: " << model_path
+                   << " via " << method
+                   << " from "
+                   << std::filesystem::path(entry.bnk_path).filename().string()
+                   << " index=" << entry.file_index
+                   << " size=" << entry.size
+                   << " meshes=" << cached.info.Meshes.size()
+                   << " buffers=" << cached.info.MeshBuffers.size()
+                   << " geoms=" << cached.geoms.size();
+                level_load_debug(os.str());
+                return true;
+            }
+
+            if (exact_failures.size() < 4) {
+                std::ostringstream os;
+                os << std::filesystem::path(entry.bnk_path).filename().string()
+                   << " index=" << entry.file_index
+                   << " size=" << entry.size
+                   << ": " << fail_reason;
+                exact_failures.push_back(os.str());
+            }
+        }
+
+        if (!exact_failures.empty()) {
+            level_load_debug("prop model exact shell rejected: " +
+                             model_path);
+            for (const auto& failure : exact_failures) {
+                level_load_debug("  exact shell candidate rejected: " +
+                                 failure);
+            }
+        } else {
+            level_load_debug("prop model exact shell missing from index: " +
+                             model_path);
+        }
+    }
+
     std::vector<unsigned char> buf;
     if (build_mdl_buffer_for_name_with_body(model_path,
                                             preferred_body_bnk,
                                             buf)) {
         std::string parse_reason;
         if (parse_prop_model_buffer(buf, model_path, cached, &parse_reason)) {
+            if (shell_pair_model) {
+                std::ostringstream os;
+                os << "prop model preferred shell loaded: " << model_path
+                   << " preferred_body_bnk="
+                   << std::filesystem::path(preferred_body_bnk)
+                          .filename().string()
+                   << " meshes=" << cached.info.Meshes.size()
+                   << " buffers=" << cached.info.MeshBuffers.size()
+                   << " geoms=" << cached.geoms.size();
+                level_load_debug(os.str());
+            }
             return true;
         }
         level_load_debug("prop model preferred parse rejected: " +

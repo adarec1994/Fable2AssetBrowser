@@ -41,8 +41,11 @@ constexpr uint32_t kHashPosition = 0xBD7C27D4;
 constexpr uint32_t kHashRotation = 0x21EBC83B;
 constexpr uint32_t kHashTransformComponent = 0xF73572C4;
 constexpr uint32_t kHashGraphicAppearanceComponent = 0xA7B6EF56;
+constexpr uint32_t kHashGraphicAppearanceAnimatedMeshComponent = 0x21D312CA;
 constexpr uint32_t kHashStaticMeshComponent = 0x29CF50D1;
 constexpr uint32_t kHashStaticMultipleMeshComponent = 0xCE642A15;
+constexpr uint32_t kHashPhysicsSimulationKeyframedComponent = 0x6B177DD0;
+constexpr uint32_t kHashPhysicsSimulationStaticComponent = 0x5883C406;
 constexpr uint32_t kHashModelFile = 0x0C17DB4E;
 constexpr uint32_t kHashModelFile1 = 0x578E3BFB;
 constexpr uint32_t kHashModelFile2 = 0x578E3BF8;
@@ -414,17 +417,18 @@ bool TryTransformRecord(const GdbView& view,
     return true;
 }
 
-bool TryComponentTransformRecord(const GdbView& view,
-                                 size_t record,
-                                 float& x,
-                                 float& y,
-                                 float& z,
-                                 float& rot_x,
-                                 float& rot_y,
-                                 float& rot_z,
-                                 bool& has_rotation) {
+bool TryComponentTransformField(const GdbView& view,
+                                size_t record,
+                                uint32_t component_field_hash,
+                                float& x,
+                                float& y,
+                                float& z,
+                                float& rot_x,
+                                float& rot_y,
+                                float& rot_z,
+                                bool& has_rotation) {
     size_t transform_slot = 0;
-    if (!view.findLocal(record, kHashTransformComponent, 6,
+    if (!view.findLocal(record, component_field_hash, 6,
                         transform_slot, nullptr)) {
         return false;
     }
@@ -435,6 +439,30 @@ bool TryComponentTransformRecord(const GdbView& view,
     if (!view.lookup(transform_hash, transform_record)) return false;
     return TryTransformRecord(view, transform_record, x, y, z,
                               rot_x, rot_y, rot_z, has_rotation);
+}
+
+bool TryComponentTransformRecord(const GdbView& view,
+                                 size_t record,
+                                 float& x,
+                                 float& y,
+                                 float& z,
+                                 float& rot_x,
+                                 float& rot_y,
+                                 float& rot_z,
+                                 bool& has_rotation) {
+    if (TryComponentTransformField(view, record, kHashTransformComponent,
+                                   x, y, z, rot_x, rot_y, rot_z,
+                                   has_rotation)) {
+        return true;
+    }
+    if (TryComponentTransformField(
+            view, record, kHashPhysicsSimulationKeyframedComponent,
+            x, y, z, rot_x, rot_y, rot_z, has_rotation)) {
+        return true;
+    }
+    return TryComponentTransformField(
+        view, record, kHashPhysicsSimulationStaticComponent,
+        x, y, z, rot_x, rot_y, rot_z, has_rotation);
 }
 
 bool TryReadModelPathHashField(const GdbView& view,
@@ -813,6 +841,24 @@ void CollectStaticMeshModelPathHashes(const GdbView& view,
     CollectModelFileFieldsAndParents(view, model_resource_record, out);
 }
 
+void CollectAnimatedMeshModelPathHashes(const GdbView& view,
+                                        size_t record,
+                                        std::vector<uint32_t>& out)
+{
+    size_t model_slot = 0;
+    if (!view.findField(record, kHashGraphicAppearanceAnimatedMeshComponent, 6,
+                        model_slot, nullptr)) {
+        return;
+    }
+
+    const uint32_t model_resource_hash =
+        ReadBeU32(view.bytes.data() + model_slot);
+    size_t model_resource_record = 0;
+    if (!view.lookup(model_resource_hash, model_resource_record)) return;
+
+    CollectModelFileFieldsAndParents(view, model_resource_record, out);
+}
+
 void CollectStaticMultipleComponentModelPathHashes(const GdbView& view,
                                                    size_t component_record,
                                                    std::vector<uint32_t>& out)
@@ -880,6 +926,7 @@ std::vector<uint32_t> CollectModelPathHashesForRecord(const GdbView& view,
     std::vector<uint32_t> out;
     if (!view.ok) return out;
     VisitRecordAndParents(view, record, [&](size_t r) {
+        CollectAnimatedMeshModelPathHashes(view, r, out);
         CollectStaticMeshModelPathHashes(view, r, out);
         CollectStaticMultipleModelPathHashes(view, r, out);
         CollectGraphicAppearanceModelPathHashes(view, r, out);
@@ -1016,9 +1063,15 @@ const char* GdbFieldName(uint32_t hash)
     case kHashRotation: return "Rotation";
     case kHashTransformComponent: return "TransformComponent";
     case kHashGraphicAppearanceComponent: return "GraphicAppearanceComponent";
+    case kHashGraphicAppearanceAnimatedMeshComponent:
+        return "GraphicAppearanceAnimatedMeshComponent";
     case kHashStaticMeshComponent: return "GraphicAppearanceStaticMeshComponent";
     case kHashStaticMultipleMeshComponent:
         return "GraphicAppearanceStaticMultipleMeshComponent";
+    case kHashPhysicsSimulationKeyframedComponent:
+        return "PhysicsSimulationKeyframedComponent";
+    case kHashPhysicsSimulationStaticComponent:
+        return "PhysicsSimulationStaticComponent";
     case kHashModelFile: return "ModelFile";
     case kHashStaticMultipleModelList: return "StaticMultipleModelList";
     case kHashStaticMultipleModelSlotA: return "StaticMultipleModelSlotA";
@@ -1053,7 +1106,6 @@ const char* GdbFieldName(uint32_t hash)
     case 0xBB128083u: return "SubgameControllerComponent";
     case 0x3D9D8E92u: return "WorkplaceComponent";
     case 0x8F506EFCu: return "ShopComponent";
-    case 0x5883C406u: return "PhysicsSimulationStaticComponent";
     case 0x5D3F8069u: return "parent";
     default: return "";
     }

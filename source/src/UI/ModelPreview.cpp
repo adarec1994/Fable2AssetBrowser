@@ -1469,10 +1469,10 @@ struct VSOUT{
     float3 wp  : TEXCOORD1;
 };
 
-float wave_disp(float4 w, float2 xz, float t){
+float wave_disp(float4 w, float2 xz, float t, float speed){
     if (w.z <= 0.0001) return 0.0;
     float k = 6.28318 / w.z;                  // 2π / wavelength
-    float phase = dot(w.xy, xz) * k + t * w.z * 0.35;
+    float phase = dot(w.xy, xz) * k + t * speed;
     return sin(phase) * w.w;
 }
 
@@ -1481,10 +1481,10 @@ VSOUT VS(VSIN i){
     float3 p = i.p;
     float2 xz = float2(p.x, p.z);
     float t = params.w;
-    float dy = wave_disp(wave0, xz, t) +
-               wave_disp(wave1, xz, t) +
-               wave_disp(wave2, xz, t) +
-               wave_disp(wave3, xz, t);
+    float dy = wave_disp(wave0, xz, t, wparams.x * 6.0) +
+               wave_disp(wave1, xz, t, wparams.y * 6.0) +
+               wave_disp(wave2, xz, t, wparams.x * 3.3) +
+               wave_disp(wave3, xz, t, wparams.y * 2.6);
     p.y += dy;
     o.p  = mul(float4(p, 1.0), mvp);
     o.n  = float3(0.0, 1.0, 0.0);
@@ -1518,57 +1518,60 @@ struct PSIN{
     float3 wp  : TEXCOORD1;
 };
 
-float2 wave_grad(float4 w, float2 xz, float t){
+float2 wave_grad(float4 w, float2 xz, float t, float speed){
     if (w.z <= 0.0001) return float2(0.0, 0.0);
     float k = 6.28318 / w.z;
-    float phase = dot(w.xy, xz) * k + t * w.z * 0.35;
+    float phase = dot(w.xy, xz) * k + t * speed;
     return w.xy * (cos(phase) * w.w * k);
 }
 
 float4 PS(PSIN i) : SV_Target {
     float t = params.w;
     float2 xz = i.wp.xz;
-    float2 grad = wave_grad(wave0, xz, t)
-                + wave_grad(wave1, xz, t)
-                + wave_grad(wave2, xz, t)
-                + wave_grad(wave3, xz, t);
+    float2 grad = wave_grad(wave0, xz, t, wparams.x * 6.0)
+                + wave_grad(wave1, xz + 17.0, t, wparams.y * 6.0)
+                + wave_grad(wave2, xz - 31.0, t, wparams.x * 3.3)
+                + wave_grad(wave3, xz + 43.0, t, wparams.y * 2.6);
     float3 wave_n = normalize(float3(-grad.x, 1.0, -grad.y));
 
-    float2 uv0 = i.t * 0.20 + float2( 0.0,  1.0) * t * wparams.x;
-    float2 uv1 = i.t * 0.13 + float2( 1.0, -0.4) * t * wparams.y;
-    float3 n0 = tex_normal.Sample(smp, uv0).rgb * 2.0 - 1.0;
-    float3 n1 = tex_normal.Sample(smp, uv1).rgb * 2.0 - 1.0;
-    float3 n_ts = normalize(n0 + n1);
-    float3 N = normalize(wave_n + float3(n_ts.x, 0.0, n_ts.y)
-                                  * (0.08 * wparams.z));
+    float2 uv0 = i.wp.xz * 0.055 + float2( 0.12,  0.85) * t * wparams.x;
+    float2 uv1 = i.wp.xz * 0.031 + float2( 0.72, -0.28) * t * wparams.y;
+    float2 r0 = tex_normal.Sample(smp, uv0).xy * 2.0 - 1.0;
+    float2 r1 = tex_normal.Sample(smp, uv1).xy * 2.0 - 1.0;
+    float2 ripple = r0 * 0.65 + r1 * 0.35;
+    float3 N = normalize(wave_n + float3(ripple.x, 0.0, ripple.y)
+                                  * (0.16 * wparams.z));
 
     float3 L = normalize(-lightDir.xyz);
     float ndotl = saturate(dot(N, L));
-    float ambient = 0.35;
+    float facing = saturate(N.y);
 
     // Two-tone water colour: deep blue at glancing angles, lighter
     // greenish at shallow viewing angles.
-    float3 deep    = float3(0.02, 0.10, 0.18);
-    float3 shallow = float3(0.18, 0.42, 0.48);
+    float3 deep    = float3(0.010, 0.075, 0.085);
+    float3 shallow = float3(0.155, 0.285, 0.235);
+    float3 sky     = float3(0.58, 0.62, 0.57);
     // We don't have a real view vector handy without a camera CB, so
     // approximate Fresnel with the projected screen-space Y from
     // SV_Position — works well enough for a flat surface viewed from
     // above.
-    float fresnel = saturate(1.0 - N.y);
-    float3 base = lerp(deep, shallow, 1.0 - fresnel * 0.5);
-    base *= (ambient + ndotl * 0.7);
+    float fresnel = pow(saturate(1.0 - facing), 2.2);
+    float3 base = lerp(deep, shallow, facing * 0.85 + 0.10);
+    base *= 0.42 + ndotl * 0.42;
+    base += sky * (fresnel * 0.34);
 
     // Specular highlight along light direction.
     float3 H = normalize(L + float3(0.0, 1.0, 0.0));
-    float spec = pow(saturate(dot(N, H)), 64.0);
-    base += float3(1.0, 1.0, 0.95) * spec * 0.8;
+    float spec = pow(saturate(dot(N, H)), 96.0);
+    float sparkle = pow(saturate(dot(normalize(float3(ripple.x, 0.25, ripple.y)), H)), 48.0);
+    base += float3(1.0, 0.96, 0.82) * (spec * 1.2 + sparkle * 0.12);
 
     if (params.z > 0.5) {
-        float3 hi = float3(0.15, 0.45, 1.00);
-        base = lerp(base, hi, 0.65);
+        float3 hi = float3(0.20, 0.55, 0.85);
+        base = lerp(base, hi, 0.55);
     }
 
-    return float4(base, 0.78);
+    return float4(base, 0.68);
 }
 )";
 

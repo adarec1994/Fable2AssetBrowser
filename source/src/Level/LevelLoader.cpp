@@ -41,6 +41,7 @@ extern const std::string& mp_last_decode_info();
 #include <functional>
 #include <thread>
 #include <iomanip>
+#include <iterator>
 #include <climits>
 #include <limits>
 #include <mutex>
@@ -1056,6 +1057,19 @@ std::string companion_interior_path(const std::string& model_path)
         return {};
     }
     p.replace(p.size() - suffix.size(), suffix.size(), "/interior.mdl");
+    return p;
+}
+
+std::string companion_exterior_path(const std::string& model_path)
+{
+    std::string p = lower_slash(model_path);
+    const std::string suffix = "/interior.mdl";
+    if (p.size() < suffix.size() ||
+        p.compare(p.size() - suffix.size(), suffix.size(), suffix) != 0)
+    {
+        return {};
+    }
+    p.replace(p.size() - suffix.size(), suffix.size(), "/exterior.mdl");
     return p;
 }
 
@@ -3019,41 +3033,92 @@ bool Open(const FlatAssetEntry& entry)
             if (!supplemental_gdbs.empty()) {
                 size_t supplemental_model_hits = 0;
                 size_t supplemental_parent_hits = 0;
+                size_t supplemental_model_parts = 0;
                 size_t supplemental_misses = 0;
+                std::vector<std::string> supplemental_debug_rows;
+                supplemental_debug_rows.push_back(
+                    "status\tentity\tentity_hash\tparent_hash\t"
+                    "source_gdb\tlookup_hash\tmodel_hashes");
                 for (auto& p : info.placements) {
                     if (p.hash_a == 0 || p.model_path_hash != 0) {
                         continue;
                     }
-                    uint32_t model_hash = 0;
+                    std::vector<uint32_t> model_hashes;
                     uint32_t parent_hash = 0;
                     bool found = false;
+                    std::string source_gdb;
+                    uint32_t lookup_hash = 0;
                     for (const auto& db : supplemental_gdbs) {
-                        if (Gdb::LookupModelPathHash(
-                                db.bytes, p.hash_a, model_hash,
+                        if (Gdb::LookupModelPathHashes(
+                                db.bytes, p.hash_a, model_hashes,
                                 &parent_hash))
                         {
                             found = true;
+                            source_gdb = db.path;
+                            lookup_hash = p.hash_a;
                             break;
                         }
                         if (p.parent_hash != 0 &&
-                            Gdb::LookupModelPathHash(
-                                db.bytes, p.parent_hash, model_hash,
+                            Gdb::LookupModelPathHashes(
+                                db.bytes, p.parent_hash, model_hashes,
                                 nullptr))
                         {
                             found = true;
+                            source_gdb = db.path;
+                            lookup_hash = p.parent_hash;
                             break;
                         }
                     }
-                    if (found && model_hash != 0) {
-                        p.model_path_hash = model_hash;
+                    if (found && !model_hashes.empty()) {
+                        p.model_path_hashes = model_hashes;
+                        p.model_path_hash = model_hashes.front();
                         ++supplemental_model_hits;
+                        supplemental_model_parts += model_hashes.size();
                         if (p.parent_hash == 0 && parent_hash != 0) {
                             p.parent_hash = parent_hash;
                             ++supplemental_parent_hits;
                         }
+                        std::ostringstream row;
+                        row << "hit\t" << p.entity_name << '\t'
+                            << hex_u32(p.hash_a) << '\t'
+                            << hex_u32(p.parent_hash) << '\t'
+                            << source_gdb << '\t'
+                            << hex_u32(lookup_hash) << '\t';
+                        for (size_t i = 0; i < model_hashes.size(); ++i) {
+                            if (i) row << ',';
+                            row << hex_u32(model_hashes[i]);
+                        }
+                        supplemental_debug_rows.push_back(row.str());
                     } else if (!p.indexed_record) {
                         ++supplemental_misses;
+                        std::ostringstream row;
+                        row << "miss\t" << p.entity_name << '\t'
+                            << hex_u32(p.hash_a) << '\t'
+                            << hex_u32(p.parent_hash) << "\t\t\t";
+                        supplemental_debug_rows.push_back(row.str());
                     }
+                }
+                if (supplemental_model_parts > supplemental_model_hits) {
+                    std::vector<Gdb::Placement> extra_parts;
+                    for (auto& p : info.placements) {
+                        if (p.model_path_hashes.size() <= 1) continue;
+                        const std::vector<uint32_t> hashes =
+                            p.model_path_hashes;
+                        p.model_path_hash = hashes.front();
+                        p.model_path_hashes.clear();
+                        p.model_path_hashes.push_back(hashes.front());
+                        for (size_t i = 1; i < hashes.size(); ++i) {
+                            Gdb::Placement part = p;
+                            part.model_path_hash = hashes[i];
+                            part.model_path_hashes.clear();
+                            part.model_path_hashes.push_back(hashes[i]);
+                            extra_parts.push_back(std::move(part));
+                        }
+                    }
+                    info.placements.insert(
+                        info.placements.end(),
+                        std::make_move_iterator(extra_parts.begin()),
+                        std::make_move_iterator(extra_parts.end()));
                 }
                 if (supplemental_model_hits > 0 ||
                     supplemental_misses > 0)
@@ -3061,9 +3126,31 @@ bool Open(const FlatAssetEntry& entry)
                     OutputLog::info(
                         "gdb supplemental model path hashes: hit=" +
                         std::to_string(supplemental_model_hits) +
+                        ", parts=" +
+                        std::to_string(supplemental_model_parts) +
                         ", miss=" + std::to_string(supplemental_misses) +
                         ", parent-filled=" +
                         std::to_string(supplemental_parent_hits));
+                }
+                if (supplemental_debug_rows.size() > 1) {
+                    const std::filesystem::path debug_path =
+                        std::filesystem::path("extracted") /
+                        "debug_gdb_supplemental_models.tsv";
+                    std::error_code ec;
+                    std::filesystem::create_directories(
+                        debug_path.parent_path(), ec);
+                    std::ofstream out(
+                        debug_path, std::ios::binary | std::ios::trunc);
+                    if (out) {
+                        for (const auto& row : supplemental_debug_rows) {
+                            out << row << '\n';
+                        }
+                        OutputLog::info(
+                            "gdb supplemental model dump: " +
+                            debug_path.string() + " (" +
+                            std::to_string(supplemental_debug_rows.size() - 1) +
+                            " row(s))");
+                    }
                 }
             }
 
@@ -4072,6 +4159,7 @@ bool Open(const FlatAssetEntry& entry)
             size_t gdb_authored_shop_companion_skipped = 0;
             size_t gdb_duplicate_instances_skipped = 0;
             size_t gdb_companion_interiors_emitted = 0;
+            size_t gdb_companion_exteriors_emitted = 0;
             std::unordered_map<std::string, size_t>
                 gdb_authored_shell_skip_paths;
             std::unordered_map<std::string, std::vector<std::string>>
@@ -4082,6 +4170,8 @@ bool Open(const FlatAssetEntry& entry)
                 gdb_emitted_shell_samples;
             std::unordered_map<std::string, size_t>
                 gdb_companion_interior_paths;
+            std::unordered_map<std::string, size_t>
+                gdb_companion_exterior_paths;
             std::unordered_map<std::string, size_t>
                 gdb_duplicate_skip_paths;
             size_t gdb_shell_entity_duplicates_skipped = 0;
@@ -4300,7 +4390,6 @@ bool Open(const FlatAssetEntry& entry)
                     std::string category,
                     const char* status,
                     const std::string& model_path) {
-                    if (!is_bwsmarket_level) return;
                     if (category.empty() && !model_path.empty()) {
                         const std::string token =
                             canonicalize_for_match(p.entity_name);
@@ -4777,6 +4866,8 @@ bool Open(const FlatAssetEntry& entry)
                     const bool shell_parent =
                         parent_lower.find("/exterior.mdl") !=
                             std::string::npos ||
+                        parent_lower.find("/interior.mdl") !=
+                            std::string::npos ||
                         parent_lower.find("bs_market_tarotstall/") !=
                             std::string::npos;
                     if (!shell_parent) return size_t(0);
@@ -4820,9 +4911,7 @@ bool Open(const FlatAssetEntry& entry)
                 if (tok.empty() && !has_model_hash) continue;
                 const std::string entity_key = gdb_entity_key(p.entity_name);
                 std::string gdb_interest_category =
-                    is_bwsmarket_level
-                        ? classify_gdb_interest(entity_key, tok, nullptr)
-                        : std::string();
+                    classify_gdb_interest(entity_key, tok, nullptr);
                 const bool clocktower_probe =
                     p.parent_hash == 0xD55304DB ||
                     entity_key.find("clocktower") != std::string::npos ||
@@ -5479,22 +5568,37 @@ bool Open(const FlatAssetEntry& entry)
                             gdb_shell_sample_text(p, hit->full_path));
                     }
                 }
-                if (const FlatAssetEntry* interior_hit =
-                        resolve_model_by_lower_path(
-                            companion_interior_path(hit->full_path)))
-                {
-                    auto& interior_pb = blocks_by_path[interior_hit->full_path];
-                    if (interior_pb.model_path.empty()) {
-                        interior_pb.type = 0xB1;
-                        interior_pb.model_path = interior_hit->full_path;
+                const std::array<std::pair<std::string, bool>, 2>
+                    shell_companion_paths = {{
+                        {companion_interior_path(hit->full_path), true},
+                        {companion_exterior_path(hit->full_path), false},
+                    }};
+                for (const auto& companion : shell_companion_paths) {
+                    if (companion.first.empty()) continue;
+                    const FlatAssetEntry* companion_hit =
+                        resolve_model_by_lower_path(companion.first);
+                    if (!companion_hit) continue;
+                    auto& companion_pb =
+                        blocks_by_path[companion_hit->full_path];
+                    if (companion_pb.model_path.empty()) {
+                        companion_pb.type = 0xB1;
+                        companion_pb.model_path = companion_hit->full_path;
                     }
                     if (emitted_prop_transform_keys.insert(
                             prop_instance_transform_key(
-                                pi, interior_hit->full_path)).second)
+                                pi, companion_hit->full_path)).second)
                     {
-                        interior_pb.instances.push_back(pi);
-                        ++gdb_companion_interiors_emitted;
-                        ++gdb_companion_interior_paths[interior_hit->full_path];
+                        companion_pb.instances.push_back(pi);
+                        emit_gmd_layout_children_for_model(companion_hit, pi);
+                        if (companion.second) {
+                            ++gdb_companion_interiors_emitted;
+                            ++gdb_companion_interior_paths[
+                                companion_hit->full_path];
+                        } else {
+                            ++gdb_companion_exteriors_emitted;
+                            ++gdb_companion_exterior_paths[
+                                companion_hit->full_path];
+                        }
                     }
                 }
                 if (is_gdb_shell_audit_model(hit->full_path)) {
@@ -6133,10 +6237,15 @@ bool Open(const FlatAssetEntry& entry)
                 }
             }
 
-            if (is_bwsmarket_level && !gdb_interest_rows.empty()) {
+            if (!gdb_interest_rows.empty()) {
+                std::string level_debug_name =
+                    bwsmarket_debug_safe_filename(entry.full_path);
+                if (level_debug_name.empty()) {
+                    level_debug_name = "level";
+                }
                 const std::filesystem::path interest_path =
                     std::filesystem::path("extracted") /
-                    "debug_bwsmarket_gdb_interest.tsv";
+                    ("debug_" + level_debug_name + "_gdb_interest.tsv");
                 std::error_code ec;
                 std::filesystem::create_directories(
                     interest_path.parent_path(), ec);
@@ -6151,7 +6260,7 @@ bool Open(const FlatAssetEntry& entry)
                         out << row << '\n';
                     }
                     std::ostringstream summary;
-                    summary << "BWSMarket GDB interest dump: "
+                    summary << "GDB interest dump: "
                             << interest_path.string() << " ("
                             << gdb_interest_rows.size() << " rows";
                     const char* categories[] = {
@@ -6169,7 +6278,7 @@ bool Open(const FlatAssetEntry& entry)
                     OutputLog::info(summary.str());
                 } else {
                     OutputLog::warn(
-                        "BWSMarket GDB interest dump failed: " +
+                        "GDB interest dump failed: " +
                         interest_path.string());
                 }
             }
@@ -6590,6 +6699,32 @@ bool Open(const FlatAssetEntry& entry)
                             "  companion interior: " +
                             std::to_string(interior_paths[i].second) +
                             "x  " + interior_paths[i].first);
+                    }
+                }
+                if (gdb_companion_exteriors_emitted > 0) {
+                    OutputLog::info(
+                        "gdb-derived companion exteriors: " +
+                        std::to_string(gdb_companion_exteriors_emitted) +
+                        " instance(s) across " +
+                        std::to_string(gdb_companion_exterior_paths.size()) +
+                        " model(s)");
+                    std::vector<std::pair<std::string, size_t>> exterior_paths(
+                        gdb_companion_exterior_paths.begin(),
+                        gdb_companion_exterior_paths.end());
+                    std::sort(exterior_paths.begin(), exterior_paths.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second != b.second) {
+                                      return a.second > b.second;
+                                  }
+                                  return a.first < b.first;
+                              });
+                    const size_t n =
+                        std::min<size_t>(exterior_paths.size(), 8);
+                    for (size_t i = 0; i < n; ++i) {
+                        OutputLog::info(
+                            "  companion exterior: " +
+                            std::to_string(exterior_paths[i].second) +
+                            "x  " + exterior_paths[i].first);
                     }
                 }
                 if (!gdb_emitted_shell_paths.empty()) {

@@ -23,6 +23,7 @@ struct WaterBody {
     float        base_height = 0.0f;
     uint32_t     declared_tile_count = 0;
     std::string  normal_map_path;
+    std::string  secondary_map_path;
     std::vector<WaterTile> tiles;
 };
 

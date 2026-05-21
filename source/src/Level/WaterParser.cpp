@@ -13,6 +13,7 @@ constexpr uint32_t kMaxBodyCount = 64;
 constexpr uint32_t kMaxDimCount = 8;
 constexpr uint32_t kMaxMaskBytes = 65536;
 constexpr size_t kBodyParamFloats = 38;
+constexpr uint32_t kMaxTileCount = 4096;
 
 uint32_t read_u32_be(const uint8_t* p) {
     return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
@@ -52,25 +53,74 @@ bool parse_body(const std::vector<uint8_t>& bytes,
         : 0.0f;
     off += kBodyParamFloats * 4;
 
-    size_t str_start = off;
-    while (off < end && bytes[off] != 0) ++off;
-    if (off >= end) return false;
-    out.normal_map_path.assign(
-        reinterpret_cast<const char*>(p + str_start), off - str_start);
-    ++off;
+    auto read_cstring = [&](std::string& dst) -> bool {
+        const size_t str_start = off;
+        while (off < end && bytes[off] != 0) ++off;
+        if (off >= end) return false;
+        dst.assign(reinterpret_cast<const char*>(p + str_start),
+                   off - str_start);
+        ++off;
+        return true;
+    };
+
+    if (!read_cstring(out.normal_map_path)) return false;
+    const size_t after_first_path = off;
+
+    // IDA shows two HString paths after the fixed water body block. Some
+    // dumps appear to omit the second path, so only consume it when the next
+    // bytes do not already look like "tile count, tile marker".
+    const bool next_is_count_then_tile =
+        off + 8 <= end &&
+        read_u32_be(p + off) <= kMaxTileCount &&
+        read_u32_be(p + off + 4) == kTileMagic;
+    if (!next_is_count_then_tile) {
+        if (!read_cstring(out.secondary_map_path)) {
+            out.secondary_map_path.clear();
+            off = after_first_path;
+        }
+    }
 
     bool tile_loop_started = false;
-    for (size_t scan = off; scan < off + 16 && scan + 4 <= end; ++scan) {
-        if (read_u32_be(p + scan) == kTileMagic) {
-            if (scan >= 4) {
-                const uint32_t declared = read_u32_be(p + scan - 4);
-                if (declared <= kMaxMaskBytes) {
-                    out.declared_tile_count = declared;
-                }
+    if (off + 4 <= end) {
+        const uint32_t declared = read_u32_be(p + off);
+        if (declared <= kMaxTileCount) {
+            out.declared_tile_count = declared;
+            off += 4;
+            if (off + 4 <= end && read_u32_be(p + off) == kTileMagic) {
+                tile_loop_started = true;
             }
-            off = scan;
-            tile_loop_started = true;
-            break;
+        }
+    }
+
+    if (!tile_loop_started) {
+        for (size_t scan = off; scan < off + 32 && scan + 4 <= end; ++scan) {
+            if (read_u32_be(p + scan) == kTileMagic) {
+                if (scan >= 4) {
+                    const uint32_t declared = read_u32_be(p + scan - 4);
+                    if (declared <= kMaxTileCount) {
+                        out.declared_tile_count = declared;
+                    }
+                }
+                off = scan;
+                tile_loop_started = true;
+                break;
+            }
+        }
+    }
+    if (!tile_loop_started && after_first_path != off) {
+        off = after_first_path;
+        for (size_t scan = off; scan < off + 32 && scan + 4 <= end; ++scan) {
+            if (read_u32_be(p + scan) == kTileMagic) {
+                if (scan >= 4) {
+                    const uint32_t declared = read_u32_be(p + scan - 4);
+                    if (declared <= kMaxTileCount) {
+                        out.declared_tile_count = declared;
+                    }
+                }
+                off = scan;
+                tile_loop_started = true;
+                break;
+            }
         }
     }
     if (!tile_loop_started) return true;

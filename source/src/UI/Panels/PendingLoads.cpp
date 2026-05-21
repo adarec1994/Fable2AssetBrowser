@@ -1601,17 +1601,42 @@ void process_pending_loads() {
                         if (!std::isfinite(y) || y == 0.0f) y = t.h_min;
                         if (!std::isfinite(y) || y == 0.0f) y = t.h_max;
 
-                        const float x0 = t.cx - t.ex;
-                        const float x1 = t.cx + t.ex;
-                        const float z0 = t.cz - t.ez;
-                        const float z1 = t.cz + t.ez;
+                        const float half_x = std::abs(t.ex) * 0.5f;
+                        const float half_z = std::abs(t.ez) * 0.5f;
+                        const float x0 = t.cx - half_x;
+                        const float x1 = t.cx + half_x;
+                        const float z0 = t.cz - half_z;
+                        const float z1 = t.cz + half_z;
 
-                        int mask_w = int(std::lround(t.h_min));
-                        int mask_h = int(std::lround(t.h_max));
                         const size_t mask_count = t.mask.size();
-                        if (mask_w <= 0 || mask_h <= 0 ||
-                            size_t(mask_w) * size_t(mask_h) != mask_count)
-                        {
+                        int mask_w = 0;
+                        int mask_h = 0;
+                        auto accept_mask_dims = [&](uint32_t w,
+                                                    uint32_t h) -> bool {
+                            if (w == 0 || h == 0) return false;
+                            const uint64_t cells = uint64_t(w) * uint64_t(h);
+                            if (cells != mask_count ||
+                                cells > uint64_t(std::numeric_limits<int>::max())) {
+                                return false;
+                            }
+                            mask_w = int(w);
+                            mask_h = int(h);
+                            return true;
+                        };
+                        auto accept_vertex_dims = [&](uint32_t w,
+                                                      uint32_t h) -> bool {
+                            if (w <= 1 || h <= 1) return false;
+                            return accept_mask_dims(w - 1, h - 1);
+                        };
+                        if (t.dims.size() >= 2) {
+                            const uint32_t a = t.dims[0];
+                            const uint32_t b = t.dims[1];
+                            (void)(accept_mask_dims(a, b) ||
+                                   accept_mask_dims(b, a) ||
+                                   accept_vertex_dims(a, b) ||
+                                   accept_vertex_dims(b, a));
+                        }
+                        if (mask_w <= 0 || mask_h <= 0) {
                             const int sq = int(std::lround(
                                 std::sqrt(double(mask_count))));
                             if (sq > 0 && size_t(sq) * size_t(sq) == mask_count) {
@@ -1625,22 +1650,43 @@ void process_pending_loads() {
                                 mask_h = 16;
                             }
                         }
-                        mask_w = std::clamp(mask_w, 1, 128);
-                        mask_h = std::clamp(mask_h, 1, 128);
+                        mask_w = std::max(mask_w, 1);
+                        mask_h = std::max(mask_h, 1);
+
+                        auto choose_subdiv = [](float extent,
+                                                int cells) -> int {
+                            if (cells <= 0 || !std::isfinite(extent))
+                                return 1;
+                            const float cell = std::abs(extent) / float(cells);
+                            if (cell <= 0.75f) return 1;
+                            return std::clamp(int(std::ceil(cell / 0.75f)),
+                                              1, 16);
+                        };
+                        int sub_x = choose_subdiv(x1 - x0, mask_w);
+                        int sub_z = choose_subdiv(z1 - z0, mask_h);
+                        int mesh_w = mask_w * sub_x;
+                        int mesh_h = mask_h * sub_z;
+                        while (uint64_t(mesh_w + 1) * uint64_t(mesh_h + 1) >
+                               120000ull && (sub_x > 1 || sub_z > 1)) {
+                            if (sub_x >= sub_z && sub_x > 1) --sub_x;
+                            else if (sub_z > 1) --sub_z;
+                            mesh_w = mask_w * sub_x;
+                            mesh_h = mask_h * sub_z;
+                        }
 
                         MDLMeshGeom wg;
-                        const int vert_w = mask_w + 1;
-                        const int vert_h = mask_h + 1;
+                        const int vert_w = mesh_w + 1;
+                        const int vert_h = mesh_h + 1;
                         const size_t vert_count =
                             size_t(vert_w) * size_t(vert_h);
                         wg.positions.reserve(vert_count * 3);
                         wg.normals.reserve(vert_count * 3);
                         wg.uvs.reserve(vert_count * 2);
-                        for (int mz = 0; mz <= mask_h; ++mz) {
-                            const float vz = float(mz) / float(mask_h);
+                        for (int mz = 0; mz <= mesh_h; ++mz) {
+                            const float vz = float(mz) / float(mesh_h);
                             const float pz = z0 + (z1 - z0) * vz;
-                            for (int mx = 0; mx <= mask_w; ++mx) {
-                                const float vx = float(mx) / float(mask_w);
+                            for (int mx = 0; mx <= mesh_w; ++mx) {
+                                const float vx = float(mx) / float(mesh_w);
                                 const float px = x0 + (x1 - x0) * vx;
                                 wg.positions.insert(wg.positions.end(),
                                                     { px, y, pz });
@@ -1652,12 +1698,16 @@ void process_pending_loads() {
 
                         auto active_cell = [&](int mx, int mz) -> bool {
                             if (t.mask.empty()) return true;
-                            const size_t mi = size_t(mz) * size_t(mask_w)
-                                            + size_t(mx);
+                            const int mask_x =
+                                std::min(mask_w - 1, mx / sub_x);
+                            const int mask_z =
+                                std::min(mask_h - 1, mz / sub_z);
+                            const size_t mi = size_t(mask_z) * size_t(mask_w)
+                                            + size_t(mask_x);
                             return mi < t.mask.size() && t.mask[mi] != 0;
                         };
-                        for (int mz = 0; mz < mask_h; ++mz) {
-                            for (int mx = 0; mx < mask_w; ++mx) {
+                        for (int mz = 0; mz < mesh_h; ++mz) {
+                            for (int mx = 0; mx < mesh_w; ++mx) {
                                 if (!active_cell(mx, mz)) continue;
                                 const uint32_t v00 =
                                     uint32_t(mz * vert_w + mx);

@@ -187,6 +187,8 @@ constexpr KeyOverride kEntityKeyOverrides[] = {
     { "cellarlargeroom", "Art\\Environment\\Regions\\Dungeon\\Tombs\\Pieces\\dotXSI\\Cellar_Large_Room\\Cellar_Large_Room.mdl" },
     { "pisspot", "Art\\Environment\\Shared assets\\Props\\dotXSI\\ESA_Pisspot\\ESA_Pisspot.mdl" },
     { "bsmarketwallstraight", "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\BS_Market_Wall_Straight\\BS_Market_Wall_Straight.mdl" },
+    { "bsmarketshantie2", "Art\\Environment\\Regions\\Bowerstone\\Buildings\\dotXSI\\BS_Market_Shantie2\\BS_Market_Shantie2.mdl" },
+    { "bsmarketshantie3", "Art\\Environment\\Regions\\Bowerstone\\Buildings\\dotXSI\\BS_Market_Shantie3\\BS_Market_Shantie3.mdl" },
     { "till", "Art\\Environment\\Regions\\Bowerstone\\Props\\dotXSI\\BS_Till\\BS_Till.mdl" },
     { "tablelargesquareultradecorative", "Art\\Environment\\Shared assets\\Furniture\\dotXSI\\ESA_F_Table_UltraDecorative\\ESA_F_Table_UltraDecorative.mdl" },
     { "shippingcrate3lid", "Art\\Environment\\Shared assets\\Props\\dotXSI\\ESA_Shipping_Crate_V1\\ESA_Shipping_Crate_V1.mdl" },

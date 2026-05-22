@@ -551,8 +551,18 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
         return pos == std::string::npos ? s : s.substr(pos + 1);
     };
 
+    static const char* const kBadWagonColourPath =
+        "art/environment/regions/bowerstone/buildings/pictures/"
+        "bs_market_tarotstall/wagon_colour_01.tex";
+    static const char* const kGoodWagonColourPath =
+        "art/environment/shared assets/props/pictures/_sharedtextures/"
+        "wagon_colour_01.tex";
+
     std::string full_key = normalize_lookup_key(tex_name);
-    std::string base_key = normalize_lookup_key(basename_key(tex_name));
+    if (full_key == kBadWagonColourPath) {
+        full_key = kGoodWagonColourPath;
+    }
+    std::string base_key = normalize_lookup_key(basename_key(full_key));
 
     std::vector<std::string> search_paths;
     search_paths.reserve(S.bnk_paths.size() + S.nested_bnk_paths.size());
@@ -635,9 +645,12 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
                          });
     }
 
+    const bool wagon_colour_shared_lookup = full_key == kGoodWagonColourPath;
+
     auto find_tex_index = [&](const std::string& bnk_path) {
         int idx = BnkCache::find_index(bnk_path, full_key);
-        if (idx < 0 && base_key != full_key) {
+        if (idx < 0 && base_key != full_key &&
+            !wagon_colour_shared_lookup) {
             idx = BnkCache::find_index(bnk_path, base_key);
         }
         return idx;
@@ -726,7 +739,11 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
             if (mip0_idx >= 0 && e.bnk_path == mip0_bnk_path) continue;
             std::string e_full = normalize_lookup_key(e.full_path);
             std::string e_base = normalize_lookup_key(e.name);
-            if (e_full != full_key && e_base != base_key) continue;
+            if (wagon_colour_shared_lookup) {
+                if (e_full != full_key) continue;
+            } else if (e_full != full_key && e_base != base_key) {
+                continue;
+            }
             if (classify(e.bnk_path) == 1) continue;
             body_idx = e.file_index;
             body_bnk_path = e.bnk_path;

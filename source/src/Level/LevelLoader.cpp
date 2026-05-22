@@ -66,6 +66,10 @@ std::vector<Level::PropBlock> g_pending_level_prop_blocks;
 std::string                   g_pending_level_model_body_bnk;
 Level::WaterScene             g_pending_level_water_scene;
 bool                          g_pending_level_water_present = false;
+Gdb::WaterTheme               g_pending_level_water_theme;
+Gdb::SkyTheme                 g_pending_level_sky_theme;
+Gdb::CloudTheme               g_pending_level_cloud_theme;
+Gdb::EnvironmentThemeTimeline g_pending_level_environment_timeline;
 std::vector<std::string>           g_level_vfs_texture_body_bnks;
 std::vector<std::string>           g_level_vfs_model_bnks;
 std::vector<std::string>           g_level_vfs_streaming_bnks;
@@ -114,6 +118,11 @@ void OpenAsync(const FlatAssetEntry& entry)
             g_pending_level_model_body_bnk.clear();
             g_pending_level_water_present = false;
             g_pending_level_water_scene = Level::WaterScene{};
+            g_pending_level_water_theme = Gdb::WaterTheme{};
+            g_pending_level_sky_theme = Gdb::SkyTheme{};
+            g_pending_level_cloud_theme = Gdb::CloudTheme{};
+            g_pending_level_environment_timeline =
+                Gdb::EnvironmentThemeTimeline{};
             g_level_havok_collision.clear();
             g_level_gdb_placements.clear();
             g_level_vfs_texture_body_bnks.clear();
@@ -214,6 +223,264 @@ struct BeReader {
         return false;
     }
 };
+
+uint32_t read_be_u32_raw(const uint8_t* p)
+{
+    return (uint32_t(p[0]) << 24) |
+           (uint32_t(p[1]) << 16) |
+           (uint32_t(p[2]) << 8)  |
+            uint32_t(p[3]);
+}
+
+float read_be_f32_raw(const uint8_t* p)
+{
+    uint32_t u = read_be_u32_raw(p);
+    float f = 0.0f;
+    std::memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
+bool skip_ehf_tex_blob(BeReader& r)
+{
+    const size_t tex_start = r.i;
+    if (!r.need(0x60)) return false;
+    const uint32_t magic = read_be_u32_raw(r.p + tex_start);
+    if (magic != 0xFFFFFFFEu) return false;
+    const uint32_t pf = read_be_u32_raw(r.p + tex_start + 0x18);
+    const uint32_t mt = read_be_u32_raw(r.p + tex_start + 0x20);
+    if (mt > 0x100 || !r.need(size_t(mt) + 8)) return false;
+
+    const uint32_t raw_size = read_be_u32_raw(r.p + tex_start + mt);
+    size_t end = 0;
+    if (pf == 98u) {
+        end = tex_start + size_t(mt) + 4 + size_t(raw_size);
+    } else {
+        const uint32_t comp_size =
+            read_be_u32_raw(r.p + tex_start + mt + 4);
+        end = tex_start + size_t(mt) + 8 + size_t(comp_size);
+    }
+    if (end > r.n) return false;
+    r.i = end;
+    return true;
+}
+
+bool triangle_area_ok(const float* a, const float* b, const float* c)
+{
+    const float ux = b[0] - a[0];
+    const float uy = b[1] - a[1];
+    const float uz = b[2] - a[2];
+    const float vx = c[0] - a[0];
+    const float vy = c[1] - a[1];
+    const float vz = c[2] - a[2];
+    const float nx = uy * vz - uz * vy;
+    const float ny = uz * vx - ux * vz;
+    const float nz = ux * vy - uy * vx;
+    return (nx * nx + ny * ny + nz * nz) > 1e-8f;
+}
+
+void push_ehf_render_triangle(std::vector<std::array<float, 9>>& tris,
+                              const float* a,
+                              const float* b,
+                              const float* c)
+{
+    if (!triangle_area_ok(a, b, c)) return;
+    std::array<float, 9> tri{};
+    std::copy(a, a + 3, tri.data() + 0);
+    std::copy(b, b + 3, tri.data() + 3);
+    std::copy(c, c + 3, tri.data() + 6);
+
+    const float ux = tri[3] - tri[0];
+    const float uy = tri[4] - tri[1];
+    const float uz = tri[5] - tri[2];
+    const float vx = tri[6] - tri[0];
+    const float vy = tri[7] - tri[1];
+    const float vz = tri[8] - tri[2];
+    const float ny = uz * vx - ux * vz;
+    if (ny < 0.0f) {
+        for (int k = 0; k < 3; ++k) {
+            std::swap(tri[3 + k], tri[6 + k]);
+        }
+    }
+    tris.push_back(tri);
+}
+
+bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
+                                 TerrainMesh& out,
+                                 std::string* out_stats = nullptr)
+{
+    out = {};
+    if (out_stats) out_stats->clear();
+
+    static constexpr char kMagic[] = "HeightFieldGraphicsFile";
+    static constexpr size_t kMagicLen = sizeof(kMagic) - 1;
+    static constexpr size_t kHeaderLen = 63;
+    if (ehf.size() < kHeaderLen ||
+        std::memcmp(ehf.data(), kMagic, kMagicLen) != 0) {
+        return false;
+    }
+
+    const uint32_t body_off = read_be_u32_raw(ehf.data() + 55);
+    const uint32_t body_size = read_be_u32_raw(ehf.data() + 59);
+    if (uint64_t(body_off) + uint64_t(body_size) > ehf.size()) {
+        return false;
+    }
+
+    BeReader r;
+    r.p = ehf.data() + body_off;
+    r.n = body_size;
+    r.i = 0;
+
+    if (!skip_ehf_tex_blob(r) || !skip_ehf_tex_blob(r)) return false;
+
+    float max_height_hint = 0.0f;
+    uint32_t render_tile_count = 0;
+    if (!r.f32(max_height_hint) || !r.u32(render_tile_count)) return false;
+    if (render_tile_count == 0 || render_tile_count > 4096) return false;
+
+    std::vector<std::array<float, 9>> tris;
+    tris.reserve(size_t(render_tile_count) * 64);
+
+    float min_x = std::numeric_limits<float>::infinity();
+    float min_y = std::numeric_limits<float>::infinity();
+    float min_z = std::numeric_limits<float>::infinity();
+    float max_x = -std::numeric_limits<float>::infinity();
+    float max_y = -std::numeric_limits<float>::infinity();
+    float max_z = -std::numeric_limits<float>::infinity();
+    uint64_t cell_count_total = 0;
+
+    auto sane_coord = [](float v) {
+        return std::isfinite(v) && std::fabs(v) < 100000.0f;
+    };
+    auto add_bounds = [&](const float* p) {
+        min_x = std::min(min_x, p[0]);
+        min_y = std::min(min_y, p[1]);
+        min_z = std::min(min_z, p[2]);
+        max_x = std::max(max_x, p[0]);
+        max_y = std::max(max_y, p[1]);
+        max_z = std::max(max_z, p[2]);
+    };
+
+    for (uint32_t ti = 0; ti < render_tile_count; ++ti) {
+        uint32_t sample_w = 0, sample_h = 0, cell_w = 0, cell_h = 0;
+        if (!r.u32(sample_w) || !r.u32(sample_h) ||
+            !r.u32(cell_w)  || !r.u32(cell_h)) {
+            return false;
+        }
+        if (sample_w == 0 || sample_h == 0 ||
+            cell_w == 0 || cell_h == 0 ||
+            cell_w > 256 || cell_h > 256) {
+            return false;
+        }
+
+        const uint64_t cell_count =
+            uint64_t(cell_w) * uint64_t(cell_h);
+        if (cell_count > 65536 ||
+            uint64_t(r.i) + cell_count * 160ull + 24ull >
+                uint64_t(r.n)) {
+            return false;
+        }
+
+        const size_t cell_base = r.i;
+        cell_count_total += cell_count;
+        for (uint64_t ci = 0; ci < cell_count; ++ci) {
+            const uint8_t* cell =
+                r.p + cell_base + size_t(ci) * 160u;
+            float strip[8][3] = {};
+            bool strip_ok = true;
+            for (int vi = 0; vi < 8; ++vi) {
+                const uint8_t* src = cell + 64 + size_t(vi) * 12u;
+                const float x = read_be_f32_raw(src + 0);
+                const float z = read_be_f32_raw(src + 4);
+                const float y = read_be_f32_raw(src + 8);
+                if (!sane_coord(x) || !sane_coord(y) || !sane_coord(z)) {
+                    strip_ok = false;
+                    break;
+                }
+                strip[vi][0] = x;
+                strip[vi][1] = y;
+                strip[vi][2] = z;
+            }
+            if (!strip_ok) continue;
+
+            const size_t tri_begin = tris.size();
+            push_ehf_render_triangle(tris, strip[0], strip[2], strip[1]);
+            push_ehf_render_triangle(tris, strip[1], strip[2], strip[3]);
+            push_ehf_render_triangle(tris, strip[4], strip[6], strip[5]);
+            push_ehf_render_triangle(tris, strip[5], strip[6], strip[7]);
+
+            for (size_t ti = tri_begin; ti < tris.size(); ++ti) {
+                const auto& tri = tris[ti];
+                add_bounds(tri.data() + 0);
+                add_bounds(tri.data() + 3);
+                add_bounds(tri.data() + 6);
+            }
+        }
+
+        r.i += size_t(cell_count) * 160u + 24u;
+    }
+
+    if (tris.empty() ||
+        !std::isfinite(min_x) || !std::isfinite(min_z) ||
+        max_x <= min_x || max_z <= min_z) {
+        return false;
+    }
+
+    const size_t vertex_count = tris.size() * 3;
+    out.positions.reserve(vertex_count * 3);
+    out.normals.reserve(vertex_count * 3);
+    out.uvs.reserve(vertex_count * 2);
+    out.indices.reserve(vertex_count);
+    out.min_height = min_y;
+    out.max_height = max_y;
+
+    const float span_x = std::max(max_x - min_x, 1e-6f);
+    const float span_z = std::max(max_z - min_z, 1e-6f);
+    for (const auto& tri : tris) {
+        const float ux = tri[3] - tri[0];
+        const float uy = tri[4] - tri[1];
+        const float uz = tri[5] - tri[2];
+        const float vx = tri[6] - tri[0];
+        const float vy = tri[7] - tri[1];
+        const float vz = tri[8] - tri[2];
+        float nx = uy * vz - uz * vy;
+        float ny = uz * vx - ux * vz;
+        float nz = ux * vy - uy * vx;
+        const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (len > 1e-6f) {
+            nx /= len;
+            ny /= len;
+            nz /= len;
+        } else {
+            nx = 0.0f;
+            ny = 1.0f;
+            nz = 0.0f;
+        }
+        for (int vi = 0; vi < 3; ++vi) {
+            const float* p = tri.data() + vi * 3;
+            const uint32_t idx =
+                uint32_t(out.positions.size() / 3);
+            out.positions.insert(out.positions.end(), p, p + 3);
+            out.normals.push_back(nx);
+            out.normals.push_back(ny);
+            out.normals.push_back(nz);
+            out.uvs.push_back((p[0] - min_x) / span_x);
+            out.uvs.push_back((p[2] - min_z) / span_z);
+            out.indices.push_back(idx);
+        }
+    }
+
+    out.width = 0;
+    out.height = 0;
+    out.ok = !out.indices.empty();
+    if (out_stats) {
+        std::ostringstream ss;
+        ss << render_tile_count << " render tile(s), "
+           << cell_count_total << " strip cell(s), "
+           << tris.size() << " tri(s)";
+        *out_stats = ss.str();
+    }
+    return out.ok;
+}
 
 struct StreamingModelCandidate {
     std::string hint_path;
@@ -453,12 +720,12 @@ Level::PropInstance prop_instance_from_xform(const Xform3f& xf,
     return pi;
 }
 
-bool is_gdb_pi_pair_yaw_rotation(float rx, float ry)
+bool is_gdb_pi_pair_yaw_rotation(float ry, float rz)
 {
     constexpr float kPi = 3.14159265358979323846f;
-    return std::isfinite(rx) && std::isfinite(ry) &&
-           std::fabs(std::fabs(rx) - kPi) < 1e-4f &&
-           std::fabs(std::fabs(ry) - kPi) < 1e-4f;
+    return std::isfinite(ry) && std::isfinite(rz) &&
+           std::fabs(std::fabs(ry) - kPi) < 1e-4f &&
+           std::fabs(std::fabs(rz) - kPi) < 1e-4f;
 }
 
 void fill_gdb_rotation_matrix(Level::PropInstance& pi,
@@ -474,26 +741,25 @@ void fill_gdb_rotation_matrix(Level::PropInstance& pi,
         scale = 1.0f;
     }
 
-    float game[9] = {};
-    const float a = -rz;
-    const float b = ry;
-    const float c = rx;
-    const float sa = std::sin(a);
-    const float ca = std::cos(a);
-    const float sb = std::sin(b);
-    const float cb = std::cos(b);
-    const float sc = std::sin(c);
-    const float cc = std::cos(c);
+    const float sx = std::sin(rx);
+    const float cx = std::cos(rx);
+    const float sy = std::sin(ry);
+    const float cy = std::cos(ry);
+    const float sz = std::sin(rz);
+    const float cz = std::cos(rz);
 
-    game[0] = cb * ca;
-    game[1] = sb * sc - cb * cc * sa;
-    game[2] = cb * sc * sa + sb * cc;
-    game[3] = sa;
-    game[4] = cc * ca;
-    game[5] = -sc * ca;
-    game[6] = -sb * ca;
-    game[7] = sb * cc * sa + cb * sc;
-    game[8] = cb * cc - sb * sc * sa;
+    // IDA f2_EulerRotationToMatrix_GDB (0x8257ACA0) builds basis vectors.
+    // Store the transpose because PropInstance applies row-major point math.
+    float game[9] = {};
+    game[0] = cy * cx;
+    game[1] = sx;
+    game[2] = -sy * cx;
+    game[3] = sy * sz - cy * cz * sx;
+    game[4] = cz * cx;
+    game[5] = sy * cz * sx + cy * sz;
+    game[6] = cy * sz * sx + sy * cz;
+    game[7] = -sz * cx;
+    game[8] = cy * cz - sy * sz * sx;
 
     const int axis_map[3] = {0, 2, 1};
     for (int row = 0; row < 3; ++row) {
@@ -513,9 +779,6 @@ choose_streaming_model_for_gdb(const std::string& entity_name,
                                uint32_t parent_hash = 0);
 std::vector<StreamingModelCandidate>
 collect_streaming_model_candidates(const std::vector<std::string>& streaming_bnks);
-void dump_bwsmarket_market_model_debug(
-    const std::string& level_path,
-    const std::vector<StreamingModelCandidate>& candidates);
 
 std::string lower_slash(std::string s)
 {
@@ -1084,7 +1347,6 @@ std::string house_facade_companion_exterior_path(const std::string& model_path)
         { "bs_townhouse_basic_facade_mid", "bs_townhouse_basic" },
         { "bs_townhouse_basic_facade",     "bs_townhouse_basic" },
         { "bs_townhouse_basic_facade_snow_v2", "bs_townhouse_basic_snow_v2" },
-        { "bs_townhouse_basic_facade_snow", "bs_townhouse_basic_snow" },
         { "bs_townhouse_v1_facade_mid",    "bs_townhouse_v1" },
         { "bs_townhouse_v1_facade",        "bs_townhouse_v1" },
         { "bs_townhouse_v1_facade_snow",   "bs_townhouse_v1_snow" },
@@ -1092,6 +1354,9 @@ std::string house_facade_companion_exterior_path(const std::string& model_path)
         { "bs_townhouse_v2_facade",        "bs_townhouse_v2" },
         { "bs_townhouse_v2_facade_snow",   "bs_townhouse_v2_snow" },
         { "bs_townhouse_v3_facade_snow",   "bs_townhouse_v3_snow" },
+        { "bs_townhouse_v1_snow",           "bs_townhouse_v1_snow" },
+        { "bs_townhouse_v2_snow",           "bs_townhouse_v2_snow" },
+        { "bs_townhouse_v3_snow",           "bs_townhouse_v3_snow" },
     };
     for (const Map& map : maps) {
         const std::string needle =
@@ -1733,257 +1998,6 @@ choose_streaming_model_for_gdb(const std::string& entity_name,
     return (best_score >= 6500) ? best : nullptr;
 }
 
-bool bwsmarket_debug_model_path_match(const std::string& lower_path)
-{
-    static constexpr const char* kNeedles[] = {
-        "bs_market_largeshop",
-        "bs_market_smallshop",
-        "bs_market_generalshop",
-        "bs_market_generalstore",
-        "generalstore",
-        "bs_market_tavern",
-        "markettavern",
-        "bs_openstall",
-        "bs_market_openstall",
-        "openstall",
-        "bs_marketstall",
-        "bs_market_stall",
-        "marketstall",
-        "tarotstall",
-        "bs_market_clocktower",
-        "bs_market_platform",
-        "bs_light_ceiling",
-        "bs_candleholder",
-        "bs_cemetary_oillamp",
-        "oillamp",
-        "lantern",
-        "candleholder",
-    };
-    for (const char* needle : kNeedles) {
-        if (lower_path.find(needle) != std::string::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool bwsmarket_debug_dump_blob_path_match(const std::string& lower_path)
-{
-    if (!bwsmarket_debug_model_path_match(lower_path)) return false;
-    return lower_path.find("/regions/bowerstone/") != std::string::npos ||
-           lower_path.find("/shared assets/") != std::string::npos;
-}
-
-std::string bwsmarket_debug_safe_filename(const std::string& path)
-{
-    std::string out;
-    out.reserve(std::min<size_t>(path.size(), 180));
-    for (unsigned char c : path) {
-        if (std::isalnum(c) || c == '.' || c == '_' || c == '-') {
-            out.push_back(char(c));
-        } else {
-            out.push_back('_');
-        }
-    }
-    if (out.size() > 180) {
-        out = out.substr(out.size() - 180);
-    }
-    if (out.empty()) out = "model";
-    return out;
-}
-
-void dump_bwsmarket_market_model_debug(
-    const std::string& level_path,
-    const std::vector<StreamingModelCandidate>& candidates)
-{
-    if (lower_slash(level_path).find("bwsmarket") == std::string::npos) {
-        return;
-    }
-
-    std::error_code ec;
-    const std::filesystem::path root = "extracted";
-    const std::filesystem::path blob_dir = root / "debug_bwsmarket_mdls";
-    std::filesystem::create_directories(blob_dir, ec);
-
-    const std::filesystem::path index_path =
-        root / "debug_bwsmarket_model_index.txt";
-    std::ofstream out(index_path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        OutputLog::warn("BWSMarket .mdl debug dump failed to open " +
-                        index_path.string());
-        return;
-    }
-
-    out << "BWSMarket market model debug\n";
-    out << "level=" << level_path << "\n";
-    out << "all_mdl_files=" << S.all_mdl_files.size() << "\n";
-    out << "streaming_candidates=" << candidates.size() << "\n\n";
-
-    std::vector<const FlatAssetEntry*> matched_models;
-    std::unordered_set<std::string> matched_paths;
-    matched_models.reserve(128);
-    for (const auto& m : S.all_mdl_files) {
-        const std::string lower = lower_slash(m.full_path);
-        if (!bwsmarket_debug_model_path_match(lower)) continue;
-        if (matched_paths.insert(lower).second) {
-            matched_models.push_back(&m);
-        }
-        out << "MODEL\tpath=" << m.full_path
-            << "\tbnk=" << m.bnk_path
-            << "\tfile_index=" << m.file_index
-            << "\tsize=" << m.size
-            << "\tnested=" << (m.from_nested ? "yes" : "no")
-            << "\thash=0x" << std::hex << std::uppercase
-            << std::setw(8) << std::setfill('0')
-            << fnv1_model_path_hash(m.full_path)
-            << std::dec << std::nouppercase << std::setfill(' ')
-            << "\n";
-    }
-
-    out << "\nSTREAMING_CANDIDATES\n";
-    for (const auto& c : candidates) {
-        const std::string combined =
-            lower_slash(c.hint_path + " " + c.resolved_path);
-        if (!bwsmarket_debug_model_path_match(combined)) continue;
-        out << "STREAM\thint=" << c.hint_path
-            << "\tresolved=" << c.resolved_path
-            << "\tentry=" << (c.entry ? "yes" : "no")
-            << "\tfrom_gmd=" << (c.from_gmd ? "yes" : "no")
-            << "\tgmd_bnk=" << c.gmd_bnk_path
-            << "\tgmd_index=" << c.gmd_file_index
-            << "\tkey=" << c.key
-            << "\tpath_key=" << c.path_key
-            << "\n";
-    }
-
-    struct Probe {
-        const char* name;
-        uint32_t parent_hash;
-    };
-    static constexpr Probe kProbes[] = {
-        { "ObjectBuildingGeneralStore", 0 },
-        { "NewObjectBuildingGeneralStore_1", 0 },
-        { "NewObjectBuildingBSMarketTavern", 0 },
-        { "ObjectBuildingBSOpenstall_V1", 0 },
-        { "ObjectBuildingBSOpenstall_V2", 0 },
-        { "ObjectBuildingBSOpenstall_V3", 0 },
-        { "ObjectBuildingBSOpenstall_V4", 0 },
-        { "ObjectBuildingBSOpenstall_V5", 0 },
-        { "ObjectBuildingBSOpenstall_V6", 0 },
-        { "ObjectBuildingBSTarotStall", 0 },
-        { "ObjectBuildingBSMarketstall_V4", 0 },
-        { "ObjectBuildingBSMarketstall_V6", 0 },
-        { "QO700_ClockTowerBase", 0xD55304DBu },
-    };
-
-    out << "\nRESOLVER_PROBES\n";
-    for (const Probe& probe : kProbes) {
-        int best_score = INT_MIN;
-        const StreamingModelCandidate* best =
-            choose_streaming_model_for_gdb(
-                probe.name, candidates, &best_score, probe.parent_hash);
-        out << "CHOICE\tentity=" << probe.name
-            << "\tparent=0x" << std::hex << std::uppercase
-            << std::setw(8) << std::setfill('0') << probe.parent_hash
-            << std::dec << std::nouppercase << std::setfill(' ')
-            << "\tscore=" << best_score;
-        if (best) {
-            out << "\thint=" << best->hint_path
-                << "\tresolved=" << best->resolved_path
-                << "\tentry=" << (best->entry ? "yes" : "no");
-        } else {
-            out << "\t<none>";
-        }
-        out << "\n";
-
-        std::vector<std::pair<int, const StreamingModelCandidate*>> ranked;
-        ranked.reserve(candidates.size());
-        for (const auto& c : candidates) {
-            const int score = streaming_model_score(probe.name, c);
-            if (score == INT_MIN) continue;
-            ranked.emplace_back(score, &c);
-        }
-        std::sort(ranked.begin(), ranked.end(),
-                  [](const auto& a, const auto& b) {
-                      return a.first > b.first;
-                  });
-        const size_t limit = std::min<size_t>(ranked.size(), 12);
-        for (size_t i = 0; i < limit; ++i) {
-            const StreamingModelCandidate* c = ranked[i].second;
-            out << "  RANK\t" << (i + 1)
-                << "\tscore=" << ranked[i].first
-                << "\thint=" << c->hint_path
-                << "\tresolved=" << c->resolved_path
-                << "\tentry=" << (c->entry ? "yes" : "no")
-                << "\n";
-        }
-    }
-
-    out << "\nBLOB_DUMPS\n";
-    size_t dumped = 0;
-    size_t failed = 0;
-    constexpr size_t kDumpLimit = 96;
-    for (const FlatAssetEntry* m : matched_models) {
-        if (!m) continue;
-        const std::string lower = lower_slash(m->full_path);
-        if (!bwsmarket_debug_dump_blob_path_match(lower)) continue;
-        if (dumped >= kDumpLimit) {
-            out << "DUMP\tSKIP\tlimit reached at " << kDumpLimit << "\n";
-            break;
-        }
-
-        std::vector<unsigned char> bytes;
-        const bool ok =
-            build_mdl_buffer_for_name_with_body(
-                m->full_path, m->bnk_path, bytes);
-        if (!ok || bytes.empty()) {
-            ++failed;
-            out << "DUMP\tFAIL\tpath=" << m->full_path
-                << "\tbnk=" << m->bnk_path
-                << "\tfile_index=" << m->file_index
-                << "\n";
-            continue;
-        }
-
-        MDLInfo info;
-        const bool parsed = parse_mdl_info(bytes, info, m->full_path);
-        std::ostringstream filename;
-        filename << std::setw(3) << std::setfill('0') << dumped
-                 << "_" << bwsmarket_debug_safe_filename(m->full_path);
-        std::filesystem::path blob_path = blob_dir / filename.str();
-        if (blob_path.extension() != ".mdl") {
-            blob_path += ".mdl";
-        }
-        std::ofstream blob(blob_path, std::ios::binary | std::ios::trunc);
-        if (!blob) {
-            ++failed;
-            out << "DUMP\tFAIL_WRITE\tpath=" << m->full_path
-                << "\tbytes=" << bytes.size()
-                << "\tfile=" << blob_path.string()
-                << "\n";
-            continue;
-        }
-        blob.write(reinterpret_cast<const char*>(bytes.data()),
-                   static_cast<std::streamsize>(bytes.size()));
-        ++dumped;
-        out << "DUMP\tOK\tpath=" << m->full_path
-            << "\tfile=" << blob_path.string()
-            << "\tbytes=" << bytes.size()
-            << "\tparse=" << (parsed ? "ok" : "fail")
-            << "\tmagic=" << info.Magic
-            << "\tmeshes=" << info.MeshCount
-            << "\tbuffers=" << info.MeshBuffers.size()
-            << "\n";
-    }
-
-    out.flush();
-    OutputLog::info(
-        "BWSMarket .mdl debug dump: " + index_path.string() +
-        " (" + std::to_string(matched_models.size()) +
-        " indexed match(es), " + std::to_string(dumped) +
-        " blob(s), " + std::to_string(failed) + " failed)");
-}
-
 constexpr char kEngineLevelMagic[]  = "LevelGraphicsFile";
 constexpr size_t kEngineLevelMagicLen = sizeof(kEngineLevelMagic) - 1;
 
@@ -2306,6 +2320,11 @@ bool Open(const FlatAssetEntry& entry)
 
     g_pending_level_prop_blocks.clear();
     g_pending_adjacent_terrain_meshes.clear();
+    g_pending_level_water_theme = Gdb::WaterTheme{};
+    g_pending_level_sky_theme = Gdb::SkyTheme{};
+    g_pending_level_cloud_theme = Gdb::CloudTheme{};
+    g_pending_level_environment_timeline =
+        Gdb::EnvironmentThemeTimeline{};
 
     if (bail_if_cancelled("entry")) return false;
 
@@ -2868,8 +2887,6 @@ bool Open(const FlatAssetEntry& entry)
                         " streaming hint path(s), " + std::to_string(indexed) +
                         " resolved through global .mdl index");
     }
-    dump_bwsmarket_market_model_debug(entry.full_path,
-                                      streaming_model_candidates);
     g_level_gdb_placements.clear();
     {
         std::vector<std::pair<uint32_t, std::string>> save_hash_to_name;
@@ -3030,17 +3047,149 @@ bool Open(const FlatAssetEntry& entry)
         const std::string gdb_path = sibling_with_ext(".gdb");
         if (load_text_sibling(gdb_path, gdb_bytes)) {
             auto info = Gdb::ParseWithSaveMap(gdb_bytes, save_hash_to_name);
+            {
+                std::vector<const std::vector<uint8_t>*> water_theme_gdbs;
+                water_theme_gdbs.reserve(1 + supplemental_gdbs.size());
+                water_theme_gdbs.push_back(&gdb_bytes);
+                  for (const auto& db : supplemental_gdbs) {
+                      water_theme_gdbs.push_back(&db.bytes);
+                  }
+ 
+                  auto colour_text = [](const float (&c)[3]) {
+                      std::ostringstream ss;
+                      ss << std::fixed << std::setprecision(3)
+                         << c[0] << ',' << c[1] << ',' << c[2];
+                      return ss.str();
+                  };
+
+                  Gdb::WaterTheme water_theme;
+                  if (Gdb::ExtractWaterTheme(water_theme_gdbs, water_theme)) {
+                      g_pending_level_water_theme = water_theme;
+                      std::ostringstream ss;
+                      ss << "water theme: GDB env params found";
+                    if (water_theme.has_shallow_colour) {
+                        ss << " shallow=("
+                           << colour_text(water_theme.shallow_colour) << ')';
+                    }
+                    if (water_theme.has_deep_colour) {
+                        ss << " deep=("
+                           << colour_text(water_theme.deep_colour) << ')';
+                    }
+                    if (water_theme.source_time_of_day >= 0.0f) {
+                        ss << " time="
+                           << std::fixed << std::setprecision(3)
+                           << water_theme.source_time_of_day;
+                    }
+                    OutputLog::success(ss.str());
+                } else {
+                    g_pending_level_water_theme = Gdb::WaterTheme{};
+                      OutputLog::info(
+                          "water theme: no GDB environment water params found; "
+                          "using shader fallback");
+                  }
+
+                  Gdb::SkyTheme sky_theme;
+                  if (Gdb::ExtractSkyTheme(water_theme_gdbs, sky_theme)) {
+                      g_pending_level_sky_theme = sky_theme;
+                      std::ostringstream ss;
+                      ss << "sky theme: GDB env params found";
+                      if (sky_theme.has_sky_colour) {
+                          ss << " sky=("
+                             << colour_text(sky_theme.sky_colour) << ')';
+                      }
+                      if (sky_theme.has_fog_colour) {
+                          ss << " fog=("
+                             << colour_text(sky_theme.fog_colour) << ')';
+                      }
+                      if (sky_theme.source_time_of_day >= 0.0f) {
+                          ss << " time="
+                             << std::fixed << std::setprecision(3)
+                             << sky_theme.source_time_of_day;
+                      }
+                      OutputLog::success(ss.str());
+                  } else {
+                      g_pending_level_sky_theme = Gdb::SkyTheme{};
+                      OutputLog::info(
+                          "sky theme: no GDB environment sky params found; "
+                          "using preview fallback");
+                  }
+
+                  Gdb::CloudTheme cloud_theme;
+                  if (Gdb::ExtractCloudTheme(water_theme_gdbs,
+                                             cloud_theme)) {
+                      g_pending_level_cloud_theme = cloud_theme;
+                      std::ostringstream ss;
+                      ss << "cloud theme: GDB env params found layers="
+                         << cloud_theme.layer_count;
+                      if (cloud_theme.layer_count > 0) {
+                          const auto& layer = cloud_theme.layers[0];
+                          ss << " first=(height="
+                             << std::fixed << std::setprecision(1)
+                             << layer.height
+                             << ", transparency="
+                             << std::setprecision(2)
+                             << layer.transparency << ')';
+                      }
+                      if (cloud_theme.source_time_of_day >= 0.0f) {
+                          ss << " time="
+                             << std::fixed << std::setprecision(3)
+                             << cloud_theme.source_time_of_day;
+                      }
+                      OutputLog::success(ss.str());
+                  } else {
+                      g_pending_level_cloud_theme = Gdb::CloudTheme{};
+                      OutputLog::info(
+                          "cloud theme: no GDB environment cloud params found; "
+                          "using clear sky");
+                  }
+
+                  Gdb::EnvironmentThemeTimeline env_timeline;
+                  if (Gdb::ExtractEnvironmentThemeTimeline(
+                          water_theme_gdbs, env_timeline)) {
+                      g_pending_level_environment_timeline = env_timeline;
+                      std::ostringstream ss;
+                      ss << "day/night cycle: GDB env day-set found keyframes="
+                         << env_timeline.keyframes.size();
+                      if (!env_timeline.keyframes.empty()) {
+                          ss << " span=["
+                             << std::fixed << std::setprecision(3)
+                             << env_timeline.keyframes.front().time_of_day
+                             << ".."
+                             << env_timeline.keyframes.back().time_of_day
+                             << "]";
+                      }
+                      OutputLog::success(ss.str());
+                  } else {
+                      g_pending_level_environment_timeline =
+                          Gdb::EnvironmentThemeTimeline{};
+                      OutputLog::info(
+                          "day/night cycle: no multi-keyframe GDB day-set; "
+                          "using fixed environment theme");
+                  }
+              }
             if (!supplemental_gdbs.empty()) {
+                const bool is_bwsslums_level_for_supplemental =
+                    lower_slash(entry.full_path).find("bwsslums") !=
+                    std::string::npos;
                 size_t supplemental_model_hits = 0;
+                size_t supplemental_model_augments = 0;
                 size_t supplemental_parent_hits = 0;
                 size_t supplemental_model_parts = 0;
                 size_t supplemental_misses = 0;
-                std::vector<std::string> supplemental_debug_rows;
-                supplemental_debug_rows.push_back(
-                    "status\tentity\tentity_hash\tparent_hash\t"
-                    "source_gdb\tlookup_hash\tmodel_hashes");
                 for (auto& p : info.placements) {
-                    if (p.hash_a == 0 || p.model_path_hash != 0) {
+                    const std::string supplemental_entity_key =
+                        compact_match_key(p.entity_name);
+                    const bool allow_slums_shell_augment =
+                        is_bwsslums_level_for_supplemental &&
+                        p.model_path_hash != 0 &&
+                        (supplemental_entity_key.find("slumstreethouse") !=
+                             std::string::npos ||
+                         supplemental_entity_key.find("townhouse") !=
+                             std::string::npos);
+                    if (p.hash_a == 0 ||
+                        (p.model_path_hash != 0 &&
+                         !allow_slums_shell_augment))
+                    {
                         continue;
                     }
                     std::vector<uint32_t> model_hashes;
@@ -3070,32 +3219,36 @@ bool Open(const FlatAssetEntry& entry)
                         }
                     }
                     if (found && !model_hashes.empty()) {
-                        p.model_path_hashes = model_hashes;
-                        p.model_path_hash = model_hashes.front();
+                        const bool augmenting_existing_hash =
+                            p.model_path_hash != 0;
+                        if (augmenting_existing_hash) {
+                            if (p.model_path_hashes.empty()) {
+                                p.model_path_hashes.push_back(
+                                    p.model_path_hash);
+                            }
+                            for (uint32_t h : model_hashes) {
+                                if (std::find(
+                                        p.model_path_hashes.begin(),
+                                        p.model_path_hashes.end(), h) ==
+                                    p.model_path_hashes.end())
+                                {
+                                    p.model_path_hashes.push_back(h);
+                                }
+                            }
+                            ++supplemental_model_augments;
+                        } else {
+                            p.model_path_hashes = model_hashes;
+                            p.model_path_hash = model_hashes.front();
+                        }
                         ++supplemental_model_hits;
-                        supplemental_model_parts += model_hashes.size();
+                        supplemental_model_parts +=
+                            p.model_path_hashes.size();
                         if (p.parent_hash == 0 && parent_hash != 0) {
                             p.parent_hash = parent_hash;
                             ++supplemental_parent_hits;
                         }
-                        std::ostringstream row;
-                        row << "hit\t" << p.entity_name << '\t'
-                            << hex_u32(p.hash_a) << '\t'
-                            << hex_u32(p.parent_hash) << '\t'
-                            << source_gdb << '\t'
-                            << hex_u32(lookup_hash) << '\t';
-                        for (size_t i = 0; i < model_hashes.size(); ++i) {
-                            if (i) row << ',';
-                            row << hex_u32(model_hashes[i]);
-                        }
-                        supplemental_debug_rows.push_back(row.str());
                     } else if (!p.indexed_record) {
                         ++supplemental_misses;
-                        std::ostringstream row;
-                        row << "miss\t" << p.entity_name << '\t'
-                            << hex_u32(p.hash_a) << '\t'
-                            << hex_u32(p.parent_hash) << "\t\t\t";
-                        supplemental_debug_rows.push_back(row.str());
                     }
                 }
                 if (supplemental_model_parts > supplemental_model_hits) {
@@ -3126,31 +3279,13 @@ bool Open(const FlatAssetEntry& entry)
                     OutputLog::info(
                         "gdb supplemental model path hashes: hit=" +
                         std::to_string(supplemental_model_hits) +
+                        ", augment=" +
+                        std::to_string(supplemental_model_augments) +
                         ", parts=" +
                         std::to_string(supplemental_model_parts) +
                         ", miss=" + std::to_string(supplemental_misses) +
                         ", parent-filled=" +
                         std::to_string(supplemental_parent_hits));
-                }
-                if (supplemental_debug_rows.size() > 1) {
-                    const std::filesystem::path debug_path =
-                        std::filesystem::path("extracted") /
-                        "debug_gdb_supplemental_models.tsv";
-                    std::error_code ec;
-                    std::filesystem::create_directories(
-                        debug_path.parent_path(), ec);
-                    std::ofstream out(
-                        debug_path, std::ios::binary | std::ios::trunc);
-                    if (out) {
-                        for (const auto& row : supplemental_debug_rows) {
-                            out << row << '\n';
-                        }
-                        OutputLog::info(
-                            "gdb supplemental model dump: " +
-                            debug_path.string() + " (" +
-                            std::to_string(supplemental_debug_rows.size() - 1) +
-                            " row(s))");
-                    }
                 }
             }
 
@@ -3217,67 +3352,6 @@ bool Open(const FlatAssetEntry& entry)
                         std::to_string(supplemental_entity_parts) +
                         ", miss=" +
                         std::to_string(supplemental_entity_misses));
-                }
-            }
-            const bool is_bwsmarket_debug_level =
-                lower_slash(entry.full_path).find("bwsmarket") !=
-                std::string::npos;
-            if (is_bwsmarket_debug_level) {
-                std::unordered_set<uint32_t> debug_hash_set;
-                for (const auto& p : info.placements) {
-                    if (p.hash_a == 0 || p.model_path_hash != 0 ||
-                        p.entity_name.empty())
-                    {
-                        continue;
-                    }
-                    const std::string key = gdb_entity_key(p.entity_name);
-                    const std::string tok =
-                        compact_match_key(p.entity_name);
-                    const std::string text = key + " " + tok;
-                    const bool interesting =
-                        text.find("generalstore") != std::string::npos ||
-                        text.find("generalshop") != std::string::npos ||
-                        text.find("bsmarkettavern") != std::string::npos ||
-                        text.find("tavern") != std::string::npos ||
-                        text.find("largeshop") != std::string::npos ||
-                        text.find("smallshop") != std::string::npos ||
-                        text.find("tarotstall") != std::string::npos ||
-                        text.find("openstall") != std::string::npos ||
-                        text.find("marketstall") != std::string::npos ||
-                        text.find("caravan") != std::string::npos ||
-                        text.find("coach") != std::string::npos;
-                    if (interesting) {
-                        debug_hash_set.insert(p.hash_a);
-                    }
-                }
-                if (!debug_hash_set.empty()) {
-                    std::vector<uint32_t> debug_hashes(
-                        debug_hash_set.begin(), debug_hash_set.end());
-                    std::sort(debug_hashes.begin(), debug_hashes.end());
-                    const std::string dump =
-                        Gdb::DebugDumpRecordChains(
-                            gdb_bytes, save_hash_to_name, debug_hashes,
-                            8, 12);
-                    const std::filesystem::path debug_path =
-                        std::filesystem::path("extracted") /
-                        "debug_bwsmarket_gdb_records.txt";
-                    std::error_code ec;
-                    std::filesystem::create_directories(
-                        debug_path.parent_path(), ec);
-                    std::ofstream out(
-                        debug_path, std::ios::binary | std::ios::trunc);
-                    if (out) {
-                        out << dump;
-                        OutputLog::info(
-                            "BWSMarket GDB record-chain dump: " +
-                            debug_path.string() + " (" +
-                            std::to_string(debug_hashes.size()) +
-                            " target hash(es))");
-                    } else {
-                        OutputLog::warn(
-                            "BWSMarket GDB record-chain dump failed: " +
-                            debug_path.string());
-                    }
                 }
             }
             g_level_gdb_placements.reserve(info.placements.size());
@@ -4005,6 +4079,9 @@ bool Open(const FlatAssetEntry& entry)
             const bool is_bwsmarket_level =
                 lower_slash(entry.full_path).find("bwsmarket") !=
                 std::string::npos;
+            const bool is_bwsslums_level =
+                lower_slash(entry.full_path).find("bwsslums") !=
+                std::string::npos;
             const uint32_t bwsmarket_clocktower_base_hash =
                 fnv1_model_path_hash(
                     "Art\\Environment\\Regions\\Bowerstone\\Structures\\dotXSI\\"
@@ -4185,7 +4262,6 @@ bool Open(const FlatAssetEntry& entry)
             std::unordered_map<std::string, size_t> gdb_shell_path_emit_counts;
             std::unordered_map<std::string, size_t>
                 gdb_shell_path_limit_skip_paths;
-            std::vector<std::string> gdb_interest_rows;
             std::unordered_map<std::string, size_t>
                 gdb_interest_category_counts;
             std::unordered_map<std::string, size_t>
@@ -4193,9 +4269,6 @@ bool Open(const FlatAssetEntry& entry)
             std::unordered_map<std::string,
                                std::unordered_map<std::string, size_t>>
                 gdb_interest_category_status_counts;
-            if (is_bwsmarket_level) {
-                gdb_interest_rows.reserve(info.placements.size());
-            }
             size_t gdb_clocktower_seen = 0;
             size_t gdb_clocktower_emitted = 0;
             size_t gdb_clocktower_companions_emitted = 0;
@@ -4366,24 +4439,12 @@ bool Open(const FlatAssetEntry& entry)
                         return std::string("shop");
                     }
                     if (has("townhouse") || has("slumstreethouse") ||
-                        has("house"))
+                        has("shantie") || has("shanty") || has("house"))
                     {
                         return std::string("house");
                     }
                     return std::string();
                 };
-            auto tsv_clean = [](std::string s) {
-                for (char& c : s) {
-                    if (c == '\t' || c == '\r' || c == '\n') c = ' ';
-                }
-                return s;
-            };
-            auto hex32 = [](uint32_t v) {
-                std::ostringstream ss;
-                ss << "0x" << std::uppercase << std::hex
-                   << std::setw(8) << std::setfill('0') << v;
-                return ss.str();
-            };
             auto add_gdb_interest_row =
                 [&](const Gdb::Placement& p,
                     const std::string& entity_key,
@@ -4401,21 +4462,6 @@ bool Open(const FlatAssetEntry& entry)
                     const std::string status_key = status ? status : "";
                     ++gdb_interest_status_counts[status_key];
                     ++gdb_interest_category_status_counts[category][status_key];
-                    std::ostringstream row;
-                    row << category << '\t'
-                        << (status ? status : "") << '\t'
-                        << tsv_clean(p.entity_name) << '\t'
-                        << tsv_clean(entity_key) << '\t'
-                        << hex32(p.hash_a) << '\t'
-                        << hex32(p.parent_hash) << '\t'
-                        << hex32(p.model_path_hash) << '\t'
-                        << std::fixed << std::setprecision(3)
-                        << p.x << '\t' << p.y << '\t' << p.z << '\t'
-                        << p.rot_x << '\t' << p.rot_y << '\t'
-                        << p.rot_z << '\t'
-                        << (p.has_rotation ? 1 : 0) << '\t'
-                        << tsv_clean(model_path);
-                    gdb_interest_rows.push_back(row.str());
                 };
 
             std::unordered_map<std::string,
@@ -5385,17 +5431,17 @@ bool Open(const FlatAssetEntry& entry)
                         ? p.scale : 1.0f;
                 if (p.has_rotation) {
                     const bool pi_pair_yaw =
-                        is_gdb_pi_pair_yaw_rotation(p.rot_x, p.rot_y);
+                        is_gdb_pi_pair_yaw_rotation(p.rot_y, p.rot_z);
                     if (pi_pair_yaw) {
                         ++gdb_pi_pair_yaw_rotations;
                     }
                     fill_gdb_rotation_matrix(pi, p.rot_x, p.rot_y, p.rot_z, scale);
                     if (pi_pair_yaw) {
 
-                    } else if (std::fabs(p.rot_x) > 1e-4f ||
-                               std::fabs(p.rot_y) > 1e-4f) {
+                    } else if (std::fabs(p.rot_y) > 1e-4f ||
+                               std::fabs(p.rot_z) > 1e-4f) {
                         ++gdb_full_euler_rotations;
-                    } else if (std::fabs(p.rot_z) > 1e-4f) {
+                    } else if (std::fabs(p.rot_x) > 1e-4f) {
                         ++gdb_yaw_only_rotations;
                     } else {
                         ++gdb_identity_rotations;
@@ -5568,11 +5614,21 @@ bool Open(const FlatAssetEntry& entry)
                             gdb_shell_sample_text(p, hit->full_path));
                     }
                 }
-                const std::array<std::pair<std::string, bool>, 2>
-                    shell_companion_paths = {{
+                std::vector<std::pair<std::string, bool>>
+                    shell_companion_paths = {
                         {companion_interior_path(hit->full_path), true},
                         {companion_exterior_path(hit->full_path), false},
-                    }};
+                    };
+                if (is_bwsslums_level) {
+                    const std::string house_exterior =
+                        house_facade_companion_exterior_path(hit->full_path);
+                    if (!house_exterior.empty()) {
+                        shell_companion_paths.push_back(
+                            {house_exterior, false});
+                        shell_companion_paths.push_back(
+                            {companion_interior_path(house_exterior), true});
+                    }
+                }
                 for (const auto& companion : shell_companion_paths) {
                     if (companion.first.empty()) continue;
                     const FlatAssetEntry* companion_hit =
@@ -5742,8 +5798,6 @@ bool Open(const FlatAssetEntry& entry)
                     float error = 0.0f;
                     std::string seed;
                 };
-                std::vector<std::string> gmd_layout_rows;
-                std::vector<std::string> gmd_solve_rows;
                 auto is_distinct_anchor_key =
                     [&](const std::string& key) {
                     auto it = world_anchors_by_key.find(key);
@@ -5815,9 +5869,6 @@ bool Open(const FlatAssetEntry& entry)
                     const StreamingModelCandidate* cand =
                         shell_candidate_for_path(exterior_path);
                     if (!cand) {
-                        gmd_solve_rows.push_back(
-                            std::string(label) +
-                            "\tmissing_gmd_candidate\t0\t0\t0\t0\t0\t0\t0\t");
                         return selected;
                     }
 
@@ -5838,17 +5889,6 @@ bool Open(const FlatAssetEntry& entry)
                                 compact_match_key(
                                     model_name_from_path(hit->full_path));
                         }
-                        std::ostringstream row;
-                        row << label << '\t'
-                            << cand->hint_path << '\t'
-                            << child.offset << '\t'
-                            << child.asset_key << '\t'
-                            << child.local.t.x << '\t'
-                            << child.local.t.y << '\t'
-                            << child.local.t.z << '\t'
-                            << child.resolved_path << '\t'
-                            << child.raw_path;
-                        gmd_layout_rows.push_back(row.str());
                     }
 
                     std::vector<GmdShellSolution> scored;
@@ -5922,30 +5962,6 @@ bool Open(const FlatAssetEntry& entry)
                         if (selected.size() >= max_solutions) break;
                     }
 
-                    size_t rank = 0;
-                    for (const auto& sol : selected) {
-                        ++rank;
-                        std::ostringstream row;
-                        row << label << '\t'
-                            << "selected" << '\t'
-                            << rank << '\t'
-                            << sol.matches << '\t'
-                            << sol.distinct_matches << '\t'
-                            << std::fixed << std::setprecision(3)
-                            << sol.error << '\t'
-                            << sol.xf.t.x << '\t'
-                            << sol.xf.t.z << '\t'
-                            << sol.xf.t.y << '\t'
-                            << sol.seed;
-                        gmd_solve_rows.push_back(row.str());
-                    }
-                    if (selected.empty()) {
-                        std::ostringstream row;
-                        row << label << '\t'
-                            << "no_strong_solution\t0\t0\t0\t0\t0\t0\t0\t"
-                            << "children=" << children.size();
-                        gmd_solve_rows.push_back(row.str());
-                    }
                     return selected;
                 };
 
@@ -6015,37 +6031,6 @@ bool Open(const FlatAssetEntry& entry)
                         std::to_string(solved_tavern));
                 }
 
-                auto write_debug_rows =
-                    [&](const char* filename,
-                        const char* header,
-                        const std::vector<std::string>& rows) {
-                    if (rows.empty()) return;
-                    const std::filesystem::path path =
-                        std::filesystem::path("extracted") / filename;
-                    std::error_code ec;
-                    std::filesystem::create_directories(
-                        path.parent_path(), ec);
-                    std::ofstream out(
-                        path, std::ios::binary | std::ios::trunc);
-                    if (!out) return;
-                    out << header << '\n';
-                    for (const auto& row : rows) {
-                        out << row << '\n';
-                    }
-                    OutputLog::info("BWSMarket .gmd shell debug: " +
-                                    path.string() + " (" +
-                                    std::to_string(rows.size()) + " rows)");
-                };
-                write_debug_rows(
-                    "debug_bwsmarket_gmd_layout.tsv",
-                    "shell\tgmd_hint\toffset\tasset_key\tlocal_x\tlocal_y\t"
-                    "local_z\tresolved_model\traw_path",
-                    gmd_layout_rows);
-                write_debug_rows(
-                    "debug_bwsmarket_gmd_shell_solve.tsv",
-                    "shell\tstatus\trank\tmatches\tdistinct_matches\t"
-                    "error\tx\tz\ty\tseed",
-                    gmd_solve_rows);
             }
 
             const bool allow_legacy_nohash_shell_anchor = false;
@@ -6234,52 +6219,6 @@ bool Open(const FlatAssetEntry& entry)
                             "dotxsi/bs_market_tavern/"
                             "bs_market_tavern/exterior.mdl");
                     }
-                }
-            }
-
-            if (!gdb_interest_rows.empty()) {
-                std::string level_debug_name =
-                    bwsmarket_debug_safe_filename(entry.full_path);
-                if (level_debug_name.empty()) {
-                    level_debug_name = "level";
-                }
-                const std::filesystem::path interest_path =
-                    std::filesystem::path("extracted") /
-                    ("debug_" + level_debug_name + "_gdb_interest.tsv");
-                std::error_code ec;
-                std::filesystem::create_directories(
-                    interest_path.parent_path(), ec);
-                std::ofstream out(
-                    interest_path, std::ios::binary | std::ios::trunc);
-                if (out) {
-                    out << "category\tstatus\tentity\tentity_key\t"
-                           "entity_hash\tparent_hash\tmodel_path_hash\t"
-                           "x\ty\tz\trot_x\trot_y\trot_z\thas_rotation\t"
-                           "resolved_model\n";
-                    for (const auto& row : gdb_interest_rows) {
-                        out << row << '\n';
-                    }
-                    std::ostringstream summary;
-                    summary << "GDB interest dump: "
-                            << interest_path.string() << " ("
-                            << gdb_interest_rows.size() << " rows";
-                    const char* categories[] = {
-                        "shop", "tavern", "stall", "house", "caravan",
-                        "light"
-                    };
-                    for (const char* category : categories) {
-                        auto it =
-                            gdb_interest_category_counts.find(category);
-                        if (it != gdb_interest_category_counts.end()) {
-                            summary << ", " << category << "=" << it->second;
-                        }
-                    }
-                    summary << ")";
-                    OutputLog::info(summary.str());
-                } else {
-                    OutputLog::warn(
-                        "GDB interest dump failed: " +
-                        interest_path.string());
                 }
             }
 
@@ -7260,35 +7199,375 @@ bool Open(const FlatAssetEntry& entry)
                             p += ext;
                             return p;
                         };
+                        auto path_leaf = [&](const std::string& p) {
+                            const std::string n = norm_path(p);
+                            const size_t slash = n.find_last_of('/');
+                            return (slash == std::string::npos)
+                                ? n
+                                : n.substr(slash + 1);
+                        };
+                        auto has_ext = [&](const std::string& p,
+                                           const char* ext) {
+                            const std::string n = norm_path(p);
+                            const size_t len = std::strlen(ext);
+                            return n.size() >= len &&
+                                n.compare(n.size() - len, len, ext) == 0;
+                        };
+                        auto heightfield_id = [&](const std::string& p) {
+                            const std::string n = norm_path(p);
+                            const size_t id_pos = n.rfind("_id_");
+                            if (id_pos == std::string::npos) {
+                                return std::string{};
+                            }
+                            size_t first = id_pos + 4;
+                            size_t last = first;
+                            while (last < n.size()) {
+                                const unsigned char c =
+                                    static_cast<unsigned char>(n[last]);
+                                if (!std::isxdigit(c)) break;
+                                ++last;
+                            }
+                            return last > first ? n.substr(first, last - first)
+                                                : std::string{};
+                        };
+                        auto path_overlap_score =
+                            [&](const std::string& a,
+                                const std::string& b) {
+                                const std::string an = norm_path(a);
+                                const std::string bn = norm_path(b);
+                                int score = 0;
+                                size_t start = 0;
+                                while (start < an.size()) {
+                                    const size_t end = an.find('/', start);
+                                    const std::string part = an.substr(
+                                        start,
+                                        end == std::string::npos
+                                            ? std::string::npos
+                                            : end - start);
+                                    if (part.size() > 2 &&
+                                        bn.find(part) != std::string::npos) {
+                                        ++score;
+                                    }
+                                    if (end == std::string::npos) break;
+                                    start = end + 1;
+                                }
+                                return score;
+                            };
+                        auto resolve_adjacent_ghf =
+                            [&](const std::string& ehf_path) {
+                                const std::string exact =
+                                    with_ext(ehf_path, ".ghf");
+                                if (const FlatAssetEntry* fe =
+                                        Level::FindHeightfieldByPath(exact)) {
+                                    return fe->full_path.empty()
+                                        ? exact
+                                        : fe->full_path;
+                                }
+
+                                const std::string exact_leaf =
+                                    path_leaf(exact);
+                                const std::string id =
+                                    heightfield_id(ehf_path);
+                                const FlatAssetEntry* best = nullptr;
+                                int best_score = 0;
+                                for (const auto& fe : S.all_heightfield_files) {
+                                    const std::string full =
+                                        fe.full_path.empty()
+                                            ? fe.name
+                                            : fe.full_path;
+                                    if (!has_ext(full, ".ghf") &&
+                                        !has_ext(fe.name, ".ghf")) {
+                                        continue;
+                                    }
+
+                                    int score = 0;
+                                    if (path_leaf(full) == exact_leaf ||
+                                        path_leaf(fe.name) == exact_leaf) {
+                                        score += 1000;
+                                    }
+                                    if (!id.empty()) {
+                                        const std::string cand_id =
+                                            heightfield_id(full.empty()
+                                                ? fe.name
+                                                : full);
+                                        if (cand_id == id) score += 700;
+                                    }
+                                    if (score == 0) continue;
+                                    score += path_overlap_score(ehf_path,
+                                                               full);
+                                    if (score > best_score) {
+                                        best_score = score;
+                                        best = &fe;
+                                    }
+                                }
+                                return best
+                                    ? (best->full_path.empty()
+                                        ? best->name
+                                        : best->full_path)
+                                    : std::string{};
+                            };
+                        auto build_ehf_proxy_mesh =
+                            [&](const HeightfieldFiles& src,
+                                float fallback_height,
+                                TerrainMesh& out) {
+                                out = {};
+                                EhfParsedBody body;
+                                if (!ParseEhfBody(src.ehf_bytes, body) ||
+                                    body.chunks.empty() ||
+                                    body.chunk_w == 0 ||
+                                    body.chunk_h == 0) {
+                                    return false;
+                                }
+
+                                float min_x = std::numeric_limits<float>::infinity();
+                                float min_z = std::numeric_limits<float>::infinity();
+                                float max_x = -std::numeric_limits<float>::infinity();
+                                float max_z = -std::numeric_limits<float>::infinity();
+                                for (const auto& c : body.chunks) {
+                                    if (!std::isfinite(c.origin[0]) ||
+                                        !std::isfinite(c.origin[1]) ||
+                                        !std::isfinite(c.extent[0]) ||
+                                        !std::isfinite(c.extent[1])) {
+                                        continue;
+                                    }
+                                    min_x = std::min(min_x, c.origin[0]);
+                                    min_z = std::min(min_z, c.origin[1]);
+                                    max_x = std::max(max_x, c.extent[0]);
+                                    max_z = std::max(max_z, c.extent[1]);
+                                }
+                                if (!std::isfinite(min_x) ||
+                                    !std::isfinite(min_z) ||
+                                    !std::isfinite(max_x) ||
+                                    !std::isfinite(max_z) ||
+                                    max_x <= min_x || max_z <= min_z) {
+                                    return false;
+                                }
+
+                                uint32_t W = src.ehf_header.u0;
+                                uint32_t H = src.ehf_header.u1;
+                                if (W < 2 || H < 2 ||
+                                    uint64_t(W) * uint64_t(H) > 600000ull) {
+                                    W = body.chunk_w + 1;
+                                    H = body.chunk_h + 1;
+                                }
+                                if (W < 2 || H < 2) return false;
+
+                                const uint32_t CW = body.chunk_w;
+                                const uint32_t CH = body.chunk_h;
+                                const size_t corner_count =
+                                    size_t(CW + 1) * size_t(CH + 1);
+                                std::vector<float> corner_sum(
+                                    corner_count, 0.0f);
+                                std::vector<uint32_t> corner_count_hits(
+                                    corner_count, 0);
+                                auto corner_index =
+                                    [&](uint32_t x, uint32_t y) {
+                                        return size_t(y) * size_t(CW + 1) + x;
+                                    };
+                                const float chunk_span_x =
+                                    (max_x - min_x) / float(CW);
+                                const float chunk_span_z =
+                                    (max_z - min_z) / float(CH);
+                                auto add_corner =
+                                    [&](uint32_t x, uint32_t y, float h) {
+                                        const size_t ci = corner_index(x, y);
+                                        corner_sum[ci] += h;
+                                        ++corner_count_hits[ci];
+                                    };
+                                for (const auto& c : body.chunks) {
+                                    int cx = int(std::lround(
+                                        (c.origin[0] - min_x) /
+                                        std::max(chunk_span_x, 1e-6f)));
+                                    int cy = int(std::lround(
+                                        (c.origin[1] - min_z) /
+                                        std::max(chunk_span_z, 1e-6f)));
+                                    cx = std::clamp(cx, 0, int(CW) - 1);
+                                    cy = std::clamp(cy, 0, int(CH) - 1);
+
+                                    float h = fallback_height;
+                                    if (std::isfinite(c.origin[2]) &&
+                                        std::isfinite(c.extent[2])) {
+                                        h = 0.5f * (c.origin[2] + c.extent[2]);
+                                    } else if (std::isfinite(c.origin[2])) {
+                                        h = c.origin[2];
+                                    } else if (std::isfinite(c.extent[2])) {
+                                        h = c.extent[2];
+                                    }
+
+                                    const uint32_t ux = uint32_t(cx);
+                                    const uint32_t uy = uint32_t(cy);
+                                    add_corner(ux,     uy,     h);
+                                    add_corner(ux + 1, uy,     h);
+                                    add_corner(ux,     uy + 1, h);
+                                    add_corner(ux + 1, uy + 1, h);
+                                }
+
+                                std::vector<float> corner_h(corner_count,
+                                                            fallback_height);
+                                for (size_t i = 0; i < corner_count; ++i) {
+                                    if (corner_count_hits[i] > 0) {
+                                        corner_h[i] = corner_sum[i] /
+                                            float(corner_count_hits[i]);
+                                    }
+                                }
+                                auto corner_h_at =
+                                    [&](uint32_t x, uint32_t y) {
+                                        x = std::min(x, CW);
+                                        y = std::min(y, CH);
+                                        return corner_h[corner_index(x, y)];
+                                    };
+                                auto bilerp_h =
+                                    [&](float fx, float fy) {
+                                        const int ix = std::clamp(
+                                            int(std::floor(fx)), 0,
+                                            int(CW) - 1);
+                                        const int iy = std::clamp(
+                                            int(std::floor(fy)), 0,
+                                            int(CH) - 1);
+                                        const float tx = std::clamp(
+                                            fx - float(ix), 0.0f, 1.0f);
+                                        const float ty = std::clamp(
+                                            fy - float(iy), 0.0f, 1.0f);
+                                        const float h00 = corner_h_at(
+                                            uint32_t(ix), uint32_t(iy));
+                                        const float h10 = corner_h_at(
+                                            uint32_t(ix + 1), uint32_t(iy));
+                                        const float h01 = corner_h_at(
+                                            uint32_t(ix), uint32_t(iy + 1));
+                                        const float h11 = corner_h_at(
+                                            uint32_t(ix + 1), uint32_t(iy + 1));
+                                        const float hx0 = h00 + (h10 - h00) * tx;
+                                        const float hx1 = h01 + (h11 - h01) * tx;
+                                        return hx0 + (hx1 - hx0) * ty;
+                                    };
+
+                                const size_t N = size_t(W) * size_t(H);
+                                out.width = W;
+                                out.height = H;
+                                out.positions.resize(N * 3);
+                                out.normals.resize(N * 3);
+                                out.uvs.resize(N * 2);
+                                out.min_height =
+                                    std::numeric_limits<float>::infinity();
+                                out.max_height =
+                                    -std::numeric_limits<float>::infinity();
+
+                                for (uint32_t y = 0; y < H; ++y) {
+                                    const float vy = (H > 1)
+                                        ? float(y) / float(H - 1)
+                                        : 0.0f;
+                                    const float fcy = vy * float(CH);
+                                    for (uint32_t x = 0; x < W; ++x) {
+                                        const float vx = (W > 1)
+                                            ? float(x) / float(W - 1)
+                                            : 0.0f;
+                                        const float fcx = vx * float(CW);
+                                        const float ph =
+                                            bilerp_h(fcx, fcy);
+                                        const size_t i = size_t(y) * W + x;
+                                        out.positions[i * 3 + 0] =
+                                            min_x + vx * (max_x - min_x);
+                                        out.positions[i * 3 + 1] = ph;
+                                        out.positions[i * 3 + 2] =
+                                            min_z + vy * (max_z - min_z);
+                                        out.uvs[i * 2 + 0] = vx;
+                                        out.uvs[i * 2 + 1] = vy;
+                                        out.min_height =
+                                            std::min(out.min_height, ph);
+                                        out.max_height =
+                                            std::max(out.max_height, ph);
+                                    }
+                                }
+
+                                const float step_x =
+                                    (max_x - min_x) /
+                                    float(std::max<uint32_t>(1, W - 1));
+                                const float step_z =
+                                    (max_z - min_z) /
+                                    float(std::max<uint32_t>(1, H - 1));
+                                auto height_at =
+                                    [&](int x, int y) {
+                                        x = std::clamp(x, 0, int(W) - 1);
+                                        y = std::clamp(y, 0, int(H) - 1);
+                                        return out.positions[
+                                            (size_t(y) * W + size_t(x)) * 3 + 1];
+                                    };
+                                for (uint32_t y = 0; y < H; ++y) {
+                                    for (uint32_t x = 0; x < W; ++x) {
+                                        const float hl = height_at(
+                                            int(x) - 1, int(y));
+                                        const float hr = height_at(
+                                            int(x) + 1, int(y));
+                                        const float hd = height_at(
+                                            int(x), int(y) - 1);
+                                        const float hu = height_at(
+                                            int(x), int(y) + 1);
+                                        float nx = (hl - hr) * step_z;
+                                        float ny = 2.0f * step_x * step_z;
+                                        float nz = (hd - hu) * step_x;
+                                        float len =
+                                            std::sqrt(nx * nx + ny * ny +
+                                                      nz * nz);
+                                        if (len > 1e-6f) {
+                                            nx /= len;
+                                            ny /= len;
+                                            nz /= len;
+                                        } else {
+                                            nx = 0.0f;
+                                            ny = 1.0f;
+                                            nz = 0.0f;
+                                        }
+                                        const size_t i = size_t(y) * W + x;
+                                        out.normals[i * 3 + 0] = nx;
+                                        out.normals[i * 3 + 1] = ny;
+                                        out.normals[i * 3 + 2] = nz;
+                                    }
+                                }
+
+                                out.indices.resize(
+                                    size_t(W - 1) * size_t(H - 1) * 6);
+                                size_t k = 0;
+                                for (uint32_t y = 0; y + 1 < H; ++y) {
+                                    for (uint32_t x = 0; x + 1 < W; ++x) {
+                                        const uint32_t i00 =
+                                            uint32_t(size_t(y) * W + x);
+                                        const uint32_t i10 =
+                                            uint32_t(size_t(y) * W + x + 1);
+                                        const uint32_t i01 =
+                                            uint32_t(size_t(y + 1) * W + x);
+                                        const uint32_t i11 =
+                                            uint32_t(size_t(y + 1) * W + x + 1);
+                                        out.indices[k++] = i00;
+                                        out.indices[k++] = i01;
+                                        out.indices[k++] = i10;
+                                        out.indices[k++] = i10;
+                                        out.indices[k++] = i01;
+                                        out.indices[k++] = i11;
+                                    }
+                                }
+                                out.ok = true;
+                                return true;
+                            };
                         const std::string main_ehf_norm = norm_path(res.ehf_path);
                         for (const auto& adj_ehf_path : all_ehf_refs) {
                             if (norm_path(adj_ehf_path) == main_ehf_norm) continue;
-                            const std::string adj_ghf_path = with_ext(adj_ehf_path, ".ghf");
-                            if (!Level::FindHeightfieldByPath(adj_ghf_path)) {
-                                OutputLog::info("adjacent terrain skipped (no .ghf): " +
-                                                adj_ehf_path);
-                                continue;
-                            }
+                            const std::string adj_ghf_path =
+                                resolve_adjacent_ghf(adj_ehf_path);
 
                             HeightfieldFiles adj_hf;
                             if (!LoadHeightfieldFiles(adj_ehf_path, adj_ghf_path,
                                                       {}, {}, adj_hf)) {
                                 OutputLog::warn("adjacent terrain load failed: " +
                                                 adj_ehf_path + " (" + adj_hf.error + ")");
-                                continue;
-                            }
-                            GhfHeights adj_hg;
-                            if (!DecodeGhfHeights(adj_hf.ghf_bytes_raw, adj_hg)) {
-                                OutputLog::warn("adjacent terrain .ghf decode failed: " +
-                                                adj_ghf_path + " (" + adj_hg.error + ")");
-                                continue;
-                            }
-                            if (adj_hg.tile_size <= 0.0f) {
-                                const float ehf_tile = adj_hf.ehf_header.ok
-                                    ? adj_hf.ehf_header.f2 : 0.0f;
-                                adj_hg.tile_size =
-                                    (ehf_tile > 0.0f && std::isfinite(ehf_tile))
-                                        ? ehf_tile : hg.tile_size;
+                                if (!adj_ghf_path.empty() &&
+                                    LoadHeightfieldFiles(adj_ehf_path, {},
+                                                         {}, {}, adj_hf)) {
+                                    OutputLog::info("adjacent terrain using .ehf only "
+                                                    "(resolved .ghf failed): " +
+                                                    adj_ehf_path);
+                                } else {
+                                    continue;
+                                }
                             }
 
                             if (S.cancel_requested.load()) {
@@ -7296,14 +7575,61 @@ bool Open(const FlatAssetEntry& entry)
                                 return false;
                             }
                             TerrainMesh adj_mesh;
-                            if (!BuildTerrainMesh(adj_hg, adj_mesh)) {
-                                OutputLog::warn("adjacent terrain mesh build failed: " +
-                                                adj_ehf_path);
-                                continue;
+                            bool used_ehf_proxy = false;
+                            if (!adj_hf.ghf_bytes_raw.empty()) {
+                                GhfHeights adj_hg;
+                                if (!DecodeGhfHeights(adj_hf.ghf_bytes_raw, adj_hg)) {
+                                    OutputLog::warn("adjacent terrain .ghf decode failed: " +
+                                                    adj_ghf_path + " (" + adj_hg.error + ")");
+                                } else {
+                                    if (adj_hg.tile_size <= 0.0f) {
+                                        const float ehf_tile = adj_hf.ehf_header.ok
+                                            ? adj_hf.ehf_header.f2 : 0.0f;
+                                        adj_hg.tile_size =
+                                            (ehf_tile > 0.0f &&
+                                             std::isfinite(ehf_tile))
+                                                ? ehf_tile : hg.tile_size;
+                                    }
+                                    if (!BuildTerrainMesh(adj_hg, adj_mesh)) {
+                                        OutputLog::warn("adjacent terrain mesh build failed: " +
+                                                        adj_ehf_path);
+                                    }
+                                }
+                            }
+                            if (!adj_mesh.ok) {
+                                std::string render_stats;
+                                if (build_ehf_render_strip_mesh(
+                                        adj_hf.ehf_bytes, adj_mesh,
+                                        &render_stats)) {
+                                    used_ehf_proxy = true;
+                                    OutputLog::info("adjacent terrain using "
+                                                    ".ehf render mesh: " +
+                                                    adj_ehf_path + " (" +
+                                                    render_stats + ")");
+                                } else if (build_ehf_proxy_mesh(adj_hf,
+                                                                 hg.min_height,
+                                                                 adj_mesh)) {
+                                    used_ehf_proxy = true;
+                                    OutputLog::info("adjacent terrain using .ehf "
+                                                    "chunk proxy (last resort): " +
+                                                    adj_ehf_path);
+                                } else {
+                                    OutputLog::info("adjacent terrain skipped "
+                                                    "(no usable .ghf/.ehf mesh): " +
+                                                    adj_ehf_path);
+                                    continue;
+                                }
+                            } else if (!adj_ghf_path.empty() &&
+                                       norm_path(adj_ghf_path) !=
+                                       norm_path(with_ext(adj_ehf_path, ".ghf"))) {
+                                OutputLog::info("adjacent terrain .ghf resolved: " +
+                                                adj_ehf_path + " -> " +
+                                                adj_ghf_path);
                             }
 
                             EhfParsedBody adj_body;
-                            if (ParseEhfBody(adj_hf.ehf_bytes, adj_body) &&
+                            if (!used_ehf_proxy &&
+                                ParseEhfBody(adj_hf.ehf_bytes, adj_body) &&
                                 !adj_body.chunks.empty()) {
                                 float min_x = 1e30f, min_z = 1e30f;
                                 for (const auto& c : adj_body.chunks) {
@@ -7410,6 +7736,7 @@ bool Open(const FlatAssetEntry& entry)
 
                         g_pending_level_water_present = false;
                         g_pending_level_water_scene = Level::WaterScene{};
+                        g_pending_level_water_theme = Gdb::WaterTheme{};
                         {
                             std::vector<std::string> water_candidates;
                             auto add_unique_water = [&](const std::string& path) {
@@ -7539,23 +7866,6 @@ bool Open(const FlatAssetEntry& entry)
                                 }
                             }
                         }
-
-                        try {
-                            std::filesystem::path dump =
-                                std::filesystem::path("extracted") /
-                                ("debug_" +
-                                 std::filesystem::path(res.ehf_path)
-                                     .filename().string());
-                            std::ofstream f(dump, std::ios::binary);
-                            if (f) {
-                                f.write(reinterpret_cast<const char*>(hf.ehf_bytes.data()),
-                                        (std::streamsize)hf.ehf_bytes.size());
-                                OutputLog::info("debug dump: " + dump.string()
-                                                + "  ("
-                                                + std::to_string(hf.ehf_bytes.size())
-                                                + " bytes)");
-                            }
-                        } catch (...) {}
 
                     }
                 }
@@ -8516,7 +8826,8 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
                                     std::vector<uint8_t>&  out_rgba,
                                     int&                   out_w,
                                     int&                   out_h,
-                                    std::string&           out_picked_name)
+                                    std::string&           out_picked_name,
+                                    bool                   allow_embedded_albedo)
 {
     out_rgba.clear();
     out_w = 0;
@@ -8548,7 +8859,8 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
         return false;
     }
 
-    if (DecodeEhfTerrainAlbedoFromBytes(ehf, hdr.u0, hdr.u1,
+    if (allow_embedded_albedo &&
+        DecodeEhfTerrainAlbedoFromBytes(ehf, hdr.u0, hdr.u1,
                                         out_rgba, out_w, out_h))
     {
         out_picked_name = "embedded_tile_albedo";

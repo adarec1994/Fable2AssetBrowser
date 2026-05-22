@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "HeightfieldLoader.h"
+#include "GdbParser.h"
 #include "WaterParser.h"
 
 struct FlatAssetEntry;
@@ -101,7 +102,8 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
                                     const std::string& preferred_bnk,
                                     std::vector<uint8_t>& out_rgba,
                                     int& out_w, int& out_h,
-                                    std::string& out_picked_name);
+                                    std::string& out_picked_name,
+                                    bool allow_embedded_albedo = true);
 
 bool BakeEhfTerrainCompositeAndSplatDebug(
     const std::vector<uint8_t>& ehf,
@@ -148,6 +150,10 @@ extern std::string                   g_pending_level_model_body_bnk;
 
 extern Level::WaterScene g_pending_level_water_scene;
 extern bool              g_pending_level_water_present;
+extern Gdb::WaterTheme   g_pending_level_water_theme;
+extern Gdb::SkyTheme     g_pending_level_sky_theme;
+extern Gdb::CloudTheme   g_pending_level_cloud_theme;
+extern Gdb::EnvironmentThemeTimeline g_pending_level_environment_timeline;
 
 extern std::vector<std::string> g_level_vfs_texture_body_bnks;
 extern std::vector<std::string> g_level_vfs_model_bnks;

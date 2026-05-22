@@ -209,20 +209,6 @@ std::vector<ADBEntry> decompress_adb(const std::string& path) {
     return result;
 }
 
-static std::mutex g_debug_mutex;
-
-static void debug_log(const std::string& msg) {
-    std::lock_guard<std::mutex> lock(g_debug_mutex);
-    std::ofstream f("hex_debug.txt", std::ios::app);
-    if (f) {
-        auto now = std::chrono::system_clock::now();
-        auto time = std::chrono::system_clock::to_time_t(now);
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&time), "%Y-%m-%d %H:%M:%S");
-        f << "[" << ss.str() << "] " << msg << std::endl;
-    }
-}
-
 void open_hex_for_selected() {
     int idx = S.selected_file_index;
     if (idx < 0 || idx >= (int) S.files.size()) {

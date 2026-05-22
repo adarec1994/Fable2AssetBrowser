@@ -66,9 +66,9 @@ bool parse_body(const std::vector<uint8_t>& bytes,
     if (!read_cstring(out.normal_map_path)) return false;
     const size_t after_first_path = off;
 
-    // IDA shows two HString paths after the fixed water body block. Some
-    // dumps appear to omit the second path, so only consume it when the next
-    // bytes do not already look like "tile count, tile marker".
+    
+    
+    
     const bool next_is_count_then_tile =
         off + 8 <= end &&
         read_u32_be(p + off) <= kMaxTileCount &&

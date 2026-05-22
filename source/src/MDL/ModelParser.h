@@ -76,6 +76,11 @@ struct MDLMeshGeom {
     bool is_terrain = false;
     bool is_water = false;
     float water_params[38] = {};
+    bool has_water_theme = false;
+    float water_opacity = 1.0f;
+    float water_shallow_colour[3] = {0.155f, 0.285f, 0.235f};
+    float water_deep_colour[3] = {0.010f, 0.075f, 0.085f};
+    float water_theme_params[10] = {};
     uint32_t MeshIndex = 0;
     uint32_t SubMeshIndex = 0;
 };
@@ -96,3 +101,6 @@ bool reparse_mdl_missing_buffers_optstr(const std::vector<unsigned char>& data,
 
 bool reparse_mdl_as_foliage_48b(const std::vector<unsigned char>& data,
                                 MDLInfo& info);
+
+bool reparse_mdl_multi_instance_buffers(const std::vector<unsigned char>& data,
+                                        MDLInfo& info);

@@ -34,7 +34,7 @@ public:
         uint32_t magic            = 0;
         uint32_t version          = 0;
         uint32_t field_8          = 0;
-        uint32_t field_C          = 0;  // raw +0x0C: decoded track record count
+        uint32_t field_C          = 0;  
         uint32_t track_count      = 0;
         uint32_t bone_count       = 0;
         uint32_t frame_count      = 0;

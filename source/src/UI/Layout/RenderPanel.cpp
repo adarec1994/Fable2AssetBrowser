@@ -1003,26 +1003,23 @@ static void shop_coord_rotation_matrix(const ShopCoordDebugCandidate& c,
     const float ry = std::isfinite(c.rot_y) ? c.rot_y : 0.0f;
     const float rz = std::isfinite(c.rot_z) ? c.rot_z : 0.0f;
 
-    float game[9] = {};
-    const float a = -rz;
-    const float b = ry;
-    const float d = rx;
-    const float sa = std::sin(a);
-    const float ca = std::cos(a);
-    const float sb = std::sin(b);
-    const float cb = std::cos(b);
-    const float sd = std::sin(d);
-    const float cd = std::cos(d);
+    const float sx = std::sin(rx);
+    const float cx = std::cos(rx);
+    const float sy = std::sin(ry);
+    const float cy = std::cos(ry);
+    const float sz = std::sin(rz);
+    const float cz = std::cos(rz);
 
-    game[0] = cb * ca;
-    game[1] = sb * sd - cb * cd * sa;
-    game[2] = cb * sd * sa + sb * cd;
-    game[3] = sa;
-    game[4] = cd * ca;
-    game[5] = -sd * ca;
-    game[6] = -sb * ca;
-    game[7] = sb * cd * sa + cb * sd;
-    game[8] = cb * cd - sb * sd * sa;
+    float game[9] = {};
+    game[0] = cy * cx;
+    game[1] = sx;
+    game[2] = -sy * cx;
+    game[3] = sy * sz - cy * cz * sx;
+    game[4] = cz * cx;
+    game[5] = sy * cz * sx + cy * sz;
+    game[6] = cy * sz * sx + sy * cz;
+    game[7] = -sz * cx;
+    game[8] = cy * cz - sy * sz * sx;
 
     const int axis_map[3] = {0, 2, 1};
     for (int row = 0; row < 3; ++row) {
@@ -1772,6 +1769,42 @@ void draw_model_in_panel(ID3D11Device* device) {
 
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Wireframe");
             ImGui::Checkbox("Show", &g_mp.wireframe);
+            if (g_mp.has_sky_theme) {
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                                   "Time");
+
+                const bool has_cycle =
+                    g_mp.has_day_night_cycle &&
+                    g_mp.day_night_keyframes.size() >= 2;
+                bool auto_time =
+                    has_cycle && !g_mp.time_of_day_override;
+                ImGui::BeginDisabled(!has_cycle);
+                if (ImGui::Checkbox("Auto", &auto_time)) {
+                    if (auto_time) {
+                        g_mp.time_of_day_override = false;
+                    } else {
+                        g_mp.time_of_day_override = true;
+                        g_mp.time_of_day_override_value =
+                            g_mp.current_time_of_day;
+                    }
+                }
+                ImGui::EndDisabled();
+
+                float hour =
+                    (g_mp.time_of_day_override
+                         ? g_mp.time_of_day_override_value
+                         : g_mp.current_time_of_day) * 24.0f;
+                hour = std::clamp(hour, 0.0f, 24.0f);
+                ImGui::SetNextItemWidth(150.0f);
+                if (ImGui::SliderFloat("##time_of_day", &hour,
+                                       0.0f, 24.0f, "%.2f h",
+                                       ImGuiSliderFlags_AlwaysClamp)) {
+                    g_mp.time_of_day_override = true;
+                    g_mp.time_of_day_override_value =
+                        std::clamp(hour / 24.0f, 0.0f, 1.0f);
+                }
+            }
 
             ImVec2 wp = ImGui::GetWindowPos();
             ImVec2 ws = ImGui::GetWindowSize();

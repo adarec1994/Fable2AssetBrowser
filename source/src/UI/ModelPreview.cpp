@@ -10,8 +10,10 @@
 #include <limits>
 #include <mutex>
 #include <fstream>
+#include <iterator>
 #include <unordered_map>
 #include <functional>
+#include <chrono>
 #include "ModelPreview.h"
 #include "../Level/TerrainSplat.h"
 #include "../Utilities/Files.h"
@@ -32,14 +34,6 @@ using namespace DirectX;
 #include <GL/glew.h>
 #endif
 FlyCam g_flycam;
-static std::mutex g_mp_debug_mutex;
-static void mp_level_load_debug(const std::string& msg)
-{
-    std::lock_guard<std::mutex> lock(g_mp_debug_mutex);
-    std::ofstream f(std::filesystem::current_path() / "level_load_debug.txt",
-                    std::ios::app);
-    if (f) f << msg << "\n";
-}
 
 static inline std::string tolower_copy(std::string s){ std::transform(s.begin(), s.end(), s.begin(), ::tolower); return s; }
 static inline std::string basename_lower_noext(const std::string& s){
@@ -1034,14 +1028,49 @@ static void mp_release_mesh(MPPerMesh& m){
     if(m.srv_extra){ m.srv_extra->Release(); m.srv_extra=nullptr; }
     m.index_count = 0;
 }
+static void mp_release_cloud_density(ModelPreview& mp){
+    for (int i = 0; i < 4; ++i) {
+        if (mp.cloud_density_srv[i]) {
+            mp.cloud_density_srv[i]->Release();
+            mp.cloud_density_srv[i] = nullptr;
+        }
+        mp.cloud_density_tried[i] = false;
+        mp.cloud_density_tex_name[i].clear();
+    }
+}
+static void mp_release_sky_textures(ModelPreview& mp){
+    if (mp.sky_overlay_srv) {
+        mp.sky_overlay_srv->Release();
+        mp.sky_overlay_srv = nullptr;
+    }
+    if (mp.sky_moon_srv) {
+        mp.sky_moon_srv->Release();
+        mp.sky_moon_srv = nullptr;
+    }
+    if (mp.sky_moon_glare_srv) {
+        mp.sky_moon_glare_srv->Release();
+        mp.sky_moon_glare_srv = nullptr;
+    }
+    mp.sky_overlay_tried = false;
+    mp.sky_moon_tried = false;
+    mp.sky_moon_glare_tried = false;
+    mp.sky_overlay_tex_name.clear();
+    mp.sky_moon_tex_name.clear();
+    mp.sky_moon_glare_tex_name.clear();
+}
 static void mp_release(ModelPreview& mp){
     for(auto& m: mp.meshes) mp_release_mesh(m);
     mp.meshes.clear();
+    mp_release_cloud_density(mp);
+    mp_release_sky_textures(mp);
     if(mp.vs){ mp.vs->Release(); mp.vs=nullptr; }
     if(mp.ps){ mp.ps->Release(); mp.ps=nullptr; }
     if(mp.vs_terrain){ mp.vs_terrain->Release(); mp.vs_terrain=nullptr; }
     if(mp.ps_terrain){ mp.ps_terrain->Release(); mp.ps_terrain=nullptr; }
     if(mp.cbuffer_terrain){ mp.cbuffer_terrain->Release(); mp.cbuffer_terrain=nullptr; }
+    if(mp.vs_sky){ mp.vs_sky->Release(); mp.vs_sky=nullptr; }
+    if(mp.ps_sky){ mp.ps_sky->Release(); mp.ps_sky=nullptr; }
+    if(mp.cbuffer_sky){ mp.cbuffer_sky->Release(); mp.cbuffer_sky=nullptr; }
     if(mp.vs_water){ mp.vs_water->Release(); mp.vs_water=nullptr; }
     if(mp.ps_water){ mp.ps_water->Release(); mp.ps_water=nullptr; }
     if(mp.cbuffer_water){ mp.cbuffer_water->Release(); mp.cbuffer_water=nullptr; }
@@ -1438,6 +1467,240 @@ float4 PS(VSOUT i) : SV_Target {
 }
 )";
 
+static const char* g_sky_vs = R"(
+struct VSOUT{
+    float4 p  : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+VSOUT VS(uint id : SV_VertexID) {
+    float2 p;
+    if (id == 0) {
+        p = float2(-1.0, -1.0);
+    } else if (id == 1) {
+        p = float2(-1.0,  3.0);
+    } else {
+        p = float2( 3.0, -1.0);
+    }
+
+    VSOUT o;
+    o.p = float4(p, 0.999, 1.0);
+    o.uv = float2((p.x + 1.0) * 0.5, 1.0 - (p.y + 1.0) * 0.5);
+    return o;
+}
+)";
+
+static const char* g_sky_ps = R"(
+Texture2D cloud_density0 : register(t8);
+Texture2D cloud_density1 : register(t9);
+Texture2D cloud_density2 : register(t10);
+Texture2D cloud_density3 : register(t11);
+Texture2D sky_moon_tex : register(t12);
+Texture2D sky_moon_glare_tex : register(t13);
+Texture2D sky_overlay_tex : register(t14);
+SamplerState smp_cloud : register(s0);
+
+cbuffer SkyCB : register(b4){
+    float4 sky_top;
+    float4 sky_bottom;
+    float4 sky_sunset;
+    float4 sky_params; // x=sun intensity, y=complementary bias, z=rayleigh, w=mie
+    float4 cloud_layer[4];  // x=alpha, y=height, z=scaleX, w=scaleY
+    float4 cloud_motion[4]; // xy=offset, zw=velocity
+    float4 cloud_light[4];  // x=brightness, y=ambient, z=normal, w=translucency
+    float4 cloud_global;    // x=enabled, y=layer count, z=time, w=reserved
+    float4 cloud_density_flags;
+    float4 sky_right;       // xyz=camera right, w=tan half horizontal fov
+    float4 sky_up;          // xyz=camera up,    w=tan half vertical fov
+    float4 sky_forward;     // xyz=camera forward
+    float4 sky_sun;         // xyz=world-space sun direction
+    float4 sky_texture_flags; // x=moon texture, y=moon glare texture, z=sky overlay
+}
+
+struct PSIN{
+    float4 p  : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+float hash21(float2 p) {
+    p = frac(p * float2(127.1, 311.7));
+    p += dot(p, p + 34.345);
+    return frac(p.x * p.y);
+}
+
+float value_noise(float2 p) {
+    float2 i = floor(p);
+    float2 f = frac(p);
+    float2 u = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i + float2(0.0, 0.0));
+    float b = hash21(i + float2(1.0, 0.0));
+    float c = hash21(i + float2(0.0, 1.0));
+    float d = hash21(i + float2(1.0, 1.0));
+    return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
+}
+
+float fbm(float2 p) {
+    float v = 0.0;
+    float amp = 0.55;
+    [unroll]
+    for (int i = 0; i < 4; ++i) {
+        v += value_noise(p) * amp;
+        p = p * 2.03 + 17.13;
+        amp *= 0.48;
+    }
+    return saturate(v);
+}
+
+float sample_cloud_density(int layer, float2 uv) {
+    float2 st = frac(uv);
+    float density = fbm(uv);
+    if (layer == 0 && cloud_density_flags.x > 0.5) {
+        density = cloud_density0.SampleLevel(smp_cloud, st, 0.0).r;
+    }
+    if (layer == 1 && cloud_density_flags.y > 0.5) {
+        density = cloud_density1.SampleLevel(smp_cloud, st, 0.0).r;
+    }
+    if (layer == 2 && cloud_density_flags.z > 0.5) {
+        density = cloud_density2.SampleLevel(smp_cloud, st, 0.0).r;
+    }
+    if (layer == 3 && cloud_density_flags.w > 0.5) {
+        density = cloud_density3.SampleLevel(smp_cloud, st, 0.0).r;
+    }
+    return density;
+}
+
+float4 PS(PSIN i) : SV_Target {
+    float2 screen = float2(i.uv.x * 2.0 - 1.0,
+                           (1.0 - i.uv.y) * 2.0 - 1.0);
+    float3 ray = normalize(
+        sky_forward.xyz +
+        sky_right.xyz * screen.x * sky_right.w +
+        sky_up.xyz * screen.y * sky_up.w);
+    float h = saturate(ray.y * 0.5 + 0.5);
+    float grad = pow(h, 0.72);
+    float rayleigh = max(sky_params.z, 0.05);
+    float mie = max(sky_params.w, 0.05);
+    float bias = saturate(sky_params.y);
+
+    float3 bottom = lerp(sky_bottom.rgb, sky_sunset.rgb, bias * 0.20);
+    float3 col = lerp(bottom, sky_top.rgb * (0.82 + 0.18 * rayleigh), grad);
+
+    float3 sun_dir = normalize(sky_sun.xyz);
+    float night = saturate((-sun_dir.y + 0.05) / 0.45);
+    col = lerp(col, col * 0.22 + float3(0.010, 0.018, 0.050), night);
+
+    float yaw_u_for_stars = atan2(ray.x, ray.z) * 0.15915494;
+    float pitch_v_for_stars = asin(clamp(ray.y, -1.0, 1.0)) * 0.31830989;
+    float star_mask = smoothstep(0.12, 0.85, h) * night;
+    if (sky_texture_flags.z > 0.5) {
+        float2 overlay_uv = frac(float2(yaw_u_for_stars, pitch_v_for_stars) +
+                                 float2(0.5, 0.5));
+        float4 overlay = sky_overlay_tex.SampleLevel(
+            smp_cloud, overlay_uv, 0.0);
+        float overlay_luma = max(max(overlay.r, overlay.g),
+                                 max(overlay.b, overlay.a));
+        col += overlay.rgb * overlay_luma * star_mask;
+    } else {
+        float2 star_grid = floor(float2(yaw_u_for_stars * 180.0,
+                                        pitch_v_for_stars * 90.0));
+        float star_seed = hash21(star_grid);
+        float star = step(0.992, star_seed) * star_mask;
+        col += star * float3(0.95, 0.97, 1.0) *
+               (0.25 + 0.75 * hash21(star_grid + 19.37));
+    }
+
+    float sun_align = saturate(dot(ray, sun_dir));
+    float disc = smoothstep(0.9991, 0.99975, sun_align);
+    float glow = pow(sun_align, 48.0 / mie) * 0.18 * saturate(sky_params.x);
+    col += sky_sunset.rgb * (disc * 0.45 + glow) * (1.0 - night);
+    col += sky_top.rgb * (1.0 - h) * 0.05;
+
+    float3 moon_dir = normalize(-sun_dir);
+    float moon_visible = saturate((moon_dir.y + 0.02) / 0.28) * night;
+    if (moon_visible > 0.001) {
+        float3 moon_right = cross(float3(0.0, 1.0, 0.0), moon_dir);
+        float right_len = dot(moon_right, moon_right);
+        moon_right = normalize(lerp(float3(1.0, 0.0, 0.0), moon_right,
+                                    step(0.0001, right_len)));
+        float3 moon_up = normalize(cross(moon_dir, moon_right));
+        float2 moon_xy = float2(dot(ray, moon_right), dot(ray, moon_up));
+        float moon_align = saturate(dot(ray, moon_dir));
+        float moon_radius = 0.045;
+        float2 moon_uv = moon_xy / moon_radius * 0.5 + 0.5;
+        float in_rect =
+            step(0.0, moon_uv.x) * step(moon_uv.x, 1.0) *
+            step(0.0, moon_uv.y) * step(moon_uv.y, 1.0);
+        float moon_edge = 1.0 - smoothstep(moon_radius * 0.45,
+                                           moon_radius,
+                                           length(moon_xy));
+        float3 moon_col = float3(0.78, 0.82, 0.92);
+        float moon_alpha = moon_edge;
+        if (sky_texture_flags.x > 0.5 && in_rect > 0.5) {
+            float4 moon_sample = sky_moon_tex.SampleLevel(
+                smp_cloud, moon_uv, 0.0);
+            moon_col = max(moon_sample.rgb, moon_col * moon_sample.r);
+            moon_alpha *= max(max(moon_sample.a, moon_sample.r),
+                              max(moon_sample.g, moon_sample.b));
+        } else {
+            float craters = value_noise(moon_uv * 12.0) * 0.18;
+            moon_col -= craters;
+        }
+        float glare = pow(moon_align, 220.0) * 0.45;
+        if (sky_texture_flags.y > 0.5 && in_rect > 0.5) {
+            float4 glare_sample = sky_moon_glare_tex.SampleLevel(
+                smp_cloud, moon_uv, 0.0);
+            glare += max(max(glare_sample.r, glare_sample.g),
+                         glare_sample.b) * 0.35;
+        }
+        col = lerp(col, moon_col, saturate(moon_alpha * moon_visible));
+        col += float3(0.34, 0.40, 0.58) * glare * moon_visible;
+    }
+
+    if (cloud_global.x > 0.5) {
+        float3 cloud_col_acc = col;
+        int count = min((int)cloud_global.y, 4);
+        [loop]
+        for (int layer = 0; layer < 4; ++layer) {
+            if (layer >= count) break;
+            float alpha = saturate(cloud_layer[layer].x);
+            if (alpha <= 0.001) continue;
+
+            float height_bias = saturate((cloud_layer[layer].y - 150.0) / 900.0);
+            float horizon = smoothstep(0.05, 0.82, h);
+            float top_fade = 1.0 - smoothstep(0.88, 1.0, h);
+            float visibility = horizon * top_fade;
+
+            float2 scale = max(abs(cloud_layer[layer].zw), float2(0.08, 0.08));
+            float2 drift = cloud_motion[layer].xy + cloud_motion[layer].zw * cloud_global.z;
+            float yaw_u = atan2(ray.x, ray.z) * 0.15915494;
+            float pitch_v = asin(clamp(ray.y, -1.0, 1.0)) * 0.31830989;
+            float2 sky_uv = float2(yaw_u, pitch_v) + 0.5;
+            float2 p = sky_uv * scale * float2(2.0, 1.15) + drift;
+            p.x += height_bias * 1.7;
+
+            float n = sample_cloud_density(layer, p);
+            float density = smoothstep(0.18 + height_bias * 0.04,
+                                       0.76,
+                                       n);
+            density *= alpha * visibility;
+
+            float brightness = max(cloud_light[layer].x, 0.05);
+            float ambient = max(cloud_light[layer].y, 0.05);
+            float rim = pow(sun_align, 3.0) *
+                        0.25 * cloud_light[layer].w;
+            float3 cloud_col = lerp(sky_bottom.rgb, float3(1.0, 0.96, 0.88),
+                                    saturate(ambient * 0.45 + brightness * 0.35));
+            cloud_col += sky_sunset.rgb * rim;
+
+            cloud_col_acc = lerp(cloud_col_acc, cloud_col, density);
+        }
+        col = cloud_col_acc;
+    }
+
+    return float4(saturate(col), 1.0);
+}
+)";
+
 static const char* g_water_vs = R"(
 cbuffer CB : register(b0){
     float4x4 mvp;
@@ -1454,6 +1717,10 @@ cbuffer WaterCB : register(b3){
     /* x = scroll_speed_0, y = scroll_speed_1, z = normal_intensity,
        w = base_water_y                                                */
     float4 wparams;
+    float4 wtheme0;
+    float4 wtheme1;
+    float4 wtheme2;
+    float4 wtheme3;
 }
 struct VSIN{
     float3 p   : POSITION;
@@ -1507,6 +1774,10 @@ cbuffer WaterCB : register(b3){
     float4 wave2;
     float4 wave3;
     float4 wparams;        // x=scroll0, y=scroll1, z=normal_intensity, w=base_y
+    float4 wtheme0;        // shallow rgb, opacity
+    float4 wtheme1;        // deep rgb, fresnel_bias
+    float4 wtheme2;        // edge min/max/bias/max refraction distance
+    float4 wtheme3;        // reflection strength/refraction scale/reflection scale/normal scale
 }
 Texture2D    tex_normal : register(t0);
 SamplerState smp        : register(s0);
@@ -1539,8 +1810,9 @@ float4 PS(PSIN i) : SV_Target {
     float2 r0 = tex_normal.Sample(smp, uv0).xy * 2.0 - 1.0;
     float2 r1 = tex_normal.Sample(smp, uv1).xy * 2.0 - 1.0;
     float2 ripple = r0 * 0.65 + r1 * 0.35;
+    float normal_scale = max(wtheme3.w, 0.05);
     float3 N = normalize(wave_n + float3(ripple.x, 0.0, ripple.y)
-                                  * (0.16 * wparams.z));
+                                  * (0.16 * wparams.z * normal_scale));
 
     float3 L = normalize(-lightDir.xyz);
     float ndotl = saturate(dot(N, L));
@@ -1548,17 +1820,20 @@ float4 PS(PSIN i) : SV_Target {
 
     // Two-tone water colour: deep blue at glancing angles, lighter
     // greenish at shallow viewing angles.
-    float3 deep    = float3(0.010, 0.075, 0.085);
-    float3 shallow = float3(0.155, 0.285, 0.235);
+    float3 deep    = wtheme1.rgb;
+    float3 shallow = wtheme0.rgb;
     float3 sky     = float3(0.58, 0.62, 0.57);
     // We don't have a real view vector handy without a camera CB, so
     // approximate Fresnel with the projected screen-space Y from
     // SV_Position — works well enough for a flat surface viewed from
     // above.
-    float fresnel = pow(saturate(1.0 - facing), 2.2);
+    float fresnel = pow(saturate(1.0 - facing + wtheme1.w), 2.2);
     float3 base = lerp(deep, shallow, facing * 0.85 + 0.10);
     base *= 0.42 + ndotl * 0.42;
-    base += sky * (fresnel * 0.34);
+    float reflection_strength = max(wtheme3.x, 0.0);
+    float reflection_scale = max(wtheme3.z, 0.0);
+    base += sky * (fresnel * (0.18 + reflection_strength * 0.32)
+                 * reflection_scale);
 
     // Specular highlight along light direction.
     float3 H = normalize(L + float3(0.0, 1.0, 0.0));
@@ -1571,7 +1846,11 @@ float4 PS(PSIN i) : SV_Target {
         base = lerp(base, hi, 0.55);
     }
 
-    return float4(base, 0.68);
+    float alpha = saturate(wtheme0.w);
+    float edge_span = max(wtheme2.y - wtheme2.x, 0.001);
+    float edge_term = saturate((facing + wtheme2.z - wtheme2.x) / edge_span);
+    alpha = saturate(lerp(alpha * 0.82, alpha, edge_term));
+    return float4(base, alpha);
 }
 )";
 
@@ -1724,6 +2003,30 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     }
 
     {
+        ID3DBlob* svsb = nullptr; ID3DBlob* spsb = nullptr;
+        if (compile_shader(g_sky_vs, "VS", "vs_5_0", &svsb) &&
+            compile_shader(g_sky_ps, "PS", "ps_5_0", &spsb))
+        {
+            dev->CreateVertexShader(svsb->GetBufferPointer(),
+                                    svsb->GetBufferSize(),
+                                    nullptr, &mp.vs_sky);
+            dev->CreatePixelShader(spsb->GetBufferPointer(),
+                                   spsb->GetBufferSize(),
+                                   nullptr, &mp.ps_sky);
+        }
+        if (svsb) svsb->Release();
+        if (spsb) spsb->Release();
+    }
+    {
+        D3D11_BUFFER_DESC scb{};
+        scb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        scb.ByteWidth = 22 * 16;
+        scb.Usage = D3D11_USAGE_DYNAMIC;
+        scb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        dev->CreateBuffer(&scb, nullptr, &mp.cbuffer_sky);
+    }
+
+    {
         ID3DBlob* wvsb = nullptr; ID3DBlob* wpsb = nullptr;
         if (compile_shader(g_water_vs, "VS", "vs_5_0", &wvsb) &&
             compile_shader(g_water_ps, "PS", "ps_5_0", &wpsb))
@@ -1742,7 +2045,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
         D3D11_BUFFER_DESC wcb{};
         wcb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
-        wcb.ByteWidth = 5 * 16;
+        wcb.ByteWidth = 9 * 16;
         wcb.Usage = D3D11_USAGE_DYNAMIC;
         wcb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         dev->CreateBuffer(&wcb, nullptr, &mp.cbuffer_water);
@@ -1920,6 +2223,17 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     mp.meshes.clear();
     mp.lod_count    = 1;
     mp.selected_lod = -1;
+    mp.has_sky_theme = false;
+    mp.has_cloud_theme = false;
+    mp.cloud_layer_count = 0;
+    mp.sky_time_of_day = -1.0f;
+    mp.has_day_night_cycle = false;
+    mp.day_night_keyframes.clear();
+    mp.time_of_day_override = false;
+    mp.time_of_day_override_value = 0.5f;
+    mp.current_time_of_day = 0.5f;
+    mp_release_cloud_density(mp);
+    mp_release_sky_textures(mp);
 
     auto extract_lod = [](std::string& name) -> uint32_t {
         size_t pos = name.rfind("|lod");
@@ -2024,14 +2338,6 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             uint64_t(g.indices.size()) * uint64_t(sizeof(uint32_t));
         const std::string mesh_log_name =
             g.name.empty() ? std::to_string(i) : g.name;
-        mp_level_load_debug(
-            "MP_Build mesh begin " + std::to_string(i + 1) + "/" +
-            std::to_string(geoms.size()) +
-            " v=" + std::to_string(vcount) +
-            " idx=" + std::to_string(g.indices.size()) +
-            " vb=" + std::to_string(vb_bytes) +
-            " ib=" + std::to_string(ib_bytes) +
-            " name=" + mesh_log_name);
         if (vb_bytes == 0 || ib_bytes == 0 ||
             vb_bytes > std::numeric_limits<UINT>::max() ||
             ib_bytes > std::numeric_limits<UINT>::max()) {
@@ -2039,8 +2345,6 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
                             mesh_log_name +
                             "' vb=" + std::to_string(vb_bytes) +
                             " ib=" + std::to_string(ib_bytes));
-            mp_level_load_debug("MP_Build mesh skipped oversized name=" +
-                                mesh_log_name);
             continue;
         }
 
@@ -2050,8 +2354,6 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             OutputLog::warn("MP_Build: vertex buffer create failed for '" +
                             mesh_log_name +
                             "' bytes=" + std::to_string(vb_bytes));
-            mp_level_load_debug("MP_Build mesh vertex buffer failed name=" +
-                                mesh_log_name);
             continue;
         }
         D3D11_BUFFER_DESC ib{}; ib.BindFlags=D3D11_BIND_INDEX_BUFFER; ib.ByteWidth=(UINT)ib_bytes; ib.Usage=D3D11_USAGE_IMMUTABLE;
@@ -2061,8 +2363,6 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
                             mesh_log_name +
                             "' bytes=" + std::to_string(ib_bytes));
             m.vb->Release();
-            mp_level_load_debug("MP_Build mesh index buffer failed name=" +
-                                mesh_log_name);
             continue;
         }
         m.index_count = (UINT)g.indices.size();
@@ -2093,6 +2393,14 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         m.is_water   = g.is_water;
         std::memcpy(m.water_params, g.water_params,
                     sizeof(m.water_params));
+        m.has_water_theme = g.has_water_theme;
+        m.water_opacity = g.water_opacity;
+        std::memcpy(m.water_shallow_colour, g.water_shallow_colour,
+                    sizeof(m.water_shallow_colour));
+        std::memcpy(m.water_deep_colour, g.water_deep_colour,
+                    sizeof(m.water_deep_colour));
+        std::memcpy(m.water_theme_params, g.water_theme_params,
+                    sizeof(m.water_theme_params));
 
         m.source_mesh_idx = (uint32_t)i;
 
@@ -2166,11 +2474,8 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         if (!m.srv_specular&& mp.default_srv) { m.srv_specular= mp.default_srv; m.srv_specular->AddRef(); }
         if (!m.srv_metallic     && mp.default_srv) { m.srv_metallic     = mp.default_srv; m.srv_metallic->AddRef(); }
         if (!m.srv_extra    && mp.default_srv) { m.srv_extra    = mp.default_srv; m.srv_extra->AddRef(); }
-        m.has_alpha = hasA || m.is_water;
+        m.has_alpha = m.is_water ? m.has_water_theme : hasA;
         mp.meshes.push_back(m);
-        mp_level_load_debug("MP_Build mesh done " + std::to_string(i + 1) +
-                            "/" + std::to_string(geoms.size()) +
-                            " name=" + mesh_log_name);
     }
 
     if (mp.lod_count > 1) {
@@ -2222,8 +2527,6 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     S.bone_rotate_mode  = false;
 
     mp.has_model = !mp.meshes.empty();
-    mp_level_load_debug("MP_Build internal finished meshes=" +
-                        std::to_string(mp.meshes.size()));
     return true;
 }
 void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
@@ -2231,10 +2534,373 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     ID3D11DeviceContext* ctx=nullptr; dev->GetImmediateContext(&ctx); if(!ctx) return;
     D3D11_VIEWPORT vp{}; vp.TopLeftX=0; vp.TopLeftY=0; vp.Width=(FLOAT)mp.width; vp.Height=(FLOAT)mp.height; vp.MinDepth=0; vp.MaxDepth=1;
     ctx->RSSetViewports(1,&vp);
+    float cy = cosf(cam.yaw);
+    float sy = sinf(cam.yaw);
+    float cp = cosf(cam.pitch);
+    float sp = sinf(cam.pitch);
+    float forward[3] = { sy * cp, sp, cy * cp };
+    XMVECTOR sky_forward_v = XMVector3Normalize(
+        XMVectorSet(forward[0], forward[1], forward[2], 0.0f));
+    XMVECTOR sky_world_up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    XMVECTOR sky_right_v = XMVector3Normalize(
+        XMVector3Cross(sky_world_up, sky_forward_v));
+    XMVECTOR sky_up_v = XMVector3Normalize(
+        XMVector3Cross(sky_forward_v, sky_right_v));
+    XMFLOAT3 sky_right_f{};
+    XMFLOAT3 sky_up_f{};
+    XMFLOAT3 sky_forward_f{};
+    XMStoreFloat3(&sky_right_f, sky_right_v);
+    XMStoreFloat3(&sky_up_f, sky_up_v);
+    XMStoreFloat3(&sky_forward_f, sky_forward_v);
+    float fov = XMConvertToRadians(60.0f);
+    float aspect = (float)mp.width / (float)mp.height;
+    const float tan_half_y = tanf(fov * 0.5f);
+    const float tan_half_x = tan_half_y * aspect;
+
+    static const auto sky_start_time =
+        std::chrono::steady_clock::now();
+    const float sky_time =
+        std::chrono::duration<float>(
+            std::chrono::steady_clock::now() - sky_start_time).count();
+    float render_sky_top[3] = {};
+    float render_sky_bottom[3] = {};
+    float render_sky_sunset[3] = {};
+    float render_sky_params[4] = {};
+    float render_cloud_layer[4][4] = {};
+    float render_cloud_motion[4][4] = {};
+    float render_cloud_light[4][4] = {};
+    std::copy(std::begin(mp.sky_top_colour),
+              std::end(mp.sky_top_colour),
+              std::begin(render_sky_top));
+    std::copy(std::begin(mp.sky_bottom_colour),
+              std::end(mp.sky_bottom_colour),
+              std::begin(render_sky_bottom));
+    std::copy(std::begin(mp.sky_sunset_colour),
+              std::end(mp.sky_sunset_colour),
+              std::begin(render_sky_sunset));
+    std::copy(std::begin(mp.sky_params),
+              std::end(mp.sky_params),
+              std::begin(render_sky_params));
+    for (int ci = 0; ci < 4; ++ci) {
+        for (int cj = 0; cj < 4; ++cj) {
+            render_cloud_layer[ci][cj] = mp.cloud_layer[ci][cj];
+            render_cloud_motion[ci][cj] = mp.cloud_motion[ci][cj];
+            render_cloud_light[ci][cj] = mp.cloud_light[ci][cj];
+        }
+    }
+    bool render_has_cloud_theme = mp.has_cloud_theme;
+    int render_cloud_count =
+        mp.has_cloud_theme ? std::clamp(mp.cloud_layer_count, 0, 4) : 0;
+    float render_sky_tod = std::isfinite(mp.sky_time_of_day)
+        ? mp.sky_time_of_day : 0.5f;
+    render_sky_tod = render_sky_tod - std::floor(render_sky_tod);
+    const bool has_time_override =
+        mp.time_of_day_override &&
+        std::isfinite(mp.time_of_day_override_value);
+    if (has_time_override) {
+        render_sky_tod = mp.time_of_day_override_value;
+        render_sky_tod -= std::floor(render_sky_tod);
+        if (render_sky_tod < 0.0f) render_sky_tod += 1.0f;
+    }
+
+    if (mp.has_day_night_cycle && mp.day_night_keyframes.size() >= 2) {
+        const float cycle_seconds =
+            std::max(mp.day_night_cycle_seconds, 1.0f);
+        if (!has_time_override) {
+            render_sky_tod = sky_time / cycle_seconds;
+            render_sky_tod -= std::floor(render_sky_tod);
+        }
+
+        const auto& keys = mp.day_night_keyframes;
+        size_t a = keys.size() - 1;
+        size_t b = 0;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            if (render_sky_tod < keys[i].time_of_day) {
+                b = i;
+                a = (i == 0) ? keys.size() - 1 : i - 1;
+                break;
+            }
+        }
+
+        float span = keys[b].time_of_day - keys[a].time_of_day;
+        if (span <= 0.0f) span += 1.0f;
+        float pos = render_sky_tod - keys[a].time_of_day;
+        if (pos < 0.0f) pos += 1.0f;
+        const float kt = span > 0.0001f
+            ? std::clamp(pos / span, 0.0f, 1.0f)
+            : 0.0f;
+        auto lerp = [kt](float va, float vb) {
+            return va + (vb - va) * kt;
+        };
+
+        for (int i = 0; i < 3; ++i) {
+            render_sky_top[i] =
+                lerp(keys[a].sky_top_colour[i],
+                     keys[b].sky_top_colour[i]);
+            render_sky_bottom[i] =
+                lerp(keys[a].sky_bottom_colour[i],
+                     keys[b].sky_bottom_colour[i]);
+            render_sky_sunset[i] =
+                lerp(keys[a].sky_sunset_colour[i],
+                     keys[b].sky_sunset_colour[i]);
+        }
+        for (int i = 0; i < 4; ++i) {
+            render_sky_params[i] =
+                lerp(keys[a].sky_params[i], keys[b].sky_params[i]);
+        }
+        render_has_cloud_theme =
+            keys[a].has_cloud_theme || keys[b].has_cloud_theme;
+        render_cloud_count = std::max(keys[a].cloud_layer_count,
+                                      keys[b].cloud_layer_count);
+        render_cloud_count = std::clamp(render_cloud_count, 0, 4);
+        for (int ci = 0; ci < 4; ++ci) {
+            for (int cj = 0; cj < 4; ++cj) {
+                render_cloud_layer[ci][cj] =
+                    lerp(keys[a].cloud_layer[ci][cj],
+                         keys[b].cloud_layer[ci][cj]);
+                render_cloud_motion[ci][cj] =
+                    lerp(keys[a].cloud_motion[ci][cj],
+                         keys[b].cloud_motion[ci][cj]);
+                render_cloud_light[ci][cj] =
+                    lerp(keys[a].cloud_light[ci][cj],
+                         keys[b].cloud_light[ci][cj]);
+            }
+        }
+    }
+    mp.current_time_of_day = render_sky_tod;
+
     float clear[4] = {0.22f,0.22f,0.22f,1.0f};
+    if (mp.has_sky_theme) {
+        clear[0] = std::clamp(render_sky_bottom[0], 0.0f, 1.0f);
+        clear[1] = std::clamp(render_sky_bottom[1], 0.0f, 1.0f);
+        clear[2] = std::clamp(render_sky_bottom[2], 0.0f, 1.0f);
+    }
     ctx->OMSetRenderTargets(1,&mp.rtv, mp.dsv);
     ctx->ClearRenderTargetView(mp.rtv, clear);
     ctx->ClearDepthStencilView(mp.dsv, D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL, 1.0f, 0);
+    if (mp.has_sky_theme && mp.vs_sky && mp.ps_sky && mp.cbuffer_sky) {
+        auto load_cloud_density_srv = [&](int idx) {
+            if (idx < 0 || idx >= 4) return;
+            if (mp.cloud_density_srv[idx] || mp.cloud_density_tried[idx]) {
+                return;
+            }
+            mp.cloud_density_tried[idx] = true;
+            const std::string& tex_name = mp.cloud_density_tex_name[idx];
+            if (tex_name.empty()) return;
+
+            std::string preferred_for_tex =
+                (S.selected_nested_index != -1 &&
+                 !S.selected_nested_temp_path.empty())
+                    ? S.selected_nested_temp_path
+                    : S.selected_bnk;
+            std::vector<unsigned char> tex_buf;
+            if (!build_any_tex_buffer_for_name(tex_name, tex_buf,
+                                               preferred_for_tex)) {
+                OutputLog::warn("cloud density texture not found: " +
+                                tex_name);
+                return;
+            }
+            bool has_alpha = false;
+            ID3D11ShaderResourceView* srv = nullptr;
+            srv_from_tex_blob_auto(dev, tex_buf, &srv, &has_alpha);
+            if (!srv) {
+                OutputLog::error("cloud density texture failed to decode: " +
+                                 tex_name);
+                return;
+            }
+            mp.cloud_density_srv[idx] = srv;
+            OutputLog::info("cloud density texture bound: " + tex_name);
+        };
+        auto load_sky_texture_srv =
+            [&](const std::string& tex_name,
+                bool& tried,
+                ID3D11ShaderResourceView*& target,
+                const char* label) {
+                if (target || tried) return;
+                tried = true;
+                if (tex_name.empty()) return;
+
+                std::string preferred_for_tex =
+                    (S.selected_nested_index != -1 &&
+                     !S.selected_nested_temp_path.empty())
+                        ? S.selected_nested_temp_path
+                        : S.selected_bnk;
+                std::vector<unsigned char> tex_buf;
+                if (!build_any_tex_buffer_for_name(tex_name, tex_buf,
+                                                   preferred_for_tex)) {
+                    OutputLog::warn(std::string(label) +
+                                    " texture not found: " + tex_name);
+                    return;
+                }
+                bool has_alpha = false;
+                ID3D11ShaderResourceView* srv = nullptr;
+                srv_from_tex_blob_auto(dev, tex_buf, &srv, &has_alpha);
+                if (!srv) {
+                    OutputLog::error(std::string(label) +
+                                     " texture failed to decode: " +
+                                     tex_name);
+                    return;
+                }
+                target = srv;
+                OutputLog::info(std::string(label) +
+                                " texture bound: " + tex_name);
+            };
+        for (int ci = 0; ci < 4; ++ci) {
+            load_cloud_density_srv(ci);
+        }
+        load_sky_texture_srv(mp.sky_moon_tex_name,
+                             mp.sky_moon_tried,
+                             mp.sky_moon_srv,
+                             "sky moon");
+        load_sky_texture_srv(mp.sky_moon_glare_tex_name,
+                             mp.sky_moon_glare_tried,
+                             mp.sky_moon_glare_srv,
+                             "sky moon glare");
+        load_sky_texture_srv(mp.sky_overlay_tex_name,
+                             mp.sky_overlay_tried,
+                             mp.sky_overlay_srv,
+                             "sky overlay");
+
+        struct SkyCB {
+            XMFLOAT4 top;
+            XMFLOAT4 bottom;
+            XMFLOAT4 sunset;
+            XMFLOAT4 params;
+            XMFLOAT4 cloud_layer[4];
+            XMFLOAT4 cloud_motion[4];
+            XMFLOAT4 cloud_light[4];
+            XMFLOAT4 cloud_global;
+            XMFLOAT4 cloud_density_flags;
+            XMFLOAT4 sky_right;
+            XMFLOAT4 sky_up;
+            XMFLOAT4 sky_forward;
+            XMFLOAT4 sky_sun;
+            XMFLOAT4 sky_texture_flags;
+        } sky_cb{};
+        auto finite_clamped = [](float v, float fallback) {
+            return std::isfinite(v) ? std::clamp(v, 0.0f, 4.0f)
+                                    : fallback;
+        };
+        sky_cb.top = XMFLOAT4(
+            finite_clamped(render_sky_top[0], 0.42f),
+            finite_clamped(render_sky_top[1], 0.56f),
+            finite_clamped(render_sky_top[2], 0.76f),
+            1.0f);
+        sky_cb.bottom = XMFLOAT4(
+            finite_clamped(render_sky_bottom[0], 0.55f),
+            finite_clamped(render_sky_bottom[1], 0.60f),
+            finite_clamped(render_sky_bottom[2], 0.65f),
+            1.0f);
+        sky_cb.sunset = XMFLOAT4(
+            finite_clamped(render_sky_sunset[0], 1.0f),
+            finite_clamped(render_sky_sunset[1], 0.47f),
+            finite_clamped(render_sky_sunset[2], 0.22f),
+            1.0f);
+        sky_cb.params = XMFLOAT4(
+            std::max(render_sky_params[0], 0.0f),
+            std::clamp(render_sky_params[1], 0.0f, 1.0f),
+            std::max(render_sky_params[2], 0.05f),
+            std::max(render_sky_params[3], 0.05f));
+
+        auto finite_raw = [](float v, float fallback) {
+            return std::isfinite(v) ? v : fallback;
+        };
+        for (int ci = 0; ci < 4; ++ci) {
+            sky_cb.cloud_layer[ci] = XMFLOAT4(
+                std::clamp(finite_raw(render_cloud_layer[ci][0], 0.0f),
+                           0.0f, 1.0f),
+                finite_raw(render_cloud_layer[ci][1], 350.0f),
+                finite_raw(render_cloud_layer[ci][2], 1.0f),
+                finite_raw(render_cloud_layer[ci][3], 1.0f));
+            sky_cb.cloud_motion[ci] = XMFLOAT4(
+                finite_raw(render_cloud_motion[ci][0], 0.0f),
+                finite_raw(render_cloud_motion[ci][1], 0.0f),
+                finite_raw(render_cloud_motion[ci][2], 0.0f),
+                finite_raw(render_cloud_motion[ci][3], 0.0f));
+            sky_cb.cloud_light[ci] = XMFLOAT4(
+                std::max(finite_raw(render_cloud_light[ci][0], 1.0f), 0.0f),
+                std::max(finite_raw(render_cloud_light[ci][1], 1.0f), 0.0f),
+                std::max(finite_raw(render_cloud_light[ci][2], 0.25f), 0.0f),
+                std::max(finite_raw(render_cloud_light[ci][3], 0.0f), 0.0f));
+        }
+        const int cloud_count =
+            render_has_cloud_theme ? render_cloud_count : 0;
+        sky_cb.cloud_global = XMFLOAT4(
+            cloud_count > 0 ? 1.0f : 0.0f,
+            static_cast<float>(cloud_count),
+            sky_time * 2.0f,
+            0.0f);
+        sky_cb.cloud_density_flags = XMFLOAT4(
+            mp.cloud_density_srv[0] ? 1.0f : 0.0f,
+            mp.cloud_density_srv[1] ? 1.0f : 0.0f,
+            mp.cloud_density_srv[2] ? 1.0f : 0.0f,
+            mp.cloud_density_srv[3] ? 1.0f : 0.0f);
+        sky_cb.sky_right = XMFLOAT4(
+            sky_right_f.x, sky_right_f.y, sky_right_f.z, tan_half_x);
+        sky_cb.sky_up = XMFLOAT4(
+            sky_up_f.x, sky_up_f.y, sky_up_f.z, tan_half_y);
+        sky_cb.sky_forward = XMFLOAT4(
+            sky_forward_f.x, sky_forward_f.y, sky_forward_f.z, 0.0f);
+        const float sun_phase = render_sky_tod * XM_2PI - XM_PIDIV2;
+        XMFLOAT3 sky_sun_f{};
+        XMStoreFloat3(
+            &sky_sun_f,
+            XMVector3Normalize(XMVectorSet(std::cos(sun_phase) * 0.72f,
+                                           std::sin(sun_phase),
+                                           0.45f,
+                                           0.0f)));
+        sky_cb.sky_sun = XMFLOAT4(
+            sky_sun_f.x, sky_sun_f.y, sky_sun_f.z, 0.0f);
+        sky_cb.sky_texture_flags = XMFLOAT4(
+            mp.sky_moon_srv ? 1.0f : 0.0f,
+            mp.sky_moon_glare_srv ? 1.0f : 0.0f,
+            mp.sky_overlay_srv ? 1.0f : 0.0f,
+            0.0f);
+
+        D3D11_MAPPED_SUBRESOURCE sms{};
+        if (SUCCEEDED(ctx->Map(mp.cbuffer_sky, 0,
+                               D3D11_MAP_WRITE_DISCARD, 0, &sms))) {
+            std::memcpy(sms.pData, &sky_cb, sizeof(sky_cb));
+            ctx->Unmap(mp.cbuffer_sky, 0);
+        }
+        float sky_blend[4] = {0, 0, 0, 0};
+        ctx->RSSetState(mp.rs);
+        ctx->OMSetDepthStencilState(mp.dssNoWrite, 0);
+        ctx->OMSetBlendState(mp.bs, sky_blend, 0xFFFFFFFF);
+        ctx->IASetInputLayout(nullptr);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(mp.vs_sky, nullptr, 0);
+        ctx->PSSetShader(mp.ps_sky, nullptr, 0);
+        ctx->VSSetConstantBuffers(4, 1, &mp.cbuffer_sky);
+        ctx->PSSetConstantBuffers(4, 1, &mp.cbuffer_sky);
+        ID3D11ShaderResourceView* cloud_srvs[4] = {
+            mp.cloud_density_srv[0],
+            mp.cloud_density_srv[1],
+            mp.cloud_density_srv[2],
+            mp.cloud_density_srv[3]
+        };
+        ctx->PSSetShaderResources(8, 4, cloud_srvs);
+        ID3D11ShaderResourceView* sky_texture_srvs[3] = {
+            mp.sky_moon_srv,
+            mp.sky_moon_glare_srv,
+            mp.sky_overlay_srv
+        };
+        ctx->PSSetShaderResources(12, 3, sky_texture_srvs);
+        ID3D11SamplerState* sky_sampler = mp.sampler;
+        ctx->PSSetSamplers(0, 1, &sky_sampler);
+        ctx->Draw(3, 0);
+        ID3D11Buffer* null_sky_cb = nullptr;
+        ctx->VSSetConstantBuffers(4, 1, &null_sky_cb);
+        ctx->PSSetConstantBuffers(4, 1, &null_sky_cb);
+        ID3D11ShaderResourceView* null_cloud_srvs[4] = {
+            nullptr, nullptr, nullptr, nullptr
+        };
+        ctx->PSSetShaderResources(8, 4, null_cloud_srvs);
+        ID3D11ShaderResourceView* null_sky_texture_srvs[3] = {
+            nullptr, nullptr, nullptr
+        };
+        ctx->PSSetShaderResources(12, 3, null_sky_texture_srvs);
+    }
     ctx->IASetInputLayout(mp.layout);
     ctx->VSSetShader(mp.vs,nullptr,0);
     ctx->PSSetShader(mp.ps,nullptr,0);
@@ -2242,17 +2908,10 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     ctx->PSSetSamplers(0, 2, samplers);
 
     ctx->RSSetState((mp.wireframe && mp.rs_wire) ? mp.rs_wire : mp.rs);
-    float cy = cosf(cam.yaw);
-    float sy = sinf(cam.yaw);
-    float cp = cosf(cam.pitch);
-    float sp = sinf(cam.pitch);
-    float forward[3] = { sy * cp, sp, cy * cp };
     XMVECTOR eye = XMVectorSet(cam.pos[0], cam.pos[1], cam.pos[2], 1);
     XMVECTOR at = XMVectorSet(cam.pos[0] + forward[0], cam.pos[1] + forward[1], cam.pos[2] + forward[2], 1);
     XMVECTOR up = XMVectorSet(0, 1, 0, 0);
     XMMATRIX V = XMMatrixLookAtLH(eye, at, up);
-    float fov = XMConvertToRadians(60.0f);
-    float aspect = (float)mp.width / (float)mp.height;
     float far_plane = mp.radius * 100.0f;
     XMMATRIX P = XMMatrixPerspectiveFovLH(fov, aspect, 0.05f, far_plane);
     XMMATRIX W = XMMatrixIdentity();
@@ -2267,7 +2926,12 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     }
     XMMATRIX MVP = XMMatrixTranspose(W * V * P);
     XMMATRIX MV  = XMMatrixTranspose(W * V);
-    XMVECTOR lightDirV = XMVector3Normalize(XMVectorSet(0.5f, 1.0f, 0.3f, 0.0f));
+    const float scene_sun_phase = render_sky_tod * XM_2PI - XM_PIDIV2;
+    XMVECTOR lightDirV = XMVector3Normalize(
+        XMVectorSet(std::cos(scene_sun_phase) * 0.72f,
+                    std::max(std::sin(scene_sun_phase), 0.15f),
+                    0.45f,
+                    0.0f));
     XMFLOAT4 lightDirF; XMStoreFloat4(&lightDirF, lightDirV);
     struct CB { XMFLOAT4X4 mvp; XMFLOAT4 lightDir; XMFLOAT4X4 mv; XMFLOAT4 params; } cb;
     XMStoreFloat4x4(&cb.mvp, MVP);
@@ -2472,6 +3136,10 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                     float wave2[4];
                     float wave3[4];
                     float wparams[4];
+                    float wtheme0[4];
+                    float wtheme1[4];
+                    float wtheme2[4];
+                    float wtheme3[4];
                 } w{};
 
                 auto finite_or = [&](int idx, float fallback) {
@@ -2519,6 +3187,35 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 w.wparams[2] = std::clamp(finite_or(1, 0.2f) * 3.0f,
                                           0.3f, 1.2f);
                 w.wparams[3] = finite_or(0, 0.0f);
+
+                auto theme_param = [&](int idx, float fallback) {
+                    const float v = (m.has_water_theme && idx >= 0 && idx < 10)
+                        ? m.water_theme_params[idx] : fallback;
+                    return std::isfinite(v) ? v : fallback;
+                };
+                w.wtheme0[0] = m.has_water_theme
+                    ? m.water_shallow_colour[0] : 0.155f;
+                w.wtheme0[1] = m.has_water_theme
+                    ? m.water_shallow_colour[1] : 0.285f;
+                w.wtheme0[2] = m.has_water_theme
+                    ? m.water_shallow_colour[2] : 0.235f;
+                w.wtheme0[3] = m.has_water_theme
+                    ? std::clamp(m.water_opacity, 0.05f, 1.0f) : 1.0f;
+                w.wtheme1[0] = m.has_water_theme
+                    ? m.water_deep_colour[0] : 0.010f;
+                w.wtheme1[1] = m.has_water_theme
+                    ? m.water_deep_colour[1] : 0.075f;
+                w.wtheme1[2] = m.has_water_theme
+                    ? m.water_deep_colour[2] : 0.085f;
+                w.wtheme1[3] = theme_param(4, 0.0f);
+                w.wtheme2[0] = theme_param(0, 0.0f);
+                w.wtheme2[1] = theme_param(1, 1.0f);
+                w.wtheme2[2] = theme_param(2, 0.0f);
+                w.wtheme2[3] = theme_param(3, 25.0f);
+                w.wtheme3[0] = theme_param(5, 0.34f);
+                w.wtheme3[1] = theme_param(6, 1.0f);
+                w.wtheme3[2] = theme_param(7, 1.0f);
+                w.wtheme3[3] = theme_param(9, 1.0f);
                 std::memcpy(wms.pData, &w, sizeof(w));
                 ctx->Unmap(mp.cbuffer_water, 0);
             }

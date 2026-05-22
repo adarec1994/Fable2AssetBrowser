@@ -23,6 +23,8 @@
 #include <cmath>
 #include <exception>
 #include <fstream>
+#include <iomanip>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -53,8 +55,6 @@ extern bool         g_mp_initialized;
 extern FlyCam       g_flycam;
 
     namespace {
-
-static void level_load_debug(const std::string& msg);
 
 struct CachedPropModel {
     bool loaded = false;
@@ -130,6 +130,19 @@ static bool parse_prop_model_buffer(const std::vector<unsigned char>& buf,
     }
     if (missing_count() > 0) {
         reparse_mdl_as_foliage_48b(buf, tmp.info);
+    }
+    {
+        std::string lp = model_path;
+        std::transform(lp.begin(), lp.end(), lp.begin(),
+                       [](unsigned char c){ return (char)std::tolower(c); });
+        std::replace(lp.begin(), lp.end(), '\\', '/');
+        const bool multi_instance_target =
+            lp.find("bs_townhouse_basic_snow_v2") != std::string::npos &&
+            (lp.find("/exterior.mdl") != std::string::npos ||
+             lp.find("/interior.mdl") != std::string::npos);
+        if (multi_instance_target) {
+            reparse_mdl_multi_instance_buffers(buf, tmp.info);
+        }
     }
 
     if (!main_ok && missing_count() >= tmp.info.MeshCount) {
@@ -273,8 +286,6 @@ static bool load_cached_prop_model(const std::string& model_path,
     if (shell_pair_model) {
         std::vector<const FlatAssetEntry*> candidates =
             collect_prop_model_candidates(model_path, preferred_body_bnk);
-        std::vector<std::string> exact_failures;
-        exact_failures.reserve(4);
         for (const FlatAssetEntry* candidate : candidates) {
             if (!candidate ||
                 normalized_asset_path(candidate->full_path) != want_full) {
@@ -286,40 +297,8 @@ static bool load_cached_prop_model(const std::string& model_path,
             std::string fail_reason;
             if (try_prop_model_candidate(entry, model_path, cached, method,
                                          &fail_reason)) {
-                std::ostringstream os;
-                os << "prop model exact shell loaded: " << model_path
-                   << " via " << method
-                   << " from "
-                   << std::filesystem::path(entry.bnk_path).filename().string()
-                   << " index=" << entry.file_index
-                   << " size=" << entry.size
-                   << " meshes=" << cached.info.Meshes.size()
-                   << " buffers=" << cached.info.MeshBuffers.size()
-                   << " geoms=" << cached.geoms.size();
-                level_load_debug(os.str());
                 return true;
             }
-
-            if (exact_failures.size() < 4) {
-                std::ostringstream os;
-                os << std::filesystem::path(entry.bnk_path).filename().string()
-                   << " index=" << entry.file_index
-                   << " size=" << entry.size
-                   << ": " << fail_reason;
-                exact_failures.push_back(os.str());
-            }
-        }
-
-        if (!exact_failures.empty()) {
-            level_load_debug("prop model exact shell rejected: " +
-                             model_path);
-            for (const auto& failure : exact_failures) {
-                level_load_debug("  exact shell candidate rejected: " +
-                                 failure);
-            }
-        } else {
-            level_load_debug("prop model exact shell missing from index: " +
-                             model_path);
         }
     }
 
@@ -329,64 +308,19 @@ static bool load_cached_prop_model(const std::string& model_path,
                                             buf)) {
         std::string parse_reason;
         if (parse_prop_model_buffer(buf, model_path, cached, &parse_reason)) {
-            if (shell_pair_model) {
-                std::ostringstream os;
-                os << "prop model preferred shell loaded: " << model_path
-                   << " preferred_body_bnk="
-                   << std::filesystem::path(preferred_body_bnk)
-                          .filename().string()
-                   << " meshes=" << cached.info.Meshes.size()
-                   << " buffers=" << cached.info.MeshBuffers.size()
-                   << " geoms=" << cached.geoms.size();
-                level_load_debug(os.str());
-            }
             return true;
         }
-        level_load_debug("prop model preferred parse rejected: " +
-                         model_path + " (" + parse_reason + ")");
-    } else {
-        level_load_debug("prop model preferred build failed: " + model_path +
-                         " preferred_body_bnk=" +
-                         std::filesystem::path(preferred_body_bnk)
-                             .filename().string());
     }
 
     const auto candidates =
         collect_prop_model_candidates(model_path, preferred_body_bnk);
-    std::vector<std::string> failures;
-    failures.reserve(std::min<size_t>(candidates.size(), 8));
     for (const FlatAssetEntry* entry : candidates) {
         if (!entry) continue;
         std::string method;
         std::string fail_reason;
         if (try_prop_model_candidate(*entry, model_path, cached, method,
                                      &fail_reason)) {
-            std::ostringstream os;
-            os << "prop model recovered: " << model_path
-               << " via " << method
-               << " from " << std::filesystem::path(entry->bnk_path).filename().string()
-               << " index=" << entry->file_index
-               << " size=" << entry->size;
-            level_load_debug(os.str());
             return true;
-        }
-        if (failures.size() < 8) {
-            std::ostringstream os;
-            os << std::filesystem::path(entry->bnk_path).filename().string()
-               << " index=" << entry->file_index
-               << " size=" << entry->size
-               << ": " << fail_reason;
-            failures.push_back(os.str());
-        }
-    }
-
-    {
-        std::ostringstream os;
-        os << "prop model unresolved: " << model_path
-           << " candidates=" << candidates.size();
-        level_load_debug(os.str());
-        for (const auto& failure : failures) {
-            level_load_debug("  candidate rejected: " + failure);
         }
     }
 
@@ -400,46 +334,6 @@ struct GeneratedTerrainTexture {
     int                  width = 0;
     int                  height = 0;
 };
-
-static std::mutex g_level_load_debug_mutex;
-
-static std::filesystem::path level_load_debug_path()
-{
-#ifdef _WIN32
-    char exe_path[MAX_PATH] = {};
-    const DWORD n = GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        return std::filesystem::path(exe_path).parent_path() /
-               "level_load_debug.txt";
-    }
-#endif
-    return std::filesystem::current_path() / "level_load_debug.txt";
-}
-
-static void level_load_debug(const std::string& msg)
-{
-    std::lock_guard<std::mutex> lock(g_level_load_debug_mutex);
-    std::ofstream f(level_load_debug_path(),
-                    std::ios::app | std::ios::out);
-    if (!f) return;
-
-    std::time_t now = std::time(nullptr);
-    char stamp[32] = {};
-    if (std::tm* tm = std::localtime(&now)) {
-        std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", tm);
-    }
-    f << "[" << stamp << "] " << msg << "\n";
-}
-
-static void reset_level_load_debug()
-{
-    std::lock_guard<std::mutex> lock(g_level_load_debug_mutex);
-    std::ofstream f(level_load_debug_path(),
-                    std::ios::trunc | std::ios::out);
-    if (f) {
-        f << "Fable 2 Asset Browser level-load debug\n";
-    }
-}
 
 static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
                                          const MDLMeshGeom& src,
@@ -666,6 +560,278 @@ static void normalize_grid_uvs(MDLMeshGeom& geom, uint32_t width, uint32_t heigh
     }
 }
 
+static uint32_t env_texture_hash(std::string s, bool lowercase)
+{
+        if (lowercase) {
+            std::transform(s.begin(), s.end(), s.begin(),
+                           [](unsigned char c) {
+                               return (char)std::tolower(c);
+                           });
+        }
+        std::replace(s.begin(), s.end(), '/', '\\');
+        uint32_t h = 0x811C9DC5u;
+        for (unsigned char c : s) {
+            h *= 0x01000193u;
+            h ^= uint32_t(c);
+        }
+        return h;
+}
+
+static std::string resolve_env_texture_hash(uint32_t hash)
+{
+    if (hash == 0 || hash == 0x811C9DC5u) return {};
+    for (const FlatAssetEntry& tex : S.all_tex_files) {
+        if (env_texture_hash(tex.full_path, true) == hash ||
+            env_texture_hash(tex.name, true) == hash ||
+            env_texture_hash(tex.full_path, false) == hash ||
+            env_texture_hash(tex.name, false) == hash) {
+            return tex.full_path;
+        }
+    }
+    return {};
+}
+
+static void apply_sky_texture_hashes_to_preview(ModelPreview& mp,
+                                                const Gdb::SkyTheme& sky)
+{
+#ifdef _WIN32
+    auto reset_overlay = [&]() {
+        if (mp.sky_overlay_srv) {
+            mp.sky_overlay_srv->Release();
+            mp.sky_overlay_srv = nullptr;
+        }
+        mp.sky_overlay_tried = false;
+        mp.sky_overlay_tex_name.clear();
+    };
+    auto reset_moon = [&]() {
+        if (mp.sky_moon_srv) {
+            mp.sky_moon_srv->Release();
+            mp.sky_moon_srv = nullptr;
+        }
+        mp.sky_moon_tried = false;
+        mp.sky_moon_tex_name.clear();
+    };
+    auto reset_glare = [&]() {
+        if (mp.sky_moon_glare_srv) {
+            mp.sky_moon_glare_srv->Release();
+            mp.sky_moon_glare_srv = nullptr;
+        }
+        mp.sky_moon_glare_tried = false;
+        mp.sky_moon_glare_tex_name.clear();
+    };
+
+    reset_overlay();
+    reset_moon();
+    reset_glare();
+    if (sky.has_sky_overlay_texture) {
+        mp.sky_overlay_tex_name =
+            resolve_env_texture_hash(sky.sky_overlay_texture_hash);
+    }
+    if (sky.has_moon_texture) {
+        mp.sky_moon_tex_name =
+            resolve_env_texture_hash(sky.moon_texture_hash);
+    }
+    if (sky.has_moon_glare_texture) {
+        mp.sky_moon_glare_tex_name =
+            resolve_env_texture_hash(sky.moon_glare_texture_hash);
+    }
+#else
+    (void)mp;
+    (void)sky;
+#endif
+}
+
+static void apply_sky_theme_to_preview(ModelPreview& mp,
+                                       const Gdb::SkyTheme& sky)
+{
+    mp.has_sky_theme = sky.has_any;
+    if (!mp.has_sky_theme) return;
+
+    std::copy(std::begin(sky.sky_colour),
+              std::end(sky.sky_colour),
+              std::begin(mp.sky_top_colour));
+    if (sky.has_fog_colour) {
+        std::copy(std::begin(sky.fog_colour),
+                  std::end(sky.fog_colour),
+                  std::begin(mp.sky_bottom_colour));
+    } else {
+        std::copy(std::begin(sky.complementary_colour),
+                  std::end(sky.complementary_colour),
+                  std::begin(mp.sky_bottom_colour));
+    }
+    std::copy(std::begin(sky.sunset_colour),
+              std::end(sky.sunset_colour),
+              std::begin(mp.sky_sunset_colour));
+    mp.sky_params[0] = sky.sun_intensity;
+    mp.sky_params[1] = sky.complementary_bias;
+    mp.sky_params[2] = sky.rayleigh;
+    mp.sky_params[3] = sky.mie;
+    mp.sky_time_of_day = sky.source_time_of_day;
+    apply_sky_texture_hashes_to_preview(mp, sky);
+}
+
+static void apply_cloud_theme_to_preview(ModelPreview& mp,
+                                         const Gdb::CloudTheme& clouds)
+{
+    mp.has_cloud_theme = clouds.has_any;
+    mp.cloud_layer_count = clouds.layer_count;
+    int density_resolved = 0;
+    int density_missing = 0;
+    for (int i = 0; i < 4; ++i) {
+        const Gdb::CloudLayerTheme& layer = clouds.layers[i];
+        const float opacity = 1.0f - std::clamp(layer.transparency, 0.0f, 1.0f);
+        mp.cloud_layer[i][0] = layer.enabled ? opacity : 0.0f;
+        mp.cloud_layer[i][1] = layer.height;
+        mp.cloud_layer[i][2] = layer.texture_scale_x;
+        mp.cloud_layer[i][3] = layer.texture_scale_y;
+
+        mp.cloud_motion[i][0] = layer.position_x;
+        mp.cloud_motion[i][1] = layer.position_y;
+        mp.cloud_motion[i][2] = layer.velocity_x;
+        mp.cloud_motion[i][3] = layer.velocity_y;
+
+        mp.cloud_light[i][0] = layer.brightness;
+        mp.cloud_light[i][1] = layer.ambient_light;
+        mp.cloud_light[i][2] = layer.normal_strength;
+        mp.cloud_light[i][3] = layer.translucency_strength;
+
+#ifdef _WIN32
+        if (mp.cloud_density_srv[i]) {
+            mp.cloud_density_srv[i]->Release();
+            mp.cloud_density_srv[i] = nullptr;
+        }
+        mp.cloud_density_tried[i] = false;
+#endif
+        mp.cloud_density_tex_name[i].clear();
+        if (layer.enabled && layer.has_density_map) {
+            mp.cloud_density_tex_name[i] =
+                resolve_env_texture_hash(layer.density_map_hash);
+            if (!mp.cloud_density_tex_name[i].empty()) {
+                ++density_resolved;
+            } else {
+                ++density_missing;
+            }
+        }
+    }
+    if (clouds.has_any) {
+        std::ostringstream ss;
+        ss << "cloud theme: density maps resolved=" << density_resolved
+           << " missing=" << density_missing;
+        OutputLog::info(ss.str());
+    }
+}
+
+static void copy_sky_theme_to_keyframe(MPSkyCloudKeyframe& key,
+                                       const Gdb::SkyTheme& sky)
+{
+    if (!sky.has_any) return;
+    std::copy(std::begin(sky.sky_colour),
+              std::end(sky.sky_colour),
+              std::begin(key.sky_top_colour));
+    if (sky.has_fog_colour) {
+        std::copy(std::begin(sky.fog_colour),
+                  std::end(sky.fog_colour),
+                  std::begin(key.sky_bottom_colour));
+    } else {
+        std::copy(std::begin(sky.complementary_colour),
+                  std::end(sky.complementary_colour),
+                  std::begin(key.sky_bottom_colour));
+    }
+    std::copy(std::begin(sky.sunset_colour),
+              std::end(sky.sunset_colour),
+              std::begin(key.sky_sunset_colour));
+    key.sky_params[0] = sky.sun_intensity;
+    key.sky_params[1] = sky.complementary_bias;
+    key.sky_params[2] = sky.rayleigh;
+    key.sky_params[3] = sky.mie;
+}
+
+static void copy_cloud_theme_to_keyframe(MPSkyCloudKeyframe& key,
+                                         const Gdb::CloudTheme& clouds)
+{
+    key.has_cloud_theme = clouds.has_any;
+    key.cloud_layer_count = clouds.layer_count;
+    for (int i = 0; i < 4; ++i) {
+        const Gdb::CloudLayerTheme& layer = clouds.layers[i];
+        const float opacity =
+            1.0f - std::clamp(layer.transparency, 0.0f, 1.0f);
+        key.cloud_layer[i][0] = layer.enabled ? opacity : 0.0f;
+        key.cloud_layer[i][1] = layer.height;
+        key.cloud_layer[i][2] = layer.texture_scale_x;
+        key.cloud_layer[i][3] = layer.texture_scale_y;
+
+        key.cloud_motion[i][0] = layer.position_x;
+        key.cloud_motion[i][1] = layer.position_y;
+        key.cloud_motion[i][2] = layer.velocity_x;
+        key.cloud_motion[i][3] = layer.velocity_y;
+
+        key.cloud_light[i][0] = layer.brightness;
+        key.cloud_light[i][1] = layer.ambient_light;
+        key.cloud_light[i][2] = layer.normal_strength;
+        key.cloud_light[i][3] = layer.translucency_strength;
+    }
+}
+
+static void apply_environment_timeline_to_preview(
+    ModelPreview& mp,
+    const Gdb::EnvironmentThemeTimeline& timeline)
+{
+    mp.has_day_night_cycle =
+        timeline.has_any && timeline.keyframes.size() >= 2;
+    mp.day_night_keyframes.clear();
+    if (!mp.has_day_night_cycle) return;
+
+    for (const Gdb::EnvironmentThemeKeyframe& src : timeline.keyframes) {
+        MPSkyCloudKeyframe key;
+        key.time_of_day = std::isfinite(src.time_of_day)
+            ? src.time_of_day - std::floor(src.time_of_day)
+            : 0.0f;
+        if (key.time_of_day < 0.0f) key.time_of_day += 1.0f;
+        std::copy(std::begin(mp.sky_top_colour),
+                  std::end(mp.sky_top_colour),
+                  std::begin(key.sky_top_colour));
+        std::copy(std::begin(mp.sky_bottom_colour),
+                  std::end(mp.sky_bottom_colour),
+                  std::begin(key.sky_bottom_colour));
+        std::copy(std::begin(mp.sky_sunset_colour),
+                  std::end(mp.sky_sunset_colour),
+                  std::begin(key.sky_sunset_colour));
+        std::copy(std::begin(mp.sky_params),
+                  std::end(mp.sky_params),
+                  std::begin(key.sky_params));
+        copy_sky_theme_to_keyframe(key, src.sky);
+        copy_cloud_theme_to_keyframe(key, src.clouds);
+#ifdef _WIN32
+        if (mp.sky_overlay_tex_name.empty() &&
+            src.sky.has_sky_overlay_texture) {
+            mp.sky_overlay_tex_name =
+                resolve_env_texture_hash(src.sky.sky_overlay_texture_hash);
+            mp.sky_overlay_tried = false;
+        }
+        if (mp.sky_moon_tex_name.empty() && src.sky.has_moon_texture) {
+            mp.sky_moon_tex_name =
+                resolve_env_texture_hash(src.sky.moon_texture_hash);
+            mp.sky_moon_tried = false;
+        }
+        if (mp.sky_moon_glare_tex_name.empty() &&
+            src.sky.has_moon_glare_texture) {
+            mp.sky_moon_glare_tex_name =
+                resolve_env_texture_hash(src.sky.moon_glare_texture_hash);
+            mp.sky_moon_glare_tried = false;
+        }
+#endif
+        mp.day_night_keyframes.push_back(key);
+    }
+
+    mp.has_sky_theme = true;
+    std::ostringstream ss;
+    ss << "day/night cycle: preview timeline active keyframes="
+       << mp.day_night_keyframes.size()
+       << " cycle=" << std::fixed << std::setprecision(0)
+       << mp.day_night_cycle_seconds << "s";
+    OutputLog::info(ss.str());
+}
+
 #ifdef _WIN32
 struct LevelPropStreamState {
     std::atomic<int>            phase{0};
@@ -679,6 +845,9 @@ struct LevelPropStreamState {
 
     std::vector<Level::PropBlock>  blocks;
     std::string                    model_body_bnk;
+    Gdb::SkyTheme                  sky_theme;
+    Gdb::CloudTheme                cloud_theme;
+    Gdb::EnvironmentThemeTimeline  environment_timeline;
     float                          terrain_tile_size = 1.0f;
     int                            terrain_width  = 0;
     int                            terrain_height = 0;
@@ -695,12 +864,6 @@ static void prop_worker_run(LevelPropStreamState* s)
         const float terrain_cz =
             (float(s->terrain_height) - 1.0f) * 0.5f * s->terrain_tile_size;
 
-        std::ostringstream start;
-        start << "prop worker start: blocks=" << s->blocks.size()
-              << " total_instances=" << s->total_instances
-              << " model_body_bnk=" << s->model_body_bnk;
-        level_load_debug(start.str());
-
         std::unordered_map<std::string, CachedPropModel> cache;
 
         for (const auto& block : s->blocks) {
@@ -713,14 +876,6 @@ static void prop_worker_run(LevelPropStreamState* s)
                 s->instances_loaded.fetch_add(block.instances.size(),
                                               std::memory_order_relaxed);
                 continue;
-            }
-
-            {
-                std::ostringstream os;
-                os << "prop block: type=0x" << std::hex << block.type
-                   << std::dec << " instances=" << block.instances.size()
-                   << " model=" << block.model_path;
-                level_load_debug(os.str());
             }
 
             auto& cached = cache[block.model_path];
@@ -804,17 +959,12 @@ static void prop_worker_run(LevelPropStreamState* s)
             (void)terrain_cx; (void)terrain_cz;
         }
 
-        level_load_debug("prop worker finished normally");
         s->phase.store(2, std::memory_order_release);
     } catch (const std::exception& e) {
-        level_load_debug("prop worker exception while processing model=" +
-                         current_model + " :: " + e.what());
         OutputLog::error("level props: prop bake worker aborted on " +
                          current_model + " (" + e.what() + ")");
         s->phase.store(2, std::memory_order_release);
     } catch (...) {
-        level_load_debug("prop worker unknown exception while processing model=" +
-                         current_model);
         OutputLog::error("level props: prop bake worker aborted on " +
                          current_model + " (unknown exception)");
         s->phase.store(2, std::memory_order_release);
@@ -827,7 +977,6 @@ static void start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
     if (g_level_prop_stream.worker.joinable()) {
         g_level_prop_stream.worker.join();
     }
-    reset_level_load_debug();
     g_level_prop_stream.phase.store(0);
     g_level_prop_stream.instances_loaded.store(0);
     g_level_prop_stream.total_instances = 0;
@@ -837,6 +986,10 @@ static void start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
     g_level_prop_stream.info            = std::move(info);
     g_level_prop_stream.blocks          = g_pending_level_prop_blocks;
     g_level_prop_stream.model_body_bnk  = g_pending_level_model_body_bnk;
+    g_level_prop_stream.sky_theme       = g_pending_level_sky_theme;
+    g_level_prop_stream.cloud_theme     = g_pending_level_cloud_theme;
+    g_level_prop_stream.environment_timeline =
+        g_pending_level_environment_timeline;
     g_level_prop_stream.terrain_tile_size = g_pending_terrain_ghf_tile_size;
     g_level_prop_stream.terrain_width   = g_pending_terrain_ghf_width;
     g_level_prop_stream.terrain_height  = g_pending_terrain_ghf_height;
@@ -932,42 +1085,18 @@ static bool stream_level_prop_batch(ID3D11Device* device)
             MP_Init(device, g_mp, 800, 600);
             g_mp_initialized = true;
         }
-        size_t total_vertices = 0;
-        size_t total_indices = 0;
-        size_t max_vertices = 0;
-        size_t max_indices = 0;
-        std::string max_name;
-        for (const auto& g : g_level_prop_stream.geoms) {
-            const size_t vc = g.positions.size() / 3;
-            const size_t ic = g.indices.size();
-            total_vertices += vc;
-            total_indices += ic;
-            if (vc > max_vertices || ic > max_indices) {
-                max_vertices = std::max(max_vertices, vc);
-                max_indices = std::max(max_indices, ic);
-                max_name = g.name;
-            }
-        }
-        {
-            std::ostringstream os;
-            os << "MP_Build start: geoms=" << g_level_prop_stream.geoms.size()
-               << " vertices=" << total_vertices
-               << " indices=" << total_indices
-               << " max_vertices=" << max_vertices
-               << " max_indices=" << max_indices
-               << " max_name=" << max_name;
-            level_load_debug(os.str());
-        }
         try {
             MP_Build(device, g_level_prop_stream.geoms,
                      g_level_prop_stream.info, g_mp);
-            level_load_debug("MP_Build finished normally");
+            apply_sky_theme_to_preview(g_mp, g_level_prop_stream.sky_theme);
+            apply_cloud_theme_to_preview(g_mp,
+                                         g_level_prop_stream.cloud_theme);
+            apply_environment_timeline_to_preview(
+                g_mp, g_level_prop_stream.environment_timeline);
         } catch (const std::exception& e) {
-            level_load_debug(std::string("MP_Build exception: ") + e.what());
             OutputLog::error(std::string("level props: MP_Build failed (") +
                              e.what() + ")");
         } catch (...) {
-            level_load_debug("MP_Build unknown exception");
             OutputLog::error("level props: MP_Build failed (unknown exception)");
         }
         bind_generated_terrain_textures(
@@ -1312,6 +1441,27 @@ void process_pending_loads() {
                                 OutputLog::info("MDL: foliage-48b fallback filled the buffer");
                             }
                         }
+                        {
+                            std::string lp = parse_path;
+                            std::transform(lp.begin(), lp.end(), lp.begin(),
+                                           [](unsigned char c){ return (char)std::tolower(c); });
+                            std::replace(lp.begin(), lp.end(), '\\', '/');
+                            const bool multi_instance_target =
+                                lp.find("bs_townhouse_basic_snow_v2") != std::string::npos &&
+                                (lp.find("/exterior.mdl") != std::string::npos ||
+                                 lp.find("/interior.mdl") != std::string::npos);
+                            if (multi_instance_target) {
+                                const size_t buffers_before_multi =
+                                    S.mdl_info.MeshBuffers.size();
+                                if (reparse_mdl_multi_instance_buffers(buf, S.mdl_info)) {
+                                    OutputLog::info(
+                                        "MDL: multi-instance fallback expanded " +
+                                        std::to_string(buffers_before_multi) +
+                                        " buffer(s) to " +
+                                        std::to_string(S.mdl_info.MeshBuffers.size()));
+                                }
+                            }
+                        }
                     }
                     S.mdl_meshes.clear();
                     parse_mdl_geometry(buf, S.mdl_info, S.mdl_meshes);
@@ -1518,6 +1668,11 @@ void process_pending_loads() {
             g_pending_level_model_body_bnk.clear();
             g_pending_level_water_present = false;
             g_pending_level_water_scene = Level::WaterScene{};
+            g_pending_level_water_theme = Gdb::WaterTheme{};
+            g_pending_level_sky_theme = Gdb::SkyTheme{};
+            g_pending_level_cloud_theme = Gdb::CloudTheme{};
+            g_pending_level_environment_timeline =
+                Gdb::EnvironmentThemeTimeline{};
             progress_done();
             S.cancel_requested.store(false);
             return;
@@ -1664,6 +1819,8 @@ void process_pending_loads() {
 
             size_t water_geom_first = geoms.size();
             size_t water_geom_count = 0;
+            size_t themed_water_geom_count = 0;
+            float water_theme_opacity = 1.0f;
             if (g_pending_level_water_present) {
                 for (size_t bi = 0; bi < g_pending_level_water_scene.bodies.size(); ++bi) {
                     const auto& body = g_pending_level_water_scene.bodies[bi];
@@ -1810,6 +1967,32 @@ void process_pending_loads() {
                             wg.water_params[pi] = body.wave_params[pi];
                         }
                         wg.water_params[0] = y;
+                        if (g_pending_level_water_theme.has_any) {
+                            const Gdb::WaterTheme& wt =
+                                g_pending_level_water_theme;
+                            wg.has_water_theme = true;
+                            wg.water_opacity = wt.opacity;
+                            water_theme_opacity = wt.opacity;
+                            std::copy(std::begin(wt.shallow_colour),
+                                      std::end(wt.shallow_colour),
+                                      std::begin(wg.water_shallow_colour));
+                            std::copy(std::begin(wt.deep_colour),
+                                      std::end(wt.deep_colour),
+                                      std::begin(wg.water_deep_colour));
+                            wg.water_theme_params[0] = wt.edge_blend_min;
+                            wg.water_theme_params[1] = wt.edge_blend_max;
+                            wg.water_theme_params[2] = wt.edge_blend_bias;
+                            wg.water_theme_params[3] =
+                                wt.max_refraction_distance;
+                            wg.water_theme_params[4] = wt.fresnel_bias;
+                            wg.water_theme_params[5] =
+                                wt.reflection_strength;
+                            wg.water_theme_params[6] = wt.refraction_scale;
+                            wg.water_theme_params[7] = wt.reflection_scale;
+                            wg.water_theme_params[8] = wt.reflection_bias;
+                            wg.water_theme_params[9] = wt.normal_scale;
+                            ++themed_water_geom_count;
+                        }
                         geoms.push_back(std::move(wg));
                         ++water_geom_count;
                     }
@@ -1818,6 +2001,18 @@ void process_pending_loads() {
                     OutputLog::success("water: " +
                         std::to_string(water_geom_count) +
                         " tessellated masked surface tile(s) emitted from .water");
+                    if (themed_water_geom_count > 0) {
+                        std::ostringstream ss;
+                        ss << "water: GDB theme applied to "
+                           << themed_water_geom_count
+                           << " tile(s), opacity="
+                           << std::fixed << std::setprecision(2)
+                           << water_theme_opacity;
+                        OutputLog::info(ss.str());
+                    } else {
+                        OutputLog::info(
+                            "water: no GDB theme on emitted tiles; opaque fallback");
+                    }
                 }
             }
 
@@ -1832,6 +2027,11 @@ void process_pending_loads() {
             }
             MP_Build(device, geoms, info, g_mp);
             g_mp.no_tilt = true;
+            apply_sky_theme_to_preview(g_mp, g_pending_level_sky_theme);
+            apply_cloud_theme_to_preview(g_mp,
+                                         g_pending_level_cloud_theme);
+            apply_environment_timeline_to_preview(
+                g_mp, g_pending_level_environment_timeline);
 
             (void)water_geom_first;
             (void)water_geom_count;
@@ -1949,6 +2149,9 @@ void process_pending_loads() {
                                 "(.ehf and .texture_atlas both failed)");
             }
 
+            const std::vector<TerrainTextureRegistry::LodPaletteEntry>
+                main_lod_palette = TerrainTextureRegistry::GetLodPalette();
+
             for (size_t ai = 0; ai < g_pending_adjacent_terrain_meshes.size(); ++ai) {
                 const size_t mesh_idx = ai + 1;
                 if (mesh_idx >= g_mp.meshes.size()) break;
@@ -1958,7 +2161,8 @@ void process_pending_loads() {
                 std::string adj_name;
                 if (!Level::BakeEhfTerrainCompositeWithBnk(
                         adj.ehf_bytes, adj.preferred_bnk,
-                        adj_rgba, adj_w, adj_h, adj_name)) {
+                        adj_rgba, adj_w, adj_h, adj_name,
+                        false)) {
                     continue;
                 }
                 ID3D11ShaderResourceView* adj_srv =
@@ -1982,6 +2186,7 @@ void process_pending_loads() {
                     m.diffuse_tex_name + " (" + std::to_string(adj_w) +
                     "x" + std::to_string(adj_h) + ")");
             }
+            TerrainTextureRegistry::SetLodPalette(main_lod_palette);
 
             if (!generated_terrain_textures.empty() &&
                 g_level_prop_stream.phase.load(std::memory_order_acquire) != 0)
@@ -2223,6 +2428,11 @@ void process_pending_loads() {
 
         g_pending_level_water_present = false;
         g_pending_level_water_scene = Level::WaterScene{};
+        g_pending_level_water_theme = Gdb::WaterTheme{};
+        g_pending_level_sky_theme = Gdb::SkyTheme{};
+        g_pending_level_cloud_theme = Gdb::CloudTheme{};
+        g_pending_level_environment_timeline =
+            Gdb::EnvironmentThemeTimeline{};
     }
 
     stream_level_prop_batch(device);
@@ -2359,6 +2569,11 @@ void process_pending_loads() {
             if (g_mp_initialized) {
                 MP_Build(geoms, info, g_mp);
                 g_mp.no_tilt = true;
+                apply_sky_theme_to_preview(g_mp, g_pending_level_sky_theme);
+                apply_cloud_theme_to_preview(g_mp,
+                                             g_pending_level_cloud_theme);
+                apply_environment_timeline_to_preview(
+                    g_mp, g_pending_level_environment_timeline);
                 S.terrain_mode = true;
                 S.show_model_preview = false;
                 S.model_preview_open = false;

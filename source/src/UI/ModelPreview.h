@@ -67,11 +67,30 @@ struct MPPerMesh {
     bool is_terrain = false;
     bool is_water   = false;
     float water_params[38] = {};
+    bool has_water_theme = false;
+    float water_opacity = 1.0f;
+    float water_shallow_colour[3] = {0.155f, 0.285f, 0.235f};
+    float water_deep_colour[3] = {0.010f, 0.075f, 0.085f};
+    float water_theme_params[10] = {};
 
     uint32_t source_mesh_idx = 0;
 
     uint32_t lod_index = 0;
 };
+
+struct MPSkyCloudKeyframe {
+    float time_of_day = 0.0f;
+    float sky_top_colour[3] = {0.42f, 0.56f, 0.76f};
+    float sky_bottom_colour[3] = {0.55f, 0.60f, 0.65f};
+    float sky_sunset_colour[3] = {1.0f, 0.47f, 0.22f};
+    float sky_params[4] = {1.0f, 0.35f, 1.0f, 1.0f};
+    bool has_cloud_theme = false;
+    int cloud_layer_count = 0;
+    float cloud_layer[4][4] = {};
+    float cloud_motion[4][4] = {};
+    float cloud_light[4][4] = {};
+};
+
 struct ModelPreview {
 #ifdef _WIN32
     ID3D11Texture2D* color = nullptr;
@@ -87,6 +106,19 @@ struct ModelPreview {
     ID3D11VertexShader* vs_terrain = nullptr;
     ID3D11PixelShader*  ps_terrain = nullptr;
     ID3D11Buffer*       cbuffer_terrain = nullptr;
+    ID3D11VertexShader* vs_sky = nullptr;
+    ID3D11PixelShader*  ps_sky = nullptr;
+    ID3D11Buffer*       cbuffer_sky = nullptr;
+    ID3D11ShaderResourceView* cloud_density_srv[4] = {
+        nullptr, nullptr, nullptr, nullptr
+    };
+    bool cloud_density_tried[4] = {false, false, false, false};
+    ID3D11ShaderResourceView* sky_overlay_srv = nullptr;
+    ID3D11ShaderResourceView* sky_moon_srv = nullptr;
+    ID3D11ShaderResourceView* sky_moon_glare_srv = nullptr;
+    bool sky_overlay_tried = false;
+    bool sky_moon_tried = false;
+    bool sky_moon_glare_tried = false;
     ID3D11VertexShader* vs_water = nullptr;
     ID3D11PixelShader*  ps_water = nullptr;
     ID3D11Buffer*       cbuffer_water = nullptr;
@@ -120,6 +152,42 @@ struct ModelPreview {
     float radius = 1.0f;
     std::vector<MPPerMesh> meshes;
     bool has_model = false;
+    bool has_sky_theme = false;
+    float sky_top_colour[3] = {0.42f, 0.56f, 0.76f};
+    float sky_bottom_colour[3] = {0.55f, 0.60f, 0.65f};
+    float sky_sunset_colour[3] = {1.0f, 0.47f, 0.22f};
+    float sky_params[4] = {1.0f, 0.35f, 1.0f, 1.0f};
+    float sky_time_of_day = -1.0f;
+    bool has_cloud_theme = false;
+    int cloud_layer_count = 0;
+    float cloud_layer[4][4] = {
+        {0.35f, 350.0f, 2.5f, 2.0f},
+        {0.22f, 420.0f, 4.5f, 3.0f},
+        {0.12f, 520.0f, 7.0f, 4.0f},
+        {0.08f, 650.0f, 10.0f, 6.0f}
+    };
+    float cloud_motion[4][4] = {
+        {0.0f, 0.0f,  0.010f,  0.004f},
+        {0.2f, 0.4f, -0.006f,  0.008f},
+        {0.6f, 0.1f,  0.004f, -0.005f},
+        {0.8f, 0.7f, -0.012f,  0.003f}
+    };
+    float cloud_light[4][4] = {
+        {0.70f, 0.45f, 0.45f, 0.35f},
+        {0.62f, 0.42f, 0.40f, 0.30f},
+        {0.55f, 0.38f, 0.35f, 0.25f},
+        {0.48f, 0.34f, 0.30f, 0.22f}
+    };
+    std::string cloud_density_tex_name[4];
+    std::string sky_overlay_tex_name;
+    std::string sky_moon_tex_name;
+    std::string sky_moon_glare_tex_name;
+    bool has_day_night_cycle = false;
+    float day_night_cycle_seconds = 180.0f;
+    std::vector<MPSkyCloudKeyframe> day_night_keyframes;
+    bool time_of_day_override = false;
+    float time_of_day_override_value = 0.5f;
+    float current_time_of_day = 0.5f;
 
     bool wireframe = false;
 

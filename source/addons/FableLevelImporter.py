@@ -36,10 +36,17 @@ RAW_MODEL_TO_FABLE_LOCAL = Matrix((
     (0, 1, 0, 0),
     (0, 0, 0, 1),
 ))
+FBX_MODEL_TO_FABLE_LOCAL = Matrix((
+    (1, 0, 0, 0),
+    (0, -1, 0, 0),
+    (0, 0, 1, 0),
+    (0, 0, 0, 1),
+))
 TERRAIN_IMPORT_TO_EDITOR = FABLE_TO_BLENDER @ GLTF_TO_BLENDER.inverted()
+FBX_TERRAIN_IMPORT_TO_EDITOR = FABLE_TO_BLENDER
 
 
-def fable_matrix(values):
+def fable_matrix(values, model_local=RAW_MODEL_TO_FABLE_LOCAL):
     if not values or len(values) != 16:
         return Matrix.Identity(4)
     raw = Matrix((
@@ -48,13 +55,14 @@ def fable_matrix(values):
         (values[8], values[9], values[10], values[11]),
         (values[12], values[13], values[14], values[15]),
     ))
-    return FABLE_TO_BLENDER @ raw @ RAW_MODEL_TO_FABLE_LOCAL
+    return FABLE_TO_BLENDER @ raw @ model_local
 
 
-def raw_prop_matrix(inst):
+def raw_prop_matrix(inst, export_format):
     raw = inst.get("raw") or []
+    model_local = FBX_MODEL_TO_FABLE_LOCAL if export_format == "FBX" else RAW_MODEL_TO_FABLE_LOCAL
     if len(raw) < 13:
-        return fable_matrix(inst.get("matrix"))
+        return fable_matrix(inst.get("matrix"), model_local)
 
     px = raw[0]
     py = raw[2]
@@ -82,7 +90,7 @@ def raw_prop_matrix(inst):
             (-s * sx, 0, c * sy, pz),
             (0, 0, 0, 1),
         ))
-    return FABLE_TO_BLENDER @ level @ RAW_MODEL_TO_FABLE_LOCAL
+    return FABLE_TO_BLENDER @ level @ model_local
 
 
 def ensure_collection(name, parent=None):
@@ -355,12 +363,17 @@ def apply_terrain_material(base_dir, manifest, terrain_objects):
 def align_terrain_to_editor_space(manifest, objects):
     terrain = manifest.get("terrain") or {}
     mesh = terrain.get("mesh") or ""
-    if os.path.splitext(mesh)[1].lower() not in {".glb", ".gltf"}:
+    ext = os.path.splitext(mesh)[1].lower()
+    if ext in {".glb", ".gltf"}:
+        align = TERRAIN_IMPORT_TO_EDITOR
+    elif ext == ".fbx":
+        align = FBX_TERRAIN_IMPORT_TO_EDITOR
+    else:
         return
     imported = set(objects)
     roots = [obj for obj in objects if obj.parent not in imported]
     for obj in roots:
-        obj.matrix_world = TERRAIN_IMPORT_TO_EDITOR @ obj.matrix_world
+        obj.matrix_world = align @ obj.matrix_world
 
 
 def progress_set(window_manager, step, total):
@@ -387,6 +400,7 @@ class FABLE2_OT_import_level(bpy.types.Operator, ImportHelper):
             manifest = json.load(f)
 
         level_name = manifest.get("level", {}).get("name") or "Fable Level"
+        export_format = (manifest.get("format") or "").upper()
         root_coll = ensure_collection(level_name)
         terrain_coll = ensure_collection("Terrain", root_coll)
         instance_coll = ensure_collection("Instances", root_coll)
@@ -443,7 +457,7 @@ class FABLE2_OT_import_level(bpy.types.Operator, ImportHelper):
                     empty.empty_display_size = 0.35
                     empty.instance_type = "COLLECTION"
                     empty.instance_collection = model_coll
-                    empty.matrix_world = raw_prop_matrix(inst)
+                    empty.matrix_world = raw_prop_matrix(inst, export_format)
                     instance_coll.objects.link(empty)
                 if index % 128 == 0:
                     progress_set(wm, step + index + 1, total_steps)

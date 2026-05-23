@@ -1036,8 +1036,7 @@ bool export_one_terrain_texture(const std::string& tex_name,
         return true;
     }
 
-    const auto fmt =
-        MdlTexExport::format_from_string(S.mdl_texture_export_format);
+    const auto fmt = MdlTexExport::Format::PNG;
     const std::string leaf =
         sanitize_name(stem_of(tex_name)) + "_" + hex8(fnv1a64(key)) +
         terrain_texture_extension(fmt);

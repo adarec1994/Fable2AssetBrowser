@@ -86,6 +86,7 @@ static TerrainEditUI g_te_ui;
 ID3D11ShaderResourceView* g_heightmap_popout_srv = nullptr;
 #endif
 std::string          g_heightmap_popout_name;
+std::string          g_heightmap_popout_kind = "Heightmap";
 int                  g_heightmap_popout_w    = 0;
 int                  g_heightmap_popout_h    = 0;
 bool                 g_heightmap_popout_open = false;
@@ -96,6 +97,7 @@ std::vector<uint8_t> g_pending_heightmap_view_rgba;
 int                  g_pending_heightmap_view_w = 0;
 int                  g_pending_heightmap_view_h = 0;
 std::string          g_pending_heightmap_view_name;
+std::string          g_pending_heightmap_view_kind = "Heightmap";
 
 namespace UI {
 
@@ -2599,7 +2601,8 @@ void draw_heightmap_popout() {
             const float dw = std::max(64.0f, (float)hw * scale);
             const float dh = std::max(64.0f, (float)hh * scale);
 
-            std::string title = "Heightmap: " + ::g_heightmap_popout_name
+            std::string title = ::g_heightmap_popout_kind + ": " +
+                              ::g_heightmap_popout_name
                               + "##heightmap_popout";
             ImGuiWindowFlags fl = ImGuiWindowFlags_NoCollapse
                                 | ImGuiWindowFlags_AlwaysAutoResize;
@@ -2628,6 +2631,7 @@ void draw_heightmap_popout() {
                 ::g_heightmap_popout_srv = nullptr;
             }
             ::g_heightmap_popout_name.clear();
+            ::g_heightmap_popout_kind = "Heightmap";
             ::g_heightmap_popout_rgba.clear();
             ::g_heightmap_popout_w = 0;
             ::g_heightmap_popout_h = 0;

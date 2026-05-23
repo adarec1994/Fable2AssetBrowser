@@ -72,6 +72,11 @@ bool RenderHeightmapToRGBA(const FlatAssetEntry& entry,
                            int&                  out_w,
                            int&                  out_h);
 
+bool RenderPf99ToRGBA(const FlatAssetEntry& entry,
+                      std::vector<uint8_t>& out_rgba,
+                      int&                  out_w,
+                      int&                  out_h);
+
 bool DecodeLevelTextureAtlas(const FlatAssetEntry& level_entry,
                              std::vector<uint8_t>& out_rgba,
                              int&                  out_w,

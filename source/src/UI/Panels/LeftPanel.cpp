@@ -768,6 +768,16 @@ void draw_left_panel() {
                                 const std::string lua_title =
                                     S.lua_files[(size_t)idx].filename;
 
+                                // Cancel any pending model / texture load that
+                                // would otherwise resurrect the model panel
+                                // (process_pending_loads runs every frame and
+                                // sets has_model = true asynchronously).
+                                g_pending_mdl_load = false;
+                                g_pending_tex_load = false;
+                                g_pending_mdl_index = -1;
+                                g_pending_tex_index = -1;
+                                g_pending_mdl_full_path.clear();
+
 #ifdef _WIN32
                                 if (g_mp.has_model) MP_Release(g_mp);
                                 g_mp.has_model = false;
@@ -777,18 +787,19 @@ void draw_left_panel() {
                                 }
                                 S.texture_window_width  = 0;
                                 S.texture_window_height = 0;
+#else
+                                g_mp.has_model = false;
 #endif
 
                                 S.lua_preview_selected = idx;
-                            S.lua_preview_title    = lua_title;
-                            S.lua_preview_content.clear();
-                            S.lua_preview_loading = true;
-                            S.show_lua_render = true;
-                            S.show_gdb_render = false;
+                                S.lua_preview_title    = lua_title;
+                                S.lua_preview_content.clear();
+                                S.lua_preview_loading  = true;
+                                S.show_lua_render      = true;
+                                S.show_gdb_render      = false;
 
-                            progress_open(
-                                    0,
-                                    "Decompiling " + lua_title + "...");
+                                OutputLog::info("Decompiling Lua: " + lua_title);
+                                progress_open(0, "Decompiling " + lua_title + "...");
                                 std::thread([lua_path]() {
                                     std::string content =
                                         read_lua_file_content(lua_path);

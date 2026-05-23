@@ -58,7 +58,8 @@ bool Build(ID3D11Device*                                       device,
            int                                                  lightmap_w,
            int                                                  lightmap_h,
            float                                                mesh_to_world_x,
-           float                                                mesh_to_world_z);
+           float                                                mesh_to_world_z,
+           bool                                                 build_material_weights = true);
 #endif
 
 const Resources& Get();

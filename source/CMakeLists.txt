@@ -97,6 +97,10 @@ set(APP_SOURCES
         src/UI/ModelPreview.h
         src/Lua.cpp
         src/Lua.h
+        src/lua/lua_decompile.h
+        src/lua/lua_parse.cpp
+        src/lua/lua_decompile.cpp
+        src/lua/lua_decompiler.cpp
 )
 
 if(WIN32)

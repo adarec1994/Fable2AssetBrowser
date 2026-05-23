@@ -186,29 +186,52 @@ void draw_lua_in_panel() {
     ImGui::PopStyleColor();
 
     {
-        const float btn_w = ImGui::CalcTextSize("Close").x +
-                            ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f;
+        // [Copy] [Close]  — anchored to the right edge.
+        const float pad      = ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float copy_w   = ImGui::CalcTextSize("Copy").x  + pad + 8.0f;
+        const float close_w  = ImGui::CalcTextSize("Close").x + pad + 8.0f;
+        const float gap      = 6.0f;
+        const float total_w  = copy_w + close_w + gap;
         ImGui::SameLine(ImGui::GetContentRegionAvail().x +
-                        ImGui::GetCursorPosX() - btn_w);
+                        ImGui::GetCursorPosX() - total_w);
+        const bool can_copy = !S.lua_preview_loading &&
+                              !S.lua_preview_content.empty();
+        ImGui::BeginDisabled(!can_copy);
+        if (ImGui::SmallButton("Copy##lua_render")) {
+            ImGui::SetClipboardText(S.lua_preview_content.c_str());
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine(0.0f, gap);
         if (ImGui::SmallButton("Close##lua_render")) {
             S.show_lua_render = false;
         }
     }
     ImGui::Separator();
 
-    ImGui::BeginChild("##lua_render_body", ImVec2(0, 0), false,
-                      ImGuiWindowFlags_HorizontalScrollbar);
     if (S.lua_preview_loading) {
         ImGui::TextDisabled("Decompiling...");
-    } else if (S.lua_preview_content.empty()) {
-        ImGui::TextDisabled("(empty)");
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Text,
-                              ImVec4(0.85f, 0.92f, 0.82f, 1.0f));
-        ImGui::TextUnformatted(S.lua_preview_content.c_str());
-        ImGui::PopStyleColor();
+        return;
     }
-    ImGui::EndChild();
+    if (S.lua_preview_content.empty()) {
+        ImGui::TextDisabled("(empty)");
+        return;
+    }
+
+    // Read-only multiline text box — lets the user click-drag to select and
+    // Ctrl+C / Ctrl+A like a normal text widget. Using const_cast here is the
+    // ImGui-sanctioned pattern for ReadOnly inputs (the widget never writes).
+    ImVec2 sz = ImGui::GetContentRegionAvail();
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(0.08f, 0.08f, 0.10f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.10f, 0.10f, 0.12f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  ImVec4(0.10f, 0.10f, 0.12f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(0.85f, 0.92f, 0.82f, 1.0f));
+    ImGui::InputTextMultiline(
+        "##lua_text",
+        const_cast<char*>(S.lua_preview_content.c_str()),
+        S.lua_preview_content.size() + 1,
+        sz,
+        ImGuiInputTextFlags_ReadOnly);
+    ImGui::PopStyleColor(4);
 }
 
 void draw_gdb_in_panel() {

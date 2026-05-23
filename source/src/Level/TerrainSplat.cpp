@@ -158,7 +158,8 @@ bool Build(ID3D11Device*                                       device,
            int                                                  lightmap_w,
            int                                                  lightmap_h,
            float                                                mesh_to_world_x,
-           float                                                mesh_to_world_z)
+           float                                                mesh_to_world_z,
+           bool                                                 build_material_weights)
 {
     Clear();
     auto& R = storage();
@@ -670,7 +671,7 @@ bool Build(ID3D11Device*                                       device,
         }
     }
 
-    {
+    if (build_material_weights) {
         const bool has_pf99 =
             !parsed.splat_indices.empty() &&
             parsed.splat_w > 0 && parsed.splat_h > 0 &&

@@ -2613,15 +2613,17 @@ void process_pending_loads() {
                             lm_w,
                             lm_h,
                             0.0f,
-                            0.0f))
+                            0.0f,
+                            !S.dev_mode))
                     {
                         if (!g_mp.meshes.empty()) {
                             g_mp.meshes[0].is_terrain = true;
                             g_mp.meshes[0].diffuse_tex_name =
                                 "ehf_splat_terrain";
                         }
-                        OutputLog::success(
-                            "terrain SPLAT shader bound: global EHF material weights");
+                        OutputLog::success(S.dev_mode
+                            ? "terrain direct layer shader bound"
+                            : "terrain SPLAT shader bound: global EHF material weights");
                     } else {
                         OutputLog::warn(
                             "terrain SPLAT shader unavailable; using EHF composite texture");

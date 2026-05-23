@@ -2,6 +2,7 @@
 #include "Utilities/Progress.h"
 #include "Utilities/State.h"
 #include "Utilities/Files.h"
+#include "lua/lua_decompile.h"
 #include <filesystem>
 #include <algorithm>
 #include <fstream>
@@ -879,19 +880,13 @@ std::string decompile(const Function& f) {
 
 }
 
+// Public entry: forward to the (in-progress) unluac C++ port. The in-house
+// Lua 5.1 reader/decompiler that used to live above is kept in tree as
+// `lua51::*` (dead code for now) so we can lift any opcode handling we
+// haven't yet ported from unluac. It produced garbage output — see the
+// commit that swapped this entry point for the rationale.
 std::string decompile_lua51_bytecode(const uint8_t* data, size_t size) {
-    lua51::BytecodeReader reader(data, size);
-
-    if (!reader.read_header()) {
-        return "";
-    }
-
-    try {
-        lua51::Function f = reader.read_function();
-        return lua51::decompile(f);
-    } catch (...) {
-        return "";
-    }
+    return lua::decompile_lua_bytecode(data, size);
 }
 
 extern std::vector<std::string> scan_luas_recursive(const std::string& root);

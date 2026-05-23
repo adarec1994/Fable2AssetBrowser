@@ -4,20 +4,30 @@
 #include "../UI/OutputLog.h"
 #include "../ISO/IsoMount.h"
 #include "../Utilities/State.h"
+#include "../BNKCore.cpp"
 
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
+#include <functional>
+#include <memory>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 
 std::string read_lua_file_content(const std::string& path);
 
 namespace Anim {
 
 namespace {
+
+std::vector<ModelAnimationBinding> g_model_animation_bindings;
+uint64_t g_model_animation_binding_revision = 1;
 
 struct Reader {
     const uint8_t* base = nullptr;
@@ -175,9 +185,15 @@ bool load_toc_bytes(const uint8_t* data, size_t size,
         }
     }
 
-    for (uint32_t i = 0; i < num_special; ++i) {
+    std::unordered_map<uint32_t,
+                       std::shared_ptr<const std::vector<AnimTrackBone>>> track_maps;
+    track_maps.reserve(num_special);
 
-        r.skip(8 * 4);
+    for (uint32_t i = 0; i < num_special; ++i) {
+        uint32_t header[8] = {};
+        for (uint32_t h = 0; h < 8; ++h) {
+            header[h] = r.u32();
+        }
         if (!r.ok) {
             OutputLog::warn("AnimBank: special-record header truncated at #" +
                             std::to_string(i) + " (clips already parsed)");
@@ -185,19 +201,43 @@ bool load_toc_bytes(const uint8_t* data, size_t size,
             break;
         }
         uint32_t n_args = r.u32();
-        r.skip((size_t)n_args * 8);
+        auto bones = std::make_shared<std::vector<AnimTrackBone>>();
+        bones->reserve(n_args);
+        for (uint32_t a = 0; a < n_args; ++a) {
+            const uint32_t name_idx = r.u32();
+            const uint32_t parent_idx = r.u32();
+            AnimTrackBone tb;
+            tb.name = lookup(name_idx, strings);
+            tb.parent = (parent_idx == 0xFFFFFFFFu)
+                ? -1
+                : (int32_t)parent_idx;
+            bones->push_back(std::move(tb));
+        }
         if (!r.ok) {
             OutputLog::warn("AnimBank: special-record args truncated at #" +
                             std::to_string(i) + " (clips already parsed)");
             r.ok = true;
             break;
         }
+
+        const uint32_t track_map_key = header[6];
+        track_maps[track_map_key] = bones;
+    }
+
+    size_t mapped_clips = 0;
+    for (auto& c : out_clips) {
+        auto it = track_maps.find(c.key1);
+        if (it == track_maps.end()) continue;
+        c.track_map = it->second;
+        ++mapped_clips;
     }
 
     OutputLog::success("AnimBank: parsed " +
                        std::to_string(out_clips.size()) +
                        " clip(s), " +
-                       std::to_string(strings.size()) + " string(s)");
+                       std::to_string(strings.size()) + " string(s), " +
+                       std::to_string(track_maps.size()) + " track map(s), " +
+                       std::to_string(mapped_clips) + " clip map link(s)");
     return true;
 }
 
@@ -286,6 +326,909 @@ uint32_t fnv1_32(const char* s, size_t n) {
         h = ((h * 0x01000193u) & 0xFFFFFFFFu) ^ (uint8_t)s[i];
     }
     return h;
+}
+
+uint32_t be_u32_at(const std::vector<uint8_t>& b, size_t off) {
+    if (off + 4 > b.size()) return 0;
+    const uint8_t* p = b.data() + off;
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] <<  8) |  (uint32_t)p[3];
+}
+
+std::string hex8(uint32_t v) {
+    char buf[9];
+    std::snprintf(buf, sizeof(buf), "%08X", v);
+    return buf;
+}
+
+bool is_default_clip_name(const AnimClip& clip) {
+    if (clip.name.size() != 11 || clip.name.compare(0, 3, "id_") != 0) {
+        return false;
+    }
+    return clip.name.substr(3) == hex8(clip.key0);
+}
+
+bool is_gdb_fallback_name(const AnimClip& clip) {
+    if (clip.name.size() != 12 || clip.name.compare(0, 4, "gdb_") != 0) {
+        return false;
+    }
+    return clip.name.substr(4) == hex8(clip.key0) ||
+           std::all_of(clip.name.begin() + 4, clip.name.end(),
+                       [](unsigned char c) {
+                           return std::isxdigit(c) != 0;
+                       });
+}
+
+std::string trim_enum_token(std::string s) {
+    while (!s.empty() &&
+           std::isspace(static_cast<unsigned char>(s.front()))) {
+        s.erase(s.begin());
+    }
+    while (!s.empty() &&
+           std::isspace(static_cast<unsigned char>(s.back()))) {
+        s.pop_back();
+    }
+    return s;
+}
+
+std::string decode_010_enum_token(std::string s) {
+    s = trim_enum_token(std::move(s));
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size();) {
+        if (s.compare(i, 2, "__") == 0) {
+            out.push_back('\\');
+            i += 2;
+        } else if (s.compare(i, 3, "DOT") == 0) {
+            out.push_back('.');
+            i += 3;
+        } else {
+            out.push_back(s[i++]);
+        }
+    }
+    return out;
+}
+
+const std::unordered_map<uint32_t, std::string>& external_gdb_enum_names() {
+    static std::unordered_map<uint32_t, std::string> names;
+    static bool loaded = false;
+    if (loaded) return names;
+    loaded = true;
+
+    std::vector<std::string> candidates;
+    candidates.emplace_back("F2GDBEnum.bt");
+    if (const char* user_profile = std::getenv("USERPROFILE")) {
+        candidates.emplace_back(
+            std::string(user_profile) + "\\Downloads\\F2GDBEnum.bt");
+    }
+
+    std::ifstream in;
+    for (const std::string& path : candidates) {
+        in.open(path);
+        if (in) break;
+        in.clear();
+    }
+    if (!in) return names;
+
+    std::string line;
+    while (std::getline(in, line)) {
+        const size_t eq = line.find('=');
+        const size_t hex = line.find("0x", eq == std::string::npos ? 0 : eq);
+        if (eq == std::string::npos || hex == std::string::npos) continue;
+
+        std::string token = decode_010_enum_token(line.substr(0, eq));
+        if (token.empty()) continue;
+
+        size_t end = hex + 2;
+        while (end < line.size() &&
+               std::isxdigit(static_cast<unsigned char>(line[end]))) {
+            ++end;
+        }
+        if (end == hex + 2) continue;
+
+        try {
+            uint32_t h = static_cast<uint32_t>(
+                std::stoul(line.substr(hex + 2, end - hex - 2), nullptr, 16));
+            names.emplace(h, std::move(token));
+        } catch (...) {
+        }
+    }
+    return names;
+}
+
+struct GdbMiniView {
+    static constexpr size_t kHeaderSize = 0x18;
+    static constexpr uint32_t kHashParent = 0x5F6317D5u;
+
+    struct Field {
+        uint32_t hash = 0;
+        uint8_t type = 0;
+        uint32_t raw = 0;
+    };
+
+    const std::vector<uint8_t>& bytes;
+    uint32_t count = 0;
+    uint32_t size_a = 0;
+    uint32_t size_b = 0;
+    uint32_t tail_count = 0;
+    uint32_t ext_count = 0;
+    size_t schema_base = 0;
+    size_t hash_base = 0;
+    size_t body_end = 0;
+    bool ok = false;
+
+    std::vector<size_t> record_offsets;
+    std::unordered_map<uint32_t, std::string> strings;
+
+    explicit GdbMiniView(const std::vector<uint8_t>& b) : bytes(b) {
+        if (bytes.size() < kHeaderSize ||
+            bytes[0] != 'G' || bytes[1] != 'D' ||
+            bytes[2] != 'B' || bytes[3] != 0) {
+            return;
+        }
+
+        count = be_u32_at(bytes, 0x04);
+        size_a = be_u32_at(bytes, 0x08);
+        size_b = be_u32_at(bytes, 0x0C);
+        tail_count = be_u32_at(bytes, 0x10);
+        ext_count = be_u32_at(bytes, 0x14);
+        if (count == 0) return;
+
+        schema_base = kHeaderSize + size_t(size_a);
+        hash_base = schema_base + size_t(size_b);
+        body_end = schema_base;
+        const size_t offset_base = hash_base + size_t(count) * 4;
+        if (body_end > bytes.size() ||
+            offset_base + size_t(count) * 2 > bytes.size()) {
+            return;
+        }
+
+        if (!build_record_offsets()) return;
+        parse_string_table();
+        ok = true;
+    }
+
+    bool schema_at(size_t record, size_t& schema_off,
+                   uint32_t& field_count) const {
+        if (record + 4 > body_end) return false;
+        schema_off = schema_base + size_t(be_u32_at(bytes, record));
+        if (schema_off + 4 > hash_base) return false;
+        uint32_t header = be_u32_at(bytes, schema_off);
+        field_count = header >> 8;
+        if (field_count > 256) {
+            const uint8_t* p = bytes.data() + schema_off;
+            field_count = (uint32_t(p[0]) | (uint32_t(p[1]) << 8)) +
+                          uint32_t(p[2]);
+            if (field_count > 1024) return false;
+        }
+        return schema_off + 4 + size_t(field_count) * 8 <= hash_base;
+    }
+
+    bool build_record_offsets() {
+        record_offsets.clear();
+        record_offsets.reserve(count);
+        size_t cur = kHeaderSize;
+        for (uint32_t i = 0; i < count; ++i) {
+            if (cur + 4 > body_end) return false;
+            record_offsets.push_back(cur);
+            size_t schema_off = 0;
+            uint32_t field_count = 0;
+            if (!schema_at(cur, schema_off, field_count)) return false;
+            const size_t entry_size = 4 + size_t(field_count) * 4;
+            if (cur + entry_size > body_end) return false;
+            cur += entry_size;
+        }
+        return true;
+    }
+
+    bool lookup(uint32_t hash, size_t& record) const {
+        if (!ok) return false;
+        size_t lo = 0;
+        size_t hi = count;
+        while (lo < hi) {
+            const size_t mid = lo + (hi - lo) / 2;
+            const uint32_t v = be_u32_at(bytes, hash_base + mid * 4);
+            if (v < hash) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo >= count) return false;
+        if (be_u32_at(bytes, hash_base + lo * 4) != hash) return false;
+        if (lo >= record_offsets.size()) return false;
+        record = record_offsets[lo];
+        return record + 4 <= body_end;
+    }
+
+    uint32_t record_hash(size_t index) const {
+        if (index >= count) return 0;
+        return be_u32_at(bytes, hash_base + index * 4);
+    }
+
+    uint32_t hash_for_record(size_t record) const {
+        auto it = std::lower_bound(record_offsets.begin(),
+                                   record_offsets.end(), record);
+        if (it == record_offsets.end() || *it != record) return 0;
+        return record_hash(size_t(it - record_offsets.begin()));
+    }
+
+    bool find_local(size_t record, uint32_t field_hash,
+                    uint8_t expected_type, uint32_t& raw) const {
+        size_t schema_off = 0;
+        uint32_t field_count = 0;
+        if (!schema_at(record, schema_off, field_count)) return false;
+        const size_t hashes = schema_off + 4;
+        const size_t descs = hashes + size_t(field_count) * 4;
+        for (uint32_t i = 0; i < field_count; ++i) {
+            if (be_u32_at(bytes, hashes + size_t(i) * 4) != field_hash) {
+                continue;
+            }
+            const uint8_t type =
+                uint8_t(be_u32_at(bytes, descs + size_t(i) * 4) >> 24);
+            if (type != expected_type) continue;
+            const size_t slot = record + 4 + size_t(i) * 4;
+            if (slot + 4 > body_end) return false;
+            raw = be_u32_at(bytes, slot);
+            return true;
+        }
+        return false;
+    }
+
+    bool local_fields(size_t record, std::vector<Field>& out) const {
+        out.clear();
+        size_t schema_off = 0;
+        uint32_t field_count = 0;
+        if (!schema_at(record, schema_off, field_count)) return false;
+        const size_t hashes = schema_off + 4;
+        const size_t descs = hashes + size_t(field_count) * 4;
+        out.reserve(field_count);
+        for (uint32_t i = 0; i < field_count; ++i) {
+            const size_t slot = record + 4 + size_t(i) * 4;
+            if (slot + 4 > body_end) return false;
+            Field f;
+            f.hash = be_u32_at(bytes, hashes + size_t(i) * 4);
+            f.type = uint8_t(be_u32_at(bytes, descs + size_t(i) * 4) >> 24);
+            f.raw = be_u32_at(bytes, slot);
+            out.push_back(f);
+        }
+        return true;
+    }
+
+    bool find_field(size_t record, uint32_t field_hash,
+                    uint8_t expected_type, uint32_t& raw,
+                    uint32_t* owner_hash = nullptr) const {
+        std::unordered_set<size_t> visited;
+        size_t cur = record;
+        for (int depth = 0; depth < 64; ++depth) {
+            if (!visited.insert(cur).second) return false;
+            if (find_local(cur, field_hash, expected_type, raw)) {
+                if (owner_hash) *owner_hash = hash_for_record(cur);
+                return true;
+            }
+
+            uint32_t parent_hash = 0;
+            if (!find_local(cur, kHashParent, 6, parent_hash) ||
+                parent_hash == 0) {
+                return false;
+            }
+
+            size_t parent_record = 0;
+            if (!lookup(parent_hash, parent_record) ||
+                parent_record == cur) {
+                return false;
+            }
+            cur = parent_record;
+        }
+        return false;
+    }
+
+    void parse_string_table() {
+        const size_t body_size =
+            2 * (4 * (size_t(ext_count) + size_t(tail_count)) +
+                 3 * size_t(count) + (size_t(count) & 1u)) +
+            size_t(size_b) + size_t(size_a);
+        const size_t table = kHeaderSize + body_size;
+        if (table + 12 > bytes.size()) return;
+
+        const uint32_t blob_size = be_u32_at(bytes, table + 4);
+        const uint32_t string_count = be_u32_at(bytes, table + 8);
+        const size_t blob = table + 12;
+        if (string_count > 100000 ||
+            blob + size_t(blob_size) + size_t(string_count) * 4 >
+                bytes.size()) {
+            return;
+        }
+
+        strings.reserve(string_count);
+        for (uint32_t i = 0; i < string_count; ++i) {
+            const size_t off = be_u32_at(bytes, blob + size_t(blob_size) +
+                                               size_t(i) * 4);
+            if (off + 4 >= blob_size) continue;
+            const uint32_t h = be_u32_at(bytes, blob + off);
+            size_t pos = blob + off + 4;
+            size_t end = pos;
+            const size_t limit = blob + size_t(blob_size);
+            while (end < limit && bytes[end] != 0) ++end;
+            if (end >= limit) continue;
+            strings.emplace(h, std::string(
+                reinterpret_cast<const char*>(bytes.data() + pos),
+                end - pos));
+        }
+    }
+};
+
+struct GdbAnimScanStats {
+    struct AnimationRecord {
+        size_t clip_index = 0;
+        uint32_t anim_hash = 0;
+        std::string label;
+    };
+
+    struct SelectorRecord {
+        uint32_t selector_hash = 0;
+        std::string label;
+    };
+
+    size_t files_seen = 0;
+    size_t files_parsed = 0;
+    size_t animation_fields = 0;
+    size_t inherited_animation_fields = 0;
+    size_t animation_key_hits = 0;
+    size_t selector_fields = 0;
+    size_t selector_key_hits = 0;
+    size_t selector_record_hits = 0;
+    size_t selector_names_assigned = 0;
+    size_t reference_record_hits = 0;
+    size_t reference_key_hits = 0;
+    size_t reference_names_assigned = 0;
+    size_t bnks_seen = 0;
+    size_t bnk_gdb_entries = 0;
+    size_t bnk_nested_seen = 0;
+    size_t model_binding_refs = 0;
+    std::unordered_set<uint32_t> model_binding_models;
+    size_t names_assigned = 0;
+    std::unordered_set<uint32_t> unique_clip_hits;
+    std::unordered_map<uint32_t, AnimationRecord> animation_records;
+    std::vector<SelectorRecord> selectors;
+};
+
+std::string name_for_gdb_hash(const GdbMiniView& view, uint32_t hash) {
+    auto str_it = view.strings.find(hash);
+    if (str_it != view.strings.end() && !str_it->second.empty()) {
+        return str_it->second;
+    }
+
+    const auto& enum_names = external_gdb_enum_names();
+    auto enum_it = enum_names.find(hash);
+    if (enum_it != enum_names.end() && !enum_it->second.empty()) {
+        return enum_it->second;
+    }
+
+    return {};
+}
+
+std::string label_for_gdb_animation_source(const GdbMiniView& view,
+                                           uint32_t record_hash,
+                                           uint32_t anim_hash) {
+    std::string name = name_for_gdb_hash(view, anim_hash);
+    if (!name.empty()) return name;
+
+    name = name_for_gdb_hash(view, record_hash);
+    if (!name.empty()) return name;
+
+    return "gdb_" + hex8(record_hash);
+}
+
+bool is_generic_animation_field_name(uint32_t field_hash,
+                                     const std::string& label) {
+    constexpr uint32_t kHashParent = 0x5F6317D5u;
+    constexpr uint32_t kHashAnimationName = 0x78B1F79Cu;
+    constexpr uint32_t kHashAnimName = 0x49BD6FC7u;
+    constexpr uint32_t kHashAnimation = 0x8F32748Du;
+    constexpr uint32_t kHashAnimations = 0xF96D7984u;
+    if (field_hash == kHashParent ||
+        field_hash == kHashAnimationName ||
+        field_hash == kHashAnimName ||
+        field_hash == kHashAnimation ||
+        field_hash == kHashAnimations) {
+        return true;
+    }
+    return label.empty() ||
+           label == "Animation" ||
+           label == "Animations" ||
+           label == "AnimationName" ||
+           label == "AnimName" ||
+           label == "parent";
+}
+
+bool assign_gdb_clip_label(AnimClip& clip, const std::string& label) {
+    if (label.empty()) return false;
+    if (!is_default_clip_name(clip) && !is_gdb_fallback_name(clip)) {
+        return false;
+    }
+    clip.name = label;
+    return true;
+}
+
+void push_unique_u32(std::vector<uint32_t>& out, uint32_t value) {
+    if (value == 0 || value == 0x811C9DC5u) return;
+    if (std::find(out.begin(), out.end(), value) == out.end()) {
+        out.push_back(value);
+    }
+}
+
+bool find_inherited_hash_any(const GdbMiniView& view,
+                             size_t record,
+                             uint32_t field_hash,
+                             uint32_t& raw) {
+    std::unordered_set<size_t> visited;
+    size_t cur = record;
+    std::vector<GdbMiniView::Field> fields;
+    for (int depth = 0; depth < 64; ++depth) {
+        if (!visited.insert(cur).second) return false;
+        if (!view.local_fields(cur, fields)) return false;
+        for (const GdbMiniView::Field& field : fields) {
+            if (field.hash != field_hash) continue;
+            if (field.type != 3 && field.type != 4 && field.type != 6) {
+                continue;
+            }
+            raw = field.raw;
+            return raw != 0 && raw != 0x811C9DC5u;
+        }
+
+        uint32_t parent_hash = 0;
+        if (!view.find_local(cur, GdbMiniView::kHashParent, 6,
+                             parent_hash) || parent_hash == 0) {
+            return false;
+        }
+
+        size_t parent_record = 0;
+        if (!view.lookup(parent_hash, parent_record) ||
+            parent_record == cur) {
+            return false;
+        }
+        cur = parent_record;
+    }
+    return false;
+}
+
+void visit_record_and_parents(
+    const GdbMiniView& view,
+    size_t record,
+    const std::function<void(size_t)>& fn) {
+    std::unordered_set<size_t> visited;
+    size_t cur = record;
+    for (int depth = 0; depth < 64; ++depth) {
+        if (!visited.insert(cur).second) return;
+        fn(cur);
+
+        uint32_t parent_hash = 0;
+        if (!view.find_local(cur, GdbMiniView::kHashParent, 6,
+                             parent_hash) || parent_hash == 0) {
+            return;
+        }
+
+        size_t parent_record = 0;
+        if (!view.lookup(parent_hash, parent_record) ||
+            parent_record == cur) {
+            return;
+        }
+        cur = parent_record;
+    }
+}
+
+void collect_model_file_hashes_from_record(
+    const GdbMiniView& view,
+    size_t record,
+    std::vector<uint32_t>& out) {
+    constexpr uint32_t kHashModelFile = 0x0C17DB4Eu;
+    constexpr uint32_t kHashModelFile1 = 0x578E3BFBu;
+    constexpr uint32_t kHashModelFile2 = 0x578E3BF8u;
+
+    std::vector<GdbMiniView::Field> fields;
+    visit_record_and_parents(view, record, [&](size_t cur) {
+        if (!view.local_fields(cur, fields)) return;
+        for (const GdbMiniView::Field& field : fields) {
+            if (field.type != 3 && field.type != 4) continue;
+            if (field.hash == kHashModelFile ||
+                field.hash == kHashModelFile1 ||
+                field.hash == kHashModelFile2) {
+                push_unique_u32(out, field.raw);
+            }
+        }
+    });
+}
+
+void collect_animated_model_hashes_for_record(
+    const GdbMiniView& view,
+    size_t record,
+    std::vector<uint32_t>& out) {
+    constexpr uint32_t kHashGraphicAppearanceComponent = 0xA7B6EF56u;
+    constexpr uint32_t kHashGraphicAppearanceAnimatedMeshComponent =
+        0x21D312CAu;
+
+    auto collect_component = [&](uint32_t component_hash) {
+        size_t component_record = 0;
+        if (!view.lookup(component_hash, component_record)) return;
+        collect_model_file_hashes_from_record(view, component_record, out);
+    };
+
+    uint32_t direct_component_hash = 0;
+    if (find_inherited_hash_any(view, record,
+                                kHashGraphicAppearanceAnimatedMeshComponent,
+                                direct_component_hash)) {
+        collect_component(direct_component_hash);
+    }
+
+    uint32_t appearance_hash = 0;
+    if (!find_inherited_hash_any(view, record, kHashGraphicAppearanceComponent,
+                                 appearance_hash)) {
+        return;
+    }
+
+    size_t appearance_record = 0;
+    if (!view.lookup(appearance_hash, appearance_record)) return;
+    visit_record_and_parents(view, appearance_record, [&](size_t cur) {
+        uint32_t component_hash = 0;
+        if (view.find_local(cur, kHashGraphicAppearanceAnimatedMeshComponent,
+                            6, component_hash)) {
+            collect_component(component_hash);
+        }
+    });
+}
+
+std::unordered_map<uint32_t, std::vector<size_t>>
+build_children_by_parent_hash(const GdbMiniView& view) {
+    std::unordered_map<uint32_t, std::vector<size_t>> out;
+    for (size_t i = 0; i < view.record_offsets.size(); ++i) {
+        const size_t record = view.record_offsets[i];
+        uint32_t parent_hash = 0;
+        if (!view.find_local(record, GdbMiniView::kHashParent, 6,
+                             parent_hash) || parent_hash == 0) {
+            continue;
+        }
+        out[parent_hash].push_back(record);
+    }
+    return out;
+}
+
+struct GdbClipRef {
+    size_t clip_index = 0;
+    uint32_t animation_record_hash = 0;
+    uint32_t animation_key = 0;
+    std::string label;
+};
+
+void push_unique_clip_ref(std::vector<GdbClipRef>& out,
+                          GdbClipRef ref) {
+    for (const GdbClipRef& existing : out) {
+        if (existing.clip_index == ref.clip_index &&
+            existing.animation_key == ref.animation_key) {
+            return;
+        }
+    }
+    out.push_back(std::move(ref));
+}
+
+void collect_clip_refs_from_animation_group(
+    const GdbMiniView& view,
+    uint32_t group_hash,
+    const std::unordered_map<uint32_t, std::vector<size_t>>& children,
+    const std::unordered_map<uint32_t,
+                             GdbAnimScanStats::AnimationRecord>& records,
+    const std::unordered_map<uint32_t, size_t>& by_key0,
+    std::vector<GdbClipRef>& out) {
+    size_t group_record = 0;
+    if (!view.lookup(group_hash, group_record)) return;
+
+    std::vector<size_t> stack;
+    std::unordered_set<size_t> visited;
+    stack.push_back(group_record);
+    std::vector<GdbMiniView::Field> fields;
+    while (!stack.empty()) {
+        const size_t record = stack.back();
+        stack.pop_back();
+        if (!visited.insert(record).second) continue;
+
+        if (view.local_fields(record, fields)) {
+            for (const GdbMiniView::Field& field : fields) {
+                std::string label = name_for_gdb_hash(view, field.hash);
+                if (is_generic_animation_field_name(field.hash, label)) {
+                    continue;
+                }
+
+                if (field.type == 6) {
+                    auto rec_it = records.find(field.raw);
+                    if (rec_it == records.end()) continue;
+                    push_unique_clip_ref(
+                        out,
+                        GdbClipRef{rec_it->second.clip_index,
+                                   field.raw,
+                                   rec_it->second.anim_hash,
+                                   label});
+                } else if (field.type == 4) {
+                    auto key_it = by_key0.find(field.raw);
+                    if (key_it == by_key0.end()) continue;
+                    push_unique_clip_ref(
+                        out,
+                        GdbClipRef{key_it->second, 0, field.raw, label});
+                }
+            }
+        }
+
+        const uint32_t record_hash = view.hash_for_record(record);
+        auto child_it = children.find(record_hash);
+        if (child_it == children.end()) continue;
+        for (size_t child : child_it->second) {
+            stack.push_back(child);
+        }
+    }
+}
+
+void collect_clip_refs_for_record(
+    const GdbMiniView& view,
+    size_t record,
+    const std::unordered_map<uint32_t, std::vector<size_t>>& children,
+    const std::unordered_map<uint32_t,
+                             GdbAnimScanStats::AnimationRecord>& records,
+    const std::unordered_map<uint32_t, size_t>& by_key0,
+    std::vector<GdbClipRef>& out) {
+    constexpr uint32_t kHashAnimation = 0x8F32748Du;
+    constexpr uint32_t kHashAnimationList = 0x63565E85u;
+    constexpr uint32_t kHashAnimations = 0xF96D7984u;
+    constexpr uint32_t kHashAnimationSet = 0xE227399Fu;
+
+    uint32_t raw = 0;
+    if (find_inherited_hash_any(view, record, kHashAnimation, raw)) {
+        auto key_it = by_key0.find(raw);
+        if (key_it != by_key0.end()) {
+            push_unique_clip_ref(
+                out,
+                GdbClipRef{key_it->second, view.hash_for_record(record),
+                           raw,
+                           label_for_gdb_animation_source(
+                               view, view.hash_for_record(record), raw)});
+        }
+    }
+
+    const uint32_t group_fields[] = {
+        kHashAnimationList, kHashAnimations, kHashAnimationSet
+    };
+    for (uint32_t field_hash : group_fields) {
+        raw = 0;
+        if (!find_inherited_hash_any(view, record, field_hash, raw)) {
+            continue;
+        }
+        collect_clip_refs_from_animation_group(
+            view, raw, children, records, by_key0, out);
+    }
+}
+
+void append_model_animation_binding(uint32_t model_hash,
+                                    uint32_t skeleton_hash,
+                                    uint32_t retarget_hash,
+                                    uint32_t source_record_hash,
+                                    const GdbClipRef& ref,
+                                    const AnimClip& clip,
+                                    GdbAnimScanStats& stats) {
+    for (const ModelAnimationBinding& existing :
+         g_model_animation_bindings) {
+        if (existing.model_path_hash == model_hash &&
+            existing.clip_index == ref.clip_index &&
+            existing.animation_key == ref.animation_key) {
+            return;
+        }
+    }
+
+    ModelAnimationBinding binding;
+    binding.model_path_hash = model_hash;
+    binding.skeleton_file_hash = skeleton_hash;
+    binding.retarget_skeleton_file_hash = retarget_hash;
+    binding.animation_record_hash = ref.animation_record_hash;
+    binding.animation_key = ref.animation_key;
+    binding.source_record_hash = source_record_hash;
+    binding.clip_index = ref.clip_index;
+    binding.animation_name = !ref.label.empty() ? ref.label : clip.name;
+    binding.source_name = ref.label;
+    g_model_animation_bindings.push_back(std::move(binding));
+    ++stats.model_binding_refs;
+    stats.model_binding_models.insert(model_hash);
+}
+
+void scan_gdb_animation_fields(
+    const std::vector<uint8_t>& bytes,
+    const std::unordered_map<uint32_t, size_t>& by_key0,
+    std::vector<AnimClip>& clips,
+    GdbAnimScanStats& stats) {
+    constexpr uint32_t kHashAnimationName = 0x78B1F79Cu;
+    constexpr uint32_t kHashAnimName = 0x49BD6FC7u;
+    constexpr uint32_t kHashAnimation = 0x8F32748Du;
+
+    ++stats.files_seen;
+    GdbMiniView view(bytes);
+    if (!view.ok) return;
+    ++stats.files_parsed;
+
+    std::unordered_map<uint32_t, GdbAnimScanStats::AnimationRecord>
+        records_in_this_gdb;
+    records_in_this_gdb.reserve(view.record_offsets.size() / 4 + 1);
+    const auto children_by_parent_hash = build_children_by_parent_hash(view);
+
+    for (size_t i = 0; i < view.record_offsets.size(); ++i) {
+        const size_t record = view.record_offsets[i];
+        const uint32_t record_hash = view.record_hash(i);
+
+        uint32_t raw = 0;
+        uint32_t animation_owner_hash = 0;
+        if (view.find_field(record, kHashAnimation, 4, raw,
+                            &animation_owner_hash)) {
+            const bool is_local_animation = animation_owner_hash == record_hash;
+            if (is_local_animation) {
+                ++stats.animation_fields;
+            } else {
+                ++stats.inherited_animation_fields;
+            }
+            auto hit = by_key0.find(raw);
+            if (hit != by_key0.end()) {
+                ++stats.animation_key_hits;
+                stats.unique_clip_hits.insert(raw);
+                std::string label = label_for_gdb_animation_source(
+                    view, record_hash, raw);
+                GdbAnimScanStats::AnimationRecord rec{
+                    hit->second, raw, label};
+                stats.animation_records.emplace(record_hash, rec);
+                records_in_this_gdb.emplace(record_hash, std::move(rec));
+
+                AnimClip& clip = clips[hit->second];
+                if (is_local_animation &&
+                    assign_gdb_clip_label(clip, label)) {
+                    ++stats.names_assigned;
+                }
+            }
+        }
+
+        raw = 0;
+        if (view.find_local(record, kHashAnimationName, 4, raw) ||
+            view.find_local(record, kHashAnimName, 4, raw)) {
+            ++stats.selector_fields;
+            if (by_key0.find(raw) != by_key0.end()) {
+                ++stats.selector_key_hits;
+            }
+            stats.selectors.push_back(
+                GdbAnimScanStats::SelectorRecord{
+                    raw,
+                    label_for_gdb_animation_source(view, record_hash, raw)});
+        }
+    }
+
+    std::vector<GdbMiniView::Field> fields;
+    for (size_t i = 0; i < view.record_offsets.size(); ++i) {
+        const size_t record = view.record_offsets[i];
+        if (!view.local_fields(record, fields)) continue;
+        for (const GdbMiniView::Field& field : fields) {
+            if (field.type == 6) {
+                auto rec_it = records_in_this_gdb.find(field.raw);
+                if (rec_it == records_in_this_gdb.end()) continue;
+                std::string label = name_for_gdb_hash(view, field.hash);
+                if (is_generic_animation_field_name(field.hash, label)) {
+                    continue;
+                }
+                ++stats.reference_record_hits;
+                AnimClip& clip = clips[rec_it->second.clip_index];
+                if (assign_gdb_clip_label(clip, label)) {
+                    ++stats.reference_names_assigned;
+                }
+            } else if (field.type == 4) {
+                auto hit = by_key0.find(field.raw);
+                if (hit == by_key0.end()) continue;
+                std::string label = name_for_gdb_hash(view, field.hash);
+                if (is_generic_animation_field_name(field.hash, label)) {
+                    continue;
+                }
+                ++stats.reference_key_hits;
+                AnimClip& clip = clips[hit->second];
+                if (assign_gdb_clip_label(clip, label)) {
+                    ++stats.reference_names_assigned;
+                }
+            }
+        }
+    }
+
+    for (size_t i = 0; i < view.record_offsets.size(); ++i) {
+        const size_t record = view.record_offsets[i];
+        const uint32_t record_hash = view.record_hash(i);
+
+        std::vector<uint32_t> model_hashes;
+        collect_animated_model_hashes_for_record(view, record, model_hashes);
+        if (model_hashes.empty()) continue;
+
+        std::vector<GdbClipRef> refs;
+        collect_clip_refs_for_record(view, record, children_by_parent_hash,
+                                     records_in_this_gdb, by_key0, refs);
+        if (refs.empty()) continue;
+
+        uint32_t skeleton_hash = 0;
+        uint32_t retarget_hash = 0;
+        constexpr uint32_t kHashSkeletonFile = 0xC3D06E3Au;
+        constexpr uint32_t kHashRetargetSkeletonFile = 0x64234AF2u;
+        find_inherited_hash_any(view, record, kHashSkeletonFile,
+                                skeleton_hash);
+        find_inherited_hash_any(view, record, kHashRetargetSkeletonFile,
+                                retarget_hash);
+
+        for (uint32_t model_hash : model_hashes) {
+            for (const GdbClipRef& ref : refs) {
+                if (ref.clip_index >= clips.size()) continue;
+                append_model_animation_binding(
+                    model_hash, skeleton_hash, retarget_hash, record_hash,
+                    ref, clips[ref.clip_index], stats);
+            }
+        }
+    }
+}
+
+bool ends_with_lower_ci(const std::string& s, const char* tail) {
+    const size_t n = std::strlen(tail);
+    if (s.size() < n) return false;
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char c =
+            static_cast<unsigned char>(s[s.size() - n + i]);
+        if (std::tolower(c) != tail[i]) return false;
+    }
+    return true;
+}
+
+void scan_bnk_gdb_entries(
+    BNKReader& reader,
+    const std::unordered_map<uint32_t, size_t>& by_key0,
+    std::vector<AnimClip>& clips,
+    GdbAnimScanStats& stats,
+    int depth) {
+    const auto& files = reader.list_files();
+    if (files.empty()) return;
+
+    for (size_t i = 0; i < files.size(); ++i) {
+        const FileEntry& entry = files[i];
+        if (ends_with_lower_ci(entry.name, ".gdb")) {
+            ++stats.bnk_gdb_entries;
+            try {
+                std::vector<uint8_t> bytes =
+                    reader.extract_index_bytes(static_cast<int>(i));
+                if (bytes.empty()) {
+                    ++stats.files_seen;
+                    continue;
+                }
+                scan_gdb_animation_fields(bytes, by_key0, clips, stats);
+            } catch (...) {
+                ++stats.files_seen;
+            }
+        } else if (depth < 4 && ends_with_lower_ci(entry.name, ".bnk")) {
+            try {
+                std::vector<uint8_t> bytes =
+                    reader.extract_index_bytes(static_cast<int>(i));
+                if (bytes.empty()) continue;
+                ++stats.bnk_nested_seen;
+                BNKReader nested(std::move(bytes));
+                scan_bnk_gdb_entries(nested, by_key0, clips, stats,
+                                     depth + 1);
+            } catch (...) {
+            }
+        }
+    }
+}
+
+void scan_bnk_path_for_gdbs(
+    const std::string& bnk_path,
+    const std::unordered_map<uint32_t, size_t>& by_key0,
+    std::vector<AnimClip>& clips,
+    GdbAnimScanStats& stats) {
+    try {
+        ++stats.bnks_seen;
+        BNKReader reader(bnk_path);
+        scan_bnk_gdb_entries(reader, by_key0, clips, stats, 0);
+    } catch (...) {
+    }
 }
 
 }
@@ -385,6 +1328,191 @@ size_t resolve_clip_names_from_luas(std::vector<AnimClip>& clips) {
                   strings_seen, overridden, clips.size());
     OutputLog::success(buf);
     return overridden;
+}
+
+size_t resolve_clip_names_from_gdb_animation_fields_for_root(
+    const std::string& root,
+    std::vector<AnimClip>& clips) {
+    if (clips.empty()) return 0;
+
+    g_model_animation_bindings.clear();
+
+    std::unordered_map<uint32_t, size_t> by_key0;
+    by_key0.reserve(clips.size());
+    for (size_t i = 0; i < clips.size(); ++i) {
+        by_key0.emplace(clips[i].key0, i);
+    }
+
+    GdbAnimScanStats stats;
+    if (ISO::IsoMount::instance().is_mounted()) {
+        for (const ISO::MountedFile& mf :
+             ISO::IsoMount::instance().list_recursive(".gdb")) {
+            auto bytes = ISO::IsoMount::instance().read_file(mf.path);
+            if (bytes.empty()) {
+                ++stats.files_seen;
+                continue;
+            }
+            scan_gdb_animation_fields(bytes, by_key0, clips, stats);
+        }
+        for (const ISO::MountedFile& mf :
+             ISO::IsoMount::instance().list_recursive(".bnk")) {
+            scan_bnk_path_for_gdbs(
+                ISO::IsoMount::make_iso_path(mf.path),
+                by_key0, clips, stats);
+        }
+    } else {
+        std::error_code ec;
+        std::filesystem::path root_path(root);
+        if (!std::filesystem::exists(root_path, ec)) return 0;
+        for (auto it = std::filesystem::recursive_directory_iterator(
+                 root_path,
+                 std::filesystem::directory_options::skip_permission_denied,
+                 ec);
+             !ec && it != std::filesystem::recursive_directory_iterator();
+             ++it) {
+            std::string ext = it->path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c) {
+                               return static_cast<char>(std::tolower(c));
+                           });
+            if (!it->is_regular_file(ec) || ext != ".gdb") {
+                continue;
+            }
+
+            std::ifstream f(it->path(), std::ios::binary | std::ios::ate);
+            if (!f) {
+                ++stats.files_seen;
+                continue;
+            }
+            std::streamsize sz = f.tellg();
+            f.seekg(0, std::ios::beg);
+            std::vector<uint8_t> bytes((size_t)sz);
+            if (!f.read(reinterpret_cast<char*>(bytes.data()), sz)) {
+                ++stats.files_seen;
+                continue;
+            }
+            scan_gdb_animation_fields(bytes, by_key0, clips, stats);
+        }
+
+        ec.clear();
+        for (auto it = std::filesystem::recursive_directory_iterator(
+                 root_path,
+                 std::filesystem::directory_options::skip_permission_denied,
+                 ec);
+             !ec && it != std::filesystem::recursive_directory_iterator();
+             ++it) {
+            std::string ext = it->path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c) {
+                               return static_cast<char>(std::tolower(c));
+                           });
+            if (!it->is_regular_file(ec) || ext != ".bnk") {
+                continue;
+            }
+            scan_bnk_path_for_gdbs(it->path().string(),
+                                   by_key0, clips, stats);
+        }
+    }
+
+    for (const GdbAnimScanStats::SelectorRecord& selector : stats.selectors) {
+        auto rec = stats.animation_records.find(selector.selector_hash);
+        if (rec == stats.animation_records.end()) continue;
+
+        ++stats.selector_record_hits;
+        AnimClip& clip = clips[rec->second.clip_index];
+        if (is_default_clip_name(clip) || is_gdb_fallback_name(clip)) {
+            clip.name = !selector.label.empty()
+                ? selector.label
+                : rec->second.label;
+            ++stats.selector_names_assigned;
+        }
+    }
+
+    char buf[512];
+    std::snprintf(
+        buf, sizeof(buf),
+        "GDB animation scan: %zu/%zu GDB(s) parsed, %zu BNK(s) scanned "
+        "(%zu nested, %zu GDB entry), %zu local + %zu inherited Animation "
+        "field(s), %zu key hit(s) across %zu clip(s), %zu direct name(s) "
+        "assigned; %zu named record ref(s), %zu named direct-key ref(s), "
+        "%zu ref name(s) assigned; %zu AnimationName/AnimName selector "
+        "field(s), %zu selector record hit(s), %zu selector name(s) "
+        "assigned (%zu selector direct key hit(s)); %zu authored model "
+        "animation binding(s) across %zu model hash(es).",
+        stats.files_parsed, stats.files_seen,
+        stats.bnks_seen, stats.bnk_nested_seen, stats.bnk_gdb_entries,
+        stats.animation_fields, stats.inherited_animation_fields,
+        stats.animation_key_hits,
+        stats.unique_clip_hits.size(), stats.names_assigned,
+        stats.reference_record_hits, stats.reference_key_hits,
+        stats.reference_names_assigned,
+        stats.selector_fields, stats.selector_record_hits,
+        stats.selector_names_assigned, stats.selector_key_hits,
+        stats.model_binding_refs, stats.model_binding_models.size());
+    OutputLog::success(buf);
+
+    ++g_model_animation_binding_revision;
+    if (g_model_animation_binding_revision == 0) {
+        g_model_animation_binding_revision = 1;
+    }
+
+    return stats.names_assigned + stats.reference_names_assigned +
+           stats.selector_names_assigned;
+}
+
+uint32_t gdb_model_path_hash(std::string path) {
+    std::transform(path.begin(), path.end(), path.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    std::replace(path.begin(), path.end(), '/', '\\');
+
+    uint32_t h = 0x811C9DC5u;
+    for (unsigned char c : path) {
+        h *= 0x01000193u;
+        h ^= uint32_t(c);
+    }
+    return h;
+}
+
+uint64_t model_animation_binding_revision() {
+    return g_model_animation_binding_revision;
+}
+
+size_t build_model_animation_cache_for_hash(
+    uint32_t model_path_hash,
+    size_t clip_count,
+    std::vector<uint8_t>& out_authored) {
+    out_authored.assign(clip_count, 0);
+    if (model_path_hash == 0 || clip_count == 0) return 0;
+
+    size_t count = 0;
+    for (const ModelAnimationBinding& binding :
+         g_model_animation_bindings) {
+        if (binding.model_path_hash != model_path_hash ||
+            binding.clip_index >= clip_count) {
+            continue;
+        }
+        if (!out_authored[binding.clip_index]) {
+            out_authored[binding.clip_index] = 1;
+            ++count;
+        }
+    }
+    return count;
+}
+
+size_t model_animation_binding_count_for_hash(uint32_t model_path_hash) {
+    if (model_path_hash == 0) return 0;
+    size_t count = 0;
+    for (const ModelAnimationBinding& binding :
+         g_model_animation_bindings) {
+        if (binding.model_path_hash == model_path_hash) ++count;
+    }
+    return count;
+}
+
+const std::vector<ModelAnimationBinding>& model_animation_bindings() {
+    return g_model_animation_bindings;
 }
 
 }

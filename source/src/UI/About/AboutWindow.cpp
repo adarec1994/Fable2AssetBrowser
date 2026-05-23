@@ -42,9 +42,9 @@ struct AboutEntry {
 };
 
 constexpr AboutEntry kAboutEntries[] = {
-    { "Version:",       "1.0.0",                                false },
+    { "Version:",       "2.0.0",                                false },
     { "Authors:",       "Matthew W",                             false },
-    { "Special Thanks:", "H3x3r and the Fable modding discord",         false },
+    { "Special Thanks:", "H3x3r, Guy, and the Fable modding discord",         false },
     { "Source Code:",
       "https://github.com/weak1337/Fable2AssetBrowser",         true  },
 };

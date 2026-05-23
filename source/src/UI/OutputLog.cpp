@@ -8,7 +8,9 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace OutputLog {
@@ -60,9 +62,173 @@ ImVec4 colour_for(Level lvl) {
     }
 }
 
+bool starts_with(const std::string& s, const char* prefix) {
+    const size_t n = std::strlen(prefix);
+    return s.size() >= n && s.compare(0, n, prefix) == 0;
+}
+
+bool contains(const std::string& s, const char* needle) {
+    return s.find(needle) != std::string::npos;
+}
+
+bool starts_with_any(const std::string& s,
+                     const char* const* prefixes,
+                     size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        if (starts_with(s, prefixes[i])) return true;
+    }
+    return false;
+}
+
+bool is_user_status_message(const std::string& msg) {
+    static constexpr const char* kPrefixes[] = {
+        ".xma export",
+        "BNK contents dump",
+        "BNK extract",
+        "Decoded ",
+        "Dump ",
+        "Dumping ",
+        "Edit Terrain:",
+        "Export location changed",
+        "Exported ",
+        "Exporting ",
+        "Extract BNK",
+        "Extracting ",
+        "GDB viewer opened:",
+        "Loaded ",
+        "Loading ",
+        "MDL dump",
+        "MDL export",
+        "TEX dump",
+        "TEX export",
+        "WAV ",
+        "heightmap opened:"
+    };
+    return starts_with_any(msg, kPrefixes,
+                           sizeof(kPrefixes) / sizeof(kPrefixes[0]));
+}
+
+bool is_noisy_message(Level lvl, const std::string& msg) {
+    if (contains(msg, "failed to decode (zero_mips)")) return true;
+    if (starts_with(msg, "texture '") &&
+        contains(msg, "failed to decode")) return true;
+    if (starts_with(msg, "texture '") &&
+        contains(msg, "' not found in any loaded BNK")) return true;
+
+    if (lvl == Level::Warn) {
+        if (starts_with(msg, "  ")) return true;
+        static constexpr const char* kWarnPrefixes[] = {
+            "AnimBank:",
+            "AnimDataFile:",
+            "GDB hashlist: curated model target missing",
+            "Locomotion:",
+            "LOD palette decode aborted:",
+            "MDL: all buffers empty",
+            "MP_Build:",
+            "TerrainSplat:",
+            "GDB viewer: no .save sibling",
+            "adjacent terrain ",
+            "bake composite:",
+            "cloud density texture not found:",
+            "ehf",
+            "havok:",
+            "havok ",
+            "level props:",
+            "level props: model load miss",
+            "level references no .ehf",
+            "no .gdb sibling",
+            "no .save sibling",
+            "no companion .list",
+            "no level.vfsconfig",
+            "prop bake worker aborted:",
+            "prop upload aborted:",
+            "streaming bnk not mounted:",
+            "terrain stage skipped:",
+            "terrain: no albedo texture decoded",
+            "texture_atlas:",
+            "texture upload failed:",
+            "texture upload skipped:"
+        };
+        if (starts_with_any(msg, kWarnPrefixes,
+                            sizeof(kWarnPrefixes) / sizeof(kWarnPrefixes[0]))) {
+            return true;
+        }
+        if (contains(msg, "NONE in engine_level")) return true;
+        if (contains(msg, "entity-scan skipped")) return true;
+        return false;
+    }
+
+    if (lvl == Level::Info || lvl == Level::Success) {
+        if (!is_user_status_message(msg)) return true;
+
+        static constexpr const char* kInfoPrefixes[] = {
+            "  ",
+            ".water parsed:",
+            "AnimBank:",
+            "AnimDataFile:",
+            "GDB animation scan:",
+            "GDB interest dump:",
+            "Lua scan:",
+            "Locomotion:",
+            "MDL:",
+            "Scanning ",
+            "TerrainSplat:",
+            "Texture preview:",
+            "adjacent terrain ",
+            "bake composite:",
+            "bound lightmap thumbnail:",
+            "bound normal thumbnail:",
+            "cloud density texture bound:",
+            "cloud theme:",
+            "cloud theme layers:",
+            "day/night cycle:",
+            "decoded ",
+            "derived placements:",
+            "derived render placements disabled",
+            "ehf",
+            "engine_level keyword scan",
+            "gdb",
+            "gdb-derived ",
+            "havok:",
+            "havok ",
+            "heightfield loaded:",
+            "heightfield resources for this level:",
+            "havok_scenario loading disabled",
+            "level OK",
+            "level props:",
+            "list (",
+            "loading .list terrain siblings:",
+            "loading level ",
+            "model catalog probe:",
+            "preserved authored Z",
+            "save:",
+            "sky theme:",
+            "streaming bnk ",
+            "streaming model candidates:",
+            "terrain SPLAT shader",
+            "terrain texture bound:",
+            "terrain texture rebound after prop upload",
+            "tree built:",
+            "vfsconfig:",
+            "water theme:",
+            "water:"
+        };
+        if (starts_with_any(msg, kInfoPrefixes,
+                            sizeof(kInfoPrefixes) / sizeof(kInfoPrefixes[0]))) {
+            return true;
+        }
+        if (starts_with(msg, "terrain '") && contains(msg, "' built")) return true;
+        if (contains(msg, "texture rebound after prop upload")) return true;
+    }
+
+    return false;
+}
+
 }
 
 void log(Level lvl, std::string msg) {
+    if (is_noisy_message(lvl, msg)) return;
+
     Entry e;
     e.lvl = lvl;
     e.msg = std::move(msg);

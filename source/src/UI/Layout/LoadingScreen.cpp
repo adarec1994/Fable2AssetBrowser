@@ -27,7 +27,7 @@ void draw_loading_screen() {
     const float center_x = origin.x + size.x * 0.5f;
     const float center_y = origin.y + size.y * 0.5f;
 
-    const char* title = "Loading BNKs";
+    const char* title = "Loading Assets";
     ImVec2 title_sz = ImGui::CalcTextSize(title);
     dl->AddText(ImVec2(center_x - title_sz.x * 0.5f, center_y - 70.0f),
                 IM_COL32(220, 225, 235, 255), title);
@@ -73,7 +73,7 @@ void draw_loading_screen() {
     }
 
     if (tree_build_elapsed_seconds() > 15.0f && progress < 0.95f) {
-        const char* hint = "(nested BNKs are extracted to temp on first scan - subsequent runs reuse the cache)";
+        const char* hint = "(nested BNKs and animation names can take a moment on first scan)";
         ImVec2 hsz = ImGui::CalcTextSize(hint);
         dl->AddText(ImVec2(center_x - hsz.x * 0.5f, bar_max.y + 60.0f),
                     IM_COL32(110, 120, 135, 255), hint);

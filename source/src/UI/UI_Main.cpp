@@ -14,12 +14,15 @@
 #include "imgui_stdlib.h"
 #include "ImGuiFileDialog.h"
 #include <cmath>
+#include <cctype>
 #include <filesystem>
 #include <algorithm>
+#include <fstream>
 #include <vector>
 #ifdef _WIN32
 #include <d3d11.h>
 #include <windows.h>
+#include "../../resource.h"
 #endif
 #include "ModelPreview.h"
 #include "../textures/export/TextureExport.h"
@@ -71,6 +74,69 @@ static int g_sparkle_heights[8] = {0};
 static float g_splash_time_elapsed = 0.0f;
 static const float g_fade_in_delay = 5.0f;
 static const float g_fade_in_duration = 2.0f;
+
+#ifdef _WIN32
+static bool load_resource_bytes(int resource_id, std::vector<unsigned char>& out) {
+    out.clear();
+    HMODULE module = GetModuleHandleW(nullptr);
+    if (!module) return false;
+    HRSRC resource = FindResourceW(module, MAKEINTRESOURCEW(resource_id), MAKEINTRESOURCEW(10));
+    if (!resource) return false;
+    DWORD size = SizeofResource(module, resource);
+    if (size == 0) return false;
+    HGLOBAL handle = LoadResource(module, resource);
+    if (!handle) return false;
+    void* ptr = LockResource(handle);
+    if (!ptr) return false;
+    auto* first = static_cast<const unsigned char*>(ptr);
+    out.assign(first, first + size);
+    return true;
+}
+
+static std::filesystem::path normalized_zip_export_path(std::filesystem::path path) {
+    if (!path.has_extension()) {
+        path += ".zip";
+        return path;
+    }
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    if (ext != ".zip") path.replace_extension(".zip");
+    return path;
+}
+
+static void export_embedded_blender_plugin_zip(const std::filesystem::path& selected_path) {
+    if (selected_path.empty()) {
+        OutputLog::error("Blender plugin export failed: no output path selected");
+        return;
+    }
+    std::vector<unsigned char> bytes;
+    if (!load_resource_bytes(IDR_FABLE_LEVEL_IMPORTER_ZIP, bytes)) {
+        OutputLog::error("Blender plugin export failed: embedded addon resource is missing");
+        return;
+    }
+    std::filesystem::path out_path = normalized_zip_export_path(selected_path);
+    std::error_code ec;
+    if (out_path.has_parent_path()) {
+        std::filesystem::create_directories(out_path.parent_path(), ec);
+        if (ec) {
+            OutputLog::error("Blender plugin export failed: " + ec.message());
+            return;
+        }
+    }
+    std::ofstream out(out_path, std::ios::binary);
+    if (!out) {
+        OutputLog::error("Blender plugin export failed: could not open " + out_path.string());
+        return;
+    }
+    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!out) {
+        OutputLog::error("Blender plugin export failed while writing " + out_path.string());
+        return;
+    }
+    OutputLog::success("Blender plugin exported: " + out_path.string());
+}
+#endif
 static const char* g_logo_map[] = {
 "                                                                                                                                              i                                                         ",
 "                                                                                                                                              iBPi                                                      ",
@@ -453,6 +519,25 @@ void draw_main(GLFWwindow* window) {
                 ImGui::EndMenu();
             }
 
+            if (ImGui::BeginMenu("Addons")) {
+                if (ImGui::MenuItem("Export Blender Plugin")) {
+#ifdef _WIN32
+                    IGFD::FileDialogConfig cfg;
+                    cfg.path = S.export_dir.empty() ? "." : S.export_dir;
+                    cfg.fileName = "FableLevelImporter.zip";
+                    cfg.flags = ImGuiFileDialogFlags_ConfirmOverwrite;
+                    ImGuiFileDialog::Instance()->OpenDialog(
+                        "ExportBlenderPluginZip",
+                        "Export Blender Plugin",
+                        ".zip",
+                        cfg);
+#else
+                    OutputLog::error("Blender plugin export is only available in the Windows build");
+#endif
+                }
+                ImGui::EndMenu();
+            }
+
             if (ImGui::BeginMenu("Help")) {
                 if (ImGui::MenuItem("About")) {
                     About::open();
@@ -607,6 +692,26 @@ void draw_main(GLFWwindow* window) {
             ImGuiFileDialog::Instance()->Close();
         }
     }
+
+#ifdef _WIN32
+    {
+        ImVec2 vp = ImGui::GetMainViewport()->WorkSize;
+        ImVec2 minSize(680, 440);
+        ImVec2 maxSize(vp.x * 0.9f, vp.y * 0.9f);
+        if (ImGuiFileDialog::Instance()->Display(
+                "ExportBlenderPluginZip", ImGuiWindowFlags_NoCollapse, minSize, maxSize)) {
+            if (ImGuiFileDialog::Instance()->IsOk()) {
+                std::filesystem::path out_path = ImGuiFileDialog::Instance()->GetFilePathName();
+                if (out_path.empty()) {
+                    std::filesystem::path current = ImGuiFileDialog::Instance()->GetCurrentPath();
+                    out_path = current / "FableLevelImporter.zip";
+                }
+                export_embedded_blender_plugin_zip(out_path);
+            }
+            ImGuiFileDialog::Instance()->Close();
+        }
+    }
+#endif
 
     UI::draw_audio_player_window();
 

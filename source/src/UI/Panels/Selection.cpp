@@ -202,7 +202,7 @@ bool open_gdb_viewer_for_bnk_entry(const std::string& bnk_path,
     }
 
     std::vector<Gdb::RecordRow> records =
-        Gdb::Build010RecordRows(gdb_bytes, save_hash_to_name, 0, 512);
+        Gdb::Build010RecordRows(gdb_bytes, save_hash_to_name);
 
     std::unordered_map<uint32_t, std::string> save_name_by_hash;
     save_name_by_hash.reserve(save_hash_to_name.size() * 2);
@@ -253,7 +253,6 @@ bool open_gdb_viewer_for_bnk_entry(const std::string& bnk_path,
             ++skeleton_refs;
         }
         row.model_path_hashes = rec.model_path_hashes;
-        row.debug_tree = rec.debug_tree;
         for (uint32_t model_hash : row.model_path_hashes) {
             auto model_it = model_name_by_hash.find(model_hash);
             if (model_it != model_name_by_hash.end()) {
@@ -382,8 +381,6 @@ void open_iso_logic(const std::string& iso_path) {
     S.last_dir = std::filesystem::path(iso_path).parent_path().string();
     save_last_dir(S.last_dir);
 
-    start_tree_build_for_root(iso_path, S.bnk_paths);
-
     if (Anim::load_toc_for_root(iso_path, S.anim_clips)) {
 
         Anim::global_data_file().open_for_root(iso_path);
@@ -391,6 +388,7 @@ void open_iso_logic(const std::string& iso_path) {
         Anim::resolve_clip_names_from_luas(S.anim_clips);
     }
     Anim::load_locomotion_for_root(iso_path);
+    start_tree_build_for_root(iso_path, S.bnk_paths);
 }
 
 void open_folder_logic(const std::string &sel) {
@@ -449,8 +447,6 @@ void open_folder_logic(const std::string &sel) {
     S.last_dir = sel;
     save_last_dir(sel);
 
-    start_tree_build_for_root(sel, S.bnk_paths);
-
     if (Anim::load_toc_for_root(sel, S.anim_clips)) {
         Anim::global_data_file().open_for_root(sel);
 
@@ -483,6 +479,8 @@ void open_folder_logic(const std::string &sel) {
     S.selected_bnk.clear();
     S.files.clear();
     refresh_file_table();
+
+    start_tree_build_for_root(sel, S.bnk_paths);
 }
 
 bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index, std::vector<unsigned char>& out) {

@@ -1,5 +1,6 @@
 #include "mdl_converter.h"
 #include "ModelParser.h"
+#include "MdlExportCommon.h"
 #include "MdlTexExport.h"
 #include "../textures/TexParser.h"
 #include "../Utilities/State.h"
@@ -8,6 +9,7 @@
 #include <string>
 #include <fstream>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <algorithm>
@@ -412,19 +414,9 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
     err_msg.clear();
 
     MDLInfo info;
-    if (!parse_mdl_info(mdl_data, info, mdl_source_path)) {
-        err_msg = "Failed to parse MDL info";
-        return false;
-    }
-
     std::vector<MDLMeshGeom> geoms;
-    if (!parse_mdl_geometry(mdl_data, info, geoms)) {
-        err_msg = "Failed to parse MDL geometry";
-        return false;
-    }
-
-    if (geoms.empty()) {
-        err_msg = "No geometry found";
+    if (!MdlExport::parse_model_for_export(mdl_data, mdl_source_path,
+                                           info, geoms, err_msg)) {
         return false;
     }
 
@@ -439,6 +431,7 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
     std::ostringstream materials;
     std::ostringstream meshes;
     std::ostringstream bone_nodes;
+    std::ostringstream animations;
 
     int bv_count = 0;
     int acc_count = 0;
@@ -813,6 +806,107 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
         mesh_count++;
     }
 
+    const uint32_t export_bone_count =
+        MdlExport::model_bone_count_for_export(info);
+    const std::vector<MdlExport::ExportAnimClip> export_anims =
+        MdlExport::collect_compatible_animations(
+            info, export_bone_count, original_to_node, mdl_source_path);
+
+    int anim_count = 0;
+    auto add_anim_accessor = [&](const void* data,
+                                 size_t byte_size,
+                                 int component_type,
+                                 int count,
+                                 const char* type,
+                                 const char* minmax) -> int {
+        const size_t off = add_data(data, byte_size);
+        if (bv_count > 0) bufferViews << ",";
+        bufferViews << "{\"buffer\":0,\"byteOffset\":" << off
+                    << ",\"byteLength\":" << byte_size << "}";
+        const int bv = bv_count++;
+        if (acc_count > 0) accessors << ",";
+        accessors << "{\"bufferView\":" << bv
+                  << ",\"componentType\":" << component_type
+                  << ",\"count\":" << count
+                  << ",\"type\":\"" << type << "\"";
+        if (minmax && minmax[0]) accessors << minmax;
+        accessors << "}";
+        return acc_count++;
+    };
+
+    for (const MdlExport::ExportAnimClip& clip : export_anims) {
+        if (clip.times.empty() || clip.channels.empty()) continue;
+
+        char range_buf[128];
+        std::snprintf(range_buf, sizeof(range_buf),
+                      ",\"min\":[%.9g],\"max\":[%.9g]",
+                      clip.times.front(), clip.times.back());
+        const int time_acc = add_anim_accessor(
+            clip.times.data(),
+            clip.times.size() * sizeof(float),
+            5126,
+            (int)clip.times.size(),
+            "SCALAR",
+            range_buf);
+
+        std::ostringstream samplers;
+        std::ostringstream channels;
+        int sampler_count = 0;
+        int channel_count = 0;
+
+        for (const MdlExport::ExportAnimChannel& ch : clip.channels) {
+            if (ch.target_node < 0) continue;
+            if (ch.has_rotation && !ch.rotations.empty()) {
+                const int rot_acc = add_anim_accessor(
+                    ch.rotations.data(),
+                    ch.rotations.size() * sizeof(float),
+                    5126,
+                    (int)clip.times.size(),
+                    "VEC4",
+                    nullptr);
+                if (sampler_count > 0) samplers << ",";
+                samplers << "{\"input\":" << time_acc
+                         << ",\"output\":" << rot_acc
+                         << ",\"interpolation\":\"LINEAR\"}";
+                const int sampler_idx = sampler_count++;
+
+                if (channel_count > 0) channels << ",";
+                channels << "{\"sampler\":" << sampler_idx
+                         << ",\"target\":{\"node\":" << ch.target_node
+                         << ",\"path\":\"rotation\"}}";
+                ++channel_count;
+            }
+
+            if (ch.has_translation && !ch.translations.empty()) {
+                const int trans_acc = add_anim_accessor(
+                    ch.translations.data(),
+                    ch.translations.size() * sizeof(float),
+                    5126,
+                    (int)clip.times.size(),
+                    "VEC3",
+                    nullptr);
+                if (sampler_count > 0) samplers << ",";
+                samplers << "{\"input\":" << time_acc
+                         << ",\"output\":" << trans_acc
+                         << ",\"interpolation\":\"LINEAR\"}";
+                const int sampler_idx = sampler_count++;
+
+                if (channel_count > 0) channels << ",";
+                channels << "{\"sampler\":" << sampler_idx
+                         << ",\"target\":{\"node\":" << ch.target_node
+                         << ",\"path\":\"translation\"}}";
+                ++channel_count;
+            }
+        }
+
+        if (sampler_count == 0 || channel_count == 0) continue;
+        if (anim_count > 0) animations << ",";
+        animations << "{\"name\":\"" << json_escape(clip.name)
+                   << "\",\"samplers\":[" << samplers.str()
+                   << "],\"channels\":[" << channels.str() << "]}";
+        ++anim_count;
+    }
+
     int first_mesh_node = bone_node_count;
 
     int root_wrapper_node = bone_node_count + mesh_count;
@@ -869,6 +963,10 @@ bool mdl_to_glb_full(const std::vector<unsigned char>& mdl_data,
             json << joint_indices[i];
         }
         json << "]}]";
+    }
+
+    if (anim_count > 0) {
+        json << ",\"animations\":[" << animations.str() << "]";
     }
 
     json << "}";

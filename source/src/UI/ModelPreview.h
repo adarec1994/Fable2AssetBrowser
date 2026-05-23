@@ -76,6 +76,17 @@ struct MPPerMesh {
     uint32_t source_mesh_idx = 0;
 
     uint32_t lod_index = 0;
+
+    struct PickRange {
+        uint32_t selection_id = 0;
+        uint32_t index_start = 0;
+        uint32_t index_count = 0;
+        float center[3] = {0.0f, 0.0f, 0.0f};
+        float radius = 0.0f;
+    };
+    std::vector<PickRange> pick_ranges;
+    std::vector<float> pick_positions;
+    std::vector<uint32_t> pick_indices;
 };
 
 struct MPSkyCloudKeyframe {
@@ -87,6 +98,7 @@ struct MPSkyCloudKeyframe {
     bool has_cloud_theme = false;
     int cloud_layer_count = 0;
     float cloud_layer[4][4] = {};
+    float cloud_shape[4][4] = {};
     float cloud_motion[4][4] = {};
     float cloud_light[4][4] = {};
 };
@@ -114,9 +126,11 @@ struct ModelPreview {
     };
     bool cloud_density_tried[4] = {false, false, false, false};
     ID3D11ShaderResourceView* sky_overlay_srv = nullptr;
+    ID3D11ShaderResourceView* sky_sun_disc_srv = nullptr;
     ID3D11ShaderResourceView* sky_moon_srv = nullptr;
     ID3D11ShaderResourceView* sky_moon_glare_srv = nullptr;
     bool sky_overlay_tried = false;
+    bool sky_sun_disc_tried = false;
     bool sky_moon_tried = false;
     bool sky_moon_glare_tried = false;
     ID3D11VertexShader* vs_water = nullptr;
@@ -129,6 +143,7 @@ struct ModelPreview {
     ID3D11BlendState* bsAlpha = nullptr;
     ID3D11DepthStencilState* dssWrite = nullptr;
     ID3D11DepthStencilState* dssNoWrite = nullptr;
+    ID3D11DepthStencilState* dssNoWriteLEqual = nullptr;
     ID3D11ShaderResourceView* default_srv = nullptr;
 #else
     unsigned int fbo = 0;
@@ -166,6 +181,12 @@ struct ModelPreview {
         {0.12f, 520.0f, 7.0f, 4.0f},
         {0.08f, 650.0f, 10.0f, 6.0f}
     };
+    float cloud_shape[4][4] = {
+        {1024.0f, 1024.0f, 0.0f, 0.0f},
+        {1536.0f, 1536.0f, 0.0f, 0.0f},
+        {2048.0f, 2048.0f, 0.0f, 0.0f},
+        {3072.0f, 3072.0f, 0.0f, 0.0f}
+    };
     float cloud_motion[4][4] = {
         {0.0f, 0.0f,  0.010f,  0.004f},
         {0.2f, 0.4f, -0.006f,  0.008f},
@@ -180,6 +201,7 @@ struct ModelPreview {
     };
     std::string cloud_density_tex_name[4];
     std::string sky_overlay_tex_name;
+    std::string sky_sun_disc_tex_name;
     std::string sky_moon_tex_name;
     std::string sky_moon_glare_tex_name;
     bool has_day_night_cycle = false;
@@ -192,6 +214,7 @@ struct ModelPreview {
     bool wireframe = false;
 
     bool no_tilt = false;
+    uint32_t selected_pick_id = 0;
 
     uint32_t lod_count    = 1;
     int32_t  selected_lod = -1;

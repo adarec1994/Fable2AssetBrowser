@@ -83,6 +83,15 @@ struct MDLMeshGeom {
     float water_theme_params[10] = {};
     uint32_t MeshIndex = 0;
     uint32_t SubMeshIndex = 0;
+
+    struct PickRange {
+        uint32_t selection_id = 0;
+        uint32_t index_start = 0;
+        uint32_t index_count = 0;
+        float center[3] = {0.0f, 0.0f, 0.0f};
+        float radius = 0.0f;
+    };
+    std::vector<PickRange> pick_ranges;
 };
 
 bool build_mdl_buffer_for_name(const std::string &mdl_name, std::vector<unsigned char> &out);

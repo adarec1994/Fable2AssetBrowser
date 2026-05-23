@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <cstdint>
 #include <vector>
 
 #ifdef _WIN32
@@ -25,6 +26,11 @@ struct Entry {
     int base_normal_w = 0,    base_normal_h = 0;
     int detail_diffuse_w = 0, detail_diffuse_h = 0;
     int detail_normal_w = 0,  detail_normal_h = 0;
+
+    std::vector<uint8_t> base_diffuse_rgba;
+    std::vector<uint8_t> base_normal_rgba;
+    std::vector<uint8_t> detail_diffuse_rgba;
+    std::vector<uint8_t> detail_normal_rgba;
 
     float base_tile_scale = 0.125f;
     float detail_tile_scale = 0.125f;

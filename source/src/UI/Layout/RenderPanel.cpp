@@ -9,6 +9,7 @@
 #include "../../animations/AnimBank.h"
 #include "../../animations/AnimDataFile.h"
 #include "../../animations/AnimPlayer.h"
+#include "../../animations/AnimRigMap.h"
 #include "../IconButton.h"
 #include "IconsFontAwesome6.h"
 #include "../OutputLog.h"
@@ -54,6 +55,7 @@ bool g_skel_overlay_show = false;
 int g_highlight_mesh_idx    = -1;
 int g_isolate_mesh_idx      = -1;
 int g_selected_level_mesh_idx = -1;
+uint32_t g_selected_level_pick_id = 0;
 
 #ifdef _WIN32
 ID3D11ShaderResourceView* g_tex_popout_srv = nullptr;
@@ -108,6 +110,63 @@ void draw_placeholder() {
                       ImVec2(origin.x + region.x, origin.y + region.y),
                       IM_COL32(20, 22, 28, 255));
     ImGui::Dummy(region);
+}
+
+bool is_adjacent_terrain_mesh_name(const std::string& name)
+{
+    return name.rfind("adjacent terrain", 0) == 0;
+}
+
+std::string clean_level_model_name(std::string name)
+{
+    const char* prefixes[] = { "prop: ", "engine_level: " };
+    for (const char* prefix : prefixes) {
+        const size_t n = std::strlen(prefix);
+        if (name.rfind(prefix, 0) == 0) {
+            name.erase(0, n);
+            break;
+        }
+    }
+
+    size_t hash = name.find('#');
+    if (hash != std::string::npos) name.resize(hash);
+    size_t inst = name.find(" (");
+    if (inst != std::string::npos) name.resize(inst);
+
+    std::replace(name.begin(), name.end(), '\\', '/');
+    size_t slash = name.find_last_of('/');
+    if (slash != std::string::npos) name = name.substr(slash + 1);
+
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    if (lower.size() >= 4 && lower.substr(lower.size() - 4) == ".mdl") {
+        name.resize(name.size() - 4);
+    }
+    return name.empty() ? std::string("(unnamed)") : name;
+}
+
+std::string level_model_key_from_mesh_name(const std::string& name)
+{
+    std::string key = clean_level_model_name(name);
+    std::transform(key.begin(), key.end(), key.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    return key;
+}
+
+std::string clean_level_material_name(std::string name)
+{
+    const size_t hash = name.find('#');
+    if (hash != std::string::npos) {
+        name.erase(0, hash + 1);
+    } else {
+        return clean_level_model_name(std::move(name));
+    }
+
+    const size_t inst = name.find(" (");
+    if (inst != std::string::npos) name.resize(inst);
+
+    return name.empty() ? std::string("(unnamed)") : name;
 }
 
 void draw_lua_in_panel() {
@@ -189,32 +248,6 @@ void draw_gdb_in_panel() {
                           ImGuiTreeNodeFlags_Bullet,
                           "%s | %s", name, value.c_str());
     };
-    auto draw_debug_node = [](auto&& self, const Gdb::DebugNode& node) -> void {
-        const bool has_children = !node.children.empty();
-        ImGui::PushID(&node);
-        if (!has_children) {
-            ImGui::TreeNodeEx("##gdb_debug_leaf",
-                              ImGuiTreeNodeFlags_Leaf |
-                              ImGuiTreeNodeFlags_NoTreePushOnOpen |
-                              ImGuiTreeNodeFlags_Bullet,
-                              "%s | %s",
-                              node.label.c_str(), node.value.c_str());
-            ImGui::PopID();
-            return;
-        }
-
-        const bool open = ImGui::TreeNodeEx(
-            "##gdb_debug_node",
-            ImGuiTreeNodeFlags_SpanAvailWidth,
-            "%s | %s", node.label.c_str(), node.value.c_str());
-        if (open) {
-            for (const Gdb::DebugNode& child : node.children) {
-                self(self, child);
-            }
-            ImGui::TreePop();
-        }
-        ImGui::PopID();
-    };
     auto hash_detail_value = [&](uint32_t hash, const std::string& name) {
         std::string v = hex32(hash);
         if (!name.empty()) v += "  " + name;
@@ -291,9 +324,6 @@ void draw_gdb_in_panel() {
             detail(record_kind(r), label);
             detail("Index", hex4(size_t(r.record_index) + 1));
             detail("Hash", hash_detail_value(r.hash, r.hash_name));
-            for (const Gdb::DebugNode& node : r.debug_tree) {
-                draw_debug_node(draw_debug_node, node);
-            }
             if (r.parent_hash != 0 || !r.parent_name.empty()) {
                 detail("Parent",
                        hash_detail_value(r.parent_hash, r.parent_name));
@@ -649,689 +679,6 @@ static void draw_gdb_placements_overlay(const ImVec2& origin,
                 IM_COL32(220, 220, 220, 200), buf);
 }
 
-struct ShopCoordDebugCandidate {
-    std::string status;
-    std::string entity;
-    std::string entity_key;
-    std::string parent_hash;
-    std::string model_hash;
-    std::string model_path;
-    float x = 0.0f;
-    float y = 0.0f;
-    float z = 0.0f;
-    float rot_x = 0.0f;
-    float rot_y = 0.0f;
-    float rot_z = 0.0f;
-    bool has_rotation = false;
-    bool parent_backed = false;
-};
-
-struct ShopCoordDebugState {
-    bool enabled = true;
-    bool render_model = true;
-    int selected = 0;
-    int model_choice = 0;
-    std::filesystem::path source_path;
-    std::filesystem::file_time_type source_stamp{};
-    std::vector<ShopCoordDebugCandidate> candidates;
-};
-
-static ShopCoordDebugState g_shop_coord_debug;
-static ModelPreview g_shop_coord_model_mp;
-static bool g_shop_coord_model_init = false;
-static std::string g_shop_coord_model_path;
-
-static const std::array<const char*, 6> kShopCoordModelLabels = {
-    "GeneralShop exterior",
-    "GeneralShop interior",
-    "LargeShop facade",
-    "SmallShop facade",
-    "GeneralShop stairs",
-    "GeneralShop counter",
-};
-
-static const std::array<const char*, 6> kShopCoordModelPaths = {
-    "art/environment/regions/bowerstone/buildings/dotxsi/"
-    "bs_market_generalshop/bs_market_generalshop/exterior.mdl",
-    "art/environment/regions/bowerstone/buildings/dotxsi/"
-    "bs_market_generalshop/bs_market_generalshop/interior.mdl",
-    "art/environment/regions/bowerstone/buildings/dotxsi/"
-    "bs_market_largeshop_facade/bs_market_largeshop_facade.mdl",
-    "art/environment/regions/bowerstone/buildings/dotxsi/"
-    "bs_market_smallshop_facade/bs_market_smallshop_facade.mdl",
-    "art/environment/regions/bowerstone/buildings/dotxsi/"
-    "bs_market_generalshop_stairs_floor/"
-    "bs_market_generalshop_stairs_floor.mdl",
-    "art/environment/regions/bowerstone/buildings/dotxsi/"
-    "bs_market_generalshop_counter/bs_market_generalshop_counter.mdl",
-};
-
-static std::vector<std::string> split_tsv_line(const std::string& line)
-{
-    std::vector<std::string> out;
-    size_t start = 0;
-    while (start <= line.size()) {
-        const size_t tab = line.find('\t', start);
-        if (tab == std::string::npos) {
-            out.push_back(line.substr(start));
-            break;
-        }
-        out.push_back(line.substr(start, tab - start));
-        start = tab + 1;
-    }
-    return out;
-}
-
-static bool parse_tsv_float(const std::string& s, float& out)
-{
-    if (s.empty()) return false;
-    char* end = nullptr;
-    const float v = std::strtof(s.c_str(), &end);
-    if (end == s.c_str() || !std::isfinite(v)) return false;
-    out = v;
-    return true;
-}
-
-static std::string shop_coord_lower(std::string s)
-{
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) {
-                       return static_cast<char>(std::tolower(c));
-                   });
-    return s;
-}
-
-static bool is_shop_coord_debug_status(const std::string& status)
-{
-    return status == "candidate_nohash_shell" ||
-           status == "skipped_authored_shell" ||
-           status == "emitted_nohash_shell_companion";
-}
-
-static bool is_shop_coord_debug_row(const std::vector<std::string>& cols)
-{
-    if (cols.size() < 15) return false;
-    if (cols[0] != "shop") return false;
-    if (!is_shop_coord_debug_status(cols[1])) return false;
-
-    const std::string entity_key = shop_coord_lower(cols[3]);
-    const std::string entity     = shop_coord_lower(cols[2]);
-    const std::string model_path = shop_coord_lower(cols[14]);
-
-    return entity_key.find("generalstore") != std::string::npos ||
-           entity_key.find("bsmarketlargeshop") != std::string::npos ||
-           entity_key.find("bsmarketsmallshop") != std::string::npos ||
-           model_path.find("generalshop") != std::string::npos ||
-           model_path.find("largeshop") != std::string::npos ||
-           model_path.find("smallshop") != std::string::npos ||
-           entity.find("generalstore") != std::string::npos ||
-           entity.find("largeshop") != std::string::npos ||
-           entity.find("smallshop") != std::string::npos;
-}
-
-static bool is_shop_coord_worldish(float x, float y, float z)
-{
-    return std::isfinite(x) && std::isfinite(y) && std::isfinite(z) &&
-           x >= 0.0f && x <= 320.0f &&
-           y >= 0.0f && y <= 420.0f &&
-           z >= 2.0f && z <= 140.0f;
-}
-
-static std::filesystem::path find_shop_coord_debug_tsv()
-{
-    std::vector<std::filesystem::path> paths;
-    const auto cwd = std::filesystem::current_path();
-    paths.push_back(cwd / "extracted" / "debug_bwsmarket_gdb_interest.tsv");
-    paths.push_back(cwd / "cmake-build-debug" / "extracted" /
-                    "debug_bwsmarket_gdb_interest.tsv");
-
-#ifdef _WIN32
-    char exe_path[MAX_PATH] = {};
-    const DWORD n = GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        const auto dir = std::filesystem::path(exe_path).parent_path();
-        paths.push_back(dir / "extracted" / "debug_bwsmarket_gdb_interest.tsv");
-    }
-#endif
-
-    for (const auto& p : paths) {
-        std::error_code ec;
-        if (std::filesystem::exists(p, ec)) return p;
-    }
-    return {};
-}
-
-static void load_shop_coord_debug_candidates(bool force = false)
-{
-    const auto path = find_shop_coord_debug_tsv();
-    if (path.empty()) {
-        if (force || !g_shop_coord_debug.source_path.empty()) {
-            g_shop_coord_debug.source_path.clear();
-            g_shop_coord_debug.candidates.clear();
-            g_shop_coord_debug.selected = 0;
-        }
-        return;
-    }
-
-    std::error_code ec;
-    const auto stamp = std::filesystem::last_write_time(path, ec);
-    if (!force && !ec &&
-        path == g_shop_coord_debug.source_path &&
-        stamp == g_shop_coord_debug.source_stamp) {
-        return;
-    }
-
-    std::ifstream in(path);
-    if (!in) return;
-
-    std::vector<ShopCoordDebugCandidate> loaded;
-    std::unordered_set<std::string> seen;
-    std::string line;
-    bool first = true;
-    while (std::getline(in, line)) {
-        if (line.empty()) continue;
-        if (first) {
-            first = false;
-            if (line.find("category\tstatus\t") == 0) continue;
-        }
-
-        const auto cols = split_tsv_line(line);
-        if (!is_shop_coord_debug_row(cols)) continue;
-
-        ShopCoordDebugCandidate c;
-        c.status      = cols[1];
-        c.entity      = cols[2];
-        c.entity_key  = cols[3];
-        c.parent_hash = cols[5];
-        c.model_hash  = cols[6];
-        c.model_path  = cols[14];
-        if (!parse_tsv_float(cols[7], c.x) ||
-            !parse_tsv_float(cols[8], c.y) ||
-            !parse_tsv_float(cols[9], c.z) ||
-            !parse_tsv_float(cols[10], c.rot_x) ||
-            !parse_tsv_float(cols[11], c.rot_y) ||
-            !parse_tsv_float(cols[12], c.rot_z)) {
-            continue;
-        }
-        c.has_rotation = cols[13] == "1";
-        if (!is_shop_coord_worldish(c.x, c.y, c.z)) continue;
-        c.parent_backed = c.parent_hash != "0x00000000";
-
-        char key[256];
-        std::snprintf(key, sizeof(key), "%s|%s|%s|%.3f|%.3f|%.3f|%s",
-                      c.status.c_str(), c.entity_key.c_str(),
-                      c.parent_hash.c_str(), c.x, c.y, c.z,
-                      c.model_path.c_str());
-        if (!seen.insert(key).second) continue;
-        loaded.push_back(std::move(c));
-    }
-
-    auto rank = [](const ShopCoordDebugCandidate& c) {
-        int r = 3000;
-        if (c.status == "candidate_nohash_shell") {
-            r = 0;
-        } else if (c.status == "skipped_authored_shell") {
-            r = 1000;
-        } else if (c.status == "emitted_nohash_shell_companion") {
-            r = 2000;
-        }
-        if (!c.parent_backed) r += 100;
-        if (shop_coord_lower(c.entity_key).find("generalstore") ==
-            std::string::npos) {
-            r += 20;
-        }
-        return r;
-    };
-    std::sort(loaded.begin(), loaded.end(),
-              [&](const auto& a, const auto& b) {
-                  const int ra = rank(a);
-                  const int rb = rank(b);
-                  if (ra != rb) return ra < rb;
-                  if (a.y != b.y) return a.y < b.y;
-                  return a.x < b.x;
-              });
-
-    g_shop_coord_debug.source_path = path;
-    g_shop_coord_debug.source_stamp = stamp;
-    g_shop_coord_debug.candidates = std::move(loaded);
-    if (g_shop_coord_debug.selected >=
-        static_cast<int>(g_shop_coord_debug.candidates.size())) {
-        g_shop_coord_debug.selected = 0;
-    }
-}
-
-static bool project_level_point_to_screen(float x,
-                                          float y,
-                                          float z,
-                                          const ImVec2& origin,
-                                          const ImVec2& region,
-                                          ImVec2& out_screen)
-{
-    using namespace DirectX;
-    float cy = cosf(g_flycam.yaw);
-    float sy = sinf(g_flycam.yaw);
-    float cp = cosf(g_flycam.pitch);
-    float sp = sinf(g_flycam.pitch);
-    XMVECTOR eye = XMVectorSet(g_flycam.pos[0], g_flycam.pos[1],
-                               g_flycam.pos[2], 1);
-    XMVECTOR at  = XMVectorSet(g_flycam.pos[0] + sy * cp,
-                               g_flycam.pos[1] + sp,
-                               g_flycam.pos[2] + cy * cp, 1);
-    XMVECTOR up  = XMVectorSet(0, 1, 0, 0);
-    XMMATRIX V = XMMatrixLookAtLH(eye, at, up);
-    float fov = XMConvertToRadians(60.0f);
-    float aspect = region.x / std::max(1.0f, region.y);
-    float far_plane = std::max(g_mp.radius * 100.0f, 1000.0f);
-    XMMATRIX P = XMMatrixPerspectiveFovLH(fov, aspect, 0.05f, far_plane);
-    XMMATRIX VP = V * P;
-
-    XMVECTOR clip = XMVector4Transform(XMVectorSet(x, z + 2.0f, y, 1.0f), VP);
-    const float w = XMVectorGetW(clip);
-    if (w <= 0.05f) return false;
-    const float ndcx = XMVectorGetX(clip) / w;
-    const float ndcy = XMVectorGetY(clip) / w;
-    if (ndcx < -1.2f || ndcx > 1.2f ||
-        ndcy < -1.2f || ndcy > 1.2f) {
-        return false;
-    }
-
-    out_screen.x = origin.x + (ndcx * 0.5f + 0.5f) * region.x;
-    out_screen.y = origin.y + (1.0f - (ndcy * 0.5f + 0.5f)) * region.y;
-    return true;
-}
-
-static bool load_shop_coord_model(ID3D11Device* device,
-                                  const std::string& model_path)
-{
-    if (!device || model_path.empty()) return false;
-    if (g_shop_coord_model_init &&
-        g_shop_coord_model_mp.has_model &&
-        g_shop_coord_model_path == model_path) {
-        return true;
-    }
-
-    if (!g_shop_coord_model_init) {
-        if (!MP_Init(device, g_shop_coord_model_mp, 64, 64)) {
-            OutputLog::error("shop coord debug: failed to init model preview");
-            return false;
-        }
-        g_shop_coord_model_init = true;
-    }
-
-    std::vector<unsigned char> buf;
-    if (!build_mdl_buffer_for_name(model_path, buf) || buf.empty()) {
-        OutputLog::error("shop coord debug: model not found " + model_path);
-        return false;
-    }
-
-    MDLInfo info;
-    if (!parse_mdl_info(buf, info, model_path)) {
-        bool reparsed = reparse_mdl_missing_buffers_optstr(buf, info);
-        if (!reparsed) reparsed = reparse_mdl_as_foliage_48b(buf, info);
-        if (!reparsed) {
-            OutputLog::error("shop coord debug: parse_mdl_info failed " +
-                             model_path);
-            return false;
-        }
-    }
-
-    std::vector<MDLMeshGeom> geoms;
-    if (!parse_mdl_geometry(buf, info, geoms) || geoms.empty()) {
-        OutputLog::error("shop coord debug: parse_mdl_geometry failed " +
-                         model_path);
-        return false;
-    }
-
-    const FlyCam saved_cam = g_flycam;
-    const bool ok = MP_Build(device, geoms, info, g_shop_coord_model_mp);
-    g_flycam = saved_cam;
-    if (!ok || !g_shop_coord_model_mp.has_model) {
-        OutputLog::error("shop coord debug: model build failed " +
-                         model_path);
-        return false;
-    }
-
-    g_shop_coord_model_path = model_path;
-    OutputLog::info("shop coord debug: loaded probe model " + model_path);
-    return true;
-}
-
-static void shop_coord_rotation_matrix(const ShopCoordDebugCandidate& c,
-                                       float out[9])
-{
-    const float rx = std::isfinite(c.rot_x) ? c.rot_x : 0.0f;
-    const float ry = std::isfinite(c.rot_y) ? c.rot_y : 0.0f;
-    const float rz = std::isfinite(c.rot_z) ? c.rot_z : 0.0f;
-
-    const float sx = std::sin(rx);
-    const float cx = std::cos(rx);
-    const float sy = std::sin(ry);
-    const float cy = std::cos(ry);
-    const float sz = std::sin(rz);
-    const float cz = std::cos(rz);
-
-    float game[9] = {};
-    game[0] = cy * cx;
-    game[1] = sx;
-    game[2] = -sy * cx;
-    game[3] = sy * sz - cy * cz * sx;
-    game[4] = cz * cx;
-    game[5] = sy * cz * sx + cy * sz;
-    game[6] = cy * sz * sx + sy * cz;
-    game[7] = -sz * cx;
-    game[8] = cy * cz - sy * sz * sx;
-
-    const int axis_map[3] = {0, 2, 1};
-    for (int row = 0; row < 3; ++row) {
-        for (int col = 0; col < 3; ++col) {
-            out[row * 3 + col] =
-                game[axis_map[row] * 3 + axis_map[col]];
-        }
-    }
-}
-
-static DirectX::XMMATRIX shop_coord_world_matrix(
-    const ShopCoordDebugCandidate& c)
-{
-    using namespace DirectX;
-    float m[9] = {};
-    if (c.has_rotation) {
-        shop_coord_rotation_matrix(c, m);
-    } else {
-        m[0] = 1.0f;
-        m[4] = 1.0f;
-        m[8] = 1.0f;
-    }
-
-    const float x = c.x;
-    const float y = c.z;
-    const float z = c.y;
-
-    XMFLOAT4X4 wf = {
-        m[0], m[3], m[6], 0.0f,
-        m[2], m[5], m[8], 0.0f,
-        m[1], m[4], m[7], 0.0f,
-        x,    y,    z,    1.0f,
-    };
-    return XMLoadFloat4x4(&wf);
-}
-
-static void draw_shop_coord_debug_model(ID3D11Device* device)
-{
-    (void)device;
-    return;
-    load_shop_coord_debug_candidates(false);
-    auto& st = g_shop_coord_debug;
-    const int count = static_cast<int>(st.candidates.size());
-    if (!st.enabled || !st.render_model || count <= 0) return;
-    if (!g_mp.rtv || !g_mp.dsv || !g_mp.vs || !g_mp.ps ||
-        !g_mp.layout || !g_mp.cbuffer) {
-        return;
-    }
-    st.selected = std::clamp(st.selected, 0, count - 1);
-    st.model_choice = std::clamp(
-        st.model_choice, 0,
-        static_cast<int>(kShopCoordModelPaths.size()) - 1);
-    const std::string model_path =
-        kShopCoordModelPaths[static_cast<size_t>(st.model_choice)];
-    if (!load_shop_coord_model(device, model_path)) return;
-
-    ID3D11DeviceContext* ctx = nullptr;
-    device->GetImmediateContext(&ctx);
-    if (!ctx) return;
-
-    D3D11_VIEWPORT vp{};
-    vp.TopLeftX = 0.0f;
-    vp.TopLeftY = 0.0f;
-    vp.Width    = static_cast<FLOAT>(g_mp.width);
-    vp.Height   = static_cast<FLOAT>(g_mp.height);
-    vp.MinDepth = 0.0f;
-    vp.MaxDepth = 1.0f;
-    ctx->RSSetViewports(1, &vp);
-    ctx->OMSetRenderTargets(1, &g_mp.rtv, g_mp.dsv);
-    ctx->IASetInputLayout(g_mp.layout);
-    ctx->VSSetShader(g_mp.vs, nullptr, 0);
-    ctx->PSSetShader(g_mp.ps, nullptr, 0);
-    ID3D11SamplerState* samplers[2] = { g_mp.sampler, g_mp.sampler_point };
-    ctx->PSSetSamplers(0, 2, samplers);
-    ctx->RSSetState(g_mp.rs);
-
-    using namespace DirectX;
-    const auto& cand = st.candidates[st.selected];
-    float cy = cosf(g_flycam.yaw);
-    float sy = sinf(g_flycam.yaw);
-    float cp = cosf(g_flycam.pitch);
-    float sp = sinf(g_flycam.pitch);
-    XMVECTOR eye = XMVectorSet(g_flycam.pos[0], g_flycam.pos[1],
-                               g_flycam.pos[2], 1);
-    XMVECTOR at  = XMVectorSet(g_flycam.pos[0] + sy * cp,
-                               g_flycam.pos[1] + sp,
-                               g_flycam.pos[2] + cy * cp, 1);
-    XMVECTOR up  = XMVectorSet(0, 1, 0, 0);
-    XMMATRIX V = XMMatrixLookAtLH(eye, at, up);
-    float aspect = static_cast<float>(g_mp.width) /
-                   std::max(1.0f, static_cast<float>(g_mp.height));
-    float far_plane = std::max(g_mp.radius * 100.0f, 1000.0f);
-    XMMATRIX P = XMMatrixPerspectiveFovLH(
-        XMConvertToRadians(60.0f), aspect, 0.05f, far_plane);
-    XMMATRIX W = shop_coord_world_matrix(cand);
-
-    XMVECTOR lightDirV =
-        XMVector3Normalize(XMVectorSet(0.5f, 1.0f, 0.3f, 0.0f));
-    XMFLOAT4 lightDirF;
-    XMStoreFloat4(&lightDirF, lightDirV);
-    struct CB {
-        XMFLOAT4X4 mvp;
-        XMFLOAT4 lightDir;
-        XMFLOAT4X4 mv;
-        XMFLOAT4 params;
-    } cb;
-    XMStoreFloat4x4(&cb.mvp, XMMatrixTranspose(W * V * P));
-    XMStoreFloat4x4(&cb.mv,  XMMatrixTranspose(W * V));
-    cb.lightDir = lightDirF;
-    cb.params = XMFLOAT4(0.4f, 48.0f, 1.0f, static_cast<float>(ImGui::GetTime()));
-    D3D11_MAPPED_SUBRESOURCE ms{};
-    if (SUCCEEDED(ctx->Map(g_mp.cbuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) {
-        std::memcpy(ms.pData, &cb, sizeof(cb));
-        ctx->Unmap(g_mp.cbuffer, 0);
-    }
-    ctx->VSSetConstantBuffers(0, 1, &g_mp.cbuffer);
-    ctx->PSSetConstantBuffers(0, 1, &g_mp.cbuffer);
-
-    std::array<XMFLOAT4X4, MP_MAX_BONES> identity_bones{};
-    for (auto& bone : identity_bones) {
-        XMStoreFloat4x4(&bone, XMMatrixIdentity());
-    }
-    if (g_mp.bone_cb) {
-        D3D11_MAPPED_SUBRESOURCE bms{};
-        if (SUCCEEDED(ctx->Map(g_mp.bone_cb, 0, D3D11_MAP_WRITE_DISCARD,
-                               0, &bms))) {
-            std::memcpy(bms.pData, identity_bones.data(),
-                        sizeof(XMFLOAT4X4) * MP_MAX_BONES);
-            ctx->Unmap(g_mp.bone_cb, 0);
-        }
-        ctx->VSSetConstantBuffers(1, 1, &g_mp.bone_cb);
-    }
-
-    float blend_factor[4] = {0, 0, 0, 0};
-    auto draw_mesh = [&](const MPPerMesh& m, ID3D11BlendState* blend) {
-        if (!m.vb || !m.ib || m.index_count == 0) return;
-        UINT stride = sizeof(MPVertex);
-        UINT offset = 0;
-        ctx->IASetVertexBuffers(0, 1, &m.vb, &stride, &offset);
-        ctx->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
-        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ctx->OMSetBlendState(blend, blend_factor, 0xFFFFFFFF);
-
-        ID3D11ShaderResourceView* diffuse =
-            m.srv_diffuse ? m.srv_diffuse :
-            (g_shop_coord_model_mp.default_srv
-                ? g_shop_coord_model_mp.default_srv
-                : g_mp.default_srv);
-        ID3D11ShaderResourceView* normal =
-            m.srv_normal ? m.srv_normal :
-            (g_shop_coord_model_mp.default_srv
-                ? g_shop_coord_model_mp.default_srv
-                : g_mp.default_srv);
-        ID3D11ShaderResourceView* specular =
-            m.srv_specular ? m.srv_specular : g_mp.default_srv;
-        ID3D11ShaderResourceView* metallic =
-            m.srv_metallic ? m.srv_metallic : g_mp.default_srv;
-        ID3D11ShaderResourceView* extra =
-            m.srv_extra ? m.srv_extra : g_mp.default_srv;
-        ID3D11ShaderResourceView* srvs[5] = {
-            diffuse, normal, specular, metallic, extra
-        };
-        ctx->PSSetShaderResources(0, 5, srvs);
-        ctx->DrawIndexed(m.index_count, 0, 0);
-        ID3D11ShaderResourceView* nulls[5] = {
-            nullptr, nullptr, nullptr, nullptr, nullptr
-        };
-        ctx->PSSetShaderResources(0, 5, nulls);
-    };
-
-    ctx->OMSetDepthStencilState(g_mp.dssWrite, 0);
-    for (const auto& m : g_shop_coord_model_mp.meshes) {
-        if (!m.has_alpha) draw_mesh(m, g_mp.bs);
-    }
-    ctx->OMSetDepthStencilState(g_mp.dssNoWrite, 0);
-    for (const auto& m : g_shop_coord_model_mp.meshes) {
-        if (m.has_alpha) draw_mesh(m, g_mp.bsAlpha);
-    }
-    ctx->Release();
-}
-
-static void draw_shop_coord_debug_overlay(const ImVec2& origin,
-                                          const ImVec2& region)
-{
-    (void)origin;
-    (void)region;
-    return;
-    load_shop_coord_debug_candidates(false);
-    auto& st = g_shop_coord_debug;
-
-    const int count = static_cast<int>(st.candidates.size());
-    if (st.selected < 0) st.selected = 0;
-    if (count > 0 && st.selected >= count) st.selected = count - 1;
-
-    ImGui::SetNextWindowPos(ImVec2(origin.x + region.x - 340.0f,
-                                   origin.y + 8.0f),
-                            ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(332.0f, 0.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.78f);
-
-    ImGuiWindowFlags fl = ImGuiWindowFlags_NoTitleBar
-                        | ImGuiWindowFlags_NoResize
-                        | ImGuiWindowFlags_NoMove
-                        | ImGuiWindowFlags_NoCollapse
-                        | ImGuiWindowFlags_NoSavedSettings
-                        | ImGuiWindowFlags_AlwaysAutoResize;
-
-    if (ImGui::Begin("##shop_coord_debug_overlay", nullptr, fl)) {
-        ImGui::Checkbox("Shop coords", &st.enabled);
-        ImGui::SameLine();
-        ImGui::Checkbox("Model", &st.render_model);
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Reload##shop_coords")) {
-            load_shop_coord_debug_candidates(true);
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled("%d", count);
-
-        ImGui::SetNextItemWidth(210.0f);
-        ImGui::Combo("##shop_coord_model",
-                     &st.model_choice,
-                     kShopCoordModelLabels.data(),
-                     static_cast<int>(kShopCoordModelLabels.size()));
-
-        if (count == 0) {
-            ImGui::TextDisabled("No shop coordinate dump found.");
-        } else {
-            if (ImGui::ArrowButton("##shop_coord_prev", ImGuiDir_Left)) {
-                st.selected = (st.selected + count - 1) % count;
-            }
-            ImGui::SameLine();
-            if (ImGui::ArrowButton("##shop_coord_next", ImGuiDir_Right)) {
-                st.selected = (st.selected + 1) % count;
-            }
-            ImGui::SameLine();
-            int display_idx = st.selected + 1;
-            ImGui::SetNextItemWidth(160.0f);
-            if (ImGui::SliderInt("##shop_coord_idx", &display_idx, 1, count)) {
-                st.selected = std::clamp(display_idx - 1, 0, count - 1);
-            }
-
-            if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
-                if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
-                    st.selected = (st.selected + count - 1) % count;
-                }
-                if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
-                    st.selected = (st.selected + 1) % count;
-                }
-            }
-
-            const auto& c = st.candidates[st.selected];
-            ImGui::Text("coord %d / %d", st.selected + 1, count);
-            ImGui::TextDisabled("%s  %s",
-                                c.status.c_str(), c.entity_key.c_str());
-            ImGui::Text("pos %.3f, %.3f, %.3f", c.x, c.y, c.z);
-            ImGui::Text("rot %.3f, %.3f, %.3f", c.rot_x, c.rot_y, c.rot_z);
-            ImGui::TextDisabled("parent %s", c.parent_hash.c_str());
-            if (!c.model_path.empty()) {
-                const char* p = c.model_path.c_str();
-                ImGui::TextWrapped("%s", p);
-            }
-
-            if (ImGui::SmallButton("Copy coord##shop_coord")) {
-                char buf[512];
-                std::snprintf(buf, sizeof(buf),
-                              "%s\t%s\t%s\tpos=(%.3f, %.3f, %.3f)\trot=(%.3f, %.3f, %.3f)\t%s",
-                              c.status.c_str(), c.entity.c_str(),
-                              c.parent_hash.c_str(),
-                              c.x, c.y, c.z,
-                              c.rot_x, c.rot_y, c.rot_z,
-                              c.model_path.c_str());
-                ImGui::SetClipboardText(buf);
-            }
-        }
-    }
-    ImGui::End();
-
-    if (!st.enabled || count == 0) return;
-    const auto& c = st.candidates[st.selected];
-
-    ImVec2 sp_screen;
-    if (!project_level_point_to_screen(c.x, c.y, c.z,
-                                       origin, region, sp_screen)) {
-        return;
-    }
-
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImU32 yellow = IM_COL32(255, 220, 40, 255);
-    const ImU32 black  = IM_COL32(0, 0, 0, 230);
-    const ImVec2 top(sp_screen.x, sp_screen.y - 52.0f);
-    const ImVec2 tip(sp_screen.x, sp_screen.y - 8.0f);
-    dl->AddLine(top, tip, black, 5.0f);
-    dl->AddLine(top, tip, yellow, 3.0f);
-    dl->AddTriangleFilled(ImVec2(tip.x - 10.0f, tip.y - 12.0f),
-                          ImVec2(tip.x + 10.0f, tip.y - 12.0f),
-                          ImVec2(tip.x, tip.y + 4.0f),
-                          yellow);
-    dl->AddTriangle(ImVec2(tip.x - 10.0f, tip.y - 12.0f),
-                    ImVec2(tip.x + 10.0f, tip.y - 12.0f),
-                    ImVec2(tip.x, tip.y + 4.0f),
-                    black, 1.5f);
-    dl->AddCircleFilled(sp_screen, 5.0f, yellow, 16);
-    dl->AddCircle(sp_screen, 7.0f, black, 16, 2.0f);
-
-    char label[128];
-    std::snprintf(label, sizeof(label), "#%d %.1f %.1f %.1f",
-                  st.selected + 1, c.x, c.y, c.z);
-    dl->AddText(ImVec2(sp_screen.x + 12.0f, sp_screen.y - 18.0f),
-                black, label);
-    dl->AddText(ImVec2(sp_screen.x + 11.0f, sp_screen.y - 19.0f),
-                yellow, label);
-}
 #endif
 
 void draw_skeleton_overlay(const ImVec2& origin, const ImVec2& region) {
@@ -1416,7 +763,9 @@ static int pick_bone_at(const ImVec2& mouse, const ImVec2& origin,
 
 int pick_level_mesh_at(const ImVec2& mouse,
                        const ImVec2& origin,
-                       const ImVec2& region) {
+                       const ImVec2& region,
+                       uint32_t* out_pick_id = nullptr) {
+    if (out_pick_id) *out_pick_id = 0;
     if (!g_mp.has_model || !g_mp.no_tilt || g_mp.meshes.empty()) return -1;
     const float fw = std::max(1.0f, region.x);
     const float fh = std::max(1.0f, region.y);
@@ -1451,8 +800,59 @@ int pick_level_mesh_at(const ImVec2& mouse,
     const float oy = g_flycam.pos[1];
     const float oz = g_flycam.pos[2];
 
-    int   best     = -1;
-    float best_t   = std::numeric_limits<float>::infinity();
+    auto hit_sphere = [&](const float center[3], float radius, float& out_t) {
+        const float lx = ox - center[0];
+        const float ly = oy - center[1];
+        const float lz = oz - center[2];
+        const float l_dot_d = lx*dx + ly*dy + lz*dz;
+        const float l_len2  = lx*lx + ly*ly + lz*lz;
+        const float r2      = radius * radius;
+        const float c       = l_len2 - r2;
+        const float disc    = l_dot_d * l_dot_d - c;
+        if (disc < 0.0f) return false;
+        const float sq = std::sqrt(disc);
+        float t = -l_dot_d - sq;
+        if (t < 0.0f) t = -l_dot_d + sq;
+        if (t < 0.0f) return false;
+        out_t = t;
+        return true;
+    };
+
+    auto hit_triangle = [&](const float* a,
+                            const float* b,
+                            const float* c,
+                            float& out_t) {
+        const float e1x = b[0] - a[0];
+        const float e1y = b[1] - a[1];
+        const float e1z = b[2] - a[2];
+        const float e2x = c[0] - a[0];
+        const float e2y = c[1] - a[1];
+        const float e2z = c[2] - a[2];
+        const float px = dy * e2z - dz * e2y;
+        const float py = dz * e2x - dx * e2z;
+        const float pz = dx * e2y - dy * e2x;
+        const float det = e1x * px + e1y * py + e1z * pz;
+        if (std::fabs(det) < 1e-7f) return false;
+        const float inv_det = 1.0f / det;
+        const float tx = ox - a[0];
+        const float ty = oy - a[1];
+        const float tz = oz - a[2];
+        const float u = (tx * px + ty * py + tz * pz) * inv_det;
+        if (u < 0.0f || u > 1.0f) return false;
+        const float qx = ty * e1z - tz * e1y;
+        const float qy = tz * e1x - tx * e1z;
+        const float qz = tx * e1y - ty * e1x;
+        const float v = (dx * qx + dy * qy + dz * qz) * inv_det;
+        if (v < 0.0f || u + v > 1.0f) return false;
+        const float t = (e2x * qx + e2y * qy + e2z * qz) * inv_det;
+        if (t <= 0.0f) return false;
+        out_t = t;
+        return true;
+    };
+
+    int      best     = -1;
+    uint32_t best_id  = 0;
+    float    best_t   = std::numeric_limits<float>::infinity();
     for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
         const auto& m = g_mp.meshes[i];
         if (m.index_count == 0 || m.radius <= 0.0f) continue;
@@ -1460,23 +860,60 @@ int pick_level_mesh_at(const ImVec2& mouse,
             m.lod_index != (uint32_t)g_mp.selected_lod) continue;
         if (m.is_terrain) continue;
         if (m.is_water)   continue;
+        if (!S.dev_mode && is_adjacent_terrain_mesh_name(m.name)) continue;
+        if (!m.pick_ranges.empty()) {
+            for (const auto& pr : m.pick_ranges) {
+                if (pr.selection_id == 0 || pr.radius <= 0.0f) continue;
+                float sphere_t = 0.0f;
+                if (!hit_sphere(pr.center, pr.radius, sphere_t)) continue;
+
+                bool tri_hit = false;
+                float tri_t = std::numeric_limits<float>::infinity();
+                if (!m.pick_positions.empty() && !m.pick_indices.empty()) {
+                    const uint32_t end = std::min<uint32_t>(
+                        pr.index_start + pr.index_count,
+                        (uint32_t)m.pick_indices.size());
+                    for (uint32_t k = pr.index_start; k + 2 < end; k += 3) {
+                        const uint32_t ia = m.pick_indices[k + 0];
+                        const uint32_t ib = m.pick_indices[k + 1];
+                        const uint32_t ic = m.pick_indices[k + 2];
+                        const size_t pa = (size_t)ia * 3;
+                        const size_t pb = (size_t)ib * 3;
+                        const size_t pc = (size_t)ic * 3;
+                        if (pa + 2 >= m.pick_positions.size() ||
+                            pb + 2 >= m.pick_positions.size() ||
+                            pc + 2 >= m.pick_positions.size()) {
+                            continue;
+                        }
+                        float t = 0.0f;
+                        if (!hit_triangle(&m.pick_positions[pa],
+                                          &m.pick_positions[pb],
+                                          &m.pick_positions[pc], t)) {
+                            continue;
+                        }
+                        if (t < tri_t) {
+                            tri_t = t;
+                            tri_hit = true;
+                        }
+                    }
+                }
+
+                const float t = tri_hit ? tri_t : sphere_t;
+                if (tri_hit && t < best_t) {
+                    best_t = t;
+                    best = (int)i;
+                    best_id = pr.selection_id;
+                }
+            }
+            continue;
+        }
         if (m.name.rfind("engine_level:", 0) == 0) continue;
 
-        const float lx = ox - m.center[0];
-        const float ly = oy - m.center[1];
-        const float lz = oz - m.center[2];
-        const float l_dot_d = lx*dx + ly*dy + lz*dz;
-        const float l_len2  = lx*lx + ly*ly + lz*lz;
-        const float r2      = m.radius * m.radius;
-        const float c       = l_len2 - r2;
-        const float disc    = l_dot_d * l_dot_d - c;
-        if (disc < 0.0f) continue;
-        const float sq = std::sqrt(disc);
-        float t = -l_dot_d - sq;
-        if (t < 0.0f) t = -l_dot_d + sq;
-        if (t < 0.0f) continue;
+        float t = 0.0f;
+        if (!hit_sphere(m.center, m.radius, t)) continue;
         if (t < best_t) { best_t = t; best = (int)i; }
     }
+    if (out_pick_id) *out_pick_id = best_id;
     return best;
 }
 
@@ -1489,6 +926,14 @@ void draw_model_in_panel(ID3D11Device* device) {
     if (::g_selected_level_mesh_idx >= (int)g_mp.meshes.size() ||
         !g_mp.has_model || !g_mp.no_tilt) {
         ::g_selected_level_mesh_idx = -1;
+        ::g_selected_level_pick_id = 0;
+    }
+    if (::g_selected_level_mesh_idx >= 0 && !S.dev_mode &&
+        is_adjacent_terrain_mesh_name(
+            g_mp.meshes[(size_t)::g_selected_level_mesh_idx].name))
+    {
+        ::g_selected_level_mesh_idx = -1;
+        ::g_selected_level_pick_id = 0;
     }
 
     if (!g_mp_initialized) {
@@ -1578,8 +1023,12 @@ void draw_model_in_panel(ID3D11Device* device) {
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
         !ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f))
     {
-        const int picked = pick_level_mesh_at(ImGui::GetIO().MousePos, origin, region);
+        uint32_t picked_id = 0;
+        const ImVec2 mouse = ImGui::GetIO().MousePos;
+        const int picked = pick_level_mesh_at(mouse, origin, region,
+                                              &picked_id);
         ::g_selected_level_mesh_idx = picked;
+        ::g_selected_level_pick_id = picked >= 0 ? picked_id : 0;
     }
 
     if (S.terrain_mode) {
@@ -1629,9 +1078,11 @@ void draw_model_in_panel(ID3D11Device* device) {
 
     for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
         g_mp.meshes[i].highlight = ((int)i == ::g_highlight_mesh_idx)
-                                || ((int)i == ::g_selected_level_mesh_idx);
+                                || (::g_selected_level_pick_id == 0 &&
+                                    (int)i == ::g_selected_level_mesh_idx);
         g_mp.meshes[i].isolated  = ((int)i == ::g_isolate_mesh_idx);
     }
+    g_mp.selected_pick_id = ::g_selected_level_pick_id;
 
     if (!S.terrain_mode) apply_orbit_to_flycam();
     MP_Render(device, g_mp, g_flycam);
@@ -1654,6 +1105,7 @@ void draw_model_in_panel(ID3D11Device* device) {
             cancel_rotate();
         } else if (g_mp.no_tilt && ::g_selected_level_mesh_idx >= 0) {
             ::g_selected_level_mesh_idx = -1;
+            ::g_selected_level_pick_id = 0;
         } else if (g_mp.no_tilt) {
 
         } else {
@@ -2015,15 +1467,12 @@ void draw_model_in_panel(ID3D11Device* device) {
             {
                 const int mi   = ::g_selected_level_mesh_idx;
                 auto&     mesh = g_mp.meshes[mi];
+                const std::string selected_model_key =
+                    level_model_key_from_mesh_name(mesh.name);
+                const std::string selected_model_name =
+                    clean_level_model_name(mesh.name);
 
-                ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1.0f),
-                                   "Selected mesh");
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Clear##sel_clear")) {
-                    ::g_selected_level_mesh_idx = -1;
-                }
-                ImGui::TextWrapped("%s",
-                    mesh.name.empty() ? "(unnamed)" : mesh.name.c_str());
+                ImGui::TextWrapped("%s", selected_model_name.c_str());
                 ImGui::Separator();
 
                 ImGui::PushID(0x20000 + mi);
@@ -2032,70 +1481,160 @@ void draw_model_in_panel(ID3D11Device* device) {
                     const char*               slot_id;
                     ID3D11ShaderResourceView* srv;
                     const std::string*        name;
-                    bool*                     visible;
+                    int                       mesh_idx;
+                    std::vector<bool*>        visible;
                 };
-                ThumbSpec thumbs[5] = {
-                    {"diffuse",  mesh.srv_diffuse,  &mesh.diffuse_tex_name,  &mesh.diffuse_visible},
-                    {"normal",   mesh.srv_normal,   &mesh.normal_tex_name,   &mesh.normal_visible},
-                    {"specular", mesh.srv_specular, &mesh.specular_tex_name, &mesh.specular_visible},
-                    {"metallic", mesh.srv_metallic, &mesh.metallic_tex_name, &mesh.metallic_visible},
-                    {"extra",    mesh.srv_extra,    &mesh.extra_tex_name,    &mesh.extra_visible},
+                struct MaterialRow {
+                    std::string key;
+                    std::string label;
+                    std::array<ThumbSpec, 5> thumbs;
                 };
-                bool any_thumb = false;
-                for (int ti = 0; ti < 5; ++ti) {
-                    const ThumbSpec& t = thumbs[ti];
-                    if (!t.srv || t.srv == g_mp.default_srv) continue;
-                    if (t.name->empty()) continue;
-                    if (any_thumb) ImGui::SameLine();
-                    any_thumb = true;
-                    ImGui::PushID(t.slot_id);
-                    ImGui::BeginGroup();
-                    ImVec4 tint = (*t.visible) ? ImVec4(1, 1, 1, 1)
-                                               : ImVec4(0.45f, 0.45f, 0.45f, 1);
-                    if (ImGui::ImageButton("##t",
-                                           (ImTextureID)t.srv,
-                                           thumb_size,
-                                           ImVec2(0, 0), ImVec2(1, 1),
-                                           ImVec4(0, 0, 0, 0), tint)) {
-                        ::g_tex_popout_srv      = t.srv;
-                        ::g_tex_popout_name     = *t.name;
-                        ::g_tex_popout_open     = true;
-                        ::g_tex_popout_mesh_idx = mi;
-                    }
-                    if (ImGui::BeginPopupContextItem()) {
-                        const auto* terrain_tex =
-                            TerrainTextureRegistry::Find(*t.name);
-                        if (terrain_tex) {
-                            tex_export_menu_rgba(*t.name,
-                                                 terrain_tex->rgba,
-                                                 terrain_tex->width,
-                                                 terrain_tex->height);
-                        } else {
-                            const std::string& preferred_bnk =
-                                (S.selected_nested_index != -1 &&
-                                 !S.selected_nested_temp_path.empty())
-                                    ? S.selected_nested_temp_path
-                                    : S.selected_bnk;
-                            tex_export_menu_named(*t.name, *t.name,
-                                                  preferred_bnk, 0);
+
+                auto make_row_key = [](const MPPerMesh& m,
+                                       const std::string& label) {
+                    return label + "|" +
+                           m.diffuse_tex_name + "|" +
+                           m.normal_tex_name + "|" +
+                           m.specular_tex_name + "|" +
+                           m.metallic_tex_name + "|" +
+                           m.extra_tex_name;
+                };
+
+                std::vector<MaterialRow> rows;
+                auto append_row_mesh =
+                    [&](MPPerMesh& related, int related_idx) {
+                        const std::string label =
+                            clean_level_material_name(related.name);
+                        const std::string key = make_row_key(related, label);
+                        MaterialRow* row = nullptr;
+                        for (auto& existing : rows) {
+                            if (existing.key == key) {
+                                row = &existing;
+                                break;
+                            }
                         }
-                        ImGui::EndPopup();
+                        if (!row) {
+                            MaterialRow fresh;
+                            fresh.key = key;
+                            fresh.label = label;
+                            fresh.thumbs = {{
+                                {"diffuse",  related.srv_diffuse,
+                                 &related.diffuse_tex_name, related_idx, {}},
+                                {"normal",   related.srv_normal,
+                                 &related.normal_tex_name, related_idx, {}},
+                                {"specular", related.srv_specular,
+                                 &related.specular_tex_name, related_idx, {}},
+                                {"metallic", related.srv_metallic,
+                                 &related.metallic_tex_name, related_idx, {}},
+                                {"extra",    related.srv_extra,
+                                 &related.extra_tex_name, related_idx, {}},
+                            }};
+                            rows.push_back(std::move(fresh));
+                            row = &rows.back();
+                        }
+
+                        row->thumbs[0].visible.push_back(
+                            &related.diffuse_visible);
+                        row->thumbs[1].visible.push_back(
+                            &related.normal_visible);
+                        row->thumbs[2].visible.push_back(
+                            &related.specular_visible);
+                        row->thumbs[3].visible.push_back(
+                            &related.metallic_visible);
+                        row->thumbs[4].visible.push_back(
+                            &related.extra_visible);
+                    };
+
+                for (size_t ri = 0; ri < g_mp.meshes.size(); ++ri) {
+                    auto& related = g_mp.meshes[ri];
+                    if (level_model_key_from_mesh_name(related.name) !=
+                        selected_model_key)
+                    {
+                        continue;
                     }
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("%s\n[%s]",
-                                          t.name->c_str(), t.slot_id);
+                    append_row_mesh(related, (int)ri);
+                }
+
+                if (rows.empty()) {
+                    ImGui::TextDisabled("(no materials)");
+                }
+                for (size_t row_i = 0; row_i < rows.size(); ++row_i) {
+                    MaterialRow& row = rows[row_i];
+                    ImGui::PushID((int)row_i);
+                    ImGui::TextUnformatted(row.label.c_str());
+
+                    bool any_thumb = false;
+                    for (size_t ti = 0; ti < row.thumbs.size(); ++ti) {
+                        ThumbSpec& t = row.thumbs[ti];
+                        if (!t.srv || t.srv == g_mp.default_srv) continue;
+                        if (!t.name || t.name->empty()) continue;
+                        if (any_thumb) ImGui::SameLine();
+                        any_thumb = true;
+                        ImGui::PushID((int)ti);
+                        ImGui::BeginGroup();
+
+                        bool visible = true;
+                        for (bool* v : t.visible) {
+                            if (v && !*v) {
+                                visible = false;
+                                break;
+                            }
+                        }
+
+                        ImVec4 tint = visible
+                            ? ImVec4(1, 1, 1, 1)
+                            : ImVec4(0.45f, 0.45f, 0.45f, 1);
+                        if (ImGui::ImageButton("##t",
+                                               (ImTextureID)t.srv,
+                                               thumb_size,
+                                               ImVec2(0, 0), ImVec2(1, 1),
+                                               ImVec4(0, 0, 0, 0), tint)) {
+                            ::g_tex_popout_srv      = t.srv;
+                            ::g_tex_popout_name     = *t.name;
+                            ::g_tex_popout_open     = true;
+                            ::g_tex_popout_mesh_idx = t.mesh_idx;
+                        }
+                        if (ImGui::BeginPopupContextItem()) {
+                            const auto* terrain_tex =
+                                TerrainTextureRegistry::Find(*t.name);
+                            if (terrain_tex) {
+                                tex_export_menu_rgba(*t.name,
+                                                     terrain_tex->rgba,
+                                                     terrain_tex->width,
+                                                     terrain_tex->height);
+                            } else {
+                                const std::string& preferred_bnk =
+                                    (S.selected_nested_index != -1 &&
+                                     !S.selected_nested_temp_path.empty())
+                                        ? S.selected_nested_temp_path
+                                        : S.selected_bnk;
+                                tex_export_menu_named(*t.name, *t.name,
+                                                      preferred_bnk, 0);
+                            }
+                            ImGui::EndPopup();
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("%s\n[%s]",
+                                              t.name->c_str(), t.slot_id);
+                        }
+                        bool checkbox_visible = visible;
+                        if (ImGui::Checkbox("##vis", &checkbox_visible)) {
+                            for (bool* v : t.visible) {
+                                if (v) *v = checkbox_visible;
+                            }
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Show %s in render", t.slot_id);
+                        }
+                        ImGui::EndGroup();
+                        ImGui::PopID();
                     }
-                    ImGui::Checkbox("##vis", t.visible);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Show %s in render", t.slot_id);
+                    if (!any_thumb) {
+                        ImGui::TextDisabled("(no textures)");
                     }
-                    ImGui::EndGroup();
+                    ImGui::Separator();
                     ImGui::PopID();
                 }
-                if (!any_thumb) {
-                    ImGui::TextDisabled("(no textures)");
-                }
-                ImGui::Separator();
                 ImGui::PopID();
             } else if (g_mp.no_tilt) {
                 const auto& lod = EhfLodThumbnails::Get();
@@ -2193,6 +1732,7 @@ void draw_model_in_panel(ID3D11Device* device) {
         ::g_highlight_mesh_idx       = -1;
         ::g_isolate_mesh_idx         = -1;
         ::g_selected_level_mesh_idx  = -1;
+        ::g_selected_level_pick_id   = 0;
         ::g_tex_popout_open          = false;
         ::g_tex_popout_srv           = nullptr;
         ::g_tex_popout_name.clear();
@@ -2703,34 +2243,93 @@ void draw_model_in_panel(ID3D11Device* device) {
                                      &S.anim_filter);
 
             const uint32_t want_bones = g_mp.bone_count;
+            size_t authored_count = 0;
+            const bool can_filter_by_authored =
+                g_mp.has_model && S.current_mdl_path_hash != 0 &&
+                !S.anim_clips.empty();
+            if (can_filter_by_authored) {
+                const uint64_t authored_sig =
+                    Anim::model_animation_binding_revision() ^
+                    (uint64_t(S.current_mdl_path_hash) << 32) ^
+                    uint64_t(S.anim_clips.size());
+                if (S.anim_authored_signature != authored_sig ||
+                    S.anim_authored_cache.size() != S.anim_clips.size()) {
+                    authored_count =
+                        Anim::build_model_animation_cache_for_hash(
+                            S.current_mdl_path_hash, S.anim_clips.size(),
+                            S.anim_authored_cache);
+                    S.anim_authored_signature = authored_sig;
+                } else {
+                    authored_count = 0;
+                    for (uint8_t v : S.anim_authored_cache) {
+                        if (v) ++authored_count;
+                    }
+                }
+            }
+            const bool has_authored_filter =
+                can_filter_by_authored && authored_count > 0;
+            if (has_authored_filter) {
+                ImGui::Checkbox("Authored model",
+                                &S.anim_authored_only);
+                if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Show clips referenced by GDB animation records for "
+                        "this exact model path hash.");
+                }
+            } else if (S.dev_mode &&
+                       g_mp.has_model && S.current_mdl_path_hash != 0) {
+                ImGui::TextDisabled("No authored animation set");
+            }
             const bool can_filter_by_skeleton =
                 Anim::global_data_file().is_open() &&
                 g_mp.has_model && want_bones > 0;
             if (can_filter_by_skeleton) {
-                ImGui::Checkbox("Same track count",
+                ImGui::Checkbox("Compatible rig",
                                 &S.anim_compatible_only);
                 if (!S.hide_tooltips && ImGui::IsItemHovered()) {
                     ImGui::SetTooltip(
-                        "Show clips whose decoded track count matches this "
-                        "model's %u bones. This is only a size gate, not a "
-                        "proof that the clip belongs to this rig.",
+                        "Show clips whose AnimBank track map matches this "
+                        "model's bone names. Falls back to the old %u-bone "
+                        "track-count gate when no track map is available.",
                         want_bones);
                 }
             } else if (S.dev_mode) {
                 ImGui::TextDisabled("Track-count filter unavailable");
             }
+            const bool filter_by_authored =
+                S.anim_authored_only && has_authored_filter;
             const bool filter_by_bones =
+                !filter_by_authored &&
                 S.anim_compatible_only && can_filter_by_skeleton;
+            if (filter_by_bones) {
+                const uint64_t sig = Anim::rig_compatibility_signature(
+                    S.mdl_info, want_bones, S.anim_clips,
+                    Anim::global_data_file().is_open());
+                if (S.anim_compat_signature != sig ||
+                    S.anim_compat_cache.size() != S.anim_clips.size()) {
+                    Anim::build_rig_compatibility_cache(
+                        S.mdl_info, want_bones, S.anim_clips,
+                        S.anim_compat_cache, S.anim_compat_matches,
+                        S.anim_compat_named_tracks);
+                    S.anim_compat_signature = sig;
+                }
+            }
 
             std::vector<int> vis;
             vis.reserve(S.anim_clips.size());
             std::string flow = S.anim_filter;
             std::transform(flow.begin(), flow.end(), flow.begin(), ::tolower);
             for (size_t i = 0; i < S.anim_clips.size(); ++i) {
-                if (filter_by_bones) {
-                    auto h = Anim::global_data_file().parse_clip_header(
-                        S.anim_clips[i]);
-                    if (!h.ok || h.bone_count != want_bones) continue;
+                if (filter_by_authored) {
+                    if (i >= S.anim_authored_cache.size() ||
+                        !S.anim_authored_cache[i]) {
+                        continue;
+                    }
+                } else if (filter_by_bones) {
+                    if (i >= S.anim_compat_cache.size() ||
+                        !S.anim_compat_cache[i]) {
+                        continue;
+                    }
                 }
                 if (flow.empty()) {
                     vis.push_back((int)i);
@@ -2747,10 +2346,15 @@ void draw_model_in_panel(ID3D11Device* device) {
                 ImGui::TextDisabled("%d / %zu%s",
                                     (int)vis.size(),
                                     S.anim_clips.size(),
-                                    filter_by_bones ? " track-count match" : "");
+                                    filter_by_authored
+                                        ? " authored model"
+                                        : (filter_by_bones ? " rig match" : ""));
                 if (filter_by_bones) {
                     ImGui::SameLine();
                     ImGui::TextDisabled("(%u bones)", want_bones);
+                } else if (filter_by_authored) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(%zu exact)", authored_count);
                 }
             }
 
@@ -2766,7 +2370,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                         ImGui::TextDisabled(
                             "tracks=%u frames=%u fmt=%u",
                             h.bone_count, h.frame_count, h.bone_idx_bits);
-
                         if (ImGui::TreeNodeEx("##anim_bone_view",
                                               ImGuiTreeNodeFlags_None,
                                               "Per-bone bodies")) {
@@ -2822,21 +2425,22 @@ void draw_model_in_panel(ID3D11Device* device) {
             while (clipper.Step()) {
                 for (int row = clipper.DisplayStart;
                      row < clipper.DisplayEnd; ++row) {
+                    const int clip_idx = vis[(size_t)row];
                     const auto& c =
-                        S.anim_clips[(size_t)vis[(size_t)row]];
+                        S.anim_clips[(size_t)clip_idx];
                     ImGui::PushID(row);
                     bool selected =
-                        (S.anim_selected_clip == vis[(size_t)row]);
+                        (S.anim_selected_clip == clip_idx);
                     char label[80];
                     float dur_s = Anim::clip_duration_seconds(c);
                     std::snprintf(label, sizeof(label), "%s  (%.2fs)",
                                   c.name.c_str(), dur_s);
                     if (ImGui::Selectable(label, selected,
                                           ImGuiSelectableFlags_SpanAllColumns)) {
-                        S.anim_selected_clip = vis[(size_t)row];
+                        S.anim_selected_clip = clip_idx;
 
                         Anim::global_player().play(
-                            &S.anim_clips[(size_t)vis[(size_t)row]],
+                            &S.anim_clips[(size_t)clip_idx],
                             Anim::global_player().is_loop());
                     }
                     if (!S.hide_tooltips && ImGui::IsItemHovered()) {
@@ -2853,6 +2457,17 @@ void draw_model_in_panel(ID3D11Device* device) {
                                                 ? "  track-count match"
                                                 : "");
                             }
+                        }
+                        if (c.track_map) {
+                            ImGui::Text("Track map: %zu / %zu model-name matches",
+                                        (clip_idx >= 0 &&
+                                         (size_t)clip_idx < S.anim_compat_matches.size())
+                                            ? (size_t)S.anim_compat_matches[(size_t)clip_idx]
+                                            : 0u,
+                                        (clip_idx >= 0 &&
+                                         (size_t)clip_idx < S.anim_compat_named_tracks.size())
+                                            ? (size_t)S.anim_compat_named_tracks[(size_t)clip_idx]
+                                            : 0u);
                         }
                         ImGui::Text("Events: %zu", c.events.size());
                         if (S.dev_mode) {

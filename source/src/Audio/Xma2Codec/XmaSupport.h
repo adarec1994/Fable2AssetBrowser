@@ -60,7 +60,7 @@ struct CodecContext {
     int           block_align  = 0;
     int           bit_rate     = 0;
     int           flags        = 0;
-    int           debug        = 0;
+    int           log_flags    = 0;
     int64_t       frame_num    = 0;
 
     std::vector<uint8_t> extradata;

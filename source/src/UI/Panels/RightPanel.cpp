@@ -7,6 +7,7 @@
 #include "../../textures/LhTexCodec.h"
 #include "../../MDL/ModelParser.h"
 #include "../../MDL/mdl_converter.h"
+#include "../../animations/AnimBank.h"
 #include "../../Utilities/Utils.h"
 #include "../../Utilities/Files.h"
 #include "../../Utilities/operations.h"
@@ -989,6 +990,10 @@ if (!can_preview) {
         auto name = item.name;
         std::string parse_path = g_pending_mdl_full_path.empty() ? name : g_pending_mdl_full_path;
         g_pending_mdl_full_path.clear();
+        S.current_mdl_path.clear();
+        S.current_mdl_path_hash = 0;
+        S.anim_authored_signature = 0;
+        S.anim_authored_cache.clear();
 
         std::string bnk_to_use;
         std::string nested_temp_copy;
@@ -1053,6 +1058,11 @@ if (!can_preview) {
                     try {
                         S.mdl_info_ok = parse_mdl_info(buf, S.mdl_info, parse_path);
                         if (S.mdl_info_ok) {
+                            S.current_mdl_path = parse_path;
+                            S.current_mdl_path_hash =
+                                Anim::gdb_model_path_hash(parse_path);
+                            S.anim_authored_signature = 0;
+                            S.anim_authored_cache.clear();
                             S.mdl_meshes.clear();
                             if (parse_mdl_geometry(buf, S.mdl_info, S.mdl_meshes)) {
                                 S.pending_preview_build = true;

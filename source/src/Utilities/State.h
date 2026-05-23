@@ -81,7 +81,6 @@ struct GdbViewerRow {
     std::string retarget_skeleton_file_name;
     std::vector<std::string> model_path_names;
     std::vector<uint32_t> model_path_hashes;
-    std::vector<Gdb::DebugNode> debug_tree;
     uint32_t marker = 0;
     uint32_t record_index = 0;
     uint32_t hash = 0;
@@ -230,6 +229,11 @@ struct State {
     std::vector<MDLMeshGeom> mdl_meshes;
 
     std::vector<float> bone_rot_deltas;
+    std::vector<float> bone_anim_rot_absolute;
+    std::vector<uint8_t> bone_anim_rot_present;
+    std::vector<float> bone_anim_trans_delta;
+    std::vector<uint8_t> bone_anim_trans_present;
+    bool bone_anim_pose_active = false;
     int  selected_bone     = -1;
     bool bone_rotate_mode  = false;
     float cam_yaw = 0.0f;
@@ -256,7 +260,16 @@ struct State {
     std::vector<Anim::AnimClip> anim_clips;
     std::string                 anim_filter;
     bool                        anim_compatible_only = true;
+    bool                        anim_authored_only = true;
     int                         anim_selected_clip = -1;
+    std::string                 current_mdl_path;
+    uint32_t                    current_mdl_path_hash = 0;
+    uint64_t                    anim_authored_signature = 0;
+    std::vector<uint8_t>         anim_authored_cache;
+    uint64_t                    anim_compat_signature = 0;
+    std::vector<uint8_t>         anim_compat_cache;
+    std::vector<uint16_t>        anim_compat_matches;
+    std::vector<uint16_t>        anim_compat_named_tracks;
 };
 
 extern State S;

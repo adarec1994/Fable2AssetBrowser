@@ -6,6 +6,7 @@
 #include "../../textures/LhTexCodec.h"
 #include "../../MDL/ModelParser.h"
 #include "../../MDL/mdl_converter.h"
+#include "../../animations/AnimBank.h"
 #include "../../Level/LevelLoader.h"
 #include "../../Level/TextureAtlasDecoder.h"
 #include "../../Level/TerrainTextureRegistry.h"
@@ -62,6 +63,47 @@ struct CachedPropModel {
     std::vector<MDLMeshGeom> geoms;
 };
 
+struct CachedTerrainTextureRgba {
+    std::vector<uint8_t> rgba;
+    int width = 0;
+    int height = 0;
+};
+
+std::unordered_map<std::string, CachedTerrainTextureRgba>& terrain_lod_rgba_cache()
+{
+    static std::unordered_map<std::string, CachedTerrainTextureRgba> cache;
+    return cache;
+}
+
+size_t& terrain_lod_rgba_cache_bytes()
+{
+    static size_t bytes = 0;
+    return bytes;
+}
+
+void remember_terrain_lod_rgba(std::string key,
+                               std::vector<uint8_t> rgba,
+                               int width,
+                               int height)
+{
+    if (rgba.empty() || width <= 0 || height <= 0) return;
+    auto& cache = terrain_lod_rgba_cache();
+    auto& bytes = terrain_lod_rgba_cache_bytes();
+    constexpr size_t kMaxTerrainLodCacheBytes = 96ull * 1024ull * 1024ull;
+    if (bytes + rgba.size() > kMaxTerrainLodCacheBytes) {
+        cache.clear();
+        bytes = 0;
+    }
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+        bytes -= it->second.rgba.size();
+    }
+    bytes += rgba.size();
+    cache[std::move(key)] = CachedTerrainTextureRgba{
+        std::move(rgba), width, height
+    };
+}
+
 static std::string normalized_asset_path(std::string s)
 {
     std::transform(s.begin(), s.end(), s.begin(),
@@ -81,6 +123,12 @@ static bool is_shell_pair_model_path(const std::string& model_path)
 {
     std::string leaf = normalized_asset_path(asset_leaf(model_path));
     return leaf == "exterior.mdl" || leaf == "interior.mdl";
+}
+
+static bool is_market_bridge_facade_proxy_path(const std::string& model_path)
+{
+    return normalized_asset_path(model_path).find("bs_market_bridge_facade") !=
+           std::string::npos;
 }
 
 static std::string asset_parent_key(const std::string& bnk_path)
@@ -409,7 +457,8 @@ static void transform_instance_normal(const Level::PropInstance& inst,
 
 static void merge_transformed_instance_into(MDLMeshGeom& dst,
                                             const MDLMeshGeom& src,
-                                            const Level::PropInstance& inst)
+                                            const Level::PropInstance& inst,
+                                            uint32_t selection_id = 0)
 {
     if (src.positions.empty() || src.indices.empty()) return;
 
@@ -424,17 +473,34 @@ static void merge_transformed_instance_into(MDLMeshGeom& dst,
     }
 
     const uint32_t base_vertex = uint32_t(dst_vcount);
+    const uint32_t index_start = uint32_t(dst.indices.size());
 
     const size_t pos_off = dst.positions.size();
     dst.positions.resize(pos_off + src.positions.size());
+    float mnx =  std::numeric_limits<float>::infinity();
+    float mny =  std::numeric_limits<float>::infinity();
+    float mnz =  std::numeric_limits<float>::infinity();
+    float mxx = -std::numeric_limits<float>::infinity();
+    float mxy = -std::numeric_limits<float>::infinity();
+    float mxz = -std::numeric_limits<float>::infinity();
     for (size_t i = 0; i < src_vcount; ++i) {
         const float lx = src.positions[i*3+0];
         const float ly = src.positions[i*3+2];
         const float lz = src.positions[i*3+1];
+        float x = 0.0f;
+        float y = 0.0f;
+        float z = 0.0f;
         transform_instance_point(inst, lx, ly, lz,
-                                 dst.positions[pos_off + i*3 + 0],
-                                 dst.positions[pos_off + i*3 + 1],
-                                 dst.positions[pos_off + i*3 + 2]);
+                                 x, y, z);
+        dst.positions[pos_off + i*3 + 0] = x;
+        dst.positions[pos_off + i*3 + 1] = y;
+        dst.positions[pos_off + i*3 + 2] = z;
+        mnx = std::min(mnx, x);
+        mny = std::min(mny, y);
+        mnz = std::min(mnz, z);
+        mxx = std::max(mxx, x);
+        mxy = std::max(mxy, y);
+        mxz = std::max(mxz, z);
     }
 
     if (!src.normals.empty()) {
@@ -469,6 +535,26 @@ static void merge_transformed_instance_into(MDLMeshGeom& dst,
     dst.indices.resize(i_off + src.indices.size());
     for (size_t k = 0; k < src.indices.size(); ++k) {
         dst.indices[i_off + k] = src.indices[k] + base_vertex;
+    }
+
+    if (selection_id != 0 && std::isfinite(mnx) && std::isfinite(mxx)) {
+        MDLMeshGeom::PickRange pr;
+        pr.selection_id = selection_id;
+        pr.index_start = index_start;
+        pr.index_count = uint32_t(src.indices.size());
+        pr.center[0] = (mnx + mxx) * 0.5f;
+        pr.center[1] = (mny + mxy) * 0.5f;
+        pr.center[2] = (mnz + mxz) * 0.5f;
+        float r2 = 0.0f;
+        for (size_t i = 0; i < src_vcount; ++i) {
+            const float x = dst.positions[pos_off + i*3 + 0] - pr.center[0];
+            const float y = dst.positions[pos_off + i*3 + 1] - pr.center[1];
+            const float z = dst.positions[pos_off + i*3 + 2] - pr.center[2];
+            r2 = std::max(r2, x * x + y * y + z * z);
+        }
+        pr.radius = std::sqrt(r2);
+        if (pr.radius < 0.0001f) pr.radius = 0.25f;
+        dst.pick_ranges.push_back(pr);
     }
 }
 
@@ -512,6 +598,28 @@ static void init_combined_prop_geom(MDLMeshGeom& dst,
         model_path, src.name, instance_count, block_type);
     if (part_index > 0) {
         dst.name += " part " + std::to_string(part_index + 1);
+    }
+
+    size_t reserve_instances = instance_count;
+    const size_t src_vertices = src.positions.size() / 3;
+    if (src_vertices > 0) {
+        reserve_instances = std::min(
+            reserve_instances,
+            std::max<size_t>(1, kMaxCombinedPropVertices / src_vertices));
+    }
+    if (!src.indices.empty()) {
+        reserve_instances = std::min(
+            reserve_instances,
+            std::max<size_t>(1, kMaxCombinedPropIndices / src.indices.size()));
+    }
+    if (reserve_instances > 0) {
+        dst.positions.reserve(src.positions.size() * reserve_instances);
+        dst.normals.reserve(src.normals.size() * reserve_instances);
+        dst.uvs.reserve(src.uvs.size() * reserve_instances);
+        dst.bone_ids.reserve(src.bone_ids.size() * reserve_instances);
+        dst.bone_weights.reserve(src.bone_weights.size() * reserve_instances);
+        dst.indices.reserve(src.indices.size() * reserve_instances);
+        dst.pick_ranges.reserve(reserve_instances);
     }
 }
 
@@ -611,6 +719,14 @@ static void apply_sky_texture_hashes_to_preview(ModelPreview& mp,
         mp.sky_moon_tried = false;
         mp.sky_moon_tex_name.clear();
     };
+    auto reset_sun_disc = [&]() {
+        if (mp.sky_sun_disc_srv) {
+            mp.sky_sun_disc_srv->Release();
+            mp.sky_sun_disc_srv = nullptr;
+        }
+        mp.sky_sun_disc_tried = false;
+        mp.sky_sun_disc_tex_name.clear();
+    };
     auto reset_glare = [&]() {
         if (mp.sky_moon_glare_srv) {
             mp.sky_moon_glare_srv->Release();
@@ -621,11 +737,16 @@ static void apply_sky_texture_hashes_to_preview(ModelPreview& mp,
     };
 
     reset_overlay();
+    reset_sun_disc();
     reset_moon();
     reset_glare();
     if (sky.has_sky_overlay_texture) {
         mp.sky_overlay_tex_name =
             resolve_env_texture_hash(sky.sky_overlay_texture_hash);
+    }
+    if (sky.has_sun_disc_texture) {
+        mp.sky_sun_disc_tex_name =
+            resolve_env_texture_hash(sky.sun_disc_texture_hash);
     }
     if (sky.has_moon_texture) {
         mp.sky_moon_tex_name =
@@ -677,13 +798,20 @@ static void apply_cloud_theme_to_preview(ModelPreview& mp,
     mp.cloud_layer_count = clouds.layer_count;
     int density_resolved = 0;
     int density_missing = 0;
+    std::ostringstream layer_log;
+    layer_log << "cloud theme layers:";
     for (int i = 0; i < 4; ++i) {
         const Gdb::CloudLayerTheme& layer = clouds.layers[i];
-        const float opacity = 1.0f - std::clamp(layer.transparency, 0.0f, 1.0f);
+        const float opacity = std::clamp(layer.transparency, 0.0f, 1.0f);
         mp.cloud_layer[i][0] = layer.enabled ? opacity : 0.0f;
         mp.cloud_layer[i][1] = layer.height;
         mp.cloud_layer[i][2] = layer.texture_scale_x;
         mp.cloud_layer[i][3] = layer.texture_scale_y;
+
+        mp.cloud_shape[i][0] = layer.size_x;
+        mp.cloud_shape[i][1] = layer.size_y;
+        mp.cloud_shape[i][2] = 0.0f;
+        mp.cloud_shape[i][3] = 0.0f;
 
         mp.cloud_motion[i][0] = layer.position_x;
         mp.cloud_motion[i][1] = layer.position_y;
@@ -712,12 +840,25 @@ static void apply_cloud_theme_to_preview(ModelPreview& mp,
                 ++density_missing;
             }
         }
+        if (layer.enabled) {
+            layer_log << " L" << (i + 1)
+                      << "(alpha=" << std::fixed << std::setprecision(2)
+                      << opacity
+                      << ", height=" << std::setprecision(1)
+                      << layer.height
+                      << ", size=" << layer.size_x << 'x'
+                      << layer.size_y
+                      << ", scale=" << std::setprecision(3)
+                      << layer.texture_scale_x << 'x'
+                      << layer.texture_scale_y << ')';
+        }
     }
     if (clouds.has_any) {
         std::ostringstream ss;
         ss << "cloud theme: density maps resolved=" << density_resolved
            << " missing=" << density_missing;
         OutputLog::info(ss.str());
+        OutputLog::info(layer_log.str());
     }
 }
 
@@ -753,12 +894,16 @@ static void copy_cloud_theme_to_keyframe(MPSkyCloudKeyframe& key,
     key.cloud_layer_count = clouds.layer_count;
     for (int i = 0; i < 4; ++i) {
         const Gdb::CloudLayerTheme& layer = clouds.layers[i];
-        const float opacity =
-            1.0f - std::clamp(layer.transparency, 0.0f, 1.0f);
+        const float opacity = std::clamp(layer.transparency, 0.0f, 1.0f);
         key.cloud_layer[i][0] = layer.enabled ? opacity : 0.0f;
         key.cloud_layer[i][1] = layer.height;
         key.cloud_layer[i][2] = layer.texture_scale_x;
         key.cloud_layer[i][3] = layer.texture_scale_y;
+
+        key.cloud_shape[i][0] = layer.size_x;
+        key.cloud_shape[i][1] = layer.size_y;
+        key.cloud_shape[i][2] = 0.0f;
+        key.cloud_shape[i][3] = 0.0f;
 
         key.cloud_motion[i][0] = layer.position_x;
         key.cloud_motion[i][1] = layer.position_y;
@@ -807,6 +952,12 @@ static void apply_environment_timeline_to_preview(
             mp.sky_overlay_tex_name =
                 resolve_env_texture_hash(src.sky.sky_overlay_texture_hash);
             mp.sky_overlay_tried = false;
+        }
+        if (mp.sky_sun_disc_tex_name.empty() &&
+            src.sky.has_sun_disc_texture) {
+            mp.sky_sun_disc_tex_name =
+                resolve_env_texture_hash(src.sky.sun_disc_texture_hash);
+            mp.sky_sun_disc_tried = false;
         }
         if (mp.sky_moon_tex_name.empty() && src.sky.has_moon_texture) {
             mp.sky_moon_tex_name =
@@ -865,11 +1016,14 @@ static void prop_worker_run(LevelPropStreamState* s)
             (float(s->terrain_height) - 1.0f) * 0.5f * s->terrain_tile_size;
 
         std::unordered_map<std::string, CachedPropModel> cache;
+        uint32_t next_selection_id = 1;
+        bool cancelled = false;
 
         for (const auto& block : s->blocks) {
             current_model = block.model_path;
             if (S.cancel_requested.load()) {
                 OutputLog::warn("prop bake worker aborted: cancel requested");
+                cancelled = true;
                 break;
             }
             if (block.model_path.empty()) {
@@ -925,6 +1079,10 @@ static void prop_worker_run(LevelPropStreamState* s)
                                               std::memory_order_relaxed);
                 continue;
             }
+            if (S.cancel_requested.load()) {
+                cancelled = true;
+                break;
+            }
 
             std::vector<MDLMeshGeom> combined(cached.geoms.size());
             std::vector<size_t> chunk_index(cached.geoms.size(), 0);
@@ -935,6 +1093,12 @@ static void prop_worker_run(LevelPropStreamState* s)
             }
 
             for (const auto& inst : block.instances) {
+                if (S.cancel_requested.load()) {
+                    cancelled = true;
+                    break;
+                }
+                const uint32_t selection_id = next_selection_id++;
+                if (next_selection_id == 0) next_selection_id = 1;
                 for (size_t gi = 0; gi < cached.geoms.size(); ++gi) {
                     const auto& src = cached.geoms[gi];
                     if (!src.positions.empty() && !src.indices.empty()) {
@@ -945,11 +1109,13 @@ static void prop_worker_run(LevelPropStreamState* s)
                                 block.instances.size(), block.type,
                                 chunk_index[gi]);
                         }
-                        merge_transformed_instance_into(combined[gi], src, inst);
+                        merge_transformed_instance_into(combined[gi], src, inst,
+                                                        selection_id);
                     }
                 }
                 s->instances_loaded.fetch_add(1, std::memory_order_relaxed);
             }
+            if (cancelled) break;
 
             for (auto& cg : combined) {
                 if (!cg.positions.empty() && !cg.indices.empty()) {
@@ -971,7 +1137,7 @@ static void prop_worker_run(LevelPropStreamState* s)
     }
 }
 
-static void start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
+static bool start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
                                     MDLInfo info)
 {
     if (g_level_prop_stream.worker.joinable()) {
@@ -985,6 +1151,14 @@ static void start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
     g_level_prop_stream.geoms           = std::move(geoms);
     g_level_prop_stream.info            = std::move(info);
     g_level_prop_stream.blocks          = g_pending_level_prop_blocks;
+    g_level_prop_stream.blocks.erase(
+        std::remove_if(g_level_prop_stream.blocks.begin(),
+                       g_level_prop_stream.blocks.end(),
+                       [](const Level::PropBlock& b) {
+                           return is_market_bridge_facade_proxy_path(
+                               b.model_path);
+                       }),
+        g_level_prop_stream.blocks.end());
     g_level_prop_stream.model_body_bnk  = g_pending_level_model_body_bnk;
     g_level_prop_stream.sky_theme       = g_pending_level_sky_theme;
     g_level_prop_stream.cloud_theme     = g_pending_level_cloud_theme;
@@ -997,7 +1171,11 @@ static void start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
     for (const auto& b : g_level_prop_stream.blocks) {
         g_level_prop_stream.total_instances += b.instances.size();
     }
-    if (g_level_prop_stream.total_instances == 0) return;
+    if (g_level_prop_stream.total_instances == 0) {
+        g_level_prop_stream.geoms.clear();
+        g_level_prop_stream.info = MDLInfo{};
+        return false;
+    }
 
     progress_open((int)g_level_prop_stream.total_instances,
                   "Loading props...");
@@ -1005,6 +1183,7 @@ static void start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
     g_level_prop_stream.phase.store(1);
     g_level_prop_stream.worker = std::thread(prop_worker_run,
                                              &g_level_prop_stream);
+    return true;
 }
 
 static void bind_generated_terrain_textures(
@@ -1058,8 +1237,10 @@ static bool stream_level_prop_batch(ID3D11Device* device)
         g_level_prop_stream.instances_loaded.load(std::memory_order_relaxed);
     const size_t total = g_level_prop_stream.total_instances;
     progress_update((int)loaded, (int)std::max<size_t>(total, 1),
-                    "Loading props " + std::to_string(loaded) + "/" +
-                    std::to_string(total));
+                    S.cancel_requested.load()
+                        ? "Cancelling prop load..."
+                        : ("Loading props " + std::to_string(loaded) + "/" +
+                           std::to_string(total)));
 
     if (phase != 2) return true;
 
@@ -1187,6 +1368,7 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
     size_t instances_loaded = 0;
     size_t models_failed = 0;
     size_t misses_logged = 0;
+    uint32_t next_selection_id = 1;
 
     if (g_pending_level_model_body_bnk.empty()) {
         OutputLog::warn("level props: no level model body BNK resolved");
@@ -1198,6 +1380,7 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
 
     for (const auto& block : g_pending_level_prop_blocks) {
         if (block.model_path.empty()) continue;
+        if (is_market_bridge_facade_proxy_path(block.model_path)) continue;
         auto& cached = cache[block.model_path];
         if (!cached.loaded && cached.geoms.empty()) {
             cached.loaded =
@@ -1226,6 +1409,8 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
         }
 
         for (const auto& inst : block.instances) {
+            const uint32_t selection_id = next_selection_id++;
+            if (next_selection_id == 0) next_selection_id = 1;
             ++instances_seen;
             for (size_t gi = 0; gi < cached.geoms.size(); ++gi) {
                 const auto& src = cached.geoms[gi];
@@ -1236,7 +1421,8 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
                             block.instances.size(), block.type,
                             chunk_index[gi]);
                     }
-                    merge_transformed_instance_into(combined[gi], src, inst);
+                    merge_transformed_instance_into(combined[gi], src, inst,
+                                                    selection_id);
                 }
             }
             ++instances_loaded;
@@ -1321,6 +1507,10 @@ void process_pending_loads() {
         S.show_model_preview = false;
         S.model_preview_open = false;
         S.model_materials_open = false;
+        S.current_mdl_path.clear();
+        S.current_mdl_path_hash = 0;
+        S.anim_authored_signature = 0;
+        S.anim_authored_cache.clear();
         S.selected_bone      = -1;
         S.bone_rotate_mode   = false;
 
@@ -1476,6 +1666,19 @@ void process_pending_loads() {
                     }
                 }
                 if (S.mdl_info_ok) {
+                    S.current_mdl_path = parse_path;
+                    S.current_mdl_path_hash =
+                        Anim::gdb_model_path_hash(parse_path);
+                    S.anim_authored_signature = 0;
+                    S.anim_authored_cache.clear();
+                    const size_t authored =
+                        Anim::model_animation_binding_count_for_hash(
+                            S.current_mdl_path_hash);
+                    if (authored > 0) {
+                        OutputLog::info(
+                            "MDL: authored animation binding(s) for model=" +
+                            std::to_string(authored));
+                    }
 #ifdef _WIN32
                     if (S.texture_window_srv) {
                         S.texture_window_srv->Release();
@@ -1725,7 +1928,8 @@ void process_pending_loads() {
             std::string composite_name;
             std::vector<uint8_t> splat_dbg_rgba;
             int splat_dbg_w = 0, splat_dbg_h = 0;
-            if (Level::BakeEhfTerrainCompositeAndSplatDebug(
+            progress_update(74, 100, "Baking terrain textures...");
+            if (Level::BakeEhfTerrainCompositeAndSplat(
                     g_pending_terrain_ehf_bytes,
                     g_pending_terrain_level_entry.bnk_path,
                     picked_rgba, picked_w, picked_h,
@@ -1805,7 +2009,9 @@ void process_pending_loads() {
                 ag.normals   = am.normals;
                 ag.uvs       = am.uvs;
                 ag.indices   = am.indices;
-                normalize_grid_uvs(ag, am.width, am.height);
+                if (!adj.preserve_mesh_uvs) {
+                    normalize_grid_uvs(ag, am.width, am.height);
+                }
                 ag.bone_ids.assign(am.positions.size() / 3 * 4, 0);
                 ag.bone_weights.assign(am.positions.size() / 3 * 4, 0.f);
                 for (size_t v = 0; v < am.positions.size() / 3; ++v) {
@@ -2016,8 +2222,7 @@ void process_pending_loads() {
                 }
             }
 
-            start_level_prop_stream(geoms, info);
-
+            progress_update(78, 100, "Uploading terrain mesh...");
             if (g_mp.has_model) {
                 MP_Release(g_mp);
                 g_mp.has_model = false;
@@ -2162,7 +2367,7 @@ void process_pending_loads() {
                 if (!Level::BakeEhfTerrainCompositeWithBnk(
                         adj.ehf_bytes, adj.preferred_bnk,
                         adj_rgba, adj_w, adj_h, adj_name,
-                        false)) {
+                        adj.prefer_embedded_albedo)) {
                     continue;
                 }
                 ID3D11ShaderResourceView* adj_srv =
@@ -2172,7 +2377,10 @@ void process_pending_loads() {
                 if (m.srv_diffuse) m.srv_diffuse->Release();
                 m.srv_diffuse = adj_srv;
                 m.diffuse_visible = true;
-                m.diffuse_tex_name = "ehf_composite[" + adj_name + "]";
+                m.diffuse_tex_name =
+                    (adj_name == "embedded_tile_albedo")
+                        ? ("ehf_embedded_tile_albedo[" + adj.label + "]")
+                        : ("ehf_composite[" + adj_name + "]");
 
                 GeneratedTerrainTexture gt;
                 gt.mesh_index = mesh_idx;
@@ -2187,13 +2395,6 @@ void process_pending_loads() {
                     "x" + std::to_string(adj_h) + ")");
             }
             TerrainTextureRegistry::SetLodPalette(main_lod_palette);
-
-            if (!generated_terrain_textures.empty() &&
-                g_level_prop_stream.phase.load(std::memory_order_acquire) != 0)
-            {
-                g_level_prop_stream.terrain_textures =
-                    std::move(generated_terrain_textures);
-            }
 
             if (!g_mp.meshes.empty() && !g_pending_terrain_ehf_bytes.empty()) {
                 const auto& ehf = g_pending_terrain_ehf_bytes;
@@ -2279,6 +2480,7 @@ void process_pending_loads() {
             (void)splat_dbg_rgba; (void)splat_dbg_w; (void)splat_dbg_h;
 
             {
+                progress_update(82, 100, "Preparing terrain materials...");
                 const std::string& preferred_bnk =
                     g_pending_terrain_level_entry.bnk_path;
                 const auto& palette =
@@ -2288,9 +2490,11 @@ void process_pending_loads() {
 
                 auto decode_one = [&](const std::string& path,
                                       ID3D11ShaderResourceView*& out_srv,
-                                      int& out_w, int& out_h)
+                                      int& out_w, int& out_h,
+                                      std::vector<uint8_t>& out_rgba)
                 {
                     out_srv = nullptr; out_w = out_h = 0;
+                    out_rgba.clear();
                     if (path.empty()) return;
 
                     std::string basename =
@@ -2299,6 +2503,19 @@ void process_pending_loads() {
                     std::transform(basename.begin(), basename.end(),
                                    basename.begin(),
                                    [](unsigned char c){ return std::tolower(c); });
+
+                    const std::string cache_key =
+                        normalized_asset_path(preferred_bnk) + "|" + basename;
+                    auto& cache = terrain_lod_rgba_cache();
+                    auto cached = cache.find(cache_key);
+                    if (cached != cache.end()) {
+                        out_rgba = cached->second.rgba;
+                        out_w = cached->second.width;
+                        out_h = cached->second.height;
+                        out_srv = create_srv_from_rgba(device, out_w, out_h,
+                                                       out_rgba);
+                        return;
+                    }
 
                     std::vector<unsigned char> blob_uc;
                     bool stitched = false;
@@ -2321,6 +2538,9 @@ void process_pending_loads() {
                     out_srv = srv;
                     out_w   = w;
                     out_h   = h;
+                    out_rgba = rgba;
+                    remember_terrain_lod_rgba(cache_key, std::move(rgba),
+                                              w, h);
                 };
 
                 for (const auto& pe : palette) {
@@ -2337,14 +2557,18 @@ void process_pending_loads() {
                     e.detail_tile_scale   = pe.detail_tile_scale;
                     e.base_intensity      = pe.base_intensity;
                     e.detail_intensity    = pe.detail_intensity;
-                    decode_one(pe.base_diffuse,   e.srv_base_diffuse,
-                               e.base_diffuse_w,  e.base_diffuse_h);
-                    decode_one(pe.base_normal,    e.srv_base_normal,
-                               e.base_normal_w,   e.base_normal_h);
+                    decode_one(pe.base_diffuse, e.srv_base_diffuse,
+                               e.base_diffuse_w, e.base_diffuse_h,
+                               e.base_diffuse_rgba);
+                    decode_one(pe.base_normal, e.srv_base_normal,
+                               e.base_normal_w, e.base_normal_h,
+                               e.base_normal_rgba);
                     decode_one(pe.detail_diffuse, e.srv_detail_diffuse,
-                               e.detail_diffuse_w, e.detail_diffuse_h);
-                    decode_one(pe.detail_normal,  e.srv_detail_normal,
-                               e.detail_normal_w,  e.detail_normal_h);
+                               e.detail_diffuse_w, e.detail_diffuse_h,
+                               e.detail_diffuse_rgba);
+                    decode_one(pe.detail_normal, e.srv_detail_normal,
+                               e.detail_normal_w, e.detail_normal_h,
+                               e.detail_normal_rgba);
                     thumbs.push_back(std::move(e));
                 }
 
@@ -2364,6 +2588,7 @@ void process_pending_loads() {
                 Level::EhfParsedBody splat_parsed;
                 if (Level::ParseEhfBody(g_pending_terrain_ehf_bytes,
                                         splat_parsed)) {
+                    progress_update(88, 100, "Building terrain splat shader...");
                     std::vector<uint8_t> lm_rgba;
                     int lm_w = 0, lm_h = 0;
                     const auto* lm_entry =
@@ -2401,12 +2626,26 @@ void process_pending_loads() {
                 }
             }
 
+            const size_t terrain_vert_count =
+                geoms.empty() ? 0 : geoms[0].positions.size() / 3;
             OutputLog::success("terrain '" + g_pending_terrain_label +
                                "' built (" +
-                               std::to_string(geoms[0].positions.size()/3) +
+                               std::to_string(terrain_vert_count) +
                                " verts)");
-            if (g_level_prop_stream.phase.load() == 0) {
+            if (S.cancel_requested.load()) {
+                OutputLog::warn("level load cancelled before prop stream");
                 progress_done();
+                S.cancel_requested.store(false);
+            } else {
+                const bool props_started =
+                    start_level_prop_stream(std::move(geoms),
+                                            std::move(info));
+                if (props_started) {
+                    g_level_prop_stream.terrain_textures =
+                        std::move(generated_terrain_textures);
+                } else {
+                    progress_done();
+                }
             }
         }
 
@@ -2482,7 +2721,7 @@ void process_pending_loads() {
             int splat_dbg_w = 0;
             int splat_dbg_h = 0;
 
-            if (Level::BakeEhfTerrainCompositeAndSplatDebug(
+            if (Level::BakeEhfTerrainCompositeAndSplat(
                     g_pending_terrain_ehf_bytes,
                     g_pending_terrain_level_entry.bnk_path,
                     picked_rgba, picked_w, picked_h,
@@ -2550,7 +2789,9 @@ void process_pending_loads() {
                 ag.normals = am.normals;
                 ag.uvs = am.uvs;
                 ag.indices = am.indices;
-                normalize_grid_uvs(ag, am.width, am.height);
+                if (!adj.preserve_mesh_uvs) {
+                    normalize_grid_uvs(ag, am.width, am.height);
+                }
                 ag.bone_ids.assign(am.positions.size() / 3 * 4, 0);
                 ag.bone_weights.assign(am.positions.size() / 3 * 4, 0.f);
                 for (size_t v = 0; v < am.positions.size() / 3; ++v) {

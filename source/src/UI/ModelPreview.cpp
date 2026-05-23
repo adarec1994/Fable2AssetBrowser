@@ -42,6 +42,14 @@ static inline std::string basename_lower_noext(const std::string& s){
     if(p!=std::string::npos) b = b.substr(0,p);
     return tolower_copy(b);
 }
+static bool mp_is_adjacent_terrain_mesh(const MPPerMesh& m)
+{
+    return m.name.rfind("adjacent terrain", 0) == 0;
+}
+static bool mp_should_hide_mesh(const MPPerMesh& m)
+{
+    return !S.dev_mode && mp_is_adjacent_terrain_mesh(m);
+}
 static inline std::string force_tex_ext(const std::string& s){
     std::string base = std::filesystem::path(s).filename().string();
     auto p = base.find_last_of('.');
@@ -1043,6 +1051,10 @@ static void mp_release_sky_textures(ModelPreview& mp){
         mp.sky_overlay_srv->Release();
         mp.sky_overlay_srv = nullptr;
     }
+    if (mp.sky_sun_disc_srv) {
+        mp.sky_sun_disc_srv->Release();
+        mp.sky_sun_disc_srv = nullptr;
+    }
     if (mp.sky_moon_srv) {
         mp.sky_moon_srv->Release();
         mp.sky_moon_srv = nullptr;
@@ -1052,9 +1064,11 @@ static void mp_release_sky_textures(ModelPreview& mp){
         mp.sky_moon_glare_srv = nullptr;
     }
     mp.sky_overlay_tried = false;
+    mp.sky_sun_disc_tried = false;
     mp.sky_moon_tried = false;
     mp.sky_moon_glare_tried = false;
     mp.sky_overlay_tex_name.clear();
+    mp.sky_sun_disc_tex_name.clear();
     mp.sky_moon_tex_name.clear();
     mp.sky_moon_glare_tex_name.clear();
 }
@@ -1091,6 +1105,7 @@ static void mp_release(ModelPreview& mp){
     if(mp.default_srv){ mp.default_srv->Release(); mp.default_srv=nullptr; }
     if(mp.dssWrite){ mp.dssWrite->Release(); mp.dssWrite=nullptr; }
     if(mp.dssNoWrite){ mp.dssNoWrite->Release(); mp.dssNoWrite=nullptr; }
+    if(mp.dssNoWriteLEqual){ mp.dssNoWriteLEqual->Release(); mp.dssNoWriteLEqual=nullptr; }
     mp.has_model = false;
 }
 static bool compile_shader(const char* src, const char* entry, const char* profile, ID3DBlob** blob){
@@ -1243,18 +1258,18 @@ cbuffer CB : register(b0){
     float4   params;
 }
 cbuffer TerrainCB : register(b2){
-    /* xy = world origin (XZ), zw = chunk extent (XZ) */
+    
     float4 chunk_origin_extent;
-    /* x = chunk_w, y = chunk_h, z = lod_count, w = max blend (255 max in u8) */
+    
     float4 chunk_grid_size;
-    /* x = blend_scale  (u8 / blend_scale → [0..1])
-       y = world-space material texture scale */
+    
+
     float4 splat_params;
-    /* Affine mesh→world transform for chunk lookup:
-       world_xy = mesh_xy * mesh_xform.xy + mesh_xform.zw
-       Needed when the mesh was built with the wrong tile_size — for
-       chapter3 the .ghf has tile_size=0 so the mesh ends up 2× the
-       true world extent.  This is the cheap fix: shader rescales. */
+    
+
+
+
+
     float4 mesh_xform;
 }
 Texture2DArray  lod_array     : register(t0);
@@ -1272,15 +1287,15 @@ struct VSOUT{
 };
 
 float3 sample_lod(int slice, float2 uv){
-    /* Sample uses screen-space derivatives implicitly → GPU mipmap. */
+    
     return lod_array.Sample(smp_wrap, float3(uv, slice)).rgb;
 }
 
 float4 PS(VSOUT i) : SV_Target {
-    /* Map mesh-space → world-space (chunk-grid space).  Mesh may be
-       at a different scale than the .ehf chunk world when .ghf tile
-       data is bogus (chapter3 has tile_size=0 in .ghf, so the mesh
-       gets built with the fallback tile=1 → 2× too big). */
+    
+
+
+
     float2 mesh_xy  = float2(i.wp.x, i.wp.z);
     float2 world_xy = mesh_xy * mesh_xform.xy + mesh_xform.zw;
     float2 origin   = chunk_origin_extent.xy;
@@ -1290,17 +1305,17 @@ float4 PS(VSOUT i) : SV_Target {
     float  max_lod  = chunk_grid_size.z;
     float2 mat_uv   = world_xy * splat_params.y;
 
-    /* Map world → chunk-grid coords [0, CW] × [0, CH]. */
+    
     float2 chunk_co = (world_xy - origin) / extent;
 
-    /* Clamp to valid chunk range. */
+    
     float2 chunk_clamped = clamp(chunk_co,
                                  float2(0, 0),
                                  float2(CW - 0.001, CH - 0.001));
     int2   chunk_xy = int2(floor(chunk_clamped));
     float2 corner_uv = frac(chunk_clamped);
 
-    /* 4 bilinear corner weights. */
+    
     float wx = corner_uv.x, wy = corner_uv.y;
     float w00 = (1.0 - wx) * (1.0 - wy);
     float w10 =        wx  * (1.0 - wy);
@@ -1310,9 +1325,9 @@ float4 PS(VSOUT i) : SV_Target {
     float3 final = float3(0.0, 0.0, 0.0);
     float  alpha_sum = 0.0;
 
-    /* Walk up to 16 layers, alpha-stacking.  Runtime loop with
-       early-out at the 0xFF sentinel so most chunks (which have only
-       2-3 layers) skip the unused slots cheaply. */
+    
+
+
     [loop]
     for (int L = 0; L < 16; ++L) {
         float4 idx_norm = chunk_idx.Load(int4(chunk_xy, L, 0));
@@ -1320,51 +1335,51 @@ float4 PS(VSOUT i) : SV_Target {
         if (idx255.x > 254.5) break;
 
         float4 bln_norm = chunk_blend.Load(int4(chunk_xy, L, 0));
-        /* blend_scale lets us recover the original 0..max_blend range
-           (chapter3's max was 3.0 so we map u8 [0,255] → [0, max]) */
+        
+
         float bscale = splat_params.x;
         float4 bln   = bln_norm * 255.0 / bscale;
 
-        /* Sample 4 corner textures.  Indices may legitimately equal
-           each other; this is fine, the shader just does 4 samples. */
+        
+
         float3 c00 = sample_lod((int)idx255.x, mat_uv);
         float3 c10 = sample_lod((int)idx255.y, mat_uv);
         float3 c01 = sample_lod((int)idx255.z, mat_uv);
         float3 c11 = sample_lod((int)idx255.w, mat_uv);
 
-        /* Bilinear-blend the 4 corner samples by position weights. */
+        
         float3 lc = c00 * w00 + c10 * w10 + c01 * w01 + c11 * w11;
 
-        /* Bilinear-blend the 4 corner blend amounts → per-pixel alpha. */
+        
         float la = saturate(bln.x * w00 + bln.y * w10
                           + bln.z * w01 + bln.w * w11);
 
-        /* Alpha-over composite. */
+        
         float one_minus = 1.0 - la;
         final     = final     * one_minus + lc * la;
         alpha_sum = saturate(alpha_sum + la * (1.0 - alpha_sum));
     }
 
-    /* Fallback: if no layer contributed (e.g. all blends zero), use
-       LOD slice 0 directly so we never render black terrain.       */
+    
+
     if (alpha_sum < 0.05) {
         final = sample_lod(0, mat_uv);
     }
 
-    /* Lightmap AO modulation.  Lightmap is sized to the heightfield;
-       map chunk_co (in [0, CW]×[0, CH]) to lightmap UV [0,1].      */
+    
+
     float2 lm_uv = chunk_co / float2(CW, CH);
     float  ao    = lightmap.Sample(smp_wrap, lm_uv).r;
     final *= (ao * 0.55 + 0.45);
 
-    /* Cheap headlamp-like diffuse term. */
+    
     float3 N = normalize(i.n);
     float3 L = normalize(float3(0.3, 0.7, 0.5));
     float  ndotl = saturate(dot(N, L));
     float  shade = 0.55 + 0.45 * ndotl;
     final *= shade;
 
-    /* Highlight tint (same as main shader). */
+    
     if (params.z > 0.5) {
         float3 hi = float3(0.15, 0.45, 1.00);
         final = lerp(final, hi, 0.65);
@@ -1497,24 +1512,25 @@ Texture2D cloud_density2 : register(t10);
 Texture2D cloud_density3 : register(t11);
 Texture2D sky_moon_tex : register(t12);
 Texture2D sky_moon_glare_tex : register(t13);
-Texture2D sky_overlay_tex : register(t14);
+Texture2D sky_sun_disc_tex : register(t14);
 SamplerState smp_cloud : register(s0);
 
 cbuffer SkyCB : register(b4){
     float4 sky_top;
     float4 sky_bottom;
     float4 sky_sunset;
-    float4 sky_params; // x=sun intensity, y=complementary bias, z=rayleigh, w=mie
-    float4 cloud_layer[4];  // x=alpha, y=height, z=scaleX, w=scaleY
-    float4 cloud_motion[4]; // xy=offset, zw=velocity
-    float4 cloud_light[4];  // x=brightness, y=ambient, z=normal, w=translucency
-    float4 cloud_global;    // x=enabled, y=layer count, z=time, w=reserved
+    float4 sky_params; 
+    float4 cloud_layer[4];  
+    float4 cloud_shape[4];  
+    float4 cloud_motion[4]; 
+    float4 cloud_light[4];  
+    float4 cloud_global;    
     float4 cloud_density_flags;
-    float4 sky_right;       // xyz=camera right, w=tan half horizontal fov
-    float4 sky_up;          // xyz=camera up,    w=tan half vertical fov
-    float4 sky_forward;     // xyz=camera forward
-    float4 sky_sun;         // xyz=world-space sun direction
-    float4 sky_texture_flags; // x=moon texture, y=moon glare texture, z=sky overlay
+    float4 sky_right;       
+    float4 sky_up;          
+    float4 sky_forward;     
+    float4 sky_sun;         
+    float4 sky_texture_flags; 
 }
 
 struct PSIN{
@@ -1522,49 +1538,19 @@ struct PSIN{
     float2 uv : TEXCOORD0;
 };
 
-float hash21(float2 p) {
-    p = frac(p * float2(127.1, 311.7));
-    p += dot(p, p + 34.345);
-    return frac(p.x * p.y);
-}
-
-float value_noise(float2 p) {
-    float2 i = floor(p);
-    float2 f = frac(p);
-    float2 u = f * f * (3.0 - 2.0 * f);
-    float a = hash21(i + float2(0.0, 0.0));
-    float b = hash21(i + float2(1.0, 0.0));
-    float c = hash21(i + float2(0.0, 1.0));
-    float d = hash21(i + float2(1.0, 1.0));
-    return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
-}
-
-float fbm(float2 p) {
-    float v = 0.0;
-    float amp = 0.55;
-    [unroll]
-    for (int i = 0; i < 4; ++i) {
-        v += value_noise(p) * amp;
-        p = p * 2.03 + 17.13;
-        amp *= 0.48;
-    }
-    return saturate(v);
-}
-
 float sample_cloud_density(int layer, float2 uv) {
-    float2 st = frac(uv);
-    float density = fbm(uv);
+    float density = 0.0;
     if (layer == 0 && cloud_density_flags.x > 0.5) {
-        density = cloud_density0.SampleLevel(smp_cloud, st, 0.0).r;
+        density = cloud_density0.Sample(smp_cloud, uv).r;
     }
     if (layer == 1 && cloud_density_flags.y > 0.5) {
-        density = cloud_density1.SampleLevel(smp_cloud, st, 0.0).r;
+        density = cloud_density1.Sample(smp_cloud, uv).r;
     }
     if (layer == 2 && cloud_density_flags.z > 0.5) {
-        density = cloud_density2.SampleLevel(smp_cloud, st, 0.0).r;
+        density = cloud_density2.Sample(smp_cloud, uv).r;
     }
     if (layer == 3 && cloud_density_flags.w > 0.5) {
-        density = cloud_density3.SampleLevel(smp_cloud, st, 0.0).r;
+        density = cloud_density3.Sample(smp_cloud, uv).r;
     }
     return density;
 }
@@ -1589,30 +1575,28 @@ float4 PS(PSIN i) : SV_Target {
     float night = saturate((-sun_dir.y + 0.05) / 0.45);
     col = lerp(col, col * 0.22 + float3(0.010, 0.018, 0.050), night);
 
-    float yaw_u_for_stars = atan2(ray.x, ray.z) * 0.15915494;
-    float pitch_v_for_stars = asin(clamp(ray.y, -1.0, 1.0)) * 0.31830989;
-    float star_mask = smoothstep(0.12, 0.85, h) * night;
-    if (sky_texture_flags.z > 0.5) {
-        float2 overlay_uv = frac(float2(yaw_u_for_stars, pitch_v_for_stars) +
-                                 float2(0.5, 0.5));
-        float4 overlay = sky_overlay_tex.SampleLevel(
-            smp_cloud, overlay_uv, 0.0);
-        float overlay_luma = max(max(overlay.r, overlay.g),
-                                 max(overlay.b, overlay.a));
-        col += overlay.rgb * overlay_luma * star_mask;
-    } else {
-        float2 star_grid = floor(float2(yaw_u_for_stars * 180.0,
-                                        pitch_v_for_stars * 90.0));
-        float star_seed = hash21(star_grid);
-        float star = step(0.992, star_seed) * star_mask;
-        col += star * float3(0.95, 0.97, 1.0) *
-               (0.25 + 0.75 * hash21(star_grid + 19.37));
-    }
-
     float sun_align = saturate(dot(ray, sun_dir));
-    float disc = smoothstep(0.9991, 0.99975, sun_align);
-    float glow = pow(sun_align, 48.0 / mie) * 0.18 * saturate(sky_params.x);
-    col += sky_sunset.rgb * (disc * 0.45 + glow) * (1.0 - night);
+    if (sky_texture_flags.z > 0.5 && night < 0.95) {
+        float3 sun_right = cross(float3(0.0, 1.0, 0.0), sun_dir);
+        float right_len = dot(sun_right, sun_right);
+        sun_right = normalize(lerp(float3(1.0, 0.0, 0.0), sun_right,
+                                   step(0.0001, right_len)));
+        float3 sun_up = normalize(cross(sun_dir, sun_right));
+        float2 sun_xy = float2(dot(ray, sun_right), dot(ray, sun_up));
+        float sun_radius = 0.055;
+        float2 sun_uv = sun_xy / sun_radius * 0.5 + 0.5;
+        float in_rect =
+            step(0.0, sun_uv.x) * step(sun_uv.x, 1.0) *
+            step(0.0, sun_uv.y) * step(sun_uv.y, 1.0);
+        if (in_rect > 0.5) {
+            float4 sun_sample = sky_sun_disc_tex.SampleLevel(
+                smp_cloud, sun_uv, 0.0);
+            float sun_alpha = max(max(sun_sample.a, sun_sample.r),
+                                  max(sun_sample.g, sun_sample.b));
+            col = lerp(col, sun_sample.rgb * saturate(sky_params.x),
+                       saturate(sun_alpha * (1.0 - night)));
+        }
+    }
     col += sky_top.rgb * (1.0 - h) * 0.05;
 
     float3 moon_dir = normalize(-sun_dir);
@@ -1642,8 +1626,7 @@ float4 PS(PSIN i) : SV_Target {
             moon_alpha *= max(max(moon_sample.a, moon_sample.r),
                               max(moon_sample.g, moon_sample.b));
         } else {
-            float craters = value_noise(moon_uv * 12.0) * 0.18;
-            moon_col -= craters;
+            moon_alpha = 0.0;
         }
         float glare = pow(moon_align, 220.0) * 0.45;
         if (sky_texture_flags.y > 0.5 && in_rect > 0.5) {
@@ -1666,17 +1649,18 @@ float4 PS(PSIN i) : SV_Target {
             if (alpha <= 0.001) continue;
 
             float height_bias = saturate((cloud_layer[layer].y - 150.0) / 900.0);
-            float horizon = smoothstep(0.05, 0.82, h);
-            float top_fade = 1.0 - smoothstep(0.88, 1.0, h);
+            float horizon = smoothstep(0.01, 0.22, ray.y);
+            float top_fade = 1.0 - smoothstep(0.98, 1.0, h);
             float visibility = horizon * top_fade;
 
-            float2 scale = max(abs(cloud_layer[layer].zw), float2(0.08, 0.08));
+            float layer_height = max(abs(cloud_layer[layer].y), 1.0);
+            float2 size = max(abs(cloud_shape[layer].xy), float2(1.0, 1.0));
+            float2 scale = max(abs(cloud_layer[layer].zw), float2(0.001, 0.001));
             float2 drift = cloud_motion[layer].xy + cloud_motion[layer].zw * cloud_global.z;
-            float yaw_u = atan2(ray.x, ray.z) * 0.15915494;
-            float pitch_v = asin(clamp(ray.y, -1.0, 1.0)) * 0.31830989;
-            float2 sky_uv = float2(yaw_u, pitch_v) + 0.5;
-            float2 p = sky_uv * scale * float2(2.0, 1.15) + drift;
-            p.x += height_bias * 1.7;
+            float plane_denom = max(ray.y, 0.02);
+            float2 plane = ray.xz * (layer_height / plane_denom);
+            float2 p = (plane / size + drift) * scale;
+            p += height_bias * float2(0.17, 0.035);
 
             float n = sample_cloud_density(layer, p);
             float density = smoothstep(0.18 + height_bias * 0.04,
@@ -1706,16 +1690,16 @@ cbuffer CB : register(b0){
     float4x4 mvp;
     float4   lightDir;
     float4x4 mv;
-    float4   params;       // params.w = time (seconds)
+    float4   params;       
 }
 cbuffer WaterCB : register(b3){
-    /* xy = wave dir 0 (unit XZ), z = wavelength 0, w = amplitude 0 */
+    
     float4 wave0;
     float4 wave1;
     float4 wave2;
     float4 wave3;
-    /* x = scroll_speed_0, y = scroll_speed_1, z = normal_intensity,
-       w = base_water_y                                                */
+    
+
     float4 wparams;
     float4 wtheme0;
     float4 wtheme1;
@@ -1738,7 +1722,7 @@ struct VSOUT{
 
 float wave_disp(float4 w, float2 xz, float t, float speed){
     if (w.z <= 0.0001) return 0.0;
-    float k = 6.28318 / w.z;                  // 2π / wavelength
+    float k = 6.28318 / w.z;                  
     float phase = dot(w.xy, xz) * k + t * speed;
     return sin(phase) * w.w;
 }
@@ -1766,18 +1750,18 @@ cbuffer CB : register(b0){
     float4x4 mvp;
     float4   lightDir;
     float4x4 mv;
-    float4   params;       // params.w = time (seconds)
+    float4   params;       
 }
 cbuffer WaterCB : register(b3){
     float4 wave0;
     float4 wave1;
     float4 wave2;
     float4 wave3;
-    float4 wparams;        // x=scroll0, y=scroll1, z=normal_intensity, w=base_y
-    float4 wtheme0;        // shallow rgb, opacity
-    float4 wtheme1;        // deep rgb, fresnel_bias
-    float4 wtheme2;        // edge min/max/bias/max refraction distance
-    float4 wtheme3;        // reflection strength/refraction scale/reflection scale/normal scale
+    float4 wparams;        
+    float4 wtheme0;        
+    float4 wtheme1;        
+    float4 wtheme2;        
+    float4 wtheme3;        
 }
 Texture2D    tex_normal : register(t0);
 SamplerState smp        : register(s0);
@@ -1818,15 +1802,15 @@ float4 PS(PSIN i) : SV_Target {
     float ndotl = saturate(dot(N, L));
     float facing = saturate(N.y);
 
-    // Two-tone water colour: deep blue at glancing angles, lighter
-    // greenish at shallow viewing angles.
+    
+    
     float3 deep    = wtheme1.rgb;
     float3 shallow = wtheme0.rgb;
     float3 sky     = float3(0.58, 0.62, 0.57);
-    // We don't have a real view vector handy without a camera CB, so
-    // approximate Fresnel with the projected screen-space Y from
-    // SV_Position — works well enough for a flat surface viewed from
-    // above.
+    
+    
+    
+    
     float fresnel = pow(saturate(1.0 - facing + wtheme1.w), 2.2);
     float3 base = lerp(deep, shallow, facing * 0.85 + 0.10);
     base *= 0.42 + ndotl * 0.42;
@@ -1835,7 +1819,7 @@ float4 PS(PSIN i) : SV_Target {
     base += sky * (fresnel * (0.18 + reflection_strength * 0.32)
                  * reflection_scale);
 
-    // Specular highlight along light direction.
+    
     float3 H = normalize(L + float3(0.0, 1.0, 0.0));
     float spec = pow(saturate(dot(N, H)), 96.0);
     float sparkle = pow(saturate(dot(normalize(float3(ripple.x, 0.25, ripple.y)), H)), 48.0);
@@ -2020,7 +2004,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     {
         D3D11_BUFFER_DESC scb{};
         scb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        scb.ByteWidth = 22 * 16;
+        scb.ByteWidth = 27 * 16;
         scb.Usage = D3D11_USAGE_DYNAMIC;
         scb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         dev->CreateBuffer(&scb, nullptr, &mp.cbuffer_sky);
@@ -2093,6 +2077,9 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     dssn.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
     dssn.DepthFunc = D3D11_COMPARISON_LESS;
     if(FAILED(dev->CreateDepthStencilState(&dssn, &mp.dssNoWrite))) return false;
+    D3D11_DEPTH_STENCIL_DESC dssle = dssn;
+    dssle.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    if(FAILED(dev->CreateDepthStencilState(&dssle, &mp.dssNoWriteLEqual))) return false;
     if(!create_white_srv(dev, &mp.default_srv)) return false;
     return true;
 }
@@ -2162,6 +2149,27 @@ static XMMATRIX bone_local_matrix(const float* tf, const float* delta ){
 
         XMMATRIX D_ = XMMatrixRotationQuaternion(qd);
         R_ = D_ * R_;
+    }
+    XMMATRIX T_ = XMMatrixTranslationFromVector(t);
+    return S_ * R_ * T_;
+}
+
+static XMMATRIX bone_local_matrix_anim_delta(const float* tf,
+                                             const float* anim_q,
+                                             const float* anim_t) {
+    XMVECTOR q = XMVectorSet(tf[0], tf[1], tf[2], tf[3]);
+    XMVECTOR t = XMVectorSet(tf[4], tf[5], tf[6], 0.0f);
+    XMVECTOR s = XMVectorSet(tf[7], tf[8], tf[9], 1.0f);
+    XMMATRIX S_ = XMMatrixScalingFromVector(s);
+    XMMATRIX R_ = XMMatrixRotationQuaternion(q);
+    if (anim_q) {
+        XMVECTOR qd = XMVectorSet(anim_q[0], anim_q[1],
+                                  anim_q[2], anim_q[3]);
+        R_ = XMMatrixRotationQuaternion(qd);
+    }
+    if (anim_t) {
+        XMVECTOR dt = XMVectorSet(anim_t[0], anim_t[1], anim_t[2], 0.0f);
+        t = XMVectorAdd(t, dt);
     }
     XMMATRIX T_ = XMMatrixTranslationFromVector(t);
     return S_ * R_ * T_;
@@ -2322,10 +2330,14 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
                 m.center[0] = (mnx + mxx) * 0.5f;
                 m.center[1] = (mny + mxy) * 0.5f;
                 m.center[2] = (mnz + mxz) * 0.5f;
-                const float dx = mxx - mnx;
-                const float dy = mxy - mny;
-                const float dz = mxz - mnz;
-                m.radius = std::max(std::max(dx, dy), dz) * 0.5f;
+                float r2 = 0.0f;
+                for (size_t v = 0; v + 2 < g.positions.size(); v += 3) {
+                    const float x = g.positions[v + 0] - m.center[0];
+                    const float y = g.positions[v + 1] - m.center[1];
+                    const float z = g.positions[v + 2] - m.center[2];
+                    r2 = std::max(r2, x * x + y * y + z * z);
+                }
+                m.radius = std::sqrt(r2);
                 if (m.radius < 0.0001f) m.radius = 0.25f;
             } else {
                 m.center[0] = m.center[1] = m.center[2] = 0.0f;
@@ -2403,6 +2415,23 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
                     sizeof(m.water_theme_params));
 
         m.source_mesh_idx = (uint32_t)i;
+        m.pick_ranges.clear();
+        m.pick_ranges.reserve(g.pick_ranges.size());
+        for (const auto& pr : g.pick_ranges) {
+            MPPerMesh::PickRange mr;
+            mr.selection_id = pr.selection_id;
+            mr.index_start = pr.index_start;
+            mr.index_count = pr.index_count;
+            mr.center[0] = pr.center[0];
+            mr.center[1] = pr.center[1];
+            mr.center[2] = pr.center[2];
+            mr.radius = pr.radius;
+            m.pick_ranges.push_back(mr);
+        }
+        if (!m.pick_ranges.empty()) {
+            m.pick_positions = g.positions;
+            m.pick_indices = g.indices;
+        }
 
         std::string preferred_for_tex =
             (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty())
@@ -2481,6 +2510,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     if (mp.lod_count > 1) {
         mp.selected_lod = 0;
     }
+    mp.selected_pick_id = 0;
 
     mp.bone_count = 0;
     mp.bone_parents.clear();
@@ -2523,6 +2553,11 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     for (uint32_t i = 0; i < mp.bone_count; ++i){
         S.bone_rot_deltas[(size_t)i * 4 + 3] = 1.0f;
     }
+    S.bone_anim_rot_absolute.clear();
+    S.bone_anim_rot_present.clear();
+    S.bone_anim_trans_delta.clear();
+    S.bone_anim_trans_present.clear();
+    S.bone_anim_pose_active = false;
     S.selected_bone     = -1;
     S.bone_rotate_mode  = false;
 
@@ -2567,6 +2602,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     float render_sky_sunset[3] = {};
     float render_sky_params[4] = {};
     float render_cloud_layer[4][4] = {};
+    float render_cloud_shape[4][4] = {};
     float render_cloud_motion[4][4] = {};
     float render_cloud_light[4][4] = {};
     std::copy(std::begin(mp.sky_top_colour),
@@ -2584,6 +2620,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     for (int ci = 0; ci < 4; ++ci) {
         for (int cj = 0; cj < 4; ++cj) {
             render_cloud_layer[ci][cj] = mp.cloud_layer[ci][cj];
+            render_cloud_shape[ci][cj] = mp.cloud_shape[ci][cj];
             render_cloud_motion[ci][cj] = mp.cloud_motion[ci][cj];
             render_cloud_light[ci][cj] = mp.cloud_light[ci][cj];
         }
@@ -2658,6 +2695,9 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 render_cloud_layer[ci][cj] =
                     lerp(keys[a].cloud_layer[ci][cj],
                          keys[b].cloud_layer[ci][cj]);
+                render_cloud_shape[ci][cj] =
+                    lerp(keys[a].cloud_shape[ci][cj],
+                         keys[b].cloud_shape[ci][cj]);
                 render_cloud_motion[ci][cj] =
                     lerp(keys[a].cloud_motion[ci][cj],
                          keys[b].cloud_motion[ci][cj]);
@@ -2756,17 +2796,17 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                              mp.sky_moon_glare_tried,
                              mp.sky_moon_glare_srv,
                              "sky moon glare");
-        load_sky_texture_srv(mp.sky_overlay_tex_name,
-                             mp.sky_overlay_tried,
-                             mp.sky_overlay_srv,
-                             "sky overlay");
-
+        load_sky_texture_srv(mp.sky_sun_disc_tex_name,
+                             mp.sky_sun_disc_tried,
+                             mp.sky_sun_disc_srv,
+                             "sky sun disc");
         struct SkyCB {
             XMFLOAT4 top;
             XMFLOAT4 bottom;
             XMFLOAT4 sunset;
             XMFLOAT4 params;
             XMFLOAT4 cloud_layer[4];
+            XMFLOAT4 cloud_shape[4];
             XMFLOAT4 cloud_motion[4];
             XMFLOAT4 cloud_light[4];
             XMFLOAT4 cloud_global;
@@ -2812,6 +2852,11 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 finite_raw(render_cloud_layer[ci][1], 350.0f),
                 finite_raw(render_cloud_layer[ci][2], 1.0f),
                 finite_raw(render_cloud_layer[ci][3], 1.0f));
+            sky_cb.cloud_shape[ci] = XMFLOAT4(
+                std::max(finite_raw(render_cloud_shape[ci][0], 1024.0f), 1.0f),
+                std::max(finite_raw(render_cloud_shape[ci][1], 1024.0f), 1.0f),
+                finite_raw(render_cloud_shape[ci][2], 0.0f),
+                finite_raw(render_cloud_shape[ci][3], 0.0f));
             sky_cb.cloud_motion[ci] = XMFLOAT4(
                 finite_raw(render_cloud_motion[ci][0], 0.0f),
                 finite_raw(render_cloud_motion[ci][1], 0.0f),
@@ -2828,7 +2873,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         sky_cb.cloud_global = XMFLOAT4(
             cloud_count > 0 ? 1.0f : 0.0f,
             static_cast<float>(cloud_count),
-            sky_time * 2.0f,
+            sky_time * 0.25f,
             0.0f);
         sky_cb.cloud_density_flags = XMFLOAT4(
             mp.cloud_density_srv[0] ? 1.0f : 0.0f,
@@ -2854,7 +2899,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         sky_cb.sky_texture_flags = XMFLOAT4(
             mp.sky_moon_srv ? 1.0f : 0.0f,
             mp.sky_moon_glare_srv ? 1.0f : 0.0f,
-            mp.sky_overlay_srv ? 1.0f : 0.0f,
+            mp.sky_sun_disc_srv ? 1.0f : 0.0f,
             0.0f);
 
         D3D11_MAPPED_SUBRESOURCE sms{};
@@ -2883,7 +2928,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         ID3D11ShaderResourceView* sky_texture_srvs[3] = {
             mp.sky_moon_srv,
             mp.sky_moon_glare_srv,
-            mp.sky_overlay_srv
+            mp.sky_sun_disc_srv
         };
         ctx->PSSetShaderResources(12, 3, sky_texture_srvs);
         ID3D11SamplerState* sky_sampler = mp.sampler;
@@ -2955,10 +3000,28 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
 
         std::vector<XMFLOAT4X4> local(n);
         bool have_deltas = (S.bone_rot_deltas.size() >= (size_t)n * 4);
+        const bool have_anim_pose =
+            S.bone_anim_pose_active &&
+            S.bone_anim_rot_absolute.size() >= (size_t)n * 4 &&
+            S.bone_anim_rot_present.size() >= (size_t)n;
+        const bool have_anim_trans =
+            S.bone_anim_trans_delta.size() >= (size_t)n * 3 &&
+            S.bone_anim_trans_present.size() >= (size_t)n;
         for (uint32_t i = 0; i < n; ++i){
             const float* tf = &mp.local_rest[(size_t)i * 11];
             const float* dq = have_deltas ? &S.bone_rot_deltas[(size_t)i * 4] : nullptr;
-            XMMATRIX L = bone_local_matrix(tf, dq);
+            const float* aq =
+                (have_anim_pose && S.bone_anim_rot_present[(size_t)i])
+                    ? &S.bone_anim_rot_absolute[(size_t)i * 4]
+                    : nullptr;
+            const float* at =
+                (have_anim_pose && have_anim_trans &&
+                 S.bone_anim_trans_present[(size_t)i])
+                    ? &S.bone_anim_trans_delta[(size_t)i * 3]
+                    : nullptr;
+            XMMATRIX L = have_anim_pose
+                ? bone_local_matrix_anim_delta(tf, aq, at)
+                : bone_local_matrix(tf, dq);
             XMStoreFloat4x4(&local[i], L);
         }
 
@@ -3003,7 +3066,10 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     }
 
     bool any_isolated = false;
-    for (const auto& mm : mp.meshes) { if (mm.isolated) { any_isolated = true; break; } }
+    for (const auto& mm : mp.meshes) {
+        if (mp_should_hide_mesh(mm)) continue;
+        if (mm.isolated) { any_isolated = true; break; }
+    }
 
     const float water_time = (float)ImGui::GetTime();
     auto upload_per_mesh_cb = [&](bool highlight){
@@ -3260,8 +3326,48 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         ctx->PSSetShaderResources(0, 5, nullsrvs);
     };
 
+    auto draw_regular_range = [&](const MPPerMesh& m,
+                                  uint32_t index_start,
+                                  uint32_t index_count,
+                                  ID3D11BlendState* bs) {
+        if (index_count == 0 || index_start >= m.index_count) return;
+        if (index_start + index_count > m.index_count) {
+            index_count = m.index_count - index_start;
+        }
+        UINT stride=sizeof(MPVertex), offset=0;
+        ctx->IASetInputLayout(mp.layout);
+        ctx->VSSetShader(mp.vs, nullptr, 0);
+        ctx->PSSetShader(mp.ps, nullptr, 0);
+        ctx->IASetVertexBuffers(0,1,&m.vb,&stride,&offset);
+        ctx->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->OMSetBlendState(bs, blend_factor, 0xFFFFFFFF);
+
+        ID3D11ShaderResourceView* diffuse_to_use  =
+            (m.diffuse_visible  && m.srv_diffuse)  ? m.srv_diffuse  : mp.default_srv;
+        ID3D11ShaderResourceView* normal_to_use   =
+            (m.normal_visible   && m.srv_normal)   ? m.srv_normal   : mp.default_srv;
+        ID3D11ShaderResourceView* specular_to_use =
+            (m.specular_visible && m.srv_specular) ? m.srv_specular : mp.default_srv;
+        ID3D11ShaderResourceView* metallic_to_use =
+            (m.metallic_visible && m.srv_metallic) ? m.srv_metallic : mp.default_srv;
+        ID3D11ShaderResourceView* extra_to_use    =
+            (m.extra_visible    && m.srv_extra)    ? m.srv_extra    : mp.default_srv;
+        ID3D11ShaderResourceView* srvs[5] = {
+            diffuse_to_use, normal_to_use, specular_to_use,
+            metallic_to_use, extra_to_use
+        };
+        ctx->PSSetShaderResources(0, 5, srvs);
+        ctx->DrawIndexed(index_count, index_start, 0);
+        ID3D11ShaderResourceView* nullsrvs[5] = {
+            nullptr, nullptr, nullptr, nullptr, nullptr
+        };
+        ctx->PSSetShaderResources(0, 5, nullsrvs);
+    };
+
     ctx->OMSetDepthStencilState(mp.dssWrite, 0);
     for(const auto& m : mp.meshes){
+        if (mp_should_hide_mesh(m)) continue;
         if(!m.vb || !m.ib || m.index_count==0 || m.has_alpha) continue;
         if (any_isolated && !m.isolated) continue;
         if (mp.selected_lod >= 0 &&
@@ -3271,12 +3377,31 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     }
     ctx->OMSetDepthStencilState(mp.dssNoWrite, 0);
     for(const auto& m : mp.meshes){
+        if (mp_should_hide_mesh(m)) continue;
         if(!m.vb || !m.ib || m.index_count==0 || !m.has_alpha) continue;
         if (any_isolated && !m.isolated) continue;
         if (mp.selected_lod >= 0 &&
             m.lod_index != (uint32_t)mp.selected_lod) continue;
         upload_per_mesh_cb(m.highlight);
         draw_one(m, mp.bsAlpha);
+    }
+
+    if (mp.selected_pick_id != 0 && mp.dssNoWriteLEqual) {
+        ctx->OMSetDepthStencilState(mp.dssNoWriteLEqual, 0);
+        upload_per_mesh_cb(true);
+        for (const auto& m : mp.meshes) {
+            if (mp_should_hide_mesh(m)) continue;
+            if (!m.vb || !m.ib || m.index_count == 0) continue;
+            if (m.is_terrain || m.is_water) continue;
+            if (any_isolated && !m.isolated) continue;
+            if (mp.selected_lod >= 0 &&
+                m.lod_index != (uint32_t)mp.selected_lod) continue;
+            ID3D11BlendState* bs = m.has_alpha ? mp.bsAlpha : mp.bs;
+            for (const auto& pr : m.pick_ranges) {
+                if (pr.selection_id != mp.selected_pick_id) continue;
+                draw_regular_range(m, pr.index_start, pr.index_count, bs);
+            }
+        }
     }
     ctx->Release();
 }
@@ -3293,12 +3418,30 @@ void MP_ComputeWorldPose(const ModelPreview& mp,
     if (mp.bone_parents.size() < (size_t)n)       return;
 
     const bool have_deltas = (deltas.size() >= (size_t)n * 4);
+    const bool have_anim_pose =
+        S.bone_anim_pose_active &&
+        S.bone_anim_rot_absolute.size() >= (size_t)n * 4 &&
+        S.bone_anim_rot_present.size() >= (size_t)n;
+    const bool have_anim_trans =
+        S.bone_anim_trans_delta.size() >= (size_t)n * 3 &&
+        S.bone_anim_trans_present.size() >= (size_t)n;
 
     std::vector<XMFLOAT4X4> local(n);
     for (uint32_t i = 0; i < n; ++i){
         const float* tf = &mp.local_rest[(size_t)i * 11];
         const float* dq = have_deltas ? &deltas[(size_t)i * 4] : nullptr;
-        XMMATRIX L = bone_local_matrix(tf, dq);
+        const float* aq =
+            (have_anim_pose && S.bone_anim_rot_present[(size_t)i])
+                ? &S.bone_anim_rot_absolute[(size_t)i * 4]
+                : nullptr;
+        const float* at =
+            (have_anim_pose && have_anim_trans &&
+             S.bone_anim_trans_present[(size_t)i])
+                ? &S.bone_anim_trans_delta[(size_t)i * 3]
+                : nullptr;
+        XMMATRIX L = have_anim_pose
+            ? bone_local_matrix_anim_delta(tf, aq, at)
+            : bone_local_matrix(tf, dq);
         XMStoreFloat4x4(&local[i], L);
     }
 
@@ -3660,6 +3803,7 @@ void MP_Render(ModelPreview& mp, const FlyCam& cam) {
     glUniformMatrix4fv(mp.mv_loc, 1, GL_FALSE, MV);
     glDepthMask(GL_TRUE);
     for (const auto& m : mp.meshes) {
+        if (mp_should_hide_mesh(m)) continue;
         if (!m.vao || m.index_count == 0 || m.has_alpha) continue;
         if (mp.selected_lod >= 0 &&
             m.lod_index != (uint32_t)mp.selected_lod) continue;
@@ -3678,6 +3822,7 @@ void MP_Render(ModelPreview& mp, const FlyCam& cam) {
     }
     glDepthMask(GL_FALSE);
     for (const auto& m : mp.meshes) {
+        if (mp_should_hide_mesh(m)) continue;
         if (!m.vao || m.index_count == 0 || !m.has_alpha) continue;
         if (mp.selected_lod >= 0 &&
             m.lod_index != (uint32_t)mp.selected_lod) continue;

@@ -69,17 +69,30 @@ void start_tree_build_for_root(const std::string& root_dir,
     g_tree_root.children.clear();
     g_tree_done_units.store(0);
 
-    g_tree_total_units.store((int)bnk_paths.size());
+    const int anim_name_units = S.anim_clips.empty() ? 0 : 1;
+    g_tree_total_units.store((int)bnk_paths.size() + anim_name_units);
     set_tree_label("");
 
     S.nested_bnk_paths.clear();
     S.nested_bnk_parents.clear();
     S.nested_bnk_virtual_paths.clear();
 
-    std::thread([bnk_snapshot = std::move(bnk_paths)]() mutable {
+    std::thread([root_snapshot = root_dir,
+                 bnk_snapshot = std::move(bnk_paths)]() mutable {
         try {
             build_unified_file_tree(g_tree_root, std::move(bnk_snapshot));
         } catch (...) {  }
+
+        if (!root_snapshot.empty() && !S.anim_clips.empty()) {
+            set_tree_label("Resolving animation names");
+            try {
+                Anim::resolve_clip_names_from_gdb_animation_fields_for_root(
+                    root_snapshot, S.anim_clips);
+                S.anim_authored_signature = 0;
+                S.anim_authored_cache.clear();
+            } catch (...) {  }
+            g_tree_done_units.fetch_add(1);
+        }
 
         g_tree_build_complete.store(true);
         g_tree_built.store(true);

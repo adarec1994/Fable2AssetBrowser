@@ -269,7 +269,33 @@ bool Build(ID3D11Device*                                       device,
                 }
 
                 std::vector<uint8_t> resized;
-                if (src_srv) {
+                const std::vector<uint8_t>* direct_rgba = nullptr;
+                int direct_w = 0;
+                int direct_h = 0;
+                if (detail_array) {
+                    if (!lod_thumbs[s].detail_diffuse_rgba.empty()) {
+                        direct_rgba = &lod_thumbs[s].detail_diffuse_rgba;
+                        direct_w = lod_thumbs[s].detail_diffuse_w;
+                        direct_h = lod_thumbs[s].detail_diffuse_h;
+                    }
+                } else if (!lod_thumbs[s].base_diffuse_rgba.empty()) {
+                    direct_rgba = &lod_thumbs[s].base_diffuse_rgba;
+                    direct_w = lod_thumbs[s].base_diffuse_w;
+                    direct_h = lod_thumbs[s].base_diffuse_h;
+                } else if (!lod_thumbs[s].detail_diffuse_rgba.empty()) {
+                    direct_rgba = &lod_thumbs[s].detail_diffuse_rgba;
+                    direct_w = lod_thumbs[s].detail_diffuse_w;
+                    direct_h = lod_thumbs[s].detail_diffuse_h;
+                }
+
+                if (direct_rgba && direct_w > 0 && direct_h > 0) {
+                    resize_rgba8(*direct_rgba, direct_w, direct_h,
+                                 resized, W, H);
+                    if (!detail_array && base_fallback.empty()) {
+                        base_fallback = resized;
+                    }
+                    ++out_real_seeded;
+                } else if (src_srv) {
                     std::vector<uint8_t> src_rgba;
                     int sw = 0, sh = 0;
                     if (readback_srv_rgba(device, src_srv,

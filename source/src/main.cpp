@@ -61,6 +61,14 @@ static std::string get_config_path() {
 }
 
 namespace {
+std::string animated_ellipsis_text(const std::string& text) {
+    if (text.size() < 3 || text.compare(text.size() - 3, 3, "...") != 0) {
+        return text;
+    }
+    const int dots = (int)std::fmod(ImGui::GetTime() * 2.6f, 3.0f) + 1;
+    return text.substr(0, text.size() - 3) + std::string((size_t)dots, '.');
+}
+
 std::map<std::string, std::string> read_config_kv() {
     std::map<std::string, std::string> kv;
     std::ifstream f(get_config_path());
@@ -395,16 +403,25 @@ int main() {
             S.show_completion = false;
         }
         ImGuiViewport *vp = ImGui::GetMainViewport();
-        float w = std::clamp(vp->WorkSize.x * 0.6f, 520.0f, 900.0f);
+        float w = std::clamp(vp->WorkSize.x * 0.46f, 420.0f, 680.0f);
         const ImGuiStyle &st = ImGui::GetStyle();
-        float line = ImGui::GetTextLineHeightWithSpacing();
-        float h = st.WindowPadding.y * 2.0f + line + st.ItemSpacing.y + (line * 2.0f + 6.0f) + st.ItemSpacing.y +
-                  ImGui::GetFrameHeight() + st.ItemSpacing.y + ImGui::GetFrameHeight() + 12.0f;
-        ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Appearing);
-        ImGui::SetNextWindowPos(vp->WorkPos + ImVec2((vp->WorkSize.x - w) * 0.5f, (vp->WorkSize.y - h) * 0.5f),
-                                ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints(
+            ImVec2(w, 0.0f),
+            ImVec2(w, std::max(220.0f, vp->WorkSize.y - 48.0f)));
+        ImGui::SetNextWindowPos(
+            vp->WorkPos + vp->WorkSize * 0.5f,
+            ImGuiCond_Always,
+            ImVec2(0.5f, 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.065f, 0.072f, 0.092f, 0.96f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f, 18.0f));
         if (ImGui::BeginPopupModal("progress_win", nullptr,
-                                   ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar)) {
+                                   ImGuiWindowFlags_AlwaysAutoResize |
+                                   ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoMove |
+                                   ImGuiWindowFlags_NoScrollbar |
+                                   ImGuiWindowFlags_NoScrollWithMouse |
+                                   ImGuiWindowFlags_NoTitleBar)) {
             int total, current;
             std::string label;
             {
@@ -414,44 +431,18 @@ int main() {
                 label = S.progress_label;
             }
             bool indeterminate = (total <= 0);
-            if (indeterminate) {
-
-                ImGui::NewLine();
-            } else {
-                ImGui::Text("%d/%d", current, total);
-            }
+            const bool cancelling = S.cancel_requested.load();
             float wrap_w = ImGui::GetContentRegionAvail().x;
-            std::string two = label;
-            if (ImGui::CalcTextSize(two.c_str()).x > wrap_w) {
-                size_t mid = two.size() / 2;
-                auto fits = [&](size_t pos) {
-                    std::string a = two.substr(0, pos), b = two.substr(pos + 1);
-                    return ImGui::CalcTextSize(a.c_str()).x <= wrap_w && ImGui::CalcTextSize(b.c_str()).x <= wrap_w;
-                };
-                size_t cand = std::string::npos;
-                size_t l1 = two.rfind('\\', mid), l2 = two.rfind('/', mid);
-                if (l1 != std::string::npos || l2 != std::string::npos) cand = std::max(
-                                                                            l1 == std::string::npos ? 0 : l1,
-                                                                            l2 == std::string::npos ? 0 : l2);
-                if (cand != std::string::npos && fits(cand)) two.insert(cand + 1, "\n");
-                else {
-                    size_t r1 = two.find('\\', mid), r2 = two.find('/', mid);
-                    size_t r = std::min(r1 == std::string::npos ? two.size() : r1,
-                                        r2 == std::string::npos ? two.size() : r2);
-                    if (r != two.size() && fits(r)) two.insert(r + 1, "\n");
-                    else two.insert(mid, "\n");
-                }
-            }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_w);
-            ImGui::BeginChild("progress_label", ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 2.0f + 6.0f), false,
-                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-            ImGui::TextUnformatted(two.c_str());
-            ImGui::EndChild();
-            ImGui::PopTextWrapPos();
+            const char* title = cancelling ? "Cancelling" :
+                (indeterminate ? "Working" : "Loading");
+            ImVec2 title_sz = ImGui::CalcTextSize(title);
+            ImGui::SetCursorPosX((ImGui::GetWindowWidth() - title_sz.x) * 0.5f);
+            ImGui::TextUnformatted(title);
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
 
             {
                 ImDrawList *dl = ImGui::GetWindowDrawList();
-                float bar_h = ImGui::GetFrameHeight();
+                float bar_h = 8.0f;
                 float bar_w = ImGui::GetContentRegionAvail().x;
                 ImVec2 bar_min = ImGui::GetCursorScreenPos();
                 ImVec2 bar_max = ImVec2(bar_min.x + bar_w, bar_min.y + bar_h);
@@ -474,20 +465,60 @@ int main() {
                         float fx1 = bar_min.x + bar_w * frac;
                         dl->AddRectFilled(bar_min, ImVec2(fx1, bar_max.y),
                                           IM_COL32(120, 200, 255, 255), r);
+                        dl->AddRectFilled(bar_min, ImVec2(fx1, bar_max.y),
+                                          IM_COL32(255, 255, 255, 28), r);
                     }
                 }
                 ImGui::Dummy(ImVec2(bar_w, bar_h));
             }
-            ImGui::Dummy(ImVec2(0, 6));
-            if (ImGui::Button("Cancel", ImVec2(-1, 0))) {
+            ImGui::Dummy(ImVec2(0, 8));
+            char pct[64];
+            if (indeterminate) {
+                std::snprintf(pct, sizeof(pct), "working...");
+            } else {
+                const float frac = total > 0
+                    ? std::clamp((float)current / (float)total, 0.0f, 1.0f)
+                    : 0.0f;
+                std::snprintf(pct, sizeof(pct), "%d%%   (%d / %d)",
+                              (int)(frac * 100.0f + 0.5f), current, total);
+            }
+            const std::string pct_text = animated_ellipsis_text(pct);
+            ImVec2 pct_sz = ImGui::CalcTextSize(pct_text.c_str());
+            ImGui::SetCursorPosX((ImGui::GetWindowWidth() - pct_sz.x) * 0.5f);
+            ImGui::TextColored(ImVec4(0.78f, 0.82f, 0.90f, 1.0f),
+                               "%s", pct_text.c_str());
 
-                S.cancel_requested = true;
-                progress_done();
-                OutputLog::warn("Extraction cancelled.");
+            const std::string display_label = animated_ellipsis_text(label);
+            ImVec2 label_sz = ImGui::CalcTextSize(display_label.c_str());
+            if (label_sz.x <= wrap_w) {
+                ImGui::SetCursorPosX(std::max(st.WindowPadding.x,
+                    (ImGui::GetWindowWidth() - label_sz.x) * 0.5f));
+                ImGui::TextColored(ImVec4(0.55f, 0.60f, 0.68f, 1.0f),
+                                   "%s", display_label.c_str());
+            } else {
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_w);
+                ImGui::TextColored(ImVec4(0.55f, 0.60f, 0.68f, 1.0f),
+                                   "%s", display_label.c_str());
+                ImGui::PopTextWrapPos();
+            }
+            ImGui::Dummy(ImVec2(0, 8));
+            if (cancelling) {
+                ImGui::BeginDisabled();
+            }
+            if (ImGui::Button(cancelling ? "Cancelling..." : "Cancel",
+                              ImVec2(-1, 0))) {
+                S.cancel_requested.store(true);
+                progress_update(current, total, "Cancelling...");
+                OutputLog::warn("Cancellation requested.");
+            }
+            if (cancelling) {
+                ImGui::EndDisabled();
             }
             if (!S.show_progress.load()) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
         ImGuiViewport *vp2 = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(vp2->WorkPos + vp2->WorkSize * 0.5f, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         if (ImGui::BeginPopupModal("error_modal", nullptr,

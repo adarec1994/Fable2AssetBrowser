@@ -1,5 +1,6 @@
 #include "MdlFbxExport.h"
 #include "ModelParser.h"
+#include "MdlExportCommon.h"
 #include "MdlTexExport.h"
 #include "../textures/TexParser.h"
 #include "../Utilities/State.h"
@@ -8,6 +9,7 @@
 #include "../UI/OutputLog.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -207,6 +209,16 @@ Node make_p(const char* name, const char* type1, const char* type2,
     return p;
 }
 
+std::string fbx_object_name(const std::string& name,
+                            const char* object_class)
+{
+    std::string out = name;
+    out.push_back('\0');
+    out.push_back('\1');
+    out += object_class;
+    return out;
+}
+
 struct IdGen {
     int64_t next = 1000000000ll;
     int64_t make() { return next++; }
@@ -307,26 +319,67 @@ struct Mat4 {
     }
 };
 
+std::string fbx_clean_name(std::string s) {
+    if (s.empty()) return "clip";
+    for (char& ch : s) {
+        const unsigned char c = (unsigned char)ch;
+        if (!std::isalnum(c) && ch != '_' && ch != '-' && ch != '.') {
+            ch = '_';
+        }
+    }
+    return s;
+}
+
+void quat_to_euler_deg(double qx, double qy, double qz, double qw,
+                       double& rx, double& ry, double& rz) {
+    const double sinr_cosp = 2.0 * (qw * qx + qy * qz);
+    const double cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy);
+    rx = std::atan2(sinr_cosp, cosr_cosp);
+
+    const double sinp = 2.0 * (qw * qy - qz * qx);
+    ry = std::abs(sinp) >= 1.0
+        ? std::copysign(3.14159265358979323846 / 2.0, sinp)
+        : std::asin(sinp);
+
+    const double siny_cosp = 2.0 * (qw * qz + qx * qy);
+    const double cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
+    rz = std::atan2(siny_cosp, cosy_cosp);
+
+    const double k = 180.0 / 3.14159265358979323846;
+    rx *= k;
+    ry *= k;
+    rz *= k;
+}
+
+void fbx_root_quat(double& qx, double& qy, double& qz, double& qw) {
+    constexpr double kS2 = 0.70710678118654752440;
+    const double x = qx;
+    const double y = qy;
+    const double z = qz;
+    const double w = qw;
+    qx = kS2 * (x + w);
+    qy = kS2 * (y - z);
+    qz = kS2 * (z + y);
+    qw = kS2 * (w - x);
+}
+
+int64_t fbx_time(float seconds) {
+    return (int64_t)std::llround((double)seconds * 46186158000.0);
+}
+
 }
 
 bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
                      const std::string& fbx_path,
                      const std::string& mdl_source_path,
-                     std::string& err_msg) {
+                     std::string& err_msg,
+                     bool include_animations) {
     err_msg.clear();
 
     MDLInfo info;
-    if (!parse_mdl_info(mdl_data, info, mdl_source_path)) {
-        err_msg = "Failed to parse MDL info";
-        return false;
-    }
     std::vector<MDLMeshGeom> geoms;
-    if (!parse_mdl_geometry(mdl_data, info, geoms)) {
-        err_msg = "Failed to parse MDL geometry";
-        return false;
-    }
-    if (geoms.empty()) {
-        err_msg = "No geometry found";
+    if (!MdlExport::parse_model_for_export(mdl_data, mdl_source_path,
+                                           info, geoms, err_msg)) {
         return false;
     }
 
@@ -521,6 +574,134 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         meshes_out.push_back(std::move(mo));
     }
 
+    struct FbxAnimCurve {
+        int64_t id = 0;
+        std::string axis;
+        std::vector<int64_t> times;
+        std::vector<float> values;
+    };
+    struct FbxAnimCurveNode {
+        int64_t id = 0;
+        int bone_filt = -1;
+        std::string property;
+        std::vector<FbxAnimCurve> curves;
+    };
+    struct FbxAnimClip {
+        std::string name;
+        int64_t stack_id = 0;
+        int64_t layer_id = 0;
+        int64_t start = 0;
+        int64_t stop = 0;
+        std::vector<FbxAnimCurveNode> nodes;
+    };
+
+    std::vector<FbxAnimClip> fbx_anims;
+    if (include_animations) {
+        const uint32_t export_bone_count =
+            MdlExport::model_bone_count_for_export(info);
+        const std::vector<MdlExport::ExportAnimClip> export_anims =
+            MdlExport::collect_compatible_animations(
+                info, export_bone_count, orig_to_filt, mdl_source_path);
+
+        for (const MdlExport::ExportAnimClip& clip : export_anims) {
+            if (clip.times.empty() || clip.channels.empty()) continue;
+
+            FbxAnimClip ac;
+            ac.name = fbx_clean_name(clip.name);
+            ac.stack_id = ids.make();
+            ac.layer_id = ids.make();
+            ac.start = fbx_time(clip.times.front());
+            ac.stop = fbx_time(clip.times.back());
+
+            for (const MdlExport::ExportAnimChannel& ch : clip.channels) {
+                if (ch.target_node < 0 ||
+                    ch.target_node >= (int)bones.size()) {
+                    continue;
+                }
+
+                if (ch.has_rotation && !ch.rotations.empty()) {
+                    FbxAnimCurveNode cn;
+                    cn.id = ids.make();
+                    cn.bone_filt = ch.target_node;
+                    cn.property = "Lcl Rotation";
+                    cn.curves.resize(3);
+                    cn.curves[0].axis = "d|X";
+                    cn.curves[1].axis = "d|Y";
+                    cn.curves[2].axis = "d|Z";
+                    for (FbxAnimCurve& curve : cn.curves) {
+                        curve.id = ids.make();
+                        curve.times.reserve(clip.times.size());
+                        curve.values.reserve(clip.times.size());
+                    }
+                    const size_t frames =
+                        std::min(clip.times.size(), ch.rotations.size() / 4);
+                    for (size_t frame = 0; frame < frames; ++frame) {
+                        const size_t q = frame * 4;
+                        double qx = ch.rotations[q + 0];
+                        double qy = ch.rotations[q + 1];
+                        double qz = ch.rotations[q + 2];
+                        double qw = ch.rotations[q + 3];
+                        if (bones[(size_t)ch.target_node].parent_filt < 0) {
+                            fbx_root_quat(qx, qy, qz, qw);
+                        }
+                        double rx = 0.0, ry = 0.0, rz = 0.0;
+                        quat_to_euler_deg(qx, qy, qz, qw, rx, ry, rz);
+                        const int64_t kt = fbx_time(clip.times[frame]);
+                        cn.curves[0].times.push_back(kt);
+                        cn.curves[1].times.push_back(kt);
+                        cn.curves[2].times.push_back(kt);
+                        cn.curves[0].values.push_back((float)rx);
+                        cn.curves[1].values.push_back((float)ry);
+                        cn.curves[2].values.push_back((float)rz);
+                    }
+                    ac.nodes.push_back(std::move(cn));
+                }
+
+                if (ch.has_translation && !ch.translations.empty()) {
+                    FbxAnimCurveNode cn;
+                    cn.id = ids.make();
+                    cn.bone_filt = ch.target_node;
+                    cn.property = "Lcl Translation";
+                    cn.curves.resize(3);
+                    cn.curves[0].axis = "d|X";
+                    cn.curves[1].axis = "d|Y";
+                    cn.curves[2].axis = "d|Z";
+                    for (FbxAnimCurve& curve : cn.curves) {
+                        curve.id = ids.make();
+                        curve.times.reserve(clip.times.size());
+                        curve.values.reserve(clip.times.size());
+                    }
+                    const size_t frames =
+                        std::min(clip.times.size(), ch.translations.size() / 3);
+                    for (size_t frame = 0; frame < frames; ++frame) {
+                        const size_t t = frame * 3;
+                        double tx = ch.translations[t + 0];
+                        double ty = ch.translations[t + 1];
+                        double tz = ch.translations[t + 2];
+                        if (bones[(size_t)ch.target_node].parent_filt < 0) {
+                            const double old_ty = ty;
+                            const double old_tz = tz;
+                            ty = -old_tz;
+                            tz =  old_ty;
+                        }
+                        const int64_t kt = fbx_time(clip.times[frame]);
+                        cn.curves[0].times.push_back(kt);
+                        cn.curves[1].times.push_back(kt);
+                        cn.curves[2].times.push_back(kt);
+                        cn.curves[0].values.push_back((float)tx);
+                        cn.curves[1].values.push_back((float)ty);
+                        cn.curves[2].values.push_back((float)tz);
+                    }
+                    ac.nodes.push_back(std::move(cn));
+                }
+            }
+
+            if (!ac.nodes.empty()) {
+                fbx_anims.push_back(std::move(ac));
+            }
+        }
+    }
+
     Node root("");
 
     {
@@ -563,8 +744,8 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         props70.add_child(make_p("CoordAxisSign",  "int", "Integer", "", { Prop::I(1)  }));
         props70.add_child(make_p("OriginalUpAxis",     "int", "Integer", "", { Prop::I(2) }));
         props70.add_child(make_p("OriginalUpAxisSign", "int", "Integer", "", { Prop::I(1) }));
-        props70.add_child(make_p("UnitScaleFactor",         "double", "Number", "", { Prop::D(1.0) }));
-        props70.add_child(make_p("OriginalUnitScaleFactor", "double", "Number", "", { Prop::D(1.0) }));
+        props70.add_child(make_p("UnitScaleFactor",         "double", "Number", "", { Prop::D(100.0) }));
+        props70.add_child(make_p("OriginalUnitScaleFactor", "double", "Number", "", { Prop::D(100.0) }));
         gs.add_child(std::move(props70));
         root.add_child(std::move(gs));
     }
@@ -595,14 +776,36 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
             total += (int)m.cluster_for_bone.size() + 1;
         }
         total += (int)bones.size() * 2;
+        int anim_curve_nodes = 0;
+        int anim_curves = 0;
+        for (const FbxAnimClip& ac : fbx_anims) {
+            anim_curve_nodes += (int)ac.nodes.size();
+            for (const FbxAnimCurveNode& cn : ac.nodes) {
+                anim_curves += (int)cn.curves.size();
+            }
+        }
+        total += (int)fbx_anims.size() * 2 + anim_curve_nodes + anim_curves;
         defs.add_child(Node("Count")).add_prop(Prop::I(total));
-        for (const char* t : {"GlobalSettings", "Geometry", "Model", "Material",
-                              "Texture", "Video", "Pose", "NodeAttribute",
-                              "Deformer"}) {
+        auto add_object_type = [&](const char* t, int count) {
             Node ot("ObjectType");
             ot.add_prop(Prop::S(t));
-            ot.add_child(Node("Count")).add_prop(Prop::I(1));
+            ot.add_child(Node("Count")).add_prop(Prop::I(count));
             defs.add_child(std::move(ot));
+        };
+        add_object_type("GlobalSettings", 1);
+        add_object_type("Geometry", (int)meshes_out.size());
+        add_object_type("Model", (int)meshes_out.size() + (int)bones.size());
+        add_object_type("Material", (int)meshes_out.size());
+        add_object_type("Texture", 1);
+        add_object_type("Video", 1);
+        add_object_type("Pose", bones.empty() ? 0 : 1);
+        add_object_type("NodeAttribute", (int)bones.size());
+        add_object_type("Deformer", 1);
+        if (!fbx_anims.empty()) {
+            add_object_type("AnimationStack", (int)fbx_anims.size());
+            add_object_type("AnimationLayer", (int)fbx_anims.size());
+            add_object_type("AnimationCurveNode", anim_curve_nodes);
+            add_object_type("AnimationCurve", anim_curves);
         }
         root.add_child(std::move(defs));
     }
@@ -613,7 +816,7 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
 
         Node m("Model");
         m.add_prop(Prop::L(b.model_id));
-        m.add_prop(Prop::S("Model::" + b.name));
+        m.add_prop(Prop::S(fbx_object_name("Model::" + b.name, "Model")));
         m.add_prop(Prop::S("LimbNode"));
         m.add_child(Node("Version")).add_prop(Prop::I(232));
         Node p70("Properties70");
@@ -643,7 +846,8 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
 
         Node na("NodeAttribute");
         na.add_prop(Prop::L(b.attr_id));
-        na.add_prop(Prop::S("NodeAttribute::"));
+        na.add_prop(Prop::S(fbx_object_name("NodeAttribute::",
+                                            "NodeAttribute")));
         na.add_prop(Prop::S("LimbNode"));
         Node nap("Properties70");
         nap.add_child(make_p("Size", "double", "Number", "", { Prop::D(1.0) }));
@@ -658,7 +862,8 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
 
         Node gn("Geometry");
         gn.add_prop(Prop::L(mo.geom_id));
-        gn.add_prop(Prop::S("Geometry::" + mo.name));
+        gn.add_prop(Prop::S(fbx_object_name("Geometry::" + mo.name,
+                                            "Geometry")));
         gn.add_prop(Prop::S("Mesh"));
 
         std::vector<double> verts(g.positions.begin(), g.positions.end());
@@ -671,7 +876,7 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
 
         std::vector<int32_t> pvi;
         pvi.reserve(g.indices.size());
-        for (size_t i = 0; i < g.indices.size(); i += 3) {
+        for (size_t i = 0; i + 2 < g.indices.size(); i += 3) {
             pvi.push_back((int32_t)g.indices[i + 0]);
             pvi.push_back((int32_t)g.indices[i + 1]);
             pvi.push_back((int32_t)~g.indices[i + 2]);
@@ -742,7 +947,7 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
 
         Node mn("Model");
         mn.add_prop(Prop::L(mo.model_id));
-        mn.add_prop(Prop::S("Model::" + mo.name));
+        mn.add_prop(Prop::S(fbx_object_name("Model::" + mo.name, "Model")));
         mn.add_prop(Prop::S("Mesh"));
         mn.add_child(Node("Version")).add_prop(Prop::I(232));
         Node mp("Properties70");
@@ -753,7 +958,8 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
 
         Node mat("Material");
         mat.add_prop(Prop::L(mo.mat_id));
-        mat.add_prop(Prop::S("Material::" + mo.name));
+        mat.add_prop(Prop::S(fbx_object_name("Material::" + mo.name,
+                                             "Material")));
         mat.add_prop(Prop::S(""));
         mat.add_child(Node("Version")).add_prop(Prop::I(102));
         mat.add_child(Node("ShadingModel")).add_prop(Prop::S("phong"));
@@ -773,7 +979,8 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
 
             Node vn("Video");
             vn.add_prop(Prop::L(et.video_id));
-            vn.add_prop(Prop::S("Video::" + et.name));
+            vn.add_prop(Prop::S(fbx_object_name("Video::" + et.name,
+                                                "Video")));
             vn.add_prop(Prop::S("Clip"));
             vn.add_child(Node("Type")).add_prop(Prop::S("Clip"));
             Node vp("Properties70");
@@ -789,7 +996,8 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
 
             Node tn("Texture");
             tn.add_prop(Prop::L(et.tex_id));
-            tn.add_prop(Prop::S("Texture::" + et.name));
+            tn.add_prop(Prop::S(fbx_object_name("Texture::" + et.name,
+                                                "Texture")));
             tn.add_prop(Prop::S(""));
             tn.add_child(Node("Type")).add_prop(Prop::S("TextureVideoClip"));
             tn.add_child(Node("Version")).add_prop(Prop::I(202));
@@ -805,7 +1013,8 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
         if (!mo.cluster_for_bone.empty()) {
             Node skin("Deformer");
             skin.add_prop(Prop::L(mo.skin_id));
-            skin.add_prop(Prop::S("Deformer::" + mo.name + "_skin"));
+            skin.add_prop(Prop::S(fbx_object_name(
+                "Deformer::" + mo.name + "_skin", "Deformer")));
             skin.add_prop(Prop::S("Skin"));
             skin.add_child(Node("Version")).add_prop(Prop::I(101));
             skin.add_child(Node("Link_DeformAcuracy")).add_prop(Prop::D(50.0));
@@ -818,7 +1027,8 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
 
                 Node c("Deformer");
                 c.add_prop(Prop::L(cid));
-                c.add_prop(Prop::S("SubDeformer::Cluster_" + b.name));
+                c.add_prop(Prop::S(fbx_object_name(
+                    "SubDeformer::Cluster_" + b.name, "Deformer")));
                 c.add_prop(Prop::S("Cluster"));
                 c.add_child(Node("Version")).add_prop(Prop::I(100));
                 c.add_child(Node("UserData")).add_prop(Prop::S("")).add_prop(Prop::S(""));
@@ -842,7 +1052,7 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
     if (!bones.empty()) {
         Node pose("Pose");
         pose.add_prop(Prop::L(ids.make()));
-        pose.add_prop(Prop::S("Pose::Bind"));
+        pose.add_prop(Prop::S(fbx_object_name("Pose::Bind", "Pose")));
         pose.add_prop(Prop::S("BindPose"));
         pose.add_child(Node("Type")).add_prop(Prop::S("BindPose"));
         pose.add_child(Node("Version")).add_prop(Prop::I(100));
@@ -854,6 +1064,65 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
             pose.add_child(std::move(pn));
         }
         objects.add_child(std::move(pose));
+    }
+
+    for (const FbxAnimClip& ac : fbx_anims) {
+        Node stack("AnimationStack");
+        stack.add_prop(Prop::L(ac.stack_id));
+        stack.add_prop(Prop::S(fbx_object_name("AnimStack::" + ac.name,
+                                               "AnimStack")));
+        stack.add_prop(Prop::S(""));
+        Node sp("Properties70");
+        sp.add_child(make_p("LocalStart", "KTime", "Time", "",
+                            { Prop::L(ac.start) }));
+        sp.add_child(make_p("LocalStop", "KTime", "Time", "",
+                            { Prop::L(ac.stop) }));
+        stack.add_child(std::move(sp));
+        objects.add_child(std::move(stack));
+
+        Node layer("AnimationLayer");
+        layer.add_prop(Prop::L(ac.layer_id));
+        layer.add_prop(Prop::S(fbx_object_name("AnimLayer::BaseLayer",
+                                               "AnimLayer")));
+        layer.add_prop(Prop::S(""));
+        objects.add_child(std::move(layer));
+
+        for (const FbxAnimCurveNode& cn : ac.nodes) {
+            Node n("AnimationCurveNode");
+            n.add_prop(Prop::L(cn.id));
+            n.add_prop(Prop::S(fbx_object_name(
+                "AnimCurveNode::" + ac.name + "_" + std::to_string(cn.id),
+                "AnimationCurveNode")));
+            n.add_prop(Prop::S(""));
+            Node p70("Properties70");
+            p70.add_child(make_p("d|X", "Number", "", "A",
+                                 { Prop::D(0.0) }));
+            p70.add_child(make_p("d|Y", "Number", "", "A",
+                                 { Prop::D(0.0) }));
+            p70.add_child(make_p("d|Z", "Number", "", "A",
+                                 { Prop::D(0.0) }));
+            n.add_child(std::move(p70));
+            objects.add_child(std::move(n));
+
+            for (const FbxAnimCurve& curve : cn.curves) {
+                Node c("AnimationCurve");
+                c.add_prop(Prop::L(curve.id));
+                c.add_prop(Prop::S(fbx_object_name(
+                    "AnimCurve::" + ac.name + "_" + std::to_string(curve.id),
+                    "AnimationCurve")));
+                c.add_prop(Prop::S(""));
+                c.add_child(Node("Default")).add_prop(Prop::F(0.0f));
+                c.add_child(Node("KeyVer")).add_prop(Prop::I(4008));
+                c.add_child(Node("KeyTime")).add_prop(Prop::AL(curve.times));
+                c.add_child(Node("KeyValueFloat")).add_prop(Prop::AF(curve.values));
+                c.add_child(Node("KeyAttrFlags")).add_prop(Prop::AI({ 24836 }));
+                c.add_child(Node("KeyAttrDataFloat")).add_prop(
+                    Prop::AF({ 0.0f, 0.0f, 0.0f, 0.0f }));
+                c.add_child(Node("KeyAttrRefCount")).add_prop(
+                    Prop::AI({ (int32_t)curve.times.size() }));
+                objects.add_child(std::move(c));
+            }
+        }
     }
 
     root.add_child(std::move(objects));
@@ -900,6 +1169,20 @@ bool mdl_to_fbx_full(const std::vector<unsigned char>& mdl_data,
                 int64_t cid = kv.second;
                 add_oo(cid, mo.skin_id);
                 add_oo(bones[filt].model_id, cid);
+            }
+        }
+    }
+
+    for (const FbxAnimClip& ac : fbx_anims) {
+        add_oo(ac.layer_id, ac.stack_id);
+        for (const FbxAnimCurveNode& cn : ac.nodes) {
+            if (cn.bone_filt < 0 || cn.bone_filt >= (int)bones.size()) {
+                continue;
+            }
+            add_oo(cn.id, ac.layer_id);
+            add_op(cn.id, bones[(size_t)cn.bone_filt].model_id, cn.property);
+            for (const FbxAnimCurve& curve : cn.curves) {
+                add_op(curve.id, cn.id, curve.axis);
             }
         }
     }

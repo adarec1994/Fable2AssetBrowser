@@ -105,7 +105,7 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
                                     std::string& out_picked_name,
                                     bool allow_embedded_albedo = true);
 
-bool BakeEhfTerrainCompositeAndSplatDebug(
+bool BakeEhfTerrainCompositeAndSplat(
     const std::vector<uint8_t>& ehf,
     const std::string& preferred_bnk,
     std::vector<uint8_t>& out_rgba,
@@ -123,6 +123,7 @@ bool BakeEhfTerrainComposite(const std::vector<uint8_t>& ehf,
 }
 
 extern std::atomic<bool>  g_pending_terrain_load;
+extern std::atomic<bool>  g_level_export_only_load;
 extern Level::TerrainMesh g_pending_terrain_mesh;
 extern std::string        g_pending_terrain_label;
 extern FlatAssetEntry     g_pending_terrain_level_entry;
@@ -134,6 +135,8 @@ struct PendingAdjacentTerrain {
     std::string          label;
     std::vector<uint8_t> ehf_bytes;
     std::string          preferred_bnk;
+    bool                 preserve_mesh_uvs = false;
+    bool                 prefer_embedded_albedo = false;
 };
 }
 extern std::vector<Level::PendingAdjacentTerrain> g_pending_adjacent_terrain_meshes;

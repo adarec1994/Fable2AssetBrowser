@@ -50,6 +50,7 @@ extern const std::string& mp_last_decode_info();
 #include <unordered_set>
 
 std::atomic<bool>   g_pending_terrain_load{false};
+std::atomic<bool>   g_level_export_only_load{false};
 Level::TerrainMesh  g_pending_terrain_mesh;
 std::string         g_pending_terrain_label;
 FlatAssetEntry      g_pending_terrain_level_entry;
@@ -264,46 +265,6 @@ bool skip_ehf_tex_blob(BeReader& r)
     return true;
 }
 
-bool triangle_area_ok(const float* a, const float* b, const float* c)
-{
-    const float ux = b[0] - a[0];
-    const float uy = b[1] - a[1];
-    const float uz = b[2] - a[2];
-    const float vx = c[0] - a[0];
-    const float vy = c[1] - a[1];
-    const float vz = c[2] - a[2];
-    const float nx = uy * vz - uz * vy;
-    const float ny = uz * vx - ux * vz;
-    const float nz = ux * vy - uy * vx;
-    return (nx * nx + ny * ny + nz * nz) > 1e-8f;
-}
-
-void push_ehf_render_triangle(std::vector<std::array<float, 9>>& tris,
-                              const float* a,
-                              const float* b,
-                              const float* c)
-{
-    if (!triangle_area_ok(a, b, c)) return;
-    std::array<float, 9> tri{};
-    std::copy(a, a + 3, tri.data() + 0);
-    std::copy(b, b + 3, tri.data() + 3);
-    std::copy(c, c + 3, tri.data() + 6);
-
-    const float ux = tri[3] - tri[0];
-    const float uy = tri[4] - tri[1];
-    const float uz = tri[5] - tri[2];
-    const float vx = tri[6] - tri[0];
-    const float vy = tri[7] - tri[1];
-    const float vz = tri[8] - tri[2];
-    const float ny = uz * vx - ux * vz;
-    if (ny < 0.0f) {
-        for (int k = 0; k < 3; ++k) {
-            std::swap(tri[3 + k], tri[6 + k]);
-        }
-    }
-    tris.push_back(tri);
-}
-
 bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
                                  TerrainMesh& out,
                                  std::string* out_stats = nullptr)
@@ -337,27 +298,42 @@ bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
     if (!r.f32(max_height_hint) || !r.u32(render_tile_count)) return false;
     if (render_tile_count == 0 || render_tile_count > 4096) return false;
 
-    std::vector<std::array<float, 9>> tris;
-    tris.reserve(size_t(render_tile_count) * 64);
-
-    float min_x = std::numeric_limits<float>::infinity();
-    float min_y = std::numeric_limits<float>::infinity();
-    float min_z = std::numeric_limits<float>::infinity();
-    float max_x = -std::numeric_limits<float>::infinity();
-    float max_y = -std::numeric_limits<float>::infinity();
-    float max_z = -std::numeric_limits<float>::infinity();
+    struct Sample {
+        float y = -std::numeric_limits<float>::infinity();
+        uint32_t count = 0;
+    };
+    std::unordered_map<uint64_t, Sample> samples;
+    samples.reserve(size_t(render_tile_count) * 128);
+    std::vector<int32_t> qxs;
+    std::vector<int32_t> qzs;
     uint64_t cell_count_total = 0;
+    uint64_t vertex_sample_total = 0;
 
     auto sane_coord = [](float v) {
         return std::isfinite(v) && std::fabs(v) < 100000.0f;
     };
-    auto add_bounds = [&](const float* p) {
-        min_x = std::min(min_x, p[0]);
-        min_y = std::min(min_y, p[1]);
-        min_z = std::min(min_z, p[2]);
-        max_x = std::max(max_x, p[0]);
-        max_y = std::max(max_y, p[1]);
-        max_z = std::max(max_z, p[2]);
+    auto quant = [](float v) -> int32_t {
+        return int32_t(std::lround(v * 2.0f));
+    };
+    auto make_key = [](int32_t qx, int32_t qz) -> uint64_t {
+        return (uint64_t(uint32_t(qx)) << 32) | uint32_t(qz);
+    };
+    auto add_sample = [&](float x, float z, float y) {
+        const int32_t qx = quant(x);
+        const int32_t qz = quant(z);
+        const uint64_t key = make_key(qx, qz);
+        auto [it, inserted] = samples.try_emplace(key);
+        if (inserted) {
+            qxs.push_back(qx);
+            qzs.push_back(qz);
+        }
+
+
+
+        Sample& s = it->second;
+        s.y = (s.count == 0) ? y : std::max(s.y, y);
+        ++s.count;
+        ++vertex_sample_total;
     };
 
     for (uint32_t ti = 0; ti < render_tile_count; ++ti) {
@@ -385,98 +361,206 @@ bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
         for (uint64_t ci = 0; ci < cell_count; ++ci) {
             const uint8_t* cell =
                 r.p + cell_base + size_t(ci) * 160u;
-            float strip[8][3] = {};
-            bool strip_ok = true;
             for (int vi = 0; vi < 8; ++vi) {
                 const uint8_t* src = cell + 64 + size_t(vi) * 12u;
                 const float x = read_be_f32_raw(src + 0);
                 const float z = read_be_f32_raw(src + 4);
                 const float y = read_be_f32_raw(src + 8);
                 if (!sane_coord(x) || !sane_coord(y) || !sane_coord(z)) {
-                    strip_ok = false;
-                    break;
+                    continue;
                 }
-                strip[vi][0] = x;
-                strip[vi][1] = y;
-                strip[vi][2] = z;
-            }
-            if (!strip_ok) continue;
-
-            const size_t tri_begin = tris.size();
-            push_ehf_render_triangle(tris, strip[0], strip[2], strip[1]);
-            push_ehf_render_triangle(tris, strip[1], strip[2], strip[3]);
-            push_ehf_render_triangle(tris, strip[4], strip[6], strip[5]);
-            push_ehf_render_triangle(tris, strip[5], strip[6], strip[7]);
-
-            for (size_t ti = tri_begin; ti < tris.size(); ++ti) {
-                const auto& tri = tris[ti];
-                add_bounds(tri.data() + 0);
-                add_bounds(tri.data() + 3);
-                add_bounds(tri.data() + 6);
+                add_sample(x, z, y);
             }
         }
 
         r.i += size_t(cell_count) * 160u + 24u;
     }
 
-    if (tris.empty() ||
-        !std::isfinite(min_x) || !std::isfinite(min_z) ||
-        max_x <= min_x || max_z <= min_z) {
+    if (samples.size() < 4) {
         return false;
     }
 
-    const size_t vertex_count = tris.size() * 3;
-    out.positions.reserve(vertex_count * 3);
-    out.normals.reserve(vertex_count * 3);
-    out.uvs.reserve(vertex_count * 2);
-    out.indices.reserve(vertex_count);
-    out.min_height = min_y;
-    out.max_height = max_y;
+    std::sort(qxs.begin(), qxs.end());
+    qxs.erase(std::unique(qxs.begin(), qxs.end()), qxs.end());
+    std::sort(qzs.begin(), qzs.end());
+    qzs.erase(std::unique(qzs.begin(), qzs.end()), qzs.end());
+    if (qxs.size() < 2 || qzs.size() < 2 ||
+        qxs.size() > 2048 || qzs.size() > 2048) {
+        return false;
+    }
 
-    const float span_x = std::max(max_x - min_x, 1e-6f);
-    const float span_z = std::max(max_z - min_z, 1e-6f);
-    for (const auto& tri : tris) {
-        const float ux = tri[3] - tri[0];
-        const float uy = tri[4] - tri[1];
-        const float uz = tri[5] - tri[2];
-        const float vx = tri[6] - tri[0];
-        const float vy = tri[7] - tri[1];
-        const float vz = tri[8] - tri[2];
-        float nx = uy * vz - uz * vy;
-        float ny = uz * vx - ux * vz;
-        float nz = ux * vy - uy * vx;
-        const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
-        if (len > 1e-6f) {
-            nx /= len;
-            ny /= len;
-            nz /= len;
-        } else {
-            nx = 0.0f;
-            ny = 1.0f;
-            nz = 0.0f;
-        }
-        for (int vi = 0; vi < 3; ++vi) {
-            const float* p = tri.data() + vi * 3;
-            const uint32_t idx =
-                uint32_t(out.positions.size() / 3);
-            out.positions.insert(out.positions.end(), p, p + 3);
-            out.normals.push_back(nx);
-            out.normals.push_back(ny);
-            out.normals.push_back(nz);
-            out.uvs.push_back((p[0] - min_x) / span_x);
-            out.uvs.push_back((p[2] - min_z) / span_z);
-            out.indices.push_back(idx);
+    const uint32_t W = uint32_t(qxs.size());
+    const uint32_t H = uint32_t(qzs.size());
+    const size_t N = size_t(W) * size_t(H);
+    std::vector<float> heights(N, 0.0f);
+    std::vector<uint8_t> has_height(N, 0);
+
+    auto grid_index = [W](uint32_t x, uint32_t z) {
+        return size_t(z) * size_t(W) + size_t(x);
+    };
+    for (uint32_t z = 0; z < H; ++z) {
+        for (uint32_t x = 0; x < W; ++x) {
+            const auto it = samples.find(make_key(qxs[x], qzs[z]));
+            if (it == samples.end() || it->second.count == 0) continue;
+            const size_t gi = grid_index(x, z);
+            heights[gi] = it->second.y;
+            has_height[gi] = 1;
         }
     }
 
-    out.width = 0;
-    out.height = 0;
+    uint32_t filled_holes = 0;
+    for (uint32_t z = 0; z < H; ++z) {
+        for (uint32_t x = 0; x < W; ++x) {
+            const size_t gi = grid_index(x, z);
+            if (has_height[gi]) continue;
+
+            float best_dist = std::numeric_limits<float>::infinity();
+            float best_h = 0.0f;
+            bool found = false;
+            for (uint32_t zz = 0; zz < H; ++zz) {
+                for (uint32_t xx = 0; xx < W; ++xx) {
+                    const size_t oi = grid_index(xx, zz);
+                    if (!has_height[oi]) continue;
+                    const float dx = float(qxs[xx] - qxs[x]);
+                    const float dz = float(qzs[zz] - qzs[z]);
+                    const float d2 = dx * dx + dz * dz;
+                    if (d2 < best_dist) {
+                        best_dist = d2;
+                        best_h = heights[oi];
+                        found = true;
+                    }
+                }
+            }
+            if (!found) return false;
+            heights[gi] = best_h;
+            has_height[gi] = 1;
+            ++filled_holes;
+        }
+    }
+
+    out.width = W;
+    out.height = H;
+    out.positions.resize(N * 3);
+    out.normals.assign(N * 3, 0.0f);
+    out.uvs.resize(N * 2);
+    out.min_height = std::numeric_limits<float>::infinity();
+    out.max_height = -std::numeric_limits<float>::infinity();
+
+    float tex_min_x = float(qxs.front()) * 0.5f;
+    float tex_max_x = float(qxs.back()) * 0.5f;
+    float tex_min_z = float(qzs.front()) * 0.5f;
+    float tex_max_z = float(qzs.back()) * 0.5f;
+    EhfParsedBody parsed_body;
+    if (ParseEhfBody(ehf, parsed_body) && !parsed_body.chunks.empty()) {
+        float chunk_min_x = std::numeric_limits<float>::infinity();
+        float chunk_min_z = std::numeric_limits<float>::infinity();
+        float chunk_max_x = -std::numeric_limits<float>::infinity();
+        float chunk_max_z = -std::numeric_limits<float>::infinity();
+        for (const auto& c : parsed_body.chunks) {
+            if (!std::isfinite(c.origin[0]) ||
+                !std::isfinite(c.origin[1]) ||
+                !std::isfinite(c.extent[0]) ||
+                !std::isfinite(c.extent[1])) {
+                continue;
+            }
+            chunk_min_x = std::min(chunk_min_x, c.origin[0]);
+            chunk_min_z = std::min(chunk_min_z, c.origin[1]);
+            chunk_max_x = std::max(chunk_max_x, c.extent[0]);
+            chunk_max_z = std::max(chunk_max_z, c.extent[1]);
+        }
+        if (std::isfinite(chunk_min_x) && std::isfinite(chunk_min_z) &&
+            std::isfinite(chunk_max_x) && std::isfinite(chunk_max_z) &&
+            chunk_max_x > chunk_min_x && chunk_max_z > chunk_min_z) {
+            tex_min_x = chunk_min_x;
+            tex_min_z = chunk_min_z;
+            tex_max_x = chunk_max_x;
+            tex_max_z = chunk_max_z;
+        }
+    }
+    const float span_x = std::max(tex_max_x - tex_min_x, 1e-6f);
+    const float span_z = std::max(tex_max_z - tex_min_z, 1e-6f);
+
+    for (uint32_t z = 0; z < H; ++z) {
+        for (uint32_t x = 0; x < W; ++x) {
+            const size_t gi = grid_index(x, z);
+            const float wx = float(qxs[x]) * 0.5f;
+            const float wz = float(qzs[z]) * 0.5f;
+            const float wy = heights[gi];
+            out.positions[gi * 3 + 0] = wx;
+            out.positions[gi * 3 + 1] = wy;
+            out.positions[gi * 3 + 2] = wz;
+            out.uvs[gi * 2 + 0] = (wx - tex_min_x) / span_x;
+            out.uvs[gi * 2 + 1] = (wz - tex_min_z) / span_z;
+            out.min_height = std::min(out.min_height, wy);
+            out.max_height = std::max(out.max_height, wy);
+        }
+    }
+
+    auto height_at = [&](int x, int z) {
+        x = std::clamp(x, 0, int(W) - 1);
+        z = std::clamp(z, 0, int(H) - 1);
+        return heights[grid_index(uint32_t(x), uint32_t(z))];
+    };
+    auto world_x_at = [&](int x) {
+        x = std::clamp(x, 0, int(W) - 1);
+        return float(qxs[uint32_t(x)]) * 0.5f;
+    };
+    auto world_z_at = [&](int z) {
+        z = std::clamp(z, 0, int(H) - 1);
+        return float(qzs[uint32_t(z)]) * 0.5f;
+    };
+    for (uint32_t z = 0; z < H; ++z) {
+        for (uint32_t x = 0; x < W; ++x) {
+            const float dx =
+                std::max(world_x_at(int(x) + 1) - world_x_at(int(x) - 1),
+                         1e-6f);
+            const float dz =
+                std::max(world_z_at(int(z) + 1) - world_z_at(int(z) - 1),
+                         1e-6f);
+            float nx = -(height_at(int(x) + 1, int(z)) -
+                         height_at(int(x) - 1, int(z))) / dx;
+            float ny = 1.0f;
+            float nz = -(height_at(int(x), int(z) + 1) -
+                         height_at(int(x), int(z) - 1)) / dz;
+            const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (len > 1e-6f) {
+                nx /= len;
+                ny /= len;
+                nz /= len;
+            }
+            const size_t gi = grid_index(x, z);
+            out.normals[gi * 3 + 0] = nx;
+            out.normals[gi * 3 + 1] = ny;
+            out.normals[gi * 3 + 2] = nz;
+        }
+    }
+
+    out.indices.reserve(size_t(W - 1) * size_t(H - 1) * 6);
+    for (uint32_t z = 0; z + 1 < H; ++z) {
+        for (uint32_t x = 0; x + 1 < W; ++x) {
+            const uint32_t i00 = uint32_t(grid_index(x, z));
+            const uint32_t i10 = uint32_t(grid_index(x + 1, z));
+            const uint32_t i01 = uint32_t(grid_index(x, z + 1));
+            const uint32_t i11 = uint32_t(grid_index(x + 1, z + 1));
+            out.indices.push_back(i00);
+            out.indices.push_back(i01);
+            out.indices.push_back(i10);
+            out.indices.push_back(i10);
+            out.indices.push_back(i01);
+            out.indices.push_back(i11);
+        }
+    }
+
     out.ok = !out.indices.empty();
     if (out_stats) {
         std::ostringstream ss;
         ss << render_tile_count << " render tile(s), "
            << cell_count_total << " strip cell(s), "
-           << tris.size() << " tri(s)";
+           << vertex_sample_total << " vertex sample(s), grid "
+           << W << "x" << H
+           << (filled_holes ? ", filled " + std::to_string(filled_holes)
+                            : std::string{})
+           << ", " << (out.indices.size() / 3) << " tri(s)";
         *out_stats = ss.str();
     }
     return out.ok;
@@ -748,8 +832,8 @@ void fill_gdb_rotation_matrix(Level::PropInstance& pi,
     const float sz = std::sin(rz);
     const float cz = std::cos(rz);
 
-    // IDA f2_EulerRotationToMatrix_GDB (0x8257ACA0) builds basis vectors.
-    // Store the transpose because PropInstance applies row-major point math.
+
+
     float game[9] = {};
     game[0] = cy * cx;
     game[1] = sx;
@@ -1102,6 +1186,12 @@ bool is_lowpoly_house_proxy_model(const std::string& model_path)
     const std::string p = lower_slash(model_path);
     return p.find("/structures/dotxsi/bs_market_lowpoly_house") !=
            std::string::npos;
+}
+
+bool is_market_bridge_facade_proxy_model(const std::string& model_path)
+{
+    const std::string p = lower_slash(model_path);
+    return p.find("bs_market_bridge_facade") != std::string::npos;
 }
 
 bool is_bwsmarket_clocktower_authored_model(const std::string& model_path)
@@ -2307,10 +2397,21 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
     return true;
 }
 
+static void loader_progress_update(int current,
+                                   int total,
+                                   const std::string& text)
+{
+    if (!g_level_export_only_load.load()) {
+        progress_update(current, total, text);
+    }
+}
+
 bool Open(const FlatAssetEntry& entry)
 {
-    OutputLog::info("loading level '" + entry.name + "' …");
-    progress_update(8, 100, "Extracting " + entry.name);
+    if (!g_level_export_only_load.load()) {
+        OutputLog::info("loading level '" + entry.name + "' …");
+    }
+    loader_progress_update(8, 100, "Extracting " + entry.name);
 
     auto bail_if_cancelled = [&](const char* where) -> bool {
         if (!S.cancel_requested.load()) return false;
@@ -2344,7 +2445,7 @@ bool Open(const FlatAssetEntry& entry)
     }
     if (bail_if_cancelled("after-extract")) return false;
 
-    progress_update(18, 100, "Parsing level entries...");
+    loader_progress_update(18, 100, "Parsing level entries...");
     EngineLevelInfo info;
     if (!ParseEngineLevel(bytes, info)) {
         OutputLog::error("parse failed for '" + entry.name + "': "
@@ -2369,6 +2470,9 @@ bool Open(const FlatAssetEntry& entry)
                 if (is_lowpoly_house_proxy_model(block.model_path)) {
                     ++lowpoly_house_proxy_blocks;
                     lowpoly_house_proxy_instances += block.instances.size();
+                    return true;
+                }
+                if (is_market_bridge_facade_proxy_model(block.model_path)) {
                     return true;
                 }
                 if (is_bwsmarket_engine_level &&
@@ -2843,6 +2947,7 @@ bool Open(const FlatAssetEntry& entry)
 
     g_level_havok_collision.clear();
     OutputLog::info("havok_scenario loading disabled");
+    if (bail_if_cancelled("after terrain siblings")) return false;
 
     g_level_vfs_texture_body_bnks.clear();
     g_level_vfs_model_bnks.clear();
@@ -2875,6 +2980,7 @@ bool Open(const FlatAssetEntry& entry)
             OutputLog::warn("no level.vfsconfig sibling in BNK");
         }
     }
+    if (bail_if_cancelled("after vfsconfig")) return false;
     const std::vector<StreamingModelCandidate> streaming_model_candidates =
         collect_streaming_model_candidates(g_level_vfs_streaming_bnks);
     if (!streaming_model_candidates.empty()) {
@@ -2997,6 +3103,11 @@ bool Open(const FlatAssetEntry& entry)
                     }
                     save_hash_to_name.emplace_back(h, std::move(name));
                     pos = entity_close + tag_close.size();
+                    if ((save_hash_to_name.size() & 0x7fu) == 0 &&
+                        bail_if_cancelled("save parse"))
+                    {
+                        return false;
+                    }
                 }
                 OutputLog::info("save: " + std::to_string(save_hash_to_name.size())
                                 + " entity hash→name mappings");
@@ -3009,6 +3120,7 @@ bool Open(const FlatAssetEntry& entry)
                 OutputLog::warn("no .save sibling in BNK");
             }
         }
+        if (bail_if_cancelled("after save parse")) return false;
 
         struct SupplementalGdb {
             std::string path;
@@ -3041,12 +3153,14 @@ bool Open(const FlatAssetEntry& entry)
                 }
             }
         }
+        if (bail_if_cancelled("after supplemental gdb load")) return false;
 
         const auto& level_prop_blocks = info.prop_blocks;
         std::vector<uint8_t> gdb_bytes;
         const std::string gdb_path = sibling_with_ext(".gdb");
         if (load_text_sibling(gdb_path, gdb_bytes)) {
             auto info = Gdb::ParseWithSaveMap(gdb_bytes, save_hash_to_name);
+            if (bail_if_cancelled("after gdb parse")) return false;
             {
                 std::vector<const std::vector<uint8_t>*> water_theme_gdbs;
                 water_theme_gdbs.reserve(1 + supplemental_gdbs.size());
@@ -3167,6 +3281,7 @@ bool Open(const FlatAssetEntry& entry)
                           "using fixed environment theme");
                   }
               }
+            if (bail_if_cancelled("after environment theme parse")) return false;
             if (!supplemental_gdbs.empty()) {
                 const bool is_bwsslums_level_for_supplemental =
                     lower_slash(entry.full_path).find("bwsslums") !=
@@ -3176,7 +3291,13 @@ bool Open(const FlatAssetEntry& entry)
                 size_t supplemental_parent_hits = 0;
                 size_t supplemental_model_parts = 0;
                 size_t supplemental_misses = 0;
+                size_t supplemental_poll = 0;
                 for (auto& p : info.placements) {
+                    if ((++supplemental_poll & 0x7fu) == 0 &&
+                        bail_if_cancelled("supplemental model resolve"))
+                    {
+                        return false;
+                    }
                     const std::string supplemental_entity_key =
                         compact_match_key(p.entity_name);
                     const bool allow_slums_shell_augment =
@@ -3253,7 +3374,13 @@ bool Open(const FlatAssetEntry& entry)
                 }
                 if (supplemental_model_parts > supplemental_model_hits) {
                     std::vector<Gdb::Placement> extra_parts;
+                    size_t extra_poll = 0;
                     for (auto& p : info.placements) {
+                        if ((++extra_poll & 0x7fu) == 0 &&
+                            bail_if_cancelled("supplemental part expansion"))
+                        {
+                            return false;
+                        }
                         if (p.model_path_hashes.size() <= 1) continue;
                         const std::vector<uint32_t> hashes =
                             p.model_path_hashes;
@@ -3300,7 +3427,13 @@ bool Open(const FlatAssetEntry& entry)
                 size_t supplemental_entity_hits = 0;
                 size_t supplemental_entity_parts = 0;
                 size_t supplemental_entity_misses = 0;
+                size_t supplemental_entity_poll = 0;
                 for (const auto& kv : save_hash_to_name) {
+                    if ((++supplemental_entity_poll & 0x7fu) == 0 &&
+                        bail_if_cancelled("supplemental entity resolve"))
+                    {
+                        return false;
+                    }
                     if (kv.first == 0 ||
                         existing_hashes.find(kv.first) !=
                             existing_hashes.end())
@@ -3358,7 +3491,13 @@ bool Open(const FlatAssetEntry& entry)
 
             size_t fixed_count = 0, var_count = 0, named_count = 0;
             size_t model_hash_count = 0;
+            size_t placement_poll = 0;
             for (const auto& p : info.placements) {
+                if ((++placement_poll & 0xffu) == 0 &&
+                    bail_if_cancelled("placement table build"))
+                {
+                    return false;
+                }
                 GdbWorldPlacement gp;
                 gp.x      = p.x;
                 gp.y      = p.y;
@@ -3386,7 +3525,6 @@ bool Open(const FlatAssetEntry& entry)
                << model_hash_count << " with model path hashes)";
             OutputLog::success(os.str());
 
-            constexpr bool verbose_gdb_diagnostics = false;
             struct GdbStreamingChoiceCacheValue {
                 const StreamingModelCandidate* hit = nullptr;
                 int score = INT_MIN;
@@ -3423,70 +3561,6 @@ bool Open(const FlatAssetEntry& entry)
                     return hit;
                 };
 
-            if (verbose_gdb_diagnostics) {
-                std::unordered_map<uint32_t, const Gdb::Placement*> parsed_by_hash;
-                parsed_by_hash.reserve(info.placements.size() * 2);
-                for (const auto& p : info.placements) {
-                    if (p.hash_a != 0) parsed_by_hash.emplace(p.hash_a, &p);
-                }
-
-                std::vector<std::pair<uint32_t, std::string>> landmark_save_names;
-                for (const auto& kv : save_hash_to_name) {
-                    if (is_gdb_landmark_name(kv.second)) {
-                        landmark_save_names.push_back(kv);
-                    }
-                }
-                if (!landmark_save_names.empty()) {
-                    OutputLog::info("gdb direct landmark hash probe (.save -> .gdb):");
-                    size_t shown = 0;
-                    size_t parsed = 0;
-                    size_t raw_only = 0;
-                    size_t absent = 0;
-                    for (const auto& kv : landmark_save_names) {
-                        const uint32_t hash = kv.first;
-                        const std::string& name = kv.second;
-                        const bool raw_hit = bytes_contain_be_u32(gdb_bytes, hash);
-                        auto it = parsed_by_hash.find(hash);
-                        if (it != parsed_by_hash.end()) ++parsed;
-                        else if (raw_hit) ++raw_only;
-                        else ++absent;
-
-                        if (shown >= 64) continue;
-                        const bool important =
-                            gdb_entity_key(name).find("bridge") != std::string::npos ||
-                            gdb_entity_key(name).find("clocktower") != std::string::npos ||
-                            gdb_entity_key(name).find("dockarch") != std::string::npos ||
-                            gdb_entity_key(name).find("lockgate") != std::string::npos ||
-                            gdb_entity_key(name).find("gatehouse") != std::string::npos ||
-                            gdb_entity_key(name).find("walltower") != std::string::npos;
-                        if (!important && it == parsed_by_hash.end()) continue;
-
-                        std::ostringstream los;
-                        los << "  0x" << std::hex << std::uppercase
-                            << std::setw(8) << std::setfill('0') << hash
-                            << std::dec << "  " << name << "  ";
-                        if (it != parsed_by_hash.end()) {
-                            const Gdb::Placement* p = it->second;
-                            los << "PARSED parent=0x" << std::hex << std::uppercase
-                                << std::setw(8) << std::setfill('0')
-                                << p->parent_hash << std::dec
-                                << " pos=(" << p->x << ", " << p->y
-                                << ", " << p->z << ")";
-                        } else if (raw_hit) {
-                            los << "RAW-HASH-ONLY (parser did not emit placement)";
-                        } else {
-                            los << "NOT-IN-GDB";
-                        }
-                        OutputLog::info(los.str());
-                        ++shown;
-                    }
-                    std::ostringstream sum;
-                    sum << "  landmark hash probe summary: "
-                        << parsed << " parsed, " << raw_only
-                        << " raw-only, " << absent << " absent from raw gdb";
-                    OutputLog::info(sum.str());
-                }
-            }
 
             struct GdbArchetypeDiag {
                 size_t count = 0;
@@ -3510,126 +3584,6 @@ bool Open(const FlatAssetEntry& entry)
                       [](const auto& a, const auto& b) {
                           return a.second->count > b.second->count;
                       });
-            if (verbose_gdb_diagnostics) {
-                OutputLog::info("gdb archetype groups: " +
-                                std::to_string(archetypes.size()) +
-                                " parent hashes (top 24)");
-                const size_t archetype_log_count =
-                    std::min<size_t>(archetypes.size(), 24);
-                for (size_t ai = 0; ai < archetype_log_count; ++ai) {
-                    const auto& kv = archetypes[ai];
-                    std::ostringstream aos;
-                    aos << "  0x" << std::hex << std::uppercase
-                        << std::setw(8) << std::setfill('0') << kv.first
-                        << std::dec << "  " << kv.second->count
-                        << " instance(s)";
-                    if (!kv.second->examples.empty()) {
-                        aos << "  e.g. ";
-                        for (size_t ei = 0; ei < kv.second->examples.size();
-                             ++ei)
-                        {
-                            if (ei) aos << ", ";
-                            aos << kv.second->examples[ei];
-                        }
-                    }
-                    OutputLog::info(aos.str());
-                }
-            }
-            if (verbose_gdb_diagnostics &&
-                !streaming_model_candidates.empty())
-            {
-                auto best_gdb_name_for_examples =
-                    [&](const std::vector<std::string>& examples,
-                        uint32_t parent_hash) {
-                        std::string best_name =
-                            gdb_representative_name(examples);
-                        int best_score = INT_MIN;
-                        for (const auto& ex : examples) {
-                            const std::string repr =
-                                gdb_representative_name(std::vector<std::string>{ex});
-                            int score = INT_MIN;
-                            const StreamingModelCandidate* hit =
-                                choose_streaming_cached(
-                                    repr, parent_hash, &score);
-                            if (hit && score > best_score) {
-                                best_name = repr;
-                                best_score = score;
-                            }
-                        }
-                        return best_name;
-                    };
-                OutputLog::info("gdb archetype -> streaming .mdl.gmd candidates (top 24):");
-                const size_t archetype_log_count =
-                    std::min<size_t>(archetypes.size(), 24);
-                for (size_t ai = 0; ai < archetype_log_count; ++ai) {
-                    const auto& kv = archetypes[ai];
-                    const std::string repr =
-                        best_gdb_name_for_examples(kv.second->examples,
-                                                   kv.first);
-                    int score = INT_MIN;
-                    const StreamingModelCandidate* hit =
-                        choose_streaming_cached(repr, kv.first, &score);
-                    std::ostringstream mos;
-                    mos << "  0x" << std::hex << std::uppercase
-                        << std::setw(8) << std::setfill('0') << kv.first
-                        << std::dec << "  " << kv.second->count << "x  "
-                        << (repr.empty() ? "(unnamed)" : repr) << " -> ";
-                    if (hit) {
-                        if (hit->entry) {
-                            mos << hit->entry->full_path;
-                        } else {
-                            mos << "hint-only:" << hit->hint_path;
-                        }
-                        mos << "  score=" << score;
-                        if (hit->from_gmd) mos << "  (from .gmd name)";
-                        else               mos << "  (from .hkx name)";
-                        if (!hit->entry) mos << "  (no global .mdl)";
-                    } else {
-                        mos << "NONE";
-                        if (score != INT_MIN) mos << "  best_score=" << score;
-                    }
-                    OutputLog::info(mos.str());
-                }
-                OutputLog::info("gdb landmark/structure candidate hashes:");
-                const char* needles[] = {
-                    "bridge", "clock", "arch", "gate", "tower", "wall",
-                    "stair", "lamp", "lantern", "statue"
-                };
-                size_t keyword_lines = 0;
-                for (const auto& kv : archetypes) {
-                    const std::string repr =
-                        best_gdb_name_for_examples(kv.second->examples,
-                                                   kv.first);
-                    const std::string key = gdb_entity_key(repr);
-                    bool interesting = false;
-                    for (const char* n : needles) {
-                        if (key.find(n) != std::string::npos) {
-                            interesting = true;
-                            break;
-                        }
-                    }
-                    if (!interesting) continue;
-                    int score = INT_MIN;
-                    const StreamingModelCandidate* hit =
-                        choose_streaming_cached(repr, kv.first, &score);
-                    std::ostringstream kos;
-                    kos << "  0x" << std::hex << std::uppercase
-                        << std::setw(8) << std::setfill('0') << kv.first
-                        << std::dec << "  " << kv.second->count << "x  "
-                        << repr << " -> ";
-                    if (hit && hit->entry) {
-                        kos << hit->entry->full_path << "  score=" << score;
-                    } else if (hit) {
-                        kos << "hint-only:" << hit->hint_path
-                            << "  score=" << score;
-                    } else {
-                        kos << "NONE";
-                        if (score != INT_MIN) kos << "  best_score=" << score;
-                    }
-                    OutputLog::info(kos.str());
-                    if (++keyword_lines >= 40) break;
-                }
-            }
 
             auto strip_suffix = [](std::string s, const char* suf) {
                 size_t n = std::strlen(suf);
@@ -4002,6 +3956,9 @@ bool Open(const FlatAssetEntry& entry)
                     if (is_gdb_static_prop_reject_model(model_hit->full_path)) {
                         return false;
                     }
+                    if (is_market_bridge_facade_proxy_model(model_hit->full_path)) {
+                        return false;
+                    }
                     if (!emitted_prop_transform_keys.insert(
                             prop_instance_transform_key(
                                 inst, model_hit->full_path)).second)
@@ -4101,69 +4058,6 @@ bool Open(const FlatAssetEntry& entry)
                         bwsmarket_has_explicit_clocktower_base_record = true;
                         break;
                     }
-                }
-            }
-            if (is_bwsmarket_level)
-            {
-                auto log_catalog_probe =
-                    [&](const char* label,
-                        std::initializer_list<const char*> needles,
-                        size_t limit) {
-                        size_t count = 0;
-                        std::vector<std::string> examples;
-                        for (const auto& m : S.all_mdl_files) {
-                            const std::string p = lower_slash(m.full_path);
-                            bool match = false;
-                            for (const char* needle : needles) {
-                                if (p.find(needle) != std::string::npos) {
-                                    match = true;
-                                    break;
-                                }
-                            }
-                            if (!match) continue;
-                            ++count;
-                            if (examples.size() < limit) {
-                                examples.push_back(m.full_path);
-                            }
-                        }
-                        std::ostringstream cat;
-                        cat << "model catalog probe: " << label << " "
-                            << count << " hit(s)";
-                        if (!examples.empty()) {
-                            cat << " e.g. ";
-                            for (size_t i = 0; i < examples.size(); ++i) {
-                                if (i) cat << " | ";
-                                cat << examples[i];
-                            }
-                        }
-                        OutputLog::info(cat.str());
-                    };
-                log_catalog_probe("clocktower", {"clocktower"}, 6);
-                log_catalog_probe("market shops",
-                                  {"bs_market_largeshop",
-                                   "bs_market_smallshop",
-                                   "bs_market_generalshop"},
-                                  20);
-                log_catalog_probe("market shells",
-                                  {"bs_market_tavern",
-                                   "bs_market_generalstore",
-                                   "bs_market_openstall",
-                                   "bs_market_marketstall",
-                                   "openstall",
-                                   "tarotstall"},
-                                  20);
-                log_catalog_probe("tavern/pub",
-                                  {"tavern", "pub", "inn"},
-                                  20);
-                log_catalog_probe("lights",
-                                  {"lamp", "lantern", "candleholder",
-                                   "light_ceiling", "lightceiling",
-                                   "oil_lamp", "oillamp"},
-                                  20);
-                if (bwsmarket_has_explicit_clocktower_base_record) {
-                    OutputLog::info(
-                        "BWSMarket clocktower: explicit GDB model hash found; "
-                        "legacy platform->tower companion disabled");
                 }
             }
 
@@ -4272,7 +4166,7 @@ bool Open(const FlatAssetEntry& entry)
             size_t gdb_clocktower_seen = 0;
             size_t gdb_clocktower_emitted = 0;
             size_t gdb_clocktower_companions_emitted = 0;
-            std::vector<std::string> gdb_clocktower_probe_lines;
+            std::vector<std::string> gdb_clocktower_audit_lines;
             size_t gdb_shop_seen = 0;
             size_t gdb_shop_emitted = 0;
             size_t gdb_shop_authored_skipped = 0;
@@ -4296,7 +4190,7 @@ bool Open(const FlatAssetEntry& entry)
                 gdb_shop_companion_paths;
             std::unordered_map<std::string, size_t>
                 gdb_nohash_shell_companion_paths;
-            std::vector<std::string> gdb_shop_probe_lines;
+            std::vector<std::string> gdb_shop_audit_lines;
             struct NoHashShellCandidate {
                 Gdb::Placement placement;
                 std::string entity_key;
@@ -4305,7 +4199,7 @@ bool Open(const FlatAssetEntry& entry)
             std::vector<NoHashShellCandidate> gdb_nohash_shell_candidates;
             std::vector<Level::PropInstance> gdb_generalshop_floor_anchors;
             std::vector<Level::PropInstance> gdb_tavern_pub_anchors;
-            struct HouseCompanionProbe {
+            struct HouseCompanionAudit {
                 size_t skipped = 0;
                 size_t exterior_hits = 0;
                 size_t exterior_misses = 0;
@@ -4315,8 +4209,8 @@ bool Open(const FlatAssetEntry& entry)
                 std::string interior_path;
                 std::vector<std::string> samples;
             };
-            std::unordered_map<std::string, HouseCompanionProbe>
-                gdb_house_companion_probes;
+            std::unordered_map<std::string, HouseCompanionAudit>
+                gdb_house_companion_audits;
             std::unordered_set<std::string> gdb_emitted_instance_keys;
             gdb_emitted_instance_keys.reserve(info.placements.size() * 2);
             auto is_market_shop_key = [](const std::string& key) {
@@ -4949,7 +4843,13 @@ bool Open(const FlatAssetEntry& entry)
                     }
                     return emitted;
                 };
+            size_t gdb_render_poll = 0;
             for (const auto& p : info.placements) {
+                if ((++gdb_render_poll & 0x7fu) == 0 &&
+                    bail_if_cancelled("gdb render placement resolve"))
+                {
+                    return false;
+                }
                 if (!emit_gdb_render_placements) continue;
                 const bool has_model_hash = p.model_path_hash != 0;
                 if (p.entity_name.empty() && !has_model_hash) continue;
@@ -4958,16 +4858,16 @@ bool Open(const FlatAssetEntry& entry)
                 const std::string entity_key = gdb_entity_key(p.entity_name);
                 std::string gdb_interest_category =
                     classify_gdb_interest(entity_key, tok, nullptr);
-                const bool clocktower_probe =
+                const bool clocktower_audit =
                     p.parent_hash == 0xD55304DB ||
                     entity_key.find("clocktower") != std::string::npos ||
                     tok.find("clocktower") != std::string::npos;
-                if (clocktower_probe) {
+                if (clocktower_audit) {
                     ++gdb_clocktower_seen;
                 }
-                bool shop_probe = is_market_shop_key(entity_key) ||
+                bool shop_audit = is_market_shop_key(entity_key) ||
                                   is_market_shop_key(tok);
-                if (shop_probe) {
+                if (shop_audit) {
                     ++gdb_shop_seen;
                 }
                 if (is_bwsmarket_level &&
@@ -4991,18 +4891,18 @@ bool Open(const FlatAssetEntry& entry)
                         p, entity_key, gdb_interest_category,
                         "skipped_unindexed_shell_fallback",
                         std::string());
-                    if (clocktower_probe &&
-                        gdb_clocktower_probe_lines.size() < 8)
+                    if (clocktower_audit &&
+                        gdb_clocktower_audit_lines.size() < 8)
                     {
-                        gdb_clocktower_probe_lines.push_back(
-                            "clocktower probe skipped unindexed shell fallback: " +
+                        gdb_clocktower_audit_lines.push_back(
+                            "clocktower audit skipped unindexed shell fallback: " +
                             gdb_shell_sample_text(p, "<no indexed record>"));
                     }
-                    if (shop_probe) {
+                    if (shop_audit) {
                         ++gdb_shop_unresolved;
-                        if (gdb_shop_probe_lines.size() < 12) {
-                            gdb_shop_probe_lines.push_back(
-                                "shop probe skipped unindexed shell fallback: " +
+                        if (gdb_shop_audit_lines.size() < 12) {
+                            gdb_shop_audit_lines.push_back(
+                                "shop audit skipped unindexed shell fallback: " +
                                 gdb_shell_sample_text(
                                     p, "<no indexed record>"));
                         }
@@ -5088,18 +4988,18 @@ bool Open(const FlatAssetEntry& entry)
                         add_gdb_interest_row(
                             p, entity_key, gdb_interest_category,
                             "unresolved", std::string());
-                        if (clocktower_probe &&
-                            gdb_clocktower_probe_lines.size() < 8)
+                        if (clocktower_audit &&
+                            gdb_clocktower_audit_lines.size() < 8)
                         {
-                            gdb_clocktower_probe_lines.push_back(
-                                "clocktower probe unresolved: " +
+                            gdb_clocktower_audit_lines.push_back(
+                                "clocktower audit unresolved: " +
                                 gdb_shell_sample_text(p, "<no model>"));
                         }
-                        if (shop_probe) {
+                        if (shop_audit) {
                             ++gdb_shop_unresolved;
-                            if (gdb_shop_probe_lines.size() < 12) {
-                                gdb_shop_probe_lines.push_back(
-                                    "shop probe unresolved: " +
+                            if (gdb_shop_audit_lines.size() < 12) {
+                                gdb_shop_audit_lines.push_back(
+                                    "shop audit unresolved: " +
                                     gdb_shell_sample_text(p, "<no model>"));
                             }
                         }
@@ -5135,19 +5035,19 @@ bool Open(const FlatAssetEntry& entry)
                     add_gdb_interest_row(
                         p, entity_key, gdb_interest_category,
                         "rejected_helper_substitute", hit->full_path);
-                    if (shop_probe) {
+                    if (shop_audit) {
                         ++gdb_shop_unresolved;
-                        if (gdb_shop_probe_lines.size() < 12) {
-                            gdb_shop_probe_lines.push_back(
-                                "shop probe rejected helper substitute: " +
+                        if (gdb_shop_audit_lines.size() < 12) {
+                            gdb_shop_audit_lines.push_back(
+                                "shop audit rejected helper substitute: " +
                                 gdb_shell_sample_text(p, hit->full_path));
                         }
                     }
                     continue;
                 }
                 ++resolved;
-                if (!shop_probe && hit && is_market_shop_path(hit->full_path)) {
-                    shop_probe = true;
+                if (!shop_audit && hit && is_market_shop_path(hit->full_path)) {
+                    shop_audit = true;
                     ++gdb_shop_seen;
                 }
                 if (hint_only || !hit) {
@@ -5155,25 +5055,25 @@ bool Open(const FlatAssetEntry& entry)
                         p, entity_key, gdb_interest_category,
                         "hint_only", hit ? hit->full_path : std::string());
                     ++gdb_hint_only_skipped;
-                    if (clocktower_probe &&
-                        gdb_clocktower_probe_lines.size() < 8)
+                    if (clocktower_audit &&
+                        gdb_clocktower_audit_lines.size() < 8)
                     {
-                        gdb_clocktower_probe_lines.push_back(
-                            "clocktower probe hint-only: " +
+                        gdb_clocktower_audit_lines.push_back(
+                            "clocktower audit hint-only: " +
                             gdb_shell_sample_text(p, "<hint only>"));
                     }
-                    if (shop_probe) {
+                    if (shop_audit) {
                         ++gdb_shop_hint_only;
-                        if (gdb_shop_probe_lines.size() < 12) {
-                            gdb_shop_probe_lines.push_back(
-                                "shop probe hint-only: " +
+                        if (gdb_shop_audit_lines.size() < 12) {
+                            gdb_shop_audit_lines.push_back(
+                                "shop audit hint-only: " +
                                 gdb_shell_sample_text(p, "<hint only>"));
                         }
                     }
                     continue;
                 }
                 const FlatAssetEntry* clocktower_platform_companion = nullptr;
-                if (clocktower_probe) {
+                if (clocktower_audit) {
                     const std::string primary_path = lower_slash(hit->full_path);
                     if (!bwsmarket_has_explicit_clocktower_base_record &&
                         primary_path.find("bs_market_platform") !=
@@ -5196,18 +5096,18 @@ bool Open(const FlatAssetEntry& entry)
                     add_gdb_interest_row(
                         p, entity_key, gdb_interest_category,
                         "skipped_authored_shell", hit->full_path);
-                    if (clocktower_probe &&
-                        gdb_clocktower_probe_lines.size() < 8)
+                    if (clocktower_audit &&
+                        gdb_clocktower_audit_lines.size() < 8)
                     {
-                        gdb_clocktower_probe_lines.push_back(
-                            "clocktower probe skipped as authored shell: " +
+                        gdb_clocktower_audit_lines.push_back(
+                            "clocktower audit skipped as authored shell: " +
                             gdb_shell_sample_text(p, hit->full_path));
                     }
-                    if (shop_probe) {
+                    if (shop_audit) {
                         ++gdb_shop_authored_skipped;
-                        if (gdb_shop_probe_lines.size() < 12) {
-                            gdb_shop_probe_lines.push_back(
-                                "shop probe skipped as authored shell: " +
+                        if (gdb_shop_audit_lines.size() < 12) {
+                            gdb_shop_audit_lines.push_back(
+                                "shop audit skipped as authored shell: " +
                                 gdb_shell_sample_text(p, hit->full_path));
                         }
                     }
@@ -5216,10 +5116,10 @@ bool Open(const FlatAssetEntry& entry)
                         shop_facade_companion_exterior_path(authored_path);
                     if (!shop_companion_exterior.empty()) {
                         ++gdb_authored_shop_companion_skipped;
-                        if (shop_probe &&
-                            gdb_shop_probe_lines.size() < 12)
+                        if (shop_audit &&
+                            gdb_shop_audit_lines.size() < 12)
                         {
-                            gdb_shop_probe_lines.push_back(
+                            gdb_shop_audit_lines.push_back(
                                 "shop companion skipped on GDB authored shell duplicate: " +
                                 gdb_shell_sample_text(
                                     p, shop_companion_exterior));
@@ -5228,30 +5128,30 @@ bool Open(const FlatAssetEntry& entry)
                     const std::string companion_exterior =
                         house_facade_companion_exterior_path(authored_path);
                     if (!companion_exterior.empty()) {
-                        HouseCompanionProbe& probe =
-                            gdb_house_companion_probes[authored_path];
-                        ++probe.skipped;
-                        if (probe.exterior_path.empty()) {
-                            probe.exterior_path = companion_exterior;
+                        HouseCompanionAudit& audit =
+                            gdb_house_companion_audits[authored_path];
+                        ++audit.skipped;
+                        if (audit.exterior_path.empty()) {
+                            audit.exterior_path = companion_exterior;
                         }
                         if (resolve_model_by_lower_path(companion_exterior)) {
-                            ++probe.exterior_hits;
+                            ++audit.exterior_hits;
                         } else {
-                            ++probe.exterior_misses;
+                            ++audit.exterior_misses;
                         }
                         const std::string companion_interior =
                             companion_interior_path(companion_exterior);
-                        if (probe.interior_path.empty()) {
-                            probe.interior_path = companion_interior;
+                        if (audit.interior_path.empty()) {
+                            audit.interior_path = companion_interior;
                         }
                         if (!companion_interior.empty() &&
                             resolve_model_by_lower_path(companion_interior)) {
-                            ++probe.interior_hits;
+                            ++audit.interior_hits;
                         } else {
-                            ++probe.interior_misses;
+                            ++audit.interior_misses;
                         }
-                        if (probe.samples.size() < 4) {
-                            probe.samples.push_back(
+                        if (audit.samples.size() < 4) {
+                            audit.samples.push_back(
                                 gdb_shell_sample_text(p, authored_path));
                         }
                     }
@@ -5296,18 +5196,18 @@ bool Open(const FlatAssetEntry& entry)
                         "skipped_non_world_shell_position", hit->full_path);
                     ++gdb_shell_bad_position_skipped;
                     ++gdb_shell_bad_position_paths[hit->full_path];
-                    if (clocktower_probe &&
-                        gdb_clocktower_probe_lines.size() < 8)
+                    if (clocktower_audit &&
+                        gdb_clocktower_audit_lines.size() < 8)
                     {
-                        gdb_clocktower_probe_lines.push_back(
-                            "clocktower probe skipped non-world shell position: " +
+                        gdb_clocktower_audit_lines.push_back(
+                            "clocktower audit skipped non-world shell position: " +
                             gdb_shell_sample_text(p, hit->full_path));
                     }
-                    if (shop_probe) {
+                    if (shop_audit) {
                         ++gdb_shop_duplicates;
-                        if (gdb_shop_probe_lines.size() < 12) {
-                            gdb_shop_probe_lines.push_back(
-                                "shop probe skipped non-world shell position: " +
+                        if (gdb_shop_audit_lines.size() < 12) {
+                            gdb_shop_audit_lines.push_back(
+                                "shop audit skipped non-world shell position: " +
                                 gdb_shell_sample_text(p, hit->full_path));
                         }
                     }
@@ -5339,18 +5239,18 @@ bool Open(const FlatAssetEntry& entry)
                             ++gdb_shell_entity_duplicates_skipped;
                             ++gdb_shell_entity_duplicate_paths[
                                 hit->full_path];
-                            if (clocktower_probe &&
-                                gdb_clocktower_probe_lines.size() < 8)
+                            if (clocktower_audit &&
+                                gdb_clocktower_audit_lines.size() < 8)
                             {
-                                gdb_clocktower_probe_lines.push_back(
-                                    "clocktower probe skipped repeated shell entity: " +
+                                gdb_clocktower_audit_lines.push_back(
+                                    "clocktower audit skipped repeated shell entity: " +
                                     gdb_shell_sample_text(p, hit->full_path));
                             }
-                            if (shop_probe) {
+                            if (shop_audit) {
                                 ++gdb_shop_duplicates;
-                                if (gdb_shop_probe_lines.size() < 12) {
-                                    gdb_shop_probe_lines.push_back(
-                                        "shop probe skipped repeated shell entity: " +
+                                if (gdb_shop_audit_lines.size() < 12) {
+                                    gdb_shop_audit_lines.push_back(
+                                        "shop audit skipped repeated shell entity: " +
                                         gdb_shell_sample_text(
                                             p, hit->full_path));
                                 }
@@ -5378,11 +5278,11 @@ bool Open(const FlatAssetEntry& entry)
                         "skipped_shell_path_cap", hit->full_path);
                     ++gdb_shell_path_limit_skipped;
                     ++gdb_shell_path_limit_skip_paths[hit->full_path];
-                    if (shop_probe) {
+                    if (shop_audit) {
                         ++gdb_shop_duplicates;
-                        if (gdb_shop_probe_lines.size() < 12) {
-                            gdb_shop_probe_lines.push_back(
-                                "shop probe skipped BWSMarket shell path cap: " +
+                        if (gdb_shop_audit_lines.size() < 12) {
+                            gdb_shop_audit_lines.push_back(
+                                "shop audit skipped BWSMarket shell path cap: " +
                                 gdb_shell_sample_text(p, hit->full_path));
                         }
                     }
@@ -5397,18 +5297,18 @@ bool Open(const FlatAssetEntry& entry)
                         "skipped_duplicate_gdb_record", hit->full_path);
                     ++gdb_duplicate_instances_skipped;
                     ++gdb_duplicate_skip_paths[hit->full_path];
-                    if (clocktower_probe &&
-                        gdb_clocktower_probe_lines.size() < 8)
+                    if (clocktower_audit &&
+                        gdb_clocktower_audit_lines.size() < 8)
                     {
-                        gdb_clocktower_probe_lines.push_back(
-                            "clocktower probe skipped duplicate gdb record: " +
+                        gdb_clocktower_audit_lines.push_back(
+                            "clocktower audit skipped duplicate gdb record: " +
                             gdb_shell_sample_text(p, hit->full_path));
                     }
-                    if (shop_probe) {
+                    if (shop_audit) {
                         ++gdb_shop_duplicates;
-                        if (gdb_shop_probe_lines.size() < 12) {
-                            gdb_shop_probe_lines.push_back(
-                                "shop probe skipped duplicate gdb record: " +
+                        if (gdb_shop_audit_lines.size() < 12) {
+                            gdb_shop_audit_lines.push_back(
+                                "shop audit skipped duplicate gdb record: " +
                                 gdb_shell_sample_text(p, hit->full_path));
                         }
                     }
@@ -5471,18 +5371,18 @@ bool Open(const FlatAssetEntry& entry)
                         "skipped_existing_prop_transform", hit->full_path);
                     ++gdb_duplicate_instances_skipped;
                     ++gdb_duplicate_skip_paths[hit->full_path];
-                    if (clocktower_probe &&
-                        gdb_clocktower_probe_lines.size() < 8)
+                    if (clocktower_audit &&
+                        gdb_clocktower_audit_lines.size() < 8)
                     {
-                        gdb_clocktower_probe_lines.push_back(
-                            "clocktower probe skipped existing prop transform: " +
+                        gdb_clocktower_audit_lines.push_back(
+                            "clocktower audit skipped existing prop transform: " +
                             gdb_shell_sample_text(p, hit->full_path));
                     }
-                    if (shop_probe) {
+                    if (shop_audit) {
                         ++gdb_shop_duplicates;
-                        if (gdb_shop_probe_lines.size() < 12) {
-                            gdb_shop_probe_lines.push_back(
-                                "shop probe skipped existing prop transform: " +
+                        if (gdb_shop_audit_lines.size() < 12) {
+                            gdb_shop_audit_lines.push_back(
+                                "shop audit skipped existing prop transform: " +
                                 gdb_shell_sample_text(p, hit->full_path));
                         }
                     }
@@ -5511,11 +5411,11 @@ bool Open(const FlatAssetEntry& entry)
                 if (has_shell_path_limit) {
                     ++gdb_shell_path_emit_counts[shell_path_count_key];
                 }
-                if (clocktower_probe) {
+                if (clocktower_audit) {
                     ++gdb_clocktower_emitted;
-                    if (gdb_clocktower_probe_lines.size() < 8) {
-                        gdb_clocktower_probe_lines.push_back(
-                            "clocktower probe emitted: " +
+                    if (gdb_clocktower_audit_lines.size() < 8) {
+                        gdb_clocktower_audit_lines.push_back(
+                            "clocktower audit emitted: " +
                             gdb_shell_sample_text(p, hit->full_path));
                     }
                     const std::string primary_path =
@@ -5540,8 +5440,8 @@ bool Open(const FlatAssetEntry& entry)
                                     clocktower_platform_companion, pi))
                             {
                                 ++gdb_clocktower_companions_emitted;
-                                if (gdb_clocktower_probe_lines.size() < 8) {
-                                    gdb_clocktower_probe_lines.push_back(
+                                if (gdb_clocktower_audit_lines.size() < 8) {
+                                    gdb_clocktower_audit_lines.push_back(
                                         "clocktower platform companion emitted: " +
                                         gdb_shell_sample_text(
                                             p,
@@ -5559,16 +5459,16 @@ bool Open(const FlatAssetEntry& entry)
                                     lower_slash(tower_path ? tower_path : ""));
                             if (append_prop_instance_for_model(tower_hit, pi)) {
                                 ++gdb_clocktower_companions_emitted;
-                                if (gdb_clocktower_probe_lines.size() < 8) {
-                                    gdb_clocktower_probe_lines.push_back(
+                                if (gdb_clocktower_audit_lines.size() < 8) {
+                                    gdb_clocktower_audit_lines.push_back(
                                         "clocktower companion emitted: " +
                                         gdb_shell_sample_text(
                                             p, tower_hit->full_path));
                                 }
                             } else if (!tower_hit &&
-                                       gdb_clocktower_probe_lines.size() < 8)
+                                       gdb_clocktower_audit_lines.size() < 8)
                             {
-                                gdb_clocktower_probe_lines.push_back(
+                                gdb_clocktower_audit_lines.push_back(
                                     "clocktower companion unresolved: " +
                                     gdb_shell_sample_text(
                                         p, tower_path ? tower_path : "<no path>"));
@@ -5590,27 +5490,27 @@ bool Open(const FlatAssetEntry& entry)
                                 resolve_model_by_lower_path(part_lower);
                             if (append_prop_instance_for_model(part_hit, pi)) {
                                 ++gdb_clocktower_companions_emitted;
-                                if (gdb_clocktower_probe_lines.size() < 8) {
-                                    gdb_clocktower_probe_lines.push_back(
+                                if (gdb_clocktower_audit_lines.size() < 8) {
+                                    gdb_clocktower_audit_lines.push_back(
                                         "clocktower part emitted: " +
                                         gdb_shell_sample_text(
                                             p, part_hit->full_path));
                                 }
                             } else if (!part_hit &&
-                                       gdb_clocktower_probe_lines.size() < 8)
+                                       gdb_clocktower_audit_lines.size() < 8)
                             {
-                                gdb_clocktower_probe_lines.push_back(
+                                gdb_clocktower_audit_lines.push_back(
                                     "clocktower part unresolved: " +
                                     gdb_shell_sample_text(p, part_path));
                             }
                         }
                     }
                 }
-                if (shop_probe) {
+                if (shop_audit) {
                     ++gdb_shop_emitted;
-                    if (gdb_shop_probe_lines.size() < 12) {
-                        gdb_shop_probe_lines.push_back(
-                            "shop probe emitted: " +
+                    if (gdb_shop_audit_lines.size() < 12) {
+                        gdb_shop_audit_lines.push_back(
+                            "shop audit emitted: " +
                             gdb_shell_sample_text(p, hit->full_path));
                     }
                 }
@@ -6250,71 +6150,6 @@ bool Open(const FlatAssetEntry& entry)
                         "gdb-derived skipped after model match: hint-only=" +
                         std::to_string(gdb_hint_only_skipped));
                 }
-                if (gdb_clocktower_seen > 0 ||
-                    !gdb_clocktower_probe_lines.empty())
-                {
-                    OutputLog::info(
-                        "gdb clocktower probe: seen=" +
-                        std::to_string(gdb_clocktower_seen) +
-                        ", emitted=" +
-                        std::to_string(gdb_clocktower_emitted) +
-                        ", companion=" +
-                        std::to_string(gdb_clocktower_companions_emitted));
-                    for (const auto& line : gdb_clocktower_probe_lines) {
-                        OutputLog::info("  " + line);
-                    }
-                }
-                if (gdb_shop_seen > 0 || !gdb_shop_probe_lines.empty()) {
-                    OutputLog::info(
-                        "gdb market shop probe: seen=" +
-                        std::to_string(gdb_shop_seen) +
-                        ", emitted=" +
-                        std::to_string(gdb_shop_emitted) +
-                        ", authored-skip=" +
-                        std::to_string(gdb_shop_authored_skipped) +
-                        ", duplicate=" +
-                        std::to_string(gdb_shop_duplicates) +
-                        ", unresolved=" +
-                        std::to_string(gdb_shop_unresolved) +
-                        ", hint-only=" +
-                        std::to_string(gdb_shop_hint_only) +
-                        ", companions=" +
-                        std::to_string(gdb_shop_companions_emitted) +
-                        ", gdb-authored-companion-skip=" +
-                        std::to_string(gdb_authored_shop_companion_skipped) +
-                        ", companion-miss=" +
-                        std::to_string(gdb_shop_companion_misses) +
-                        ", bad-pos=" +
-                        std::to_string(gdb_shop_companion_invalid_positions));
-                    for (const auto& line : gdb_shop_probe_lines) {
-                        OutputLog::info("  " + line);
-                    }
-                }
-                if (auto light_cat =
-                        gdb_interest_category_status_counts.find("light");
-                    light_cat != gdb_interest_category_status_counts.end())
-                {
-                    auto count_status = [&](const char* key) {
-                        auto it = light_cat->second.find(key);
-                        return it == light_cat->second.end()
-                                   ? size_t(0)
-                                   : it->second;
-                    };
-                    OutputLog::info(
-                        "gdb light probe: emitted=" +
-                        std::to_string(count_status("emitted")) +
-                        ", duplicate=" +
-                        std::to_string(
-                            count_status("skipped_duplicate_gdb_record") +
-                            count_status("skipped_existing_prop_transform")) +
-                        ", rejected=" +
-                        std::to_string(
-                            count_status("rejected_non_static_model") +
-                            count_status("rejected_helper_substitute")) +
-                        ", unresolved=" +
-                        std::to_string(count_status("unresolved") +
-                                       count_status("hint_only")));
-                }
                 if (gdb_shop_companions_emitted > 0) {
                     OutputLog::info(
                         "gdb shop companions: " +
@@ -6564,53 +6399,6 @@ bool Open(const FlatAssetEntry& entry)
                             for (const auto& sample : sample_it->second) {
                                 OutputLog::info("    e.g. " + sample);
                             }
-                        }
-                    }
-                }
-                if (!gdb_house_companion_probes.empty()) {
-                    size_t total = 0;
-                    for (const auto& kv : gdb_house_companion_probes) {
-                        total += kv.second.skipped;
-                    }
-                    OutputLog::info(
-                        "gdb-derived authored house companion probe (not emitted): " +
-                        std::to_string(total) +
-                        " instance(s) across " +
-                        std::to_string(gdb_house_companion_probes.size()) +
-                        " model(s)");
-                    std::vector<std::pair<std::string, HouseCompanionProbe>>
-                        probes(gdb_house_companion_probes.begin(),
-                               gdb_house_companion_probes.end());
-                    std::sort(probes.begin(), probes.end(),
-                              [](const auto& a, const auto& b) {
-                                  if (a.second.skipped != b.second.skipped) {
-                                      return a.second.skipped >
-                                             b.second.skipped;
-                                  }
-                                  return a.first < b.first;
-                              });
-                    const size_t n =
-                        std::min<size_t>(probes.size(), 8);
-                    for (size_t i = 0; i < n; ++i) {
-                        const HouseCompanionProbe& probe = probes[i].second;
-                        OutputLog::info(
-                            "  authored house companion candidate: " +
-                            std::to_string(probe.skipped) +
-                            "x  " + probes[i].first);
-                        OutputLog::info(
-                            "    exterior: " +
-                            std::to_string(probe.exterior_hits) +
-                            " hit / " +
-                            std::to_string(probe.exterior_misses) +
-                            " miss  " + probe.exterior_path);
-                        OutputLog::info(
-                            "    interior: " +
-                            std::to_string(probe.interior_hits) +
-                            " hit / " +
-                            std::to_string(probe.interior_misses) +
-                            " miss  " + probe.interior_path);
-                        for (const auto& sample : probe.samples) {
-                            OutputLog::info("    e.g. " + sample);
                         }
                     }
                 }
@@ -6896,47 +6684,12 @@ bool Open(const FlatAssetEntry& entry)
             size_t total_rb  = 0;
             size_t total_inst = 0;
 
-            constexpr size_t kProbeLimit = 8;
-            size_t probed = 0;
-            size_t with_world_pos = 0;
-            std::vector<std::string> world_pos_hits;
-            world_pos_hits.reserve(kProbeLimit);
-
-            auto looks_world_scale = [](float v) {
-                return std::isfinite(v) && std::fabs(v) > 5.0f &&
-                       std::fabs(v) < 1000.0f;
-            };
-            auto looks_world_pos = [&](float x, float y, float z) {
-                if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
-                    return false;
-                if (std::fabs(x) > 1000.0f || std::fabs(y) > 1000.0f ||
-                    std::fabs(z) > 1000.0f) return false;
-                return looks_world_scale(x) || looks_world_scale(y) ||
-                       looks_world_scale(z);
-            };
-
-            std::map<std::string, size_t> streaming_extensions;
-            std::map<std::string, std::vector<size_t>> ext_size_samples;
-            std::map<std::string, int>                 ext_sample_idx;
-            std::map<std::string, std::string>         ext_sample_name;
-
             for (size_t i = 0; i < files.size(); ++i) {
                 const auto& name = files[i].name;
                 std::string lower = name;
                 std::transform(lower.begin(), lower.end(),
                                lower.begin(), ::tolower);
 
-                {
-                    size_t dot = lower.find_last_of('.');
-                    std::string ext = (dot != std::string::npos)
-                                        ? lower.substr(dot) : "(no-ext)";
-                    streaming_extensions[ext]++;
-                    ext_size_samples[ext].push_back(files[i].size());
-                    if (ext_sample_idx.find(ext) == ext_sample_idx.end()) {
-                        ext_sample_idx[ext]  = (int)i;
-                        ext_sample_name[ext] = name;
-                    }
-                }
 
                 if (lower.size() < 4 ||
                     lower.compare(lower.size() - 4, 4, ".hkx") != 0) continue;
@@ -6961,44 +6714,6 @@ bool Open(const FlatAssetEntry& entry)
                     }
                 }
 
-                if (this_rb > 0 && rb_class && probed < kProbeLimit) {
-                    ++probed;
-                    auto rdf32 = [&](size_t o) -> float {
-                        if (o + 4 > pf->bytes.size()) return 0.0f;
-                        uint32_t u =
-                            (uint32_t(pf->bytes[o])     << 24) |
-                            (uint32_t(pf->bytes[o + 1]) << 16) |
-                            (uint32_t(pf->bytes[o + 2]) <<  8) |
-                             uint32_t(pf->bytes[o + 3]);
-                        float f; std::memcpy(&f, &u, 4); return f;
-                    };
-                    for (const auto& vf : pf->virtual_fixups) {
-                        if (vf.classnames_offset !=
-                            rb_class->classnames_offset) continue;
-                        const size_t base = pf->data_section.absolute_data_start
-                                          + vf.data_offset;
-                        if (base + 12 > pf->bytes.size()) break;
-                        const size_t end_ok =
-                            std::min(base + 0x200, pf->bytes.size());
-                        for (size_t q = base; q + 12 <= end_ok; q += 4) {
-                            float x = rdf32(q);
-                            float y = rdf32(q + 4);
-                            float z = rdf32(q + 8);
-                            if (looks_world_pos(x, y, z)) {
-                                ++with_world_pos;
-                                std::ostringstream osp;
-                                osp << "    [probe " << with_world_pos
-                                    << "] " << name << "  vec3 @+0x"
-                                    << std::hex << (q - base) << std::dec
-                                    << " = (" << x << ", " << y << ", "
-                                    << z << ")";
-                                world_pos_hits.push_back(osp.str());
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                }
 
             }
 
@@ -7010,62 +6725,6 @@ bool Open(const FlatAssetEntry& entry)
                << total_inst << " havok instances";
             OutputLog::success(os.str());
 
-            std::ostringstream osp;
-            osp << "  world-pos probe: " << with_world_pos << " / "
-                << probed << " HKX have a world-scale vec3 in their first "
-                << "rigid body (diagnostic only — no placements emitted)";
-            if (with_world_pos > 0) OutputLog::info(osp.str());
-            else                     OutputLog::info(osp.str());
-            for (const auto& line : world_pos_hits) {
-                OutputLog::info(line);
-            }
-
-            std::vector<std::pair<std::string, size_t>> ext_sorted(
-                streaming_extensions.begin(), streaming_extensions.end());
-            std::sort(ext_sorted.begin(), ext_sorted.end(),
-                      [](const auto& a, const auto& b){
-                          return a.second > b.second;
-                      });
-            OutputLog::info("  streaming BNK file extensions:");
-            for (const auto& [ext, n] : ext_sorted) {
-                auto& sizes = ext_size_samples[ext];
-                size_t mn = sizes.empty() ? 0 : *std::min_element(sizes.begin(), sizes.end());
-                size_t mx = sizes.empty() ? 0 : *std::max_element(sizes.begin(), sizes.end());
-                size_t total = 0;
-                for (auto s : sizes) total += s;
-                size_t avg = sizes.empty() ? 0 : total / sizes.size();
-
-                std::ostringstream osx;
-                osx << "    " << ext << "  ×" << n
-                    << "  sizes: min=" << mn << " avg=" << avg << " max=" << mx;
-                OutputLog::info(osx.str());
-
-                if (ext != ".hkx" && ext_sample_idx.count(ext)) {
-                    int idx = ext_sample_idx[ext];
-                    try {
-                        auto bytes = bnk.reader->extract_index_bytes(idx);
-                        const size_t dump_n = std::min<size_t>(bytes.size(), 128);
-                        OutputLog::info("      sample: " + ext_sample_name[ext]
-                                        + "  (" + std::to_string(bytes.size())
-                                        + " bytes)");
-                        for (size_t off = 0; off < dump_n; off += 16) {
-                            std::ostringstream lineh, linea;
-                            lineh << "        +0x" << std::hex
-                                  << std::setw(3) << std::setfill('0')
-                                  << off << "  ";
-                            for (size_t k = 0; k < 16 && off + k < dump_n; ++k) {
-                                lineh << std::setw(2) << std::setfill('0')
-                                      << (unsigned)bytes[off + k] << " ";
-                                unsigned char c = bytes[off + k];
-                                linea << (char)((c >= 32 && c < 127) ? c : '.');
-                            }
-                            OutputLog::info(lineh.str() + "  " + linea.str());
-                        }
-                    } catch (...) {
-                        OutputLog::warn("      (failed to extract sample)");
-                    }
-                }
-            }
         } catch (const std::exception& ex) {
             OutputLog::warn(std::string("streaming bnk scan failed: ") + ex.what());
         }
@@ -7075,7 +6734,7 @@ bool Open(const FlatAssetEntry& entry)
 
     if (!res.ehf_path.empty() || !res.ghf_path.empty()) {
         HeightfieldFiles hf;
-        progress_update(32, 100, "Loading heightfield files...");
+        loader_progress_update(32, 100, "Loading heightfield files...");
         if (!LoadHeightfieldFiles(res.ehf_path, res.ghf_path,
                                   res.hdb_path, res.genv_path, hf)) {
             OutputLog::error("heightfield load failed: " + hf.error);
@@ -7090,54 +6749,9 @@ bool Open(const FlatAssetEntry& entry)
                 << " → " << hf.ghf_bytes_raw.size() << "B (raw)";
             OutputLog::success(hos.str());
 
-            if (hf.ehf_header.ok) {
-                const auto& h = hf.ehf_header;
-                std::ostringstream eos;
-                eos << "  .ehf header (63B): magic=\"" << h.magic
-                    << "\"  version=" << h.version
-                    << "\n    floats: f0=" << h.f0 << "  f1=" << h.f1
-                    << "  f2=" << h.f2 << "  f3=" << h.f3 << "  f4=" << h.f4
-                    << "\n    u0=" << h.u0 << "  u1=" << h.u1
-                    << "\n    body: offset=0x" << std::hex << h.body_offset
-                    << "  size=" << std::dec << h.body_size << "B"
-                    << "  (file=" << hf.ehf_bytes.size() << "B"
-                    << ", end=0x" << std::hex
-                    << (h.body_offset + h.body_size) << std::dec << ")";
-                OutputLog::info(eos.str());
-
-                const uint64_t body_end =
-                    uint64_t(h.body_offset) + uint64_t(h.body_size);
-                if (body_end > hf.ehf_bytes.size()) {
-                    std::ostringstream wos;
-                    wos << "  .ehf body extent (" << body_end
-                        << "B) exceeds file size (" << hf.ehf_bytes.size()
-                        << "B) — header layout may be wrong";
-                    OutputLog::warn(wos.str());
-                } else {
-                    const size_t dump_start = h.body_offset;
-                    const size_t dump_end   = std::min<size_t>(
-                        h.body_offset + 64, hf.ehf_bytes.size());
-                    std::ostringstream dos;
-                    dos << "  .ehf body[0..63]:";
-                    for (size_t i = dump_start; i < dump_end; ++i) {
-                        if ((i - dump_start) % 16 == 0) {
-                            dos << "\n    +0x" << std::hex
-                                << std::setw(3) << std::setfill('0')
-                                << (i - dump_start) << "  ";
-                        }
-                        dos << std::hex << std::setw(2)
-                            << std::setfill('0')
-                            << int(hf.ehf_bytes[i]) << ' ';
-                    }
-                    OutputLog::info(dos.str());
-                }
-            } else {
-                OutputLog::warn("  .ehf header missing or invalid (need 63B + magic)");
-            }
-
             if (!hf.ghf_bytes_raw.empty()) {
                 GhfHeights hg;
-                progress_update(45, 100, "Decoding height grid...");
+                loader_progress_update(45, 100, "Decoding height grid...");
                 if (!DecodeGhfHeights(hf.ghf_bytes_raw, hg)) {
                     OutputLog::error("  .ghf decode failed: " + hg.error);
                 } else {
@@ -7163,7 +6777,7 @@ bool Open(const FlatAssetEntry& entry)
                     OutputLog::success(gos.str());
 
                     TerrainMesh mesh;
-                    progress_update(58, 100, "Building terrain mesh...");
+                    loader_progress_update(58, 100, "Building terrain mesh...");
                     if (S.cancel_requested.load()) {
                         OutputLog::warn("level load cancelled before terrain mesh build");
                         return false;
@@ -7576,6 +7190,7 @@ bool Open(const FlatAssetEntry& entry)
                             }
                             TerrainMesh adj_mesh;
                             bool used_ehf_proxy = false;
+                            bool used_ehf_render_mesh = false;
                             if (!adj_hf.ghf_bytes_raw.empty()) {
                                 GhfHeights adj_hg;
                                 if (!DecodeGhfHeights(adj_hf.ghf_bytes_raw, adj_hg)) {
@@ -7602,6 +7217,7 @@ bool Open(const FlatAssetEntry& entry)
                                         adj_hf.ehf_bytes, adj_mesh,
                                         &render_stats)) {
                                     used_ehf_proxy = true;
+                                    used_ehf_render_mesh = true;
                                     OutputLog::info("adjacent terrain using "
                                                     ".ehf render mesh: " +
                                                     adj_ehf_path + " (" +
@@ -7654,6 +7270,8 @@ bool Open(const FlatAssetEntry& entry)
                             adj.preferred_bnk = g_pending_terrain_level_entry.bnk_path;
                             adj.ehf_bytes = std::move(adj_hf.ehf_bytes);
                             adj.mesh = std::move(adj_mesh);
+                            adj.preserve_mesh_uvs = used_ehf_render_mesh;
+                            adj.prefer_embedded_albedo = used_ehf_render_mesh;
                             g_pending_adjacent_terrain_meshes.push_back(std::move(adj));
                         }
                         if (!g_pending_adjacent_terrain_meshes.empty()) {
@@ -7836,7 +7454,8 @@ bool Open(const FlatAssetEntry& entry)
                             OutputLog::warn("level load cancelled before handoff to terrain stage");
                             return false;
                         }
-                        g_pending_terrain_load        = true;
+                        g_pending_terrain_load =
+                            !g_level_export_only_load.load();
 
                         {
                             auto pal = EhfPalette::Parse(hf.ehf_bytes);
@@ -8793,12 +8412,12 @@ bool BakeEhfTerrainComposite(const std::vector<uint8_t>& ehf,
                                           out_picked_name);
 }
 
-namespace { bool g_capture_splat_debug = false;
-            std::vector<uint8_t>* g_splat_debug_rgba = nullptr;
-            int* g_splat_debug_w = nullptr;
-            int* g_splat_debug_h = nullptr; }
+namespace { bool g_capture_splat_output = false;
+            std::vector<uint8_t>* g_splat_output_rgba = nullptr;
+            int* g_splat_output_w = nullptr;
+            int* g_splat_output_h = nullptr; }
 
-bool BakeEhfTerrainCompositeAndSplatDebug(
+bool BakeEhfTerrainCompositeAndSplat(
     const std::vector<uint8_t>& ehf,
     const std::string& preferred_bnk,
     std::vector<uint8_t>& out_rgba,
@@ -8807,17 +8426,17 @@ bool BakeEhfTerrainCompositeAndSplatDebug(
     std::vector<uint8_t>& out_splat_rgba,
     int& out_splat_w, int& out_splat_h)
 {
-    g_capture_splat_debug = true;
-    g_splat_debug_rgba    = &out_splat_rgba;
-    g_splat_debug_w       = &out_splat_w;
-    g_splat_debug_h       = &out_splat_h;
+    g_capture_splat_output = true;
+    g_splat_output_rgba    = &out_splat_rgba;
+    g_splat_output_w       = &out_splat_w;
+    g_splat_output_h       = &out_splat_h;
     bool ok = BakeEhfTerrainCompositeWithBnk(ehf, preferred_bnk,
                                              out_rgba, out_w, out_h,
                                              out_picked_name);
-    g_capture_splat_debug = false;
-    g_splat_debug_rgba = nullptr;
-    g_splat_debug_w = nullptr;
-    g_splat_debug_h = nullptr;
+    g_capture_splat_output = false;
+    g_splat_output_rgba = nullptr;
+    g_splat_output_w = nullptr;
+    g_splat_output_h = nullptr;
     return ok;
 }
 
@@ -9006,10 +8625,10 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
         + std::to_string(parsed.chunk_h) + " × "
         + std::to_string(mats.size()) + " LODs]";
 
-    if (g_capture_splat_debug && g_splat_debug_rgba) {
-        g_splat_debug_rgba->clear();
-        if (g_splat_debug_w) *g_splat_debug_w = 0;
-        if (g_splat_debug_h) *g_splat_debug_h = 0;
+    if (g_capture_splat_output && g_splat_output_rgba) {
+        g_splat_output_rgba->clear();
+        if (g_splat_output_w) *g_splat_output_w = 0;
+        if (g_splat_output_h) *g_splat_output_h = 0;
     }
 
     const size_t pix = size_t(lm_w) * size_t(lm_h);

@@ -55,6 +55,8 @@ set(APP_SOURCES
         src/MDL/mdl_converter.cpp
         src/Level/LevelLoader.cpp
         src/Level/LevelLoader.h
+        src/Level/LevelExport.cpp
+        src/Level/LevelExport.h
         src/Level/HeightfieldLoader.cpp
         src/Level/HeightfieldLoader.h
         src/Level/TextureAtlasDecoder.cpp

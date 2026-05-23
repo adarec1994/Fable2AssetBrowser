@@ -21,3 +21,5 @@ IDR_ROBOTO_FONT RCDATA    "include/font/Roboto-Regular.ttf"
 IDR_MENU_INTERLUDE_WAV RCDATA "include/audio/menu_interlude.wav"
 
 IDR_ABOUT_IMAGE RCDATA "include/image/ob_tarotcards.png"
+
+IDR_FABLE_LEVEL_IMPORTER_ZIP RCDATA "addons/FableLevelImporter.zip"

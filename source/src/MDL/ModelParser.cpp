@@ -1350,27 +1350,47 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
             all_positions[v*3+2]=half_to_float(hz);
 
             if(!mb.IsAltPath && vertex_stride >= 20){
-                uint8_t bone_idx = p[15];
-                uint8_t weight_val = p[19];
-                if(bone_idx < 255){
-                    all_bone_ids[v*4+0] = bone_idx;
-                    all_bone_ids[v*4+1] = 0;
-                    all_bone_ids[v*4+2] = 0;
-                    all_bone_ids[v*4+3] = 0;
-                    float w = (weight_val > 0) ? (weight_val / 255.0f) : 1.0f;
-                    all_bone_weights[v*4+0] = w;
-                    all_bone_weights[v*4+1] = 0.0f;
-                    all_bone_weights[v*4+2] = 0.0f;
-                    all_bone_weights[v*4+3] = 0.0f;
+                const uint32_t bone_count =
+                    info.BoneCount ? info.BoneCount
+                                   : (uint32_t)info.Bones.size();
+                uint16_t ids[4] = {
+                    (uint16_t)p[12], (uint16_t)p[13],
+                    (uint16_t)p[14], (uint16_t)p[15]
+                };
+                uint8_t weights_u8[4] = { p[16], p[17], p[18], p[19] };
+
+                int out_influence = 0;
+                float weight_sum = 0.0f;
+                for(int k=0; k<4; ++k){
+                    if(ids[k] >= 255) continue;
+                    if(bone_count > 0 && ids[k] >= bone_count) continue;
+                    if(weights_u8[k] == 0) continue;
+
+                    const size_t o = (size_t)v * 4 + (size_t)out_influence;
+                    all_bone_ids[o] = ids[k];
+                    all_bone_weights[o] = weights_u8[k] / 255.0f;
+                    weight_sum += all_bone_weights[o];
+                    ++out_influence;
+                }
+
+                if(out_influence > 0 && weight_sum > 1e-6f){
+                    for(int k=0; k<out_influence; ++k){
+                        all_bone_weights[(size_t)v * 4 + (size_t)k] /=
+                            weight_sum;
+                    }
                 } else {
-                    all_bone_ids[v*4+0] = 0;
-                    all_bone_ids[v*4+1] = 0;
-                    all_bone_ids[v*4+2] = 0;
-                    all_bone_ids[v*4+3] = 0;
-                    all_bone_weights[v*4+0] = 1.0f;
-                    all_bone_weights[v*4+1] = 0.0f;
-                    all_bone_weights[v*4+2] = 0.0f;
-                    all_bone_weights[v*4+3] = 0.0f;
+                    for(int k=0; k<4; ++k){
+                        if(ids[k] >= 255) continue;
+                        if(bone_count > 0 && ids[k] >= bone_count) continue;
+                        all_bone_ids[(size_t)v * 4 + 0] = ids[k];
+                        all_bone_weights[(size_t)v * 4 + 0] = 1.0f;
+                        out_influence = 1;
+                        break;
+                    }
+                    if(out_influence == 0){
+                        all_bone_ids[(size_t)v * 4 + 0] = 0;
+                        all_bone_weights[(size_t)v * 4 + 0] = 1.0f;
+                    }
                 }
             } else {
                 all_bone_ids[v*4+0] = 0;

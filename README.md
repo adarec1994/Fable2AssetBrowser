@@ -1,12 +1,13 @@
 # Fable 2 Asset Browser
 Browse the Fable 2 BNK files. Included features:
 - Search and filter the internal files
-- Render and preview the models & textures. 
+- Render and preview the models, textures & animations.
+- Load and preview levels
 - Export models to FBX or GLB.
 - Export textures.
 - Export audio files.
-- More coming soon.
-- Animations are currently a WIP - there are lots of references, but they do not currently work!
+- Export animations.
+- Export level.
 
 ## How to use
 - Acquire a legitimate copy of Fable 2.
@@ -25,7 +26,7 @@ Here is a preview of an Oak Tree:
 Skeleton preview is also available!
 ![SkeletonPreview.png](images/SkeletonPreview.png)
 
-You can mess around rotating bones; though animations are currently WIP!
+You can mess around rotating bones; animations work too!
 ![BoneRotation.png](images/BoneRotation.png)
 
 Quick sample of a Hobbe in blender!
@@ -60,5 +61,10 @@ Follow these steps to submit your changes:
 5. Submit a pull request to the 'main' branch.
 
 ### TO-DO List:
+1. Pixel perfect terrains
+2. Skyboxes and Water
+3. Lighting
+4. FX
+5. Importing/ mods
 
     

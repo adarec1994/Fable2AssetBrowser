@@ -201,16 +201,38 @@ static bool parse_prop_model_buffer(const std::vector<unsigned char>& buf,
         return false;
     }
 
-    parse_mdl_geometry(buf, tmp.info, tmp.geoms);
-    if (tmp.geoms.empty()) {
-        if (reason) {
-            *reason = "parse_mdl_geometry produced 0 geoms"
-                      ", bytes=" + std::to_string(buf.size()) +
-                      ", meshes=" + std::to_string(tmp.info.Meshes.size()) +
-                      ", buffers=" +
-                      std::to_string(tmp.info.MeshBuffers.size());
+    // Prefer the engine-faithful renderer — the same byte-exact decode the model
+    // preview now uses. It requires the MeshFile header, which is present on full
+    // files and on body+header assemblies (globals header + level body). A
+    // header-less body (which the engine walker cannot decode) falls back to the
+    // heuristic raw-scan parser.
+    const bool has_mesh_header =
+        buf.size() >= 8 &&
+        (std::memcmp(buf.data(), "MeshFile", 8) == 0 ||
+         std::memcmp(buf.data(), "DefMeshF", 8) == 0);
+    if (has_mesh_header) {
+        tmp.geoms.clear();
+        if (!build_mdl_engine_geometry(buf, tmp.geoms) || tmp.geoms.empty()) {
+            // Header present but undecodable → corrupt or mismatched header.
+            // Reject so the caller can try another candidate (e.g. the raw body).
+            if (reason) {
+                *reason = "engine decode produced 0 geoms, bytes=" +
+                          std::to_string(buf.size());
+            }
+            return false;
         }
-        return false;
+    } else {
+        parse_mdl_geometry(buf, tmp.info, tmp.geoms);
+        if (tmp.geoms.empty()) {
+            if (reason) {
+                *reason = "parse_mdl_geometry produced 0 geoms"
+                          ", bytes=" + std::to_string(buf.size()) +
+                          ", meshes=" + std::to_string(tmp.info.Meshes.size()) +
+                          ", buffers=" +
+                          std::to_string(tmp.info.MeshBuffers.size());
+            }
+            return false;
+        }
     }
 
     out.info = std::move(tmp.info);
@@ -283,6 +305,26 @@ static bool try_prop_model_candidate(const FlatAssetEntry& entry,
                                      std::string& method,
                                      std::string* fail_reason = nullptr)
 {
+    // Try the body+header assembly FIRST: globals header + level body yields a
+    // full MeshFile that the engine-faithful renderer can decode byte-exactly.
+    // (When no global header exists, the assembly returns the raw body, which for
+    // a self-contained level model already carries its own MeshFile header.)
+    std::vector<unsigned char> buf;
+    if (build_mdl_buffer_for_name_with_body(model_path, entry.bnk_path, buf)) {
+        std::string parse_reason;
+        if (parse_prop_model_buffer(buf, model_path, cached, &parse_reason)) {
+            method = "body+header";
+            return true;
+        }
+        if (fail_reason) {
+            *fail_reason = "body+header parse rejected: " + parse_reason;
+        }
+    } else if (fail_reason) {
+        *fail_reason = "body+header build failed";
+    }
+
+    // Fallback: the raw header-less body, decoded by the heuristic raw-scan parser
+    // (used when the body+header assembly picked a wrong/mismatched header).
     try {
         std::vector<unsigned char> body =
             BnkCache::extract_bytes(entry.bnk_path, entry.file_index);
@@ -294,31 +336,18 @@ static bool try_prop_model_candidate(const FlatAssetEntry& entry,
                 return true;
             }
             if (fail_reason) {
-                *fail_reason = "body parse rejected: " + parse_reason;
+                if (!fail_reason->empty()) *fail_reason += "; ";
+                *fail_reason += "body parse rejected: " + parse_reason;
             }
         } else if (fail_reason) {
-            *fail_reason = "body extract returned 0 bytes";
+            if (!fail_reason->empty()) *fail_reason += "; ";
+            *fail_reason += "body extract returned 0 bytes";
         }
     } catch (...) {
         if (fail_reason) {
-            *fail_reason = "body extract threw";
-        }
-    }
-
-    std::vector<unsigned char> buf;
-    if (build_mdl_buffer_for_name_with_body(model_path, entry.bnk_path, buf)) {
-        std::string parse_reason;
-        if (parse_prop_model_buffer(buf, model_path, cached, &parse_reason)) {
-            method = "body+header";
-            return true;
-        }
-        if (fail_reason) {
             if (!fail_reason->empty()) *fail_reason += "; ";
-            *fail_reason += "body+header parse rejected: " + parse_reason;
+            *fail_reason += "body extract threw";
         }
-    } else if (fail_reason) {
-        if (!fail_reason->empty()) *fail_reason += "; ";
-        *fail_reason += "body+header build failed";
     }
 
     return false;

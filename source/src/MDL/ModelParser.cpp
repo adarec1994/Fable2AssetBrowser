@@ -1376,11 +1376,18 @@ struct MDLEngMeshHdr {
     std::string name;
     std::vector<MDLEngMat> mats;
 };
+// One draw batch inside a record: a contiguous run of the index list that uses a
+// single material. matIdx selects into the owning mesh header's material list.
+struct MDLEngSub {
+    uint8_t  MatIdx   = 0;
+    uint32_t StartIdx = 0;   // start offset into the u16 index list
+};
 struct MDLEngRec {
     std::string MeshName;                                // rigid: inline; skinned: from header
     bool     Skinned = false;
     uint32_t IndexCount = 0, VertexCount = 0, Ext1 = 0, MeshIdx = 0;
     size_t   VertexOffset = 0, IndexOffset = 0;
+    std::vector<MDLEngSub> Submeshes;                    // per-material index ranges
     // Captured cloth-block data (ext1==1) — drives the soft-body solver.
     uint32_t ClothSimVtx = 0;       // sim particle count
     size_t   ClothRestOffset = 0;   // sim rest positions (vec3 × nv)
@@ -1438,6 +1445,26 @@ static bool mdl_read_cloth_block(R& r, MDLEngRec* rec){
 // byte-coverage over the full corpus, 1763/1807):
 //   full (LOD0, or any section with bones): 20 B/vtx primary + (16*sh4) secondary
 //   reduced (boneless LOD>0): a single (16*sh4) B/vtx stream, no primary
+// Read the submesh table (subc × 41 bytes each): marker u32 (0xFFFFFFFF) +
+// matIdx u32 + flag u8 + faceCount u32 + startIdx u32 + 6 floats (bounds).
+// Captures matIdx + startIdx so the builder can split the index list into
+// per-material draw batches (byte-exact layout from sub_82B2BCC8 / the old
+// parse_mdl_info submesh reader).
+static bool mdl_read_submeshes(R& r, uint32_t subc, MDLEngRec& rec){
+    rec.Submeshes.clear();
+    rec.Submeshes.reserve(subc);
+    for(uint32_t s=0;s<subc;s++){
+        uint32_t marker,matIdx,faceCount,startIdx; uint8_t flag;
+        if(!r.u32be(marker)||!r.u32be(matIdx)||!r.u8(flag)
+           ||!r.u32be(faceCount)||!r.u32be(startIdx)) return false;
+        if(!r.skip(24)) return false;                   // 6 floats (per-submesh bounds)
+        (void)marker;(void)flag;(void)faceCount;
+        MDLEngSub sm; sm.MatIdx=(uint8_t)(matIdx & 0xFF); sm.StartIdx=startIdx;
+        rec.Submeshes.push_back(sm);
+    }
+    return true;
+}
+
 static bool mdl_read_rigid_record(R& r, bool full, uint32_t sh4, MDLEngRec& rec){
     rec.Skinned = false;
     if(!r.strz(rec.MeshName)) return false;                  // meshName\0
@@ -1450,7 +1477,7 @@ static bool mdl_read_rigid_record(R& r, bool full, uint32_t sh4, MDLEngRec& rec)
     if(!r.skip(40)) return false;                            // AABB(6f)+sphere(4f), rigid-only
     uint32_t subc=0; if(!r.u32be(subc)) return false;
     if(subc>100000u) return false;
-    if(!r.skip((size_t)subc*41)) return false;               // submeshes
+    if(!mdl_read_submeshes(r, subc, rec)) return false;      // submeshes (per-material ranges)
     if(full){
         rec.VertexOffset = r.i;
         if(!r.skip((size_t)rec.VertexCount*20)) return false;        // primary 20 B/vtx
@@ -1482,7 +1509,7 @@ static bool mdl_read_skinned_record(R& r, uint32_t sh4, MDLEngRec& rec){
     if(rec.IndexCount>4000000u||rec.VertexCount>4000000u) return false;
     uint32_t subc=0; if(!r.u32be(subc)) return false;
     if(subc>100000u) return false;
-    if(!r.skip((size_t)subc*41)) return false;
+    if(!mdl_read_submeshes(r, subc, rec)) return false;      // submeshes (per-material ranges)
     rec.VertexOffset = r.i;
     if(!r.skip((size_t)rec.VertexCount*28)) return false;    // skinned 28 B/vtx
     rec.IndexOffset = r.i;
@@ -1701,65 +1728,85 @@ bool build_mdl_engine_geometry(const std::vector<unsigned char>& data, std::vect
             }
         }
 
+        // Raw u16 index list for the whole record.
         std::vector<uint16_t> strip(rec.IndexCount);
         const uint8_t* fp = data.data()+rec.IndexOffset;
-        bool hasFFFF=false;
-        for(uint32_t i=0;i<rec.IndexCount;i++){
-            uint16_t w=(uint16_t(fp[i*2+0])<<8)|fp[i*2+1];
-            strip[i]=w; if(w==0xFFFF) hasFFFF=true;
-        }
-        if(hasFFFF){ build_triangles_from_strip(strip, g.indices); }
-        else{
-            size_t tc=strip.size()/3; g.indices.resize(tc*3);
-            for(size_t t=0;t<tc;t++){ g.indices[t*3+0]=strip[t*3+0]; g.indices[t*3+1]=strip[t*3+1]; g.indices[t*3+2]=strip[t*3+2]; }
-        }
-        bool ok=true;
-        for(uint32_t idx : g.indices){ if(idx>=vc){ ok=false; break; } }
-        if(!ok){ ++ri; continue; }
+        for(uint32_t i=0;i<rec.IndexCount;i++)
+            strip[i]=(uint16_t(fp[i*2+0])<<8)|fp[i*2+1];
 
-        compute_smooth_normals(vc, g.indices, g.positions, g.normals);
-
-        // Textures + display name from the owning mesh header (record idx1).
-        if(rec.MeshIdx < hdrs.size() && !hdrs[rec.MeshIdx].mats.empty()){
-            const MDLEngMat& mt = hdrs[rec.MeshIdx].mats[0];
-            g.diffuse_tex_name  = mt.diffuse;
-            g.specular_tex_name = mt.specular;
-            g.normal_tex_name   = mt.normal;
-            g.metallic_tex_name = mt.metallic;
-            g.extra_tex_name    = mt.extra;
-        }
-        if(!rec.MeshName.empty())                     g.name = rec.MeshName;
-        else if(rec.MeshIdx < hdrs.size() && !hdrs[rec.MeshIdx].name.empty())
-                                                      g.name = hdrs[rec.MeshIdx].name;
-        else                                          g.name = "mesh_" + std::to_string(ri);
-        g.alpha_test = false;   // Fable diffuse-alpha = gloss, not opacity → opaque
-        g.cloth_sim  = false;   // cloth renders as a normal skinned mesh
-        if(g.cloth_sim && rec.ClothSimVtx>0
-           && rec.ClothRestOffset + (size_t)rec.ClothSimVtx*12 <= n
-           && rec.ClothFlagOffset + rec.ClothSimVtx <= n){
-            // Map each render vertex to its nearest sim particle (both in bind
-            // pose) and inherit that particle's attachment flag from the cloth
-            // block — this is the real anchor data, not a heuristic.
-            const uint32_t sn = rec.ClothSimVtx;
-            auto rdf=[&](size_t o)->float{ uint32_t u=(uint32_t(data[o])<<24)|(uint32_t(data[o+1])<<16)|(uint32_t(data[o+2])<<8)|uint32_t(data[o+3]); float f; std::memcpy(&f,&u,4); return f; };
-            std::vector<float> sp((size_t)sn*3);
-            for(uint32_t s=0;s<sn;s++){ size_t o=rec.ClothRestOffset+(size_t)s*12; sp[s*3]=rdf(o); sp[s*3+1]=rdf(o+4); sp[s*3+2]=rdf(o+8); }
-            const uint8_t* fl = data.data()+rec.ClothFlagOffset;
-            g.cloth_pin.assign(vc, 0);
-            for(uint32_t v=0; v<vc; v++){
-                float bx=g.positions[v*3], by=g.positions[v*3+1], bz=g.positions[v*3+2];
-                float best=1e30f; uint32_t bi=0;
-                for(uint32_t s=0;s<sn;s++){
-                    float dx=bx-sp[s*3],dy=by-sp[s*3+1],dz=bz-sp[s*3+2], d=dx*dx+dy*dy+dz*dz;
-                    if(d<best){ best=d; bi=s; }
-                }
-                g.cloth_pin[v] = fl[bi] ? 1 : 0;
+        // Build a triangle list from an index sub-range, auto-detecting a
+        // triangle STRIP (0xFFFF restarts present) vs a plain triangle LIST.
+        // Submeshes mix the two, so this must be decided per range, not globally.
+        auto build_range=[&](uint32_t s, uint32_t e, std::vector<uint32_t>& outIdx){
+            outIdx.clear();
+            if(e>rec.IndexCount) e=rec.IndexCount;
+            if(s>=e) return;
+            std::vector<uint16_t> sub(strip.begin()+s, strip.begin()+e);
+            bool ff=false; for(uint16_t w: sub){ if(w==0xFFFF){ ff=true; break; } }
+            if(ff){ build_triangles_from_strip(sub, outIdx); }
+            else{
+                size_t tc=sub.size()/3; outIdx.resize(tc*3);
+                for(size_t t=0;t<tc;t++){ outIdx[t*3]=sub[t*3]; outIdx[t*3+1]=sub[t*3+1]; outIdx[t*3+2]=sub[t*3+2]; }
             }
-            g.cloth_damping = rec.ClothDamping;
+        };
+
+        // Per-material draw batches: the index list is partitioned at submesh
+        // StartIdx boundaries (each submesh owns [StartIdx, next StartIdx), the
+        // last runs to IndexCount) and each batch takes its own material. The
+        // engine builder previously collapsed every batch onto material 0.
+        std::vector<MDLEngSub> subs = rec.Submeshes;
+        if(subs.empty()){ subs.push_back(MDLEngSub{}); }        // whole list, material 0
+        std::sort(subs.begin(), subs.end(),
+                  [](const MDLEngSub&a,const MDLEngSub&b){ return a.StartIdx<b.StartIdx; });
+
+        // Smooth normals come from the FULL record geometry so they stay
+        // consistent across batch boundaries.
+        std::vector<uint32_t> fullIdx; build_range(0, rec.IndexCount, fullIdx);
+        bool okAll=true; for(uint32_t id : fullIdx){ if(id>=vc){ okAll=false; break; } }
+        if(!okAll){ ++ri; continue; }
+        compute_smooth_normals(vc, fullIdx, g.positions, g.normals);
+
+        const MDLEngMeshHdr* hdr = (rec.MeshIdx<hdrs.size()) ? &hdrs[rec.MeshIdx] : nullptr;
+        const std::string baseName =
+            !rec.MeshName.empty() ? rec.MeshName
+            : (hdr && !hdr->name.empty() ? hdr->name : ("mesh_"+std::to_string(ri)));
+        auto assignMat=[&](MDLMeshGeom& tg, uint8_t matIdx){
+            if(hdr && !hdr->mats.empty()){
+                const MDLEngMat& mt = hdr->mats[matIdx < hdr->mats.size() ? matIdx : 0];
+                tg.diffuse_tex_name=mt.diffuse; tg.specular_tex_name=mt.specular;
+                tg.normal_tex_name=mt.normal;   tg.metallic_tex_name=mt.metallic;
+                tg.extra_tex_name=mt.extra;
+            }
+            // Let transparency follow the diffuse texture again: the renderer
+            // only alpha-tests/blends meshes whose diffuse actually carries alpha
+            // (has_alpha), so enabling this restores cutouts/glass/foliage that
+            // the previous blanket alpha_test=false made fully opaque.
+            tg.name=baseName; tg.alpha_test=true; tg.cloth_sim=false; tg.MeshIndex=ri;
+        };
+
+        if(subs.size()==1){
+            g.indices = std::move(fullIdx);                    // single material — no vertex copy
+            assignMat(g, subs[0].MatIdx);
+            out.push_back(std::move(g));
+            any=true;
+        }else{
+            for(size_t si=0; si<subs.size(); ++si){
+                uint32_t s = subs[si].StartIdx;
+                uint32_t e = (si+1<subs.size()) ? subs[si+1].StartIdx : rec.IndexCount;
+                std::vector<uint32_t> idx; build_range(s, e, idx);
+                if(idx.empty()) continue;
+                bool ok2=true; for(uint32_t id : idx){ if(id>=vc){ ok2=false; break; } }
+                if(!ok2) continue;
+                MDLMeshGeom sg;
+                sg.positions = g.positions; sg.uvs = g.uvs; sg.normals = g.normals;
+                if(rec.Skinned){ sg.bone_ids = g.bone_ids; sg.bone_weights = g.bone_weights; }
+                sg.indices = std::move(idx);
+                assignMat(sg, subs[si].MatIdx);
+                sg.SubMeshIndex = (uint32_t)si;
+                out.push_back(std::move(sg));
+                any=true;
+            }
         }
-        g.MeshIndex = ri;
-        out.push_back(std::move(g));
-        any=true;
         ++ri;
     }
     return any;

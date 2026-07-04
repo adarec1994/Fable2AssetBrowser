@@ -483,7 +483,7 @@ void open_folder_logic(const std::string &sel) {
     start_tree_build_for_root(sel, S.bnk_paths);
 }
 
-bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index, std::vector<unsigned char>& out) {
+bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index, std::vector<unsigned char>& out, const std::string& mdl_full_path) {
     try {
         BNKReader nested_reader(nested_bnk_path);
         const auto& files = nested_reader.list_files();
@@ -511,25 +511,49 @@ bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index, 
         BNKReader r_headers(*p_headers);
         const auto& header_files = r_headers.list_files();
 
-        std::string mdl_filename = std::filesystem::path(mdl_name).filename().string();
-        std::string mdl_lower = mdl_filename;
-        std::transform(mdl_lower.begin(), mdl_lower.end(), mdl_lower.begin(), ::tolower);
+        // Match the header by FULL PATH, not just basename: dozens of buildings
+        // each ship an "interior.mdl"/"exterior.mdl", so a basename match grabs
+        // the FIRST such header (the wrong building) -> its LOD sizes/mesh
+        // headers don't match this body -> the mesh walker drifts and the model
+        // fails to parse (renders nothing). Prefer an exact full-path match;
+        // fall back to basename only if no full-path match is found.
+        auto norm = [](std::string s) {
+            std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+            std::replace(s.begin(), s.end(), '\\', '/');
+            return s;
+        };
+        std::vector<std::string> full_keys;
+        if (!mdl_full_path.empty()) full_keys.push_back(norm(mdl_full_path));
+        if (mdl_name.find('/') != std::string::npos ||
+            mdl_name.find('\\') != std::string::npos)
+            full_keys.push_back(norm(mdl_name));
+        const std::string base_key =
+            norm(std::filesystem::path(mdl_name).filename().string());
 
         int header_idx = -1;
-        for (size_t i = 0; i < header_files.size(); ++i) {
-            std::string hname = std::filesystem::path(header_files[i].name).filename().string();
-            std::string hname_lower = hname;
-            std::transform(hname_lower.begin(), hname_lower.end(), hname_lower.begin(), ::tolower);
-            if (hname_lower == mdl_lower) {
-                header_idx = (int)i;
-                break;
+        for (const auto& want : full_keys) {
+            for (size_t i = 0; i < header_files.size(); ++i) {
+                if (norm(header_files[i].name) == want) { header_idx = (int)i; break; }
+            }
+            if (header_idx != -1) break;
+        }
+        if (header_idx == -1) {
+            for (size_t i = 0; i < header_files.size(); ++i) {
+                std::string hbase =
+                    norm(std::filesystem::path(header_files[i].name).filename().string());
+                if (hbase == base_key) { header_idx = (int)i; break; }
             }
         }
 
         if (header_idx == -1) {
+            OutputLog::warn("nested MDL: no header match for body '" + mdl_name +
+                            "' (full='" + mdl_full_path + "') -> body-only (will not parse)");
             out = body_data;
             return true;
         }
+        OutputLog::info("nested MDL: body '" + mdl_name + "' (full='" + mdl_full_path +
+                        "') -> header[" + std::to_string(header_idx) + "] '" +
+                        header_files[header_idx].name + "'");
 
         auto tmp_header = tmpdir / "header.bin";
         extract_one(*p_headers, header_idx, tmp_header.string());

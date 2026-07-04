@@ -46,7 +46,7 @@ constexpr AboutEntry kAboutEntries[] = {
     { "Authors:",       "Matthew W",                             false },
     { "Special Thanks:", "H3x3r, Guy, and the Fable modding discord",         false },
     { "Source Code:",
-      "https://github.com/weak1337/Fable2AssetBrowser",         true  },
+      "https://github.com/adarec1994/Fable2AssetBrowser",         true  },
 };
 
 constexpr float kImageMaxWidth   = 240.0f;

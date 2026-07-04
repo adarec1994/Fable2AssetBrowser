@@ -61,7 +61,8 @@ bool open_gdb_viewer_for_bnk_entry(const std::string& bnk_path,
                                    int file_index,
                                    const std::string& file_name);
 bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index,
-                            std::vector<unsigned char>& out);
+                            std::vector<unsigned char>& out,
+                            const std::string& mdl_full_path = "");
 bool is_in_audio_folder(const std::string& path);
 void load_flat_asset_entry(const FlatAssetEntry& e, int kind);
 

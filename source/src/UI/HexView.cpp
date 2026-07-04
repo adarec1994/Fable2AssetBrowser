@@ -63,7 +63,7 @@ static bool is_bc_format(uint32_t comp_flag, DXGI_FORMAT& out_fmt) {
 }
 #endif
 
-static bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index, std::vector<unsigned char>& out) {
+static bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index, std::vector<unsigned char>& out, const std::string& mdl_full_path = "") {
     try {
         BNKReader nested_reader(nested_bnk_path);
         const auto& files = nested_reader.list_files();
@@ -91,18 +91,34 @@ static bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_
         BNKReader r_headers(*p_headers);
         const auto& header_files = r_headers.list_files();
 
-        std::string mdl_filename = std::filesystem::path(mdl_name).filename().string();
-        std::string mdl_lower = mdl_filename;
-        std::transform(mdl_lower.begin(), mdl_lower.end(), mdl_lower.begin(), ::tolower);
+        // Match the header by FULL PATH (many buildings share basenames like
+        // "interior.mdl"/"exterior.mdl"; a basename match grabs the wrong
+        // building's header and the model fails to parse). Basename fallback only.
+        auto norm = [](std::string s) {
+            std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+            std::replace(s.begin(), s.end(), '\\', '/');
+            return s;
+        };
+        std::vector<std::string> full_keys;
+        if (!mdl_full_path.empty()) full_keys.push_back(norm(mdl_full_path));
+        if (mdl_name.find('/') != std::string::npos ||
+            mdl_name.find('\\') != std::string::npos)
+            full_keys.push_back(norm(mdl_name));
+        const std::string base_key =
+            norm(std::filesystem::path(mdl_name).filename().string());
 
         int header_idx = -1;
-        for (size_t i = 0; i < header_files.size(); ++i) {
-            std::string hname = std::filesystem::path(header_files[i].name).filename().string();
-            std::string hname_lower = hname;
-            std::transform(hname_lower.begin(), hname_lower.end(), hname_lower.begin(), ::tolower);
-            if (hname_lower == mdl_lower) {
-                header_idx = (int)i;
-                break;
+        for (const auto& want : full_keys) {
+            for (size_t i = 0; i < header_files.size(); ++i) {
+                if (norm(header_files[i].name) == want) { header_idx = (int)i; break; }
+            }
+            if (header_idx != -1) break;
+        }
+        if (header_idx == -1) {
+            for (size_t i = 0; i < header_files.size(); ++i) {
+                std::string hbase =
+                    norm(std::filesystem::path(header_files[i].name).filename().string());
+                if (hbase == base_key) { header_idx = (int)i; break; }
             }
         }
 
@@ -279,7 +295,7 @@ void open_hex_for_selected() {
                 ok = build_any_tex_buffer_for_name(name, buf, preferred_for_tex);
             } else if (want_mdl) {
                 if (is_nested) {
-                    ok = reconstruct_nested_mdl(bnk_to_use, item.index, buf);
+                    ok = reconstruct_nested_mdl(bnk_to_use, item.index, buf, name);
                 } else {
                     ok = build_mdl_buffer_for_name(name, buf);
                 }
@@ -471,6 +487,19 @@ void draw_hex_window() {
                     S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info, S.hex_file_path);
                 }
 
+                // Developer mode: extract cloth/soft-body extension blocks.
+                // Re-walks only when the shown buffer changes (independent of
+                // whichever panel last populated S.mdl_info).
+                {
+                    static const unsigned char* cloth_buf_ptr = nullptr;
+                    static size_t cloth_buf_sz = 0;
+                    if(cloth_buf_ptr != S.hex_data.data() || cloth_buf_sz != S.hex_data.size()){
+                        parse_mdl_cloth_blocks(S.hex_data, S.mdl_info);
+                        cloth_buf_ptr = S.hex_data.data();
+                        cloth_buf_sz  = S.hex_data.size();
+                    }
+                }
+
                 if(!S.mdl_info_ok){
                     ImGui::TextColored(ImVec4(1,0.5f,0.5f,1), "Failed to parse .mdl");
                 }else{
@@ -542,6 +571,34 @@ void draw_hex_window() {
                                         }
                                     }
                                 }
+                                ImGui::TreePop();
+                            }
+                        }
+                    }
+
+                    if(!S.mdl_info.ClothBlocks.empty()){
+                        ImGui::Dummy(ImVec2(0,6));
+                        ImGui::Text("Cloth / Soft-Body (%zu)", S.mdl_info.ClothBlocks.size());
+                        ImGui::Separator();
+                        for(size_t ci=0; ci<S.mdl_info.ClothBlocks.size(); ++ci){
+                            const auto& c = S.mdl_info.ClothBlocks[ci];
+                            std::string lbl = "Cloth " + std::to_string(ci) +
+                                              " (mesh " + std::to_string(c.MeshIndex) + ")";
+                            if(ImGui::TreeNode(lbl.c_str())){
+                                ImGui::Text("Record / Mesh: %u / %u", c.RecordIndex, c.MeshIndex);
+                                ImGui::Text("BlockOffset: 0x%zX", c.BlockOffset);
+                                ImGui::Text("BlockSize: %zu bytes", c.BlockSize);
+                                ImGui::Text("SimVertices: %u", c.SimVertexCount);
+                                ImGui::Text("Triangles: %u (indices %u)", c.TriangleCount, c.IndexCount);
+                                ImGui::Text("Edges: %u", c.EdgeCount);
+                                ImGui::Text("BonesPerVertex: %u", c.BonesPerVertex);
+                                ImGui::Text("Constraints: dist %u, bend %u, link %u",
+                                            c.DistConstraints, c.BendConstraints, c.LinkConstraints);
+                                ImGui::Text("SimParams: %.3f %.3f %.3f %.3f %.3f %.3f",
+                                            c.SimParams[0], c.SimParams[1], c.SimParams[2],
+                                            c.SimParams[3], c.SimParams[4], c.SimParams[5]);
+                                ImGui::Text("RestPosOffset: 0x%zX", c.RestPosOffset);
+                                ImGui::Text("IndexListOffset: 0x%zX", c.IndexListOffset);
                                 ImGui::TreePop();
                             }
                         }

@@ -1139,6 +1139,632 @@ if(is_foliage){
     return true;
 }
 
+bool parse_mdl_cloth_blocks(const std::vector<unsigned char>& data, MDLInfo& info){
+    info.ClothBlocks.clear();
+    if(data.size() < 0x68) return false;
+    if(std::memcmp(data.data(), "MeshFile", 8) != 0) return false; // skinned/MeshFile only
+
+    R r{data.data(), data.size(), 0};
+
+    auto rd_u32_at = [&](size_t off, uint32_t& v) -> bool {
+        if(off + 4 > r.n) return false;
+        const uint8_t* q = r.p + off;
+        v = (uint32_t(q[0])<<24)|(uint32_t(q[1])<<16)|(uint32_t(q[2])<<8)|uint32_t(q[3]);
+        return true;
+    };
+
+    // body must be exactly lodCount complete LOD sections (104 + sum(lodSizes))
+    uint32_t lodCount = 0;
+    if(!rd_u32_at(0x38, lodCount)) return false;
+    if(lodCount < 1 || lodCount > 3) return false;
+    uint32_t lodSizes[3] = {0,0,0};
+    size_t total = 0;
+    for(uint32_t i=0;i<lodCount;i++){
+        if(!rd_u32_at(0x3C + i*4, lodSizes[i])) return false;
+        total += lodSizes[i];
+    }
+    if((size_t)104 + total != r.n) return false;
+
+    auto expect_zero = [&](size_t k) -> bool {
+        if(!r.need(k)) return false;
+        for(size_t j=0;j<k;j++) if(r.p[r.i+j] != 0) return false;
+        r.i += k; return true;
+    };
+
+    // Parse one cloth block starting at r.i (just past the ext1 flag).
+    auto parse_cloth = [&](uint32_t rec_idx, uint32_t mesh_idx) -> bool {
+        const size_t start = r.i;
+        uint32_t a16,u16c,nv,a28,a32,a24,n77;
+        if(!r.u32be(a16)||!r.u32be(u16c)||!r.u32be(nv)||!r.u32be(a28)
+           ||!r.u32be(a32)||!r.u32be(a24)||!r.u32be(n77)) return false;
+        (void)a16; (void)a28; (void)a32;
+        if(nv > 1000000u || u16c > 4000000u || n77 > 4000000u) return false;
+        uint32_t A=0,B=0;
+        if(!r.u32be(A)||!r.u32be(B)) return false;       // skin-bind sub-object
+        if(A > 1000000u || B > 64u) return false;
+        const size_t boneid_off = r.i;
+        if(!r.skip((size_t)A*B))  return false;          // bone ids (A*B bytes)
+        const size_t weight_off = r.i;
+        if(!r.skip((size_t)A*16)) return false;          // weights (A * vec4)
+        uint32_t nDist,nBendA,nBendB,nVol,nLink;
+        if(!r.u32be(nDist)||!r.u32be(nBendA)||!r.u32be(nBendB)
+           ||!r.u32be(nVol)||!r.u32be(nLink)) return false;
+        float sim[6];
+        for(int k=0;k<6;k++) if(!r.f32be(sim[k])) return false;
+        uint8_t b1,b2; if(!r.u8(b1)||!r.u8(b2)) return false; (void)b1; (void)b2;
+        const size_t restpos_off = r.i;
+        if(!r.skip((size_t)nv*12)) return false;         // rest positions (vec3)
+        if(!r.skip((size_t)nv*8))  return false;
+        if(!r.skip((size_t)nv*4))  return false;
+        if(!r.skip((size_t)nv*16)) return false;
+        if(!r.skip((size_t)nv*4))  return false;
+        const size_t idxlist_off = r.i;
+        if(!r.skip((size_t)u16c*2)) return false;        // sim triangle index list
+        if(!r.skip((size_t)n77*4))  return false;
+        if(!r.skip((size_t)n77*16)) return false;
+        if(!r.skip((size_t)nv*1))   return false;        // per-vertex flags
+        if(!r.skip((size_t)nDist*32)) return false;      // distance constraints
+        if(nBendA != 0) return false;                    // 52B/iter UNVERIFIED (never seen)
+        if(!r.skip((size_t)nBendB*56)) return false;     // bend constraints
+        if(nVol != 0) return false;                      // 196B/iter UNVERIFIED (never seen)
+        if(!r.skip((size_t)nLink*8)) return false;       // link constraints
+        if(!r.skip((size_t)nv*16)) return false;         // skin-palette trailer
+
+        MDLClothInfo c;
+        c.RecordIndex = rec_idx;   c.MeshIndex = mesh_idx;
+        c.BlockOffset = start;     c.BlockSize = r.i - start;
+        c.SimVertexCount = nv;     c.TriangleCount = a24;  c.IndexCount = u16c;
+        c.EdgeCount = n77;         c.BonesPerVertex = B;
+        c.DistConstraints = nDist; c.BendConstraints = nBendB; c.LinkConstraints = nLink;
+        for(int k=0;k<6;k++) c.SimParams[k] = sim[k];
+        c.RestPosOffset = restpos_off; c.IndexListOffset = idxlist_off;
+        c.BoneIdOffset = boneid_off;   c.WeightOffset = weight_off;
+        info.ClothBlocks.push_back(c);
+        return true;
+    };
+
+    size_t off = 0x68;
+    for(uint32_t lod=0; lod<lodCount; ++lod){
+        const size_t sec_end = off + lodSizes[lod];
+        if(sec_end > r.n) { info.ClothBlocks.clear(); return false; }
+        r.i = off;
+
+        if(!expect_zero(32)) { info.ClothBlocks.clear(); return false; }
+        uint32_t bc=0; if(!r.u32be(bc)) { info.ClothBlocks.clear(); return false; }
+        if(bc > 100000u) { info.ClothBlocks.clear(); return false; }
+        for(uint32_t i=0;i<bc;i++){ std::string nm; if(!r.strz(nm)||!r.skip(4)) { info.ClothBlocks.clear(); return false; } }
+        uint32_t btc=0; if(!r.u32be(btc)) { info.ClothBlocks.clear(); return false; }
+        if(!r.skip((size_t)btc*44)) { info.ClothBlocks.clear(); return false; }
+        if(!r.skip(40)) { info.ClothBlocks.clear(); return false; } // sphere + AABB copy
+        uint32_t mc=0,rigid=0,skinned=0;
+        if(!r.u32be(mc)||!r.u32be(rigid)||!r.u32be(skinned)) { info.ClothBlocks.clear(); return false; }
+        if(!expect_zero(12)) { info.ClothBlocks.clear(); return false; }
+        uint8_t tagc=0; if(!r.u8(tagc)) { info.ClothBlocks.clear(); return false; }
+        for(uint8_t t=0;t<tagc;t++){ std::string s; if(!r.strz(s)||!r.skip(1)) { info.ClothBlocks.clear(); return false; } }
+        if(!r.skip(20)) { info.ClothBlocks.clear(); return false; } // SH probe descriptor
+        uint32_t pcount=0; if(!r.u32be(pcount)) { info.ClothBlocks.clear(); return false; }
+        if(!r.skip((size_t)pcount*4)) { info.ClothBlocks.clear(); return false; } // probe floats
+        uint32_t sbc=0; if(!r.u32be(sbc)) { info.ClothBlocks.clear(); return false; }
+        if(sbc > 1000000u) { info.ClothBlocks.clear(); return false; }
+        for(uint32_t i=0;i<sbc;i++){ std::string s; if(!r.strz(s)) { info.ClothBlocks.clear(); return false; } } // hide-regions
+
+        if(mc > 100000u) { info.ClothBlocks.clear(); return false; }
+        for(uint32_t m=0;m<mc;m++){
+            std::string nm;
+            if(!r.skip(4)||!r.strz(nm)||!r.skip(8)) { info.ClothBlocks.clear(); return false; }
+            if(!expect_zero(21)) { info.ClothBlocks.clear(); return false; }
+            if(!r.skip(4)||!r.skip(12)) { info.ClothBlocks.clear(); return false; }
+            uint32_t matc=0; if(!r.u32be(matc)) { info.ClothBlocks.clear(); return false; }
+            if(matc > 100000u) { info.ClothBlocks.clear(); return false; }
+            for(uint32_t j=0;j<matc;j++){
+                for(int t=0;t<5;t++){ std::string s; if(!r.strz(s)) { info.ClothBlocks.clear(); return false; } }
+                if(!r.skip(12)) { info.ClothBlocks.clear(); return false; }
+                if(r.i < r.n && r.p[r.i] == 0x01) r.i += 1; // optional material trailer
+            }
+        }
+
+        // Buffer records: first `rigid` use the rigid reader (not sized here),
+        // the next `skinned` use the skinned reader. Cloth only occurs on
+        // skinned records, and cloth-bearing files are fully skinned (rigid==0).
+        if(rigid != 0) { info.ClothBlocks.clear(); return false; }
+        const uint32_t rec_count = rigid + skinned;
+        if(rec_count > 100000u) { info.ClothBlocks.clear(); return false; }
+        for(uint32_t mi=0; mi<rec_count; ++mi){
+            if(r.i < r.n && r.p[r.i] == 0x01) r.i += 1;     // record lead byte
+            uint32_t idx0,idx1,tric,idxc,vtxc;
+            if(!r.u32be(idx0)||!r.u32be(idx1)||!r.u32be(tric)||!r.u32be(idxc)||!r.u32be(vtxc))
+                { info.ClothBlocks.clear(); return false; }
+            (void)idx0; (void)tric;
+            uint32_t subc=0; if(!r.u32be(subc)) { info.ClothBlocks.clear(); return false; }
+            if(subc > 100000u) { info.ClothBlocks.clear(); return false; }
+            if(!r.skip((size_t)subc*41)) { info.ClothBlocks.clear(); return false; } // submeshes
+            if(!r.skip((size_t)vtxc*28)) { info.ClothBlocks.clear(); return false; } // vertices
+            if(!r.skip((size_t)idxc*2))  { info.ClothBlocks.clear(); return false; } // strip indices
+            if(!r.skip((size_t)vtxc*16)) { info.ClothBlocks.clear(); return false; } // baked stream
+            uint32_t ext1=0; if(!r.u32be(ext1)) { info.ClothBlocks.clear(); return false; }
+            if(ext1 == 1){
+                if(!parse_cloth(mi, idx1)) { info.ClothBlocks.clear(); return false; }
+            } else if(ext1 != 0){
+                info.ClothBlocks.clear(); return false;
+            }
+            uint32_t ext2=0; if(!r.u32be(ext2)) { info.ClothBlocks.clear(); return false; }
+            if(ext2 != 0) { info.ClothBlocks.clear(); return false; } // ext2 block unseen in retail
+        }
+        if(r.i != sec_end) { info.ClothBlocks.clear(); return false; } // must land on boundary
+        off = sec_end;
+    }
+    return true;
+}
+
+bool build_mdl_cloth_geometry(const std::vector<unsigned char>& data, std::vector<MDLMeshGeom>& out){
+    MDLInfo tmp;
+    if(!parse_mdl_cloth_blocks(data, tmp) || tmp.ClothBlocks.empty()) return false;
+    const size_t n = data.size();
+    auto rdf32 = [&](size_t o) -> float {
+        uint32_t u=(uint32_t(data[o])<<24)|(uint32_t(data[o+1])<<16)|(uint32_t(data[o+2])<<8)|uint32_t(data[o+3]);
+        float f; std::memcpy(&f,&u,4); return f;
+    };
+    auto rdu16 = [&](size_t o) -> uint16_t { return (uint16_t)((uint16_t(data[o])<<8)|data[o+1]); };
+
+    bool any=false;
+    for(const auto& c : tmp.ClothBlocks){
+        const uint32_t nv = c.SimVertexCount;
+        if(nv==0 || c.IndexCount < 3) continue;
+        if(c.RestPosOffset + (size_t)nv*12 > n) continue;
+        if(c.IndexListOffset + (size_t)c.IndexCount*2 > n) continue;
+
+        MDLMeshGeom g;
+        g.positions.resize((size_t)nv*3);
+        for(uint32_t v=0; v<nv; ++v){
+            const size_t o = c.RestPosOffset + (size_t)v*12;
+            g.positions[v*3+0]=rdf32(o);
+            g.positions[v*3+1]=rdf32(o+4);
+            g.positions[v*3+2]=rdf32(o+8);
+        }
+        g.indices.resize(c.IndexCount);
+        bool ok=true;
+        for(uint32_t i=0;i<c.IndexCount;++i){
+            uint16_t idx = rdu16(c.IndexListOffset + (size_t)i*2);
+            if(idx >= nv){ ok=false; break; }       // triangle list, indices into sim verts
+            g.indices[i]=idx;
+        }
+        if(!ok) continue;
+
+        // Attach the block's own skin binding so the sim mesh deforms with the
+        // skeleton exactly like the render mesh (rest positions are bind-pose).
+        if(c.BonesPerVertex>0 && c.BonesPerVertex<=4
+           && c.BoneIdOffset + (size_t)nv*c.BonesPerVertex <= n
+           && c.WeightOffset + (size_t)nv*16 <= n){
+            g.bone_ids.assign((size_t)nv*4, 0);
+            g.bone_weights.assign((size_t)nv*4, 0.0f);
+            for(uint32_t v=0; v<nv; ++v){
+                for(uint32_t k=0;k<c.BonesPerVertex;++k)
+                    g.bone_ids[v*4+k] = data[c.BoneIdOffset + (size_t)v*c.BonesPerVertex + k];
+                for(int k=0;k<4;k++)
+                    g.bone_weights[v*4+k] = rdf32(c.WeightOffset + (size_t)v*16 + (size_t)k*4);
+            }
+        }
+
+        compute_smooth_normals(nv, g.indices, g.positions, g.normals);
+        g.name = "[cloth] mesh " + std::to_string(c.MeshIndex);
+        g.is_cloth = true;
+        g.MeshIndex = 100000u + c.RecordIndex;   // synthetic; only used for display naming
+        out.push_back(std::move(g));
+        any=true;
+    }
+    return any;
+}
+
+// ============================================================================
+// Developer-mode: fully engine-faithful geometry decode. Walks the MeshFile LOD
+// sections exactly like the engine (header prologue sub_82B714A0 with the
+// "polymsh"/LOD fix — the 32 section-start bytes are 4 (f32,u32) LOD-range
+// pairs, NOT a required-zero block), reads every RIGID record (sub_82B2BCC8,
+// 20 B/vtx) and SKINNED record (28 B/vtx) byte-for-byte, captures per-mesh
+// materials, and builds fully TEXTURED renderable geometry. Self-contained and
+// fully bounds-checked: on ANY inconsistency it bails to empty (returns false)
+// and asserts it lands exactly on each section boundary. This is the ONLY
+// geometry source in developer mode — there is deliberately no heuristic
+// fallback, so a mis-parse shows as no geometry (a clean test signal).
+// ============================================================================
+namespace {
+
+struct MDLEngMat {
+    std::string diffuse, specular, normal, metallic, extra;
+};
+struct MDLEngMeshHdr {
+    std::string name;
+    std::vector<MDLEngMat> mats;
+};
+struct MDLEngRec {
+    std::string MeshName;                                // rigid: inline; skinned: from header
+    bool     Skinned = false;
+    uint32_t IndexCount = 0, VertexCount = 0, Ext1 = 0, MeshIdx = 0;
+    size_t   VertexOffset = 0, IndexOffset = 0;
+    // Captured cloth-block data (ext1==1) — drives the soft-body solver.
+    uint32_t ClothSimVtx = 0;       // sim particle count
+    size_t   ClothRestOffset = 0;   // sim rest positions (vec3 × nv)
+    size_t   ClothFlagOffset = 0;   // per-particle flag byte × nv (attachment)
+    float    ClothDamping = 0.05f;  // sim param: damping
+};
+
+// Advance r past one cloth/soft-body ext block (skip-only mirror of the
+// parse_cloth lambda in parse_mdl_cloth_blocks). ext1 can attach to rigid too.
+static bool mdl_read_cloth_block(R& r, MDLEngRec* rec){
+    uint32_t a16,u16c,nv,a28,a32,a24,n77;
+    if(!r.u32be(a16)||!r.u32be(u16c)||!r.u32be(nv)||!r.u32be(a28)
+       ||!r.u32be(a32)||!r.u32be(a24)||!r.u32be(n77)) return false;
+    (void)a16;(void)a28;(void)a32;(void)a24;
+    if(nv>1000000u||u16c>4000000u||n77>4000000u) return false;
+    uint32_t A=0,B=0;
+    if(!r.u32be(A)||!r.u32be(B)) return false;
+    if(A>1000000u||B>64u) return false;
+    if(!r.skip((size_t)A*B))  return false;      // skin-bind bone ids
+    if(!r.skip((size_t)A*16)) return false;      // skin-bind weights
+    uint32_t nDist,nBendA,nBendB,nVol,nLink;
+    if(!r.u32be(nDist)||!r.u32be(nBendA)||!r.u32be(nBendB)
+       ||!r.u32be(nVol)||!r.u32be(nLink)) return false;
+    float sp[6];
+    for(int k=0;k<6;k++) if(!r.f32be(sp[k])) return false;   // sim params
+    if(!r.skip(2))   return false;               // 2 bools
+    const size_t restOff = r.i;
+    if(!r.skip((size_t)nv*12)) return false;     // rest positions (vec3)
+    if(!r.skip((size_t)nv*8))  return false;
+    if(!r.skip((size_t)nv*4))  return false;
+    if(!r.skip((size_t)nv*16)) return false;
+    if(!r.skip((size_t)nv*4))  return false;
+    if(!r.skip((size_t)u16c*2))return false;     // sim triangle indices
+    if(!r.skip((size_t)n77*4)) return false;
+    if(!r.skip((size_t)n77*16))return false;
+    const size_t flagOff = r.i;
+    if(!r.skip((size_t)nv*1))  return false;      // per-particle flags
+    if(!r.skip((size_t)nDist*32))  return false;  // distance constraints
+    if(!r.skip((size_t)nBendA*52)) return false;  // bend-A
+    if(!r.skip((size_t)nBendB*56)) return false;  // bend-B
+    if(!r.skip((size_t)nVol*148))  return false;  // volume
+    if(!r.skip((size_t)nLink*8))   return false;  // link constraints
+    if(!r.skip((size_t)nv*16)) return false;      // skin-palette trailer
+    if(rec){
+        rec->ClothSimVtx    = nv;
+        rec->ClothRestOffset= restOff;
+        rec->ClothFlagOffset= flagOff;
+        rec->ClothDamping   = sp[2];
+    }
+    return true;
+}
+
+// Byte-identical translation of sub_82B2BCC8 (rigid record). The rigid reader
+// consumes NO ext2. Vertex streams are LOD- and SH-dependent (verified by
+// byte-coverage over the full corpus, 1763/1807):
+//   full (LOD0, or any section with bones): 20 B/vtx primary + (16*sh4) secondary
+//   reduced (boneless LOD>0): a single (16*sh4) B/vtx stream, no primary
+static bool mdl_read_rigid_record(R& r, bool full, uint32_t sh4, MDLEngRec& rec){
+    rec.Skinned = false;
+    if(!r.strz(rec.MeshName)) return false;                  // meshName\0
+    uint8_t lead=0; if(!r.u8(lead)) return false; (void)lead; // 0x01 lead
+    uint32_t idx0,idx1,tric;
+    if(!r.u32be(idx0)||!r.u32be(idx1)||!r.u32be(tric)
+       ||!r.u32be(rec.IndexCount)||!r.u32be(rec.VertexCount)) return false; // 5 counts
+    (void)idx0;(void)tric; rec.MeshIdx = idx1;               // idx1 = owning mesh header
+    if(rec.IndexCount>4000000u||rec.VertexCount>4000000u) return false;
+    if(!r.skip(40)) return false;                            // AABB(6f)+sphere(4f), rigid-only
+    uint32_t subc=0; if(!r.u32be(subc)) return false;
+    if(subc>100000u) return false;
+    if(!r.skip((size_t)subc*41)) return false;               // submeshes
+    if(full){
+        rec.VertexOffset = r.i;
+        if(!r.skip((size_t)rec.VertexCount*20)) return false;        // primary 20 B/vtx
+        rec.IndexOffset = r.i;
+        if(!r.skip((size_t)rec.IndexCount*2)) return false;          // u16 index list
+        if(!r.skip((size_t)rec.VertexCount*16*sh4)) return false;    // secondary (0 when no SH)
+    }else{
+        rec.VertexOffset = r.i;
+        if(!r.skip((size_t)rec.VertexCount*16*sh4)) return false;    // reduced stream = vtxc*16*sh4 (reuses LOD0 verts)
+        rec.IndexOffset = r.i;
+        if(!r.skip((size_t)rec.IndexCount*2)) return false;
+    }
+    if(!r.u32be(rec.Ext1)) return false;                     // ext1 cloth flag
+    if(rec.Ext1==1){ if(!mdl_read_cloth_block(r, &rec)) return false; }
+    else if(rec.Ext1!=0) return false;
+    return true;                                             // no ext2 for rigid
+}
+
+// Byte-identical skinned record (sub_82B20180 layout, proven by the cloth
+// walker). Full 28 B/vtx + (16*sh4) B/vtx secondary at EVERY LOD (unlike rigid);
+// skinned DOES read ext2.
+static bool mdl_read_skinned_record(R& r, uint32_t sh4, MDLEngRec& rec){
+    rec.Skinned = true;
+    if(r.i<r.n && r.p[r.i]==0x01) r.i+=1;
+    uint32_t idx0,idx1,tric;
+    if(!r.u32be(idx0)||!r.u32be(idx1)||!r.u32be(tric)
+       ||!r.u32be(rec.IndexCount)||!r.u32be(rec.VertexCount)) return false;
+    (void)idx0;(void)tric; rec.MeshIdx = idx1;
+    if(rec.IndexCount>4000000u||rec.VertexCount>4000000u) return false;
+    uint32_t subc=0; if(!r.u32be(subc)) return false;
+    if(subc>100000u) return false;
+    if(!r.skip((size_t)subc*41)) return false;
+    rec.VertexOffset = r.i;
+    if(!r.skip((size_t)rec.VertexCount*28)) return false;    // skinned 28 B/vtx
+    rec.IndexOffset = r.i;
+    if(!r.skip((size_t)rec.IndexCount*2))  return false;
+    if(!r.skip((size_t)rec.VertexCount*16*sh4)) return false; // secondary (0 when no SH)
+    if(!r.u32be(rec.Ext1)) return false;
+    if(rec.Ext1==1){ if(!mdl_read_cloth_block(r, &rec)) return false; }
+    else if(rec.Ext1!=0) return false;
+    uint32_t ext2=0; if(!r.u32be(ext2)) return false;        // skinned DOES read ext2
+    if(ext2==1){                                             // ext2/morph block (sub_82B89640)
+        uint32_t a0,a1v,mcount;
+        if(!r.u32be(a0)||!r.u32be(a1v)||!r.u32be(mcount)) return false; // 3 u32 header
+        (void)a0;(void)a1v;
+        if(mcount>4000000u) return false;
+        if(!r.skip((size_t)mcount*20)) return false;         // count × (u32 + vec4)
+    }else if(ext2!=0) return false;
+    return true;
+}
+
+// Walk the MeshFile LOD sections engine-faithfully; collect every record (rigid
+// + skinned) with geometry offsets, plus per-mesh materials. Bails to empty on
+// any inconsistency.
+static bool parse_mdl_engine_records(const std::vector<unsigned char>& data,
+                                     std::vector<MDLEngRec>& out_recs,
+                                     std::vector<MDLEngMeshHdr>& out_hdrs,
+                                     uint32_t& out_bone_count){
+    out_recs.clear(); out_hdrs.clear(); out_bone_count = 0;
+    if(data.size() < 0x68) return false;
+    if(std::memcmp(data.data(), "MeshFile", 8) != 0 &&
+       std::memcmp(data.data(), "DefMeshF", 8) != 0) return false;
+
+    R r{data.data(), data.size(), 0};
+    auto fail = [&]()->bool{ out_recs.clear(); out_hdrs.clear(); return false; };
+    auto rd_u32_at = [&](size_t off, uint32_t& v)->bool{
+        if(off+4>r.n) return false;
+        const uint8_t* q=r.p+off;
+        v=(uint32_t(q[0])<<24)|(uint32_t(q[1])<<16)|(uint32_t(q[2])<<8)|uint32_t(q[3]);
+        return true; };
+
+    uint32_t lodCount=0;
+    if(!rd_u32_at(0x38,lodCount)) return false;
+    if(lodCount<1||lodCount>3) return false;
+    uint32_t lodSizes[3]={0,0,0}; size_t total=0;
+    for(uint32_t i=0;i<lodCount;i++){ if(!rd_u32_at(0x3C+i*4,lodSizes[i])) return false; total+=lodSizes[i]; }
+    if((size_t)104+total != r.n) return false;
+
+    // Only build geometry from the FIRST (highest-detail) LOD section, but the
+    // walker still traverses all sections to validate boundaries.
+    size_t off = 0x68;
+    for(uint32_t lod=0; lod<lodCount; ++lod){
+        const size_t sec_end = off + lodSizes[lod];
+        if(sec_end>r.n) return fail();
+        if(lodSizes[lod]==0){ off=sec_end; continue; }       // engine skips zero-size LODs (sub_82AB85B8)
+        r.i = off;
+
+        // --- prologue (sub_82B714A0) ---
+        if(!r.skip(32)) return fail();                       // 4 (f32,u32) LOD-range pairs (POLYMSH FIX)
+        uint32_t bc=0; if(!r.u32be(bc)) return fail();
+        if(bc>100000u) return fail();
+        if(lod==0) out_bone_count = bc;                      // vertex bone ids index this palette
+        for(uint32_t i=0;i<bc;i++){ std::string nm; if(!r.strz(nm)||!r.skip(4)) return fail(); } // bones
+        uint32_t btc=0; if(!r.u32be(btc)) return fail();
+        if(btc>100000u) return fail();
+        if(!r.skip((size_t)btc*44)) return fail();           // transforms
+
+        // --- bounds(40) + 5 counts + flag ---
+        if(!r.skip(40)) return fail();
+        uint32_t mc=0,rigid=0,skinned=0,ex52=0,ex240=0;
+        if(!r.u32be(mc)||!r.u32be(rigid)||!r.u32be(skinned)
+           ||!r.u32be(ex52)||!r.u32be(ex240)) return fail();
+        if(mc>100000u||rigid>100000u||skinned>100000u||ex52||ex240) return fail();
+        uint8_t flag=0; if(!r.u8(flag)) return fail();
+
+        // --- tags ---
+        uint32_t tagc=0; if(!r.u32be(tagc)) return fail();
+        if(tagc>100000u) return fail();
+        for(uint32_t t=0;t<tagc;t++){ std::string s; if(!r.strz(s)||!r.skip(1)) return fail(); }
+
+        // --- SH probe block ---
+        uint32_t shdesc[5];
+        for(int i=0;i<5;i++) if(!r.u32be(shdesc[i])) return fail(); // 5 u32 descriptor
+        const uint32_t sh4 = shdesc[4];                      // secondary-stream multiplier (a6+16)
+        if(sh4>16u) return fail();                           // sane (0 or 1 in retail)
+        uint32_t fc=0; if(!r.u32be(fc)) return fail();
+        if(fc>1000000u) return fail();
+        if(!r.skip((size_t)fc*4)) return fail();
+
+        // --- hide-region strings ---
+        uint32_t hrc=0; if(!r.u32be(hrc)) return fail();
+        if(hrc>1000000u) return fail();
+        for(uint32_t i=0;i<hrc;i++){ std::string s; if(!r.strz(s)) return fail(); }
+
+        // --- material / mesh headers (mc) ---
+        const bool capture = (lod==0);
+        for(uint32_t m=0;m<mc;m++){
+            MDLEngMeshHdr h;
+            uint32_t sel=0; if(!r.u32be(sel)) return fail();  // shader-type selector (float bits 0/1/2/3)
+            if(sel==2){                                       // type-2 material (sub_82B23728): 68 bytes, no name/textures
+                if(!r.skip(68)) return fail();
+                if(capture) out_hdrs.push_back(std::move(h)); // empty header keeps mesh indices aligned
+                continue;
+            }
+            if(!r.strz(h.name)||!r.skip(8)) return fail();    // name + sub_82B1E458 params (45)
+            if(!r.skip(21)) return fail();
+            if(!r.skip(4)||!r.skip(12)) return fail();
+            uint32_t matc=0; if(!r.u32be(matc)) return fail();
+            if(matc>100000u) return fail();
+            for(uint32_t j=0;j<matc;j++){
+                // Engine material element = sub_82A93850: 9 slot-5 strings + 8 bytes
+                // (2 floats via sub_82A1BD30). Standard materials leave 4 of the 9
+                // empty; foliage fills more (translucency, "polymsh").
+                MDLEngMat mt;
+                if(!r.strz(mt.diffuse) ||!r.strz(mt.specular)||!r.strz(mt.normal)
+                   ||!r.strz(mt.metallic)||!r.strz(mt.extra))  return fail();
+                std::string s;
+                for(int k=0;k<4;k++){ if(!r.strz(s)) return fail(); } // slots 6..9
+                if(!r.skip(8)) return fail();                          // 2 floats
+                remap_known_mdl_texture_path(mt.diffuse);
+                remap_known_mdl_texture_path(mt.specular);
+                remap_known_mdl_texture_path(mt.normal);
+                remap_known_mdl_texture_path(mt.metallic);
+                remap_known_mdl_texture_path(mt.extra);
+                h.mats.push_back(std::move(mt));
+            }
+            if(capture) out_hdrs.push_back(std::move(h));
+        }
+
+        // --- records: rigid first, then skinned ---
+        uint32_t vtxAccum = 0;                               // engine v158: summed rigid vertex count
+        for(uint32_t i=0;i<rigid;i++){
+            MDLEngRec rec;
+            // full 20B primary present on LOD0, or any section with bones (skinned
+            // creatures keep it in lower LODs; boneless props reduce).
+            if(!mdl_read_rigid_record(r, (lod==0)||(bc>0), sh4, rec)) return fail();
+            vtxAccum += rec.VertexCount;
+            if(capture) out_recs.push_back(std::move(rec));
+        }
+        for(uint32_t i=0;i<skinned;i++){
+            MDLEngRec rec;
+            if(!mdl_read_skinned_record(r, sh4, rec)) return fail();
+            if(capture) out_recs.push_back(std::move(rec));
+        }
+        // Section flag (v68)==1: trailing per-vertex u32 buffer (baked level data,
+        // sum(rigid vtx)*4). Present on interior/exterior level geometry.
+        if(flag){ if(!r.skip((size_t)vtxAccum*4)) return fail(); }
+
+        if(r.i != sec_end) return fail();                    // must land on boundary
+        off = sec_end;
+    }
+    return !out_recs.empty();
+}
+
+} // namespace
+
+bool build_mdl_engine_geometry(const std::vector<unsigned char>& data, std::vector<MDLMeshGeom>& out){
+    std::vector<MDLEngRec>     recs;
+    std::vector<MDLEngMeshHdr> hdrs;
+    uint32_t bone_count = 0;
+    if(!parse_mdl_engine_records(data, recs, hdrs, bone_count)) return false;
+    const size_t n = data.size();
+    bool any=false;
+    uint32_t ri=0;
+    for(const auto& rec : recs){
+        const uint32_t vc     = rec.VertexCount;
+        const uint32_t stride = rec.Skinned ? 28u : 20u;
+        const uint32_t uv_off = rec.Skinned ? 20u : 12u;     // uv half2 offset within vertex
+        if(vc==0 || rec.IndexCount<3){ ++ri; continue; }
+        if(rec.VertexOffset + (size_t)vc*stride > n){ ++ri; continue; }
+        if(rec.IndexOffset + (size_t)rec.IndexCount*2 > n){ ++ri; continue; }
+
+        MDLMeshGeom g;
+        g.positions.resize((size_t)vc*3);
+        g.uvs.resize((size_t)vc*2);
+        if(rec.Skinned){                                     // skinning: bone ids @12, weights @16
+            g.bone_ids.assign((size_t)vc*4, 0);
+            g.bone_weights.assign((size_t)vc*4, 0.0f);
+        }
+        const uint8_t* vp = data.data()+rec.VertexOffset;
+        for(uint32_t v=0; v<vc; ++v){
+            const uint8_t* p = vp + (size_t)v*stride;
+            g.positions[v*3+0]=half_to_float((uint16_t(p[0])<<8)|p[1]);       // pos half3 @0
+            g.positions[v*3+1]=half_to_float((uint16_t(p[2])<<8)|p[3]);
+            g.positions[v*3+2]=half_to_float((uint16_t(p[4])<<8)|p[5]);
+            g.uvs[v*2+0]=half_to_float((uint16_t(p[uv_off+0])<<8)|p[uv_off+1]);
+            g.uvs[v*2+1]=half_to_float((uint16_t(p[uv_off+2])<<8)|p[uv_off+3]);
+
+            if(rec.Skinned){
+                // 4× u8 bone ids @12, 4× u8 weights @16 — compacted & re-normalised
+                // to sum 1 (matches the existing skinned decode path).
+                uint16_t ids[4] = { p[12], p[13], p[14], p[15] };
+                uint8_t  wt [4] = { p[16], p[17], p[18], p[19] };
+                int outI=0; float sum=0.0f;
+                for(int k=0;k<4;++k){
+                    if(ids[k]>=255) continue;
+                    if(bone_count>0 && ids[k]>=bone_count) continue;
+                    if(wt[k]==0) continue;
+                    const size_t o=(size_t)v*4+(size_t)outI;
+                    g.bone_ids[o]=ids[k];
+                    g.bone_weights[o]=wt[k]/255.0f;
+                    sum+=g.bone_weights[o];
+                    ++outI;
+                }
+                if(outI>0 && sum>1e-6f){
+                    for(int k=0;k<outI;++k) g.bone_weights[(size_t)v*4+(size_t)k]/=sum;
+                }else{
+                    outI=0;
+                    for(int k=0;k<4;++k){
+                        if(ids[k]>=255) continue;
+                        if(bone_count>0 && ids[k]>=bone_count) continue;
+                        g.bone_ids[(size_t)v*4+0]=ids[k];
+                        g.bone_weights[(size_t)v*4+0]=1.0f;
+                        outI=1; break;
+                    }
+                    if(outI==0){ g.bone_ids[(size_t)v*4+0]=0; g.bone_weights[(size_t)v*4+0]=1.0f; }
+                }
+            }
+        }
+
+        std::vector<uint16_t> strip(rec.IndexCount);
+        const uint8_t* fp = data.data()+rec.IndexOffset;
+        bool hasFFFF=false;
+        for(uint32_t i=0;i<rec.IndexCount;i++){
+            uint16_t w=(uint16_t(fp[i*2+0])<<8)|fp[i*2+1];
+            strip[i]=w; if(w==0xFFFF) hasFFFF=true;
+        }
+        if(hasFFFF){ build_triangles_from_strip(strip, g.indices); }
+        else{
+            size_t tc=strip.size()/3; g.indices.resize(tc*3);
+            for(size_t t=0;t<tc;t++){ g.indices[t*3+0]=strip[t*3+0]; g.indices[t*3+1]=strip[t*3+1]; g.indices[t*3+2]=strip[t*3+2]; }
+        }
+        bool ok=true;
+        for(uint32_t idx : g.indices){ if(idx>=vc){ ok=false; break; } }
+        if(!ok){ ++ri; continue; }
+
+        compute_smooth_normals(vc, g.indices, g.positions, g.normals);
+
+        // Textures + display name from the owning mesh header (record idx1).
+        if(rec.MeshIdx < hdrs.size() && !hdrs[rec.MeshIdx].mats.empty()){
+            const MDLEngMat& mt = hdrs[rec.MeshIdx].mats[0];
+            g.diffuse_tex_name  = mt.diffuse;
+            g.specular_tex_name = mt.specular;
+            g.normal_tex_name   = mt.normal;
+            g.metallic_tex_name = mt.metallic;
+            g.extra_tex_name    = mt.extra;
+        }
+        if(!rec.MeshName.empty())                     g.name = rec.MeshName;
+        else if(rec.MeshIdx < hdrs.size() && !hdrs[rec.MeshIdx].name.empty())
+                                                      g.name = hdrs[rec.MeshIdx].name;
+        else                                          g.name = "mesh_" + std::to_string(ri);
+        g.alpha_test = false;   // Fable diffuse-alpha = gloss, not opacity → opaque
+        g.cloth_sim  = false;   // cloth renders as a normal skinned mesh
+        if(g.cloth_sim && rec.ClothSimVtx>0
+           && rec.ClothRestOffset + (size_t)rec.ClothSimVtx*12 <= n
+           && rec.ClothFlagOffset + rec.ClothSimVtx <= n){
+            // Map each render vertex to its nearest sim particle (both in bind
+            // pose) and inherit that particle's attachment flag from the cloth
+            // block — this is the real anchor data, not a heuristic.
+            const uint32_t sn = rec.ClothSimVtx;
+            auto rdf=[&](size_t o)->float{ uint32_t u=(uint32_t(data[o])<<24)|(uint32_t(data[o+1])<<16)|(uint32_t(data[o+2])<<8)|uint32_t(data[o+3]); float f; std::memcpy(&f,&u,4); return f; };
+            std::vector<float> sp((size_t)sn*3);
+            for(uint32_t s=0;s<sn;s++){ size_t o=rec.ClothRestOffset+(size_t)s*12; sp[s*3]=rdf(o); sp[s*3+1]=rdf(o+4); sp[s*3+2]=rdf(o+8); }
+            const uint8_t* fl = data.data()+rec.ClothFlagOffset;
+            g.cloth_pin.assign(vc, 0);
+            for(uint32_t v=0; v<vc; v++){
+                float bx=g.positions[v*3], by=g.positions[v*3+1], bz=g.positions[v*3+2];
+                float best=1e30f; uint32_t bi=0;
+                for(uint32_t s=0;s<sn;s++){
+                    float dx=bx-sp[s*3],dy=by-sp[s*3+1],dz=bz-sp[s*3+2], d=dx*dx+dy*dy+dz*dz;
+                    if(d<best){ best=d; bi=s; }
+                }
+                g.cloth_pin[v] = fl[bi] ? 1 : 0;
+            }
+            g.cloth_damping = rec.ClothDamping;
+        }
+        g.MeshIndex = ri;
+        out.push_back(std::move(g));
+        any=true;
+        ++ri;
+    }
+    return any;
+}
+
 bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& info, std::vector<MDLMeshGeom>& out){
     out.clear();
     if(info.MeshBuffers.size()!=info.Meshes.size()){

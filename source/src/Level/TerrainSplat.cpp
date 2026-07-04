@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
 
 namespace TerrainSplat {
 
@@ -747,6 +748,19 @@ bool Build(ID3D11Device*                                       device,
                         int(mat_idx), 0, N - 1);
                 }
 
+                // Per-corner blend, matching the engine pixel shader (and the
+                // verified dev/direct shader g_terrain_ps):
+                //   weight_k = mask * saturate(blend_k / 3) * bilinear_k
+                // Each corner contributes its OWN blend byte. (The previous code
+                // bilinearly interpolated the blend across corners first, which
+                // smears each corner's blend into its neighbours and produces
+                // wrong transitions.)
+                const float corner_bw[4] = {
+                    std::clamp(float(layer.blend[0]) / 3.0f, 0.0f, 1.0f),
+                    std::clamp(float(layer.blend[1]) / 3.0f, 0.0f, 1.0f),
+                    std::clamp(float(layer.blend[2]) / 3.0f, 0.0f, 1.0f),
+                    std::clamp(float(layer.blend[3]) / 3.0f, 0.0f, 1.0f)
+                };
                 for (int py = 0; py <= 32; ++py) {
                     const float fy = float(py) / 32.0f;
                     for (int px = 0; px <= 32; ++px) {
@@ -757,14 +771,8 @@ bool Build(ID3D11Device*                                       device,
                             (1.0f - fx) *        fy,
                                       fx  *        fy
                         };
-                        const float blend =
-                            (float(layer.blend[0]) * cwx[0] +
-                             float(layer.blend[1]) * cwx[1] +
-                             float(layer.blend[2]) * cwx[2] +
-                             float(layer.blend[3]) * cwx[3]) / 3.0f;
-                        const float layer_w = mask_sample(layer, px, py) *
-                            std::clamp(blend, 0.0f, 1.0f);
-                        if (layer_w <= 0.0001f) continue;
+                        const float m = mask_sample(layer, px, py);
+                        if (m <= 0.0001f) continue;
 
                         const int gx = cx * 32 + px;
                         const int gy = cy * 32 + py;
@@ -775,9 +783,9 @@ bool Build(ID3D11Device*                                       device,
                         const size_t dst =
                             size_t(gy) * size_t(R.weight_w) + size_t(gx);
                         for (int k = 0; k < 4; ++k) {
-                            if (cwx[k] <= 0.0001f) continue;
-                            weights[size_t(mat_corner[k]) * area + dst] +=
-                                layer_w * cwx[k];
+                            const float cw = m * corner_bw[k] * cwx[k];
+                            if (cw <= 0.0001f) continue;
+                            weights[size_t(mat_corner[k]) * area + dst] += cw;
                         }
                         ++global_contribs;
                     }

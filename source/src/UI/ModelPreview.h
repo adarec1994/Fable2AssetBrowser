@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <memory>
 #include "../MDL/ModelParser.h"
 #ifdef _WIN32
 #include <d3d11.h>
@@ -66,6 +67,10 @@ struct MPPerMesh {
 
     bool is_terrain = false;
     bool is_water   = false;
+    bool is_cloth   = false;
+    bool alpha_test = true;   // diffuse.a<0.25 discard (off for engine geom)
+    bool cloth_sim  = false;  // render via cloth solver (dynamic VB, no GPU skin)
+    std::shared_ptr<struct ClothSim> cloth;  // per-mesh soft-body state
     float water_params[38] = {};
     bool has_water_theme = false;
     float water_opacity = 1.0f;

@@ -1544,7 +1544,7 @@ void process_pending_loads() {
             bool ok = false;
             try {
                 if (is_nested) {
-                    ok = reconstruct_nested_mdl(bnk_to_use, item.index, buf);
+                    ok = reconstruct_nested_mdl(bnk_to_use, item.index, buf, parse_path);
                 } else {
                     ok = build_mdl_buffer_for_name(name, buf);
                 }
@@ -1654,9 +1654,12 @@ void process_pending_loads() {
                         }
                     }
                     S.mdl_meshes.clear();
-                    parse_mdl_geometry(buf, S.mdl_info, S.mdl_meshes);
-                    OutputLog::info("MDL: parse_mdl_geometry produced " +
-                                    std::to_string(S.mdl_meshes.size()) + " geom blocks");
+                    // Engine-faithful geometry is the sole model renderer: a
+                    // byte-exact decode with no heuristic fallback (a mis-parse
+                    // shows as no geometry). Cloth is rendered textured inline.
+                    build_mdl_engine_geometry(buf, S.mdl_meshes);
+                    OutputLog::info("MDL: engine geometry produced " +
+                                    std::to_string(S.mdl_meshes.size()) + " mesh(es)");
                     {
                         size_t nonempty = 0;
                         for (const auto& g : S.mdl_meshes) {
@@ -2605,7 +2608,20 @@ void process_pending_loads() {
                         lm_h    = lm_entry->height;
                     }
                     const auto& fresh_thumbs = EhfLodThumbnails::Get();
-                    if (TerrainSplat::Build(
+                    bool splat_has_material_weights = true;
+                    bool splat_ok = TerrainSplat::Build(
+                        device,
+                        splat_parsed,
+                        fresh_thumbs,
+                        lm_rgba,
+                        lm_w,
+                        lm_h,
+                        0.0f,
+                        0.0f,
+                        true);
+                    if (!splat_ok && S.dev_mode) {
+                        splat_has_material_weights = false;
+                        splat_ok = TerrainSplat::Build(
                             device,
                             splat_parsed,
                             fresh_thumbs,
@@ -2614,16 +2630,18 @@ void process_pending_loads() {
                             lm_h,
                             0.0f,
                             0.0f,
-                            !S.dev_mode))
+                            false);
+                    }
+                    if (splat_ok)
                     {
                         if (!g_mp.meshes.empty()) {
                             g_mp.meshes[0].is_terrain = true;
                             g_mp.meshes[0].diffuse_tex_name =
                                 "ehf_splat_terrain";
                         }
-                        OutputLog::success(S.dev_mode
-                            ? "terrain direct layer shader bound"
-                            : "terrain SPLAT shader bound: global EHF material weights");
+                        OutputLog::success(splat_has_material_weights
+                            ? "terrain SPLAT shader bound: global EHF material weights"
+                            : "terrain direct layer fallback bound");
                     } else {
                         OutputLog::warn(
                             "terrain SPLAT shader unavailable; using EHF composite texture");

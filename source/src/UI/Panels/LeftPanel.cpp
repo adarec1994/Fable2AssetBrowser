@@ -31,7 +31,8 @@
 extern ModelPreview g_mp;
 
 static const char* const kLeftPanelTabLabels[] = {
-    "BNK List", "File Tree", "Levels", "Models", "Textures", "Audio", "Animations"
+    "BNK List", "File Tree", "Levels", "Lua Scripts",
+    "Models", "Textures", "Audio", "Animations"
 };
 
 static float compute_tab_button_width() {
@@ -183,6 +184,82 @@ void drill_open_lua(DrillState& d) {
     d.target_t = 1.0f;
 }
 
+std::string lua_script_list_label(const LuaFileUI& e) {
+    std::string label = e.path;
+    if (!S.root_dir.empty() && label.rfind(S.root_dir, 0) == 0) {
+        label.erase(0, S.root_dir.size());
+        while (!label.empty() && (label.front() == '\\' || label.front() == '/')) {
+            label.erase(label.begin());
+        }
+    } else if (label.rfind("iso://", 0) == 0) {
+        label.erase(0, 6);
+    }
+    if (label.empty()) {
+        label = e.filename.empty() ? e.path : e.filename;
+    }
+    return label;
+}
+
+void select_lua_script(size_t idx) {
+    S.viewing_lua = true;
+    S.viewing_adb = false;
+    S.show_gdb_render = false;
+    S.selected_bnk.clear();
+    S.global_search.clear();
+    S.files.clear();
+    S.files.reserve(S.lua_files.size());
+    S.selected_file_index = -1;
+
+    for (size_t i = 0; i < S.lua_files.size(); ++i) {
+        S.files.push_back({(int)i, S.lua_files[i].filename,
+                           S.lua_files[i].size});
+    }
+
+    if (idx >= S.lua_files.size()) {
+        return;
+    }
+
+    S.selected_file_index = (int)idx;
+
+    const std::string lua_path = S.lua_files[idx].path;
+    const std::string lua_title = S.lua_files[idx].filename;
+
+    g_pending_mdl_load = false;
+    g_pending_tex_load = false;
+    g_pending_mdl_index = -1;
+    g_pending_tex_index = -1;
+    g_pending_mdl_full_path.clear();
+
+#ifdef _WIN32
+    if (g_mp.has_model) MP_Release(g_mp);
+    g_mp.has_model = false;
+    if (S.texture_window_srv) {
+        S.texture_window_srv->Release();
+        S.texture_window_srv = nullptr;
+    }
+    S.texture_window_width  = 0;
+    S.texture_window_height = 0;
+#else
+    g_mp.has_model = false;
+#endif
+
+    S.lua_preview_selected = (int)idx;
+    S.lua_preview_title    = lua_title;
+    S.lua_preview_content.clear();
+    S.lua_preview_loading  = true;
+    S.show_lua_render      = true;
+    S.show_gdb_render      = false;
+
+    OutputLog::info("Decompiling Lua: " + lua_title);
+    progress_open(0, "Decompiling " + lua_title + "...");
+    std::thread([lua_path]() {
+        std::string content = read_lua_file_content(lua_path);
+        S.lua_preview_content = content;
+        S.lua_preview_loading = false;
+        progress_done();
+    }).detach();
+}
+
 void drill_back(DrillState& d) {
     d.target_t = 0.0f;
 
@@ -260,6 +337,9 @@ void draw_left_panel() {
     ImGui::SameLine(0, 2);
     const ImU32 kGoldLabel = IM_COL32(255, 215, 0, 255);
     if (tab_button("Levels", s_active_tab == 6, kGoldLabel)) s_active_tab = 6;
+    ImGui::SameLine(0, 2);
+    const ImU32 kLuaLabel = IM_COL32(80, 220, 120, 255);
+    if (tab_button("Lua Scripts", s_active_tab == 7, kLuaLabel)) s_active_tab = 7;
 
     const ImU32 kPurpleLabel = IM_COL32(200, 130, 255, 255);
     if (tab_button("Models",   s_active_tab == 2, kPurpleLabel)) s_active_tab = 2;
@@ -745,69 +825,7 @@ void draw_left_panel() {
                             }
                             S.selected_file_index = idx;
                         } else if (g_bnk_drill.kind == DrillKind::Lua) {
-
-                            S.viewing_lua = true;
-                            S.viewing_adb = false;
-                            S.show_gdb_render = false;
-                            S.selected_bnk.clear();
-                            S.global_search.clear();
-                            S.files.clear();
-                            S.selected_file_index = -1;
-                            for (size_t i = 0; i < S.lua_files.size(); ++i) {
-                                S.files.push_back({(int)i,
-                                                   S.lua_files[i].filename,
-                                                   S.lua_files[i].size});
-                            }
-                            S.selected_file_index = idx;
-
-                            if (idx >= 0 &&
-                                (size_t)idx < S.lua_files.size())
-                            {
-                                const std::string lua_path =
-                                    S.lua_files[(size_t)idx].path;
-                                const std::string lua_title =
-                                    S.lua_files[(size_t)idx].filename;
-
-                                // Cancel any pending model / texture load that
-                                // would otherwise resurrect the model panel
-                                // (process_pending_loads runs every frame and
-                                // sets has_model = true asynchronously).
-                                g_pending_mdl_load = false;
-                                g_pending_tex_load = false;
-                                g_pending_mdl_index = -1;
-                                g_pending_tex_index = -1;
-                                g_pending_mdl_full_path.clear();
-
-#ifdef _WIN32
-                                if (g_mp.has_model) MP_Release(g_mp);
-                                g_mp.has_model = false;
-                                if (S.texture_window_srv) {
-                                    S.texture_window_srv->Release();
-                                    S.texture_window_srv = nullptr;
-                                }
-                                S.texture_window_width  = 0;
-                                S.texture_window_height = 0;
-#else
-                                g_mp.has_model = false;
-#endif
-
-                                S.lua_preview_selected = idx;
-                                S.lua_preview_title    = lua_title;
-                                S.lua_preview_content.clear();
-                                S.lua_preview_loading  = true;
-                                S.show_lua_render      = true;
-                                S.show_gdb_render      = false;
-
-                                OutputLog::info("Decompiling Lua: " + lua_title);
-                                progress_open(0, "Decompiling " + lua_title + "...");
-                                std::thread([lua_path]() {
-                                    std::string content =
-                                        read_lua_file_content(lua_path);
-                                    S.lua_preview_content = content;
-                                    S.lua_preview_loading = false;
-                                    progress_done();
-                                }).detach();
-                            }
+                            select_lua_script((size_t)idx);
                         }
                     }
 
@@ -1636,6 +1654,73 @@ void draw_left_panel() {
                     }
                     ImGui::Unindent(8.0f);
                 }
+            }
+            ImGui::EndChild();
+        }
+
+        if (s_active_tab == 7) {
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##lua_scripts_filter", "Filter",
+                                     &S.lua_filter);
+            std::string flow = S.lua_filter;
+            std::transform(flow.begin(), flow.end(), flow.begin(),
+                           [](unsigned char c){ return std::tolower(c); });
+
+            std::vector<int> vis;
+            vis.reserve(S.lua_files.size());
+            for (size_t i = 0; i < S.lua_files.size(); ++i) {
+                const std::string label = lua_script_list_label(S.lua_files[i]);
+                if (flow.empty()) {
+                    vis.push_back((int)i);
+                    continue;
+                }
+
+                std::string haystack = label + " " + S.lua_files[i].path;
+                std::transform(haystack.begin(), haystack.end(),
+                               haystack.begin(),
+                               [](unsigned char c){ return std::tolower(c); });
+                if (haystack.find(flow) != std::string::npos) {
+                    vis.push_back((int)i);
+                }
+            }
+
+            if (S.dev_mode) {
+                ImGui::TextDisabled("%d / %zu scripts",
+                                    (int)vis.size(), S.lua_files.size());
+                ImGui::Separator();
+            }
+
+            ImGui::BeginChild("lua_scripts_list", ImVec2(0, 0), false);
+            if (S.lua_files.empty()) {
+                ImGui::TextDisabled("No Lua scripts indexed yet.");
+                ImGui::TextDisabled("Open a Fable 2 root to populate the list.");
+            } else {
+                ImGuiListClipper clipper;
+                clipper.Begin((int)vis.size());
+                while (clipper.Step()) {
+                    for (int row = clipper.DisplayStart;
+                         row < clipper.DisplayEnd; ++row) {
+                        const int idx = vis[(size_t)row];
+                        const LuaFileUI& e = S.lua_files[(size_t)idx];
+                        const std::string label = lua_script_list_label(e);
+                        const bool selected =
+                            S.viewing_lua && S.selected_file_index == idx;
+
+                        ImGui::PushID(idx);
+                        if (ImGui::Selectable(label.c_str(), selected,
+                                              ImGuiSelectableFlags_SpanAllColumns)) {
+                            select_lua_script((size_t)idx);
+                        }
+                        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                            ImGui::BeginTooltip();
+                            ImGui::TextUnformatted(e.path.c_str());
+                            ImGui::Text("Size: %u bytes", e.size);
+                            ImGui::EndTooltip();
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                clipper.End();
             }
             ImGui::EndChild();
         }

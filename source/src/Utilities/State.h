@@ -137,6 +137,7 @@ struct State {
     std::string wav_filter;
     std::string anim_filter_files;
     std::string level_filter;
+    std::string lua_filter;
 
     bool show_paths = true;
 

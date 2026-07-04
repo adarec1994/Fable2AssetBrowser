@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iterator>
 #include <unordered_map>
+#include <unordered_set>
 #include <functional>
 #include <chrono>
 #include "ModelPreview.h"
@@ -1147,11 +1148,14 @@ struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
 VSOUT VS(VSIN i){
     VSOUT o;
 
-    float4x4 skin =
-        bones[i.bid.x] * i.bw.x +
-        bones[i.bid.y] * i.bw.y +
-        bones[i.bid.z] * i.bw.z +
-        bones[i.bid.w] * i.bw.w;
+    // params.y > 0.5 = "no skin": vertex is already in model space (cloth solver
+    // writes solved positions into a dynamic VB each frame).
+    float4x4 skin = (params.y > 0.5)
+        ? float4x4(1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1)
+        : bones[i.bid.x] * i.bw.x +
+          bones[i.bid.y] * i.bw.y +
+          bones[i.bid.z] * i.bw.z +
+          bones[i.bid.w] * i.bw.w;
 
     float4 p_skin = mul(float4(i.p, 1.0), skin);
     float3 n_skin = mul(i.n, (float3x3)skin);
@@ -1207,12 +1211,20 @@ float4 PS(VSOUT i) : SV_Target {
 
     float3 color = albedo * diff_term + spec.xxx;
 
+    if (params.z > 1.5) {
+        // cloth/soft-body sim overlay (dev): lit flat green, texture-independent,
+        // always opaque so the untextured sim mesh is never alpha-discarded.
+        return float4(float3(0.20, 0.95, 0.40) * (0.4 + 0.6 * diff_term), 1.0);
+    }
     if (params.z > 0.5) {
         float3 hi = float3(0.15, 0.45, 1.00);
         color = lerp(color, hi, 0.65);
     }
 
-    if (alpha < 0.25) discard;
+    // params.x = alpha-test flag. Opaque materials (engine geom) pack a gloss
+    // mask in diffuse-alpha, not opacity, so they must NOT discard or blend.
+    if (params.x > 0.5 && alpha < 0.25) discard;
+    if (params.x < 0.5) alpha = 1.0;
 
     return float4(color, alpha);
 }
@@ -1431,8 +1443,14 @@ float3 sample_material(int slice, float2 world_xy, float slope_w){
     int max_slice = max((int)chunk_grid_size.z - 1, 0);
     int s = min(max(slice, 0), max_slice);
     float4 mp = material_params[s];
-    float base_scale = (mp.x > 0.0) ? mp.x : splat_params.y;
-    float detail_scale = (mp.y > 0.0) ? mp.y : base_scale;
+    /* Tile every layer at the shared reference density (splat_params.y =
+       R.tile_scale). The per-material authored base scale (mp.x) varies per
+       layer (e.g. grass 0.125 vs cobbles 0.25) and magnifies the low-scale
+       layers ~2x, reading as "blown up" / low-LOD. Dev mode samples uniformly
+       at this same density and looks correct; we keep the per-material WEIGHT
+       blending below and only fix the diffuse tiling scale here. */
+    float base_scale = splat_params.y;
+    float detail_scale = splat_params.y;
     float3 base = lod_array.Sample(
         smp_wrap, float3(world_xy * base_scale, s)).rgb;
     float3 detail = lod_detail_array.Sample(
@@ -2230,6 +2248,160 @@ static void compute_rest_world(const MDLInfo& info,
     }
 }
 
+// ==== Cloth soft-body solver ================================================
+// Position-Based-Dynamics cloth on a cloth record's render mesh. Particles =
+// mesh vertices; distance constraints = mesh edges (rest length from bind pose);
+// pinned = the top ~22% by Y (the attachment band). Each frame the free
+// particles are Verlet-integrated under gravity, attracted toward the
+// skeleton-driven (skinned) pose, and the distance constraints are projected.
+// Solved model-space positions + recomputed normals go into a dynamic VB drawn
+// with no_skin (params.y). Tunables below.
+struct ClothSim {
+    std::vector<float>    bind;    // 3*N bind-space positions
+    std::vector<uint8_t>  bid;     // 4*N bone ids
+    std::vector<float>    bw;      // 4*N bone weights
+    std::vector<uint32_t> idx;     // triangle index list
+    std::vector<uint32_t> e0, e1;  // distance-constraint endpoints
+    std::vector<float>    rest;    // rest lengths
+    std::vector<uint8_t>  pinned;  // 1*N
+    std::vector<float>    pos, prev; // 3*N solved (model space)
+    std::vector<MPVertex> vtx;     // full vertex array (uv/bones kept; pos/nrm updated)
+    float scale = 1.0f;            // bbox diagonal (for gravity scaling)
+    float damping = 0.05f;         // sim-param damping (from cloth block)
+    bool  inited = false;
+};
+
+static std::shared_ptr<ClothSim> mp_build_cloth(const MDLMeshGeom& g,
+                                                std::vector<MPVertex>&& vtx){
+    const size_t N = g.positions.size()/3;
+    if(N==0 || g.indices.size()<3) return nullptr;
+    auto c = std::make_shared<ClothSim>();
+    c->bind = g.positions;
+    c->idx  = g.indices;
+    c->vtx  = std::move(vtx);
+    const bool hasBI = (g.bone_ids.size()==N*4), hasBW = (g.bone_weights.size()==N*4);
+    c->bid.assign(N*4,0); c->bw.assign(N*4,0.0f);
+    for(size_t v=0;v<N;v++) for(int k=0;k<4;k++){
+        uint32_t id = hasBI ? g.bone_ids[v*4+k] : 0; if(id>=MP_MAX_BONES) id=0;
+        c->bid[v*4+k]=(uint8_t)id;
+        c->bw[v*4+k] = hasBW ? g.bone_weights[v*4+k] : (k==0?1.0f:0.0f);
+    }
+    std::unordered_set<uint64_t> seen;
+    auto addEdge=[&](uint32_t a,uint32_t b){
+        if(a==b) return; if(a>b) std::swap(a,b);
+        if(!seen.insert(((uint64_t)a<<32)|b).second) return;
+        const float dx=g.positions[a*3]-g.positions[b*3];
+        const float dy=g.positions[a*3+1]-g.positions[b*3+1];
+        const float dz=g.positions[a*3+2]-g.positions[b*3+2];
+        c->e0.push_back(a); c->e1.push_back(b);
+        c->rest.push_back(std::sqrt(dx*dx+dy*dy+dz*dz));
+    };
+    for(size_t t=0;t+2<c->idx.size();t+=3){
+        addEdge(c->idx[t],c->idx[t+1]); addEdge(c->idx[t+1],c->idx[t+2]); addEdge(c->idx[t+2],c->idx[t]);
+    }
+    float mnx=1e30f,mny=1e30f,mnz=1e30f,mxx=-1e30f,mxy=-1e30f,mxz=-1e30f;
+    for(size_t v=0;v<N;v++){
+        float x=g.positions[v*3],y=g.positions[v*3+1],z=g.positions[v*3+2];
+        mnx=std::min(mnx,x);mny=std::min(mny,y);mnz=std::min(mnz,z);
+        mxx=std::max(mxx,x);mxy=std::max(mxy,y);mxz=std::max(mxz,z);
+    }
+    c->scale = std::sqrt((mxx-mnx)*(mxx-mnx)+(mxy-mny)*(mxy-mny)+(mxz-mnz)*(mxz-mnz));
+    if(c->scale<1e-4f) c->scale=1.0f;
+    c->damping = g.cloth_damping;
+
+    // --- Anchoring: real per-vertex attachment flags from the cloth block,
+    //     with per-connected-component safety so no island can float free. ---
+    c->pinned.assign(N,0);
+    size_t realPins=0;
+    if(g.cloth_pin.size()==N)
+        for(size_t v=0;v<N;v++) if(g.cloth_pin[v]){ c->pinned[v]=1; ++realPins; }
+    // reject degenerate flag sets (nothing pinned, or ~everything pinned)
+    if(!(realPins>0 && realPins < N*9/10)) std::fill(c->pinned.begin(),c->pinned.end(),0);
+
+    // union-find over the mesh edges → connected components (islands)
+    std::vector<uint32_t> par(N); for(uint32_t v=0;v<(uint32_t)N;v++) par[v]=v;
+    std::function<uint32_t(uint32_t)> find=[&](uint32_t x){ while(par[x]!=x){ par[x]=par[par[x]]; x=par[x]; } return x; };
+    for(size_t e=0;e<c->e0.size();e++){ uint32_t a=find(c->e0[e]),b=find(c->e1[e]); if(a!=b) par[a]=b; }
+    std::unordered_map<uint32_t,float> cMax,cMin; std::unordered_map<uint32_t,uint8_t> cPinned;
+    for(uint32_t v=0;v<(uint32_t)N;v++){
+        uint32_t r=find(v); float y=g.positions[v*3+1];
+        auto it=cMax.find(r);
+        if(it==cMax.end()){ cMax[r]=y; cMin[r]=y; } else { it->second=std::max(it->second,y); cMin[r]=std::min(cMin[r],y); }
+        if(c->pinned[v]) cPinned[r]=1;
+    }
+    // any island with no real pin → anchor its top ~18% by Y
+    for(uint32_t v=0;v<(uint32_t)N;v++){
+        uint32_t r=find(v); if(cPinned.count(r)) continue;
+        float t = cMax[r] - (cMax[r]-cMin[r])*0.18f;
+        if(g.positions[v*3+1]>=t) c->pinned[v]=1;
+    }
+    c->pos.assign(N*3,0.0f); c->prev.assign(N*3,0.0f);
+    return c;
+}
+
+// Advances the sim one frame and refreshes c.vtx (pos + recomputed normals).
+static void mp_step_cloth(ClothSim& c, const XMFLOAT4X4* bmats, uint32_t nbones){
+    const size_t N = c.pos.size()/3;
+    std::vector<float> tgt(N*3);
+    for(size_t v=0; v<N; ++v){
+        XMMATRIX acc = XMMatrixSet(0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0);
+        float wsum=0.0f;
+        for(int k=0;k<4;k++){
+            float w=c.bw[v*4+k]; if(w<=0.0f) continue;
+            uint32_t id=c.bid[v*4+k]; if(id>=nbones) id=0;
+            acc = acc + XMLoadFloat4x4(&bmats[id])*w; wsum+=w;
+        }
+        if(wsum<1e-4f) acc = XMMatrixIdentity();
+        XMVECTOR wp = XMVector4Transform(XMVectorSet(c.bind[v*3],c.bind[v*3+1],c.bind[v*3+2],1.0f), acc);
+        tgt[v*3]=XMVectorGetX(wp); tgt[v*3+1]=XMVectorGetY(wp); tgt[v*3+2]=XMVectorGetZ(wp);
+    }
+    if(!c.inited){ c.pos=tgt; c.prev=tgt; c.inited=true; }
+
+    // sim-param damping (~0.01–0.2) → Verlet velocity retention
+    const float damp = 1.0f - std::min(std::max(c.damping,0.0f),0.4f);
+    const float grav = c.scale * 0.0016f;     // per-step downward pull (model units)
+    const float attract = 0.03f;              // pull toward skinned pose (keeps it near body)
+    for(size_t v=0;v<N;v++){
+        if(c.pinned[v]){
+            for(int a=0;a<3;a++){ c.pos[v*3+a]=tgt[v*3+a]; c.prev[v*3+a]=tgt[v*3+a]; }
+            continue;
+        }
+        for(int a=0;a<3;a++){
+            float x=c.pos[v*3+a], px=c.prev[v*3+a];
+            float nx = x + (x-px)*damp + (a==1 ? -grav : 0.0f);
+            nx += (tgt[v*3+a]-x)*attract;
+            c.prev[v*3+a]=x; c.pos[v*3+a]=nx;
+        }
+    }
+    for(int it=0; it<10; ++it){
+        for(size_t e=0;e<c.rest.size();e++){
+            const uint32_t a=c.e0[e], b=c.e1[e];
+            float dx=c.pos[b*3]-c.pos[a*3], dy=c.pos[b*3+1]-c.pos[a*3+1], dz=c.pos[b*3+2]-c.pos[a*3+2];
+            float d=std::sqrt(dx*dx+dy*dy+dz*dz); if(d<1e-6f) continue;
+            float wa=c.pinned[a]?0.0f:1.0f, wb=c.pinned[b]?0.0f:1.0f, ws=wa+wb; if(ws<1e-6f) continue;
+            float diff=(d-c.rest[e])/d, sa=wa/ws, sb=wb/ws;
+            c.pos[a*3]+=dx*diff*sa; c.pos[a*3+1]+=dy*diff*sa; c.pos[a*3+2]+=dz*diff*sa;
+            c.pos[b*3]-=dx*diff*sb; c.pos[b*3+1]-=dy*diff*sb; c.pos[b*3+2]-=dz*diff*sb;
+        }
+    }
+    std::vector<float> nrm(N*3,0.0f);
+    for(size_t t=0;t+2<c.idx.size();t+=3){
+        uint32_t ia=c.idx[t],ib=c.idx[t+1],ic=c.idx[t+2];
+        float ax=c.pos[ia*3],ay=c.pos[ia*3+1],az=c.pos[ia*3+2];
+        float ux=c.pos[ib*3]-ax,uy=c.pos[ib*3+1]-ay,uz=c.pos[ib*3+2]-az;
+        float vx=c.pos[ic*3]-ax,vy=c.pos[ic*3+1]-ay,vz=c.pos[ic*3+2]-az;
+        float nx=uy*vz-uz*vy, ny=uz*vx-ux*vz, nz=ux*vy-uy*vx;
+        nrm[ia*3]+=nx;nrm[ia*3+1]+=ny;nrm[ia*3+2]+=nz;
+        nrm[ib*3]+=nx;nrm[ib*3+1]+=ny;nrm[ib*3+2]+=nz;
+        nrm[ic*3]+=nx;nrm[ic*3+1]+=ny;nrm[ic*3+2]+=nz;
+    }
+    for(size_t v=0;v<N && v<c.vtx.size();v++){
+        c.vtx[v].px=c.pos[v*3]; c.vtx[v].py=c.pos[v*3+1]; c.vtx[v].pz=c.pos[v*3+2];
+        float x=nrm[v*3],y=nrm[v*3+1],z=nrm[v*3+2], l=std::sqrt(x*x+y*y+z*z);
+        if(l>1e-6f){ c.vtx[v].nx=x/l; c.vtx[v].ny=y/l; c.vtx[v].nz=z/l; }
+    }
+}
+
 bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp){
     for(auto& m : mp.meshes){
         if(m.vb){m.vb->Release();}
@@ -2372,7 +2544,11 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             continue;
         }
 
-        D3D11_BUFFER_DESC vb{}; vb.BindFlags=D3D11_BIND_VERTEX_BUFFER; vb.ByteWidth=(UINT)vb_bytes; vb.Usage=D3D11_USAGE_IMMUTABLE;
+        // Cloth meshes need a CPU-writable (dynamic) VB — the solver rewrites
+        // positions/normals every frame.
+        D3D11_BUFFER_DESC vb{}; vb.BindFlags=D3D11_BIND_VERTEX_BUFFER; vb.ByteWidth=(UINT)vb_bytes;
+        if(g.cloth_sim){ vb.Usage=D3D11_USAGE_DYNAMIC; vb.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE; }
+        else           { vb.Usage=D3D11_USAGE_IMMUTABLE; }
         D3D11_SUBRESOURCE_DATA vsd{}; vsd.pSysMem=vtx.data();
         if(FAILED(dev->CreateBuffer(&vb,&vsd,&m.vb))) {
             OutputLog::warn("MP_Build: vertex buffer create failed for '" +
@@ -2380,6 +2556,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
                             "' bytes=" + std::to_string(vb_bytes));
             continue;
         }
+        if(g.cloth_sim){ m.cloth = mp_build_cloth(g, std::move(vtx)); }
         D3D11_BUFFER_DESC ib{}; ib.BindFlags=D3D11_BIND_INDEX_BUFFER; ib.ByteWidth=(UINT)ib_bytes; ib.Usage=D3D11_USAGE_IMMUTABLE;
         D3D11_SUBRESOURCE_DATA isd{}; isd.pSysMem=g.indices.data();
         if(FAILED(dev->CreateBuffer(&ib,&isd,&m.ib))) {
@@ -2415,6 +2592,9 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         m.isolated  = false;
         m.is_terrain = g.is_terrain;
         m.is_water   = g.is_water;
+        m.is_cloth   = g.is_cloth;
+        m.alpha_test = g.alpha_test;
+        m.cloth_sim  = g.cloth_sim && (bool)m.cloth;   // only if solver built
         std::memcpy(m.water_params, g.water_params,
                     sizeof(m.water_params));
         m.has_water_theme = g.has_water_theme;
@@ -3077,6 +3257,19 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         ctx->VSSetConstantBuffers(1, 1, &mp.bone_cb);
     }
 
+    // Step cloth soft-body sims (anchored to the skinned pose) and refresh their
+    // dynamic vertex buffers with the solved model-space positions/normals.
+    for (auto& m : mp.meshes){
+        if (!m.cloth_sim || !m.cloth || !m.vb) continue;
+        mp_step_cloth(*m.cloth, bone_mats.data(), MP_MAX_BONES);
+        D3D11_MAPPED_SUBRESOURCE cms{};
+        if (SUCCEEDED(ctx->Map(m.vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &cms))){
+            std::memcpy(cms.pData, m.cloth->vtx.data(),
+                        m.cloth->vtx.size() * sizeof(MPVertex));
+            ctx->Unmap(m.vb, 0);
+        }
+    }
+
     bool any_isolated = false;
     for (const auto& mm : mp.meshes) {
         if (mp_should_hide_mesh(mm)) continue;
@@ -3084,10 +3277,12 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     }
 
     const float water_time = (float)ImGui::GetTime();
-    auto upload_per_mesh_cb = [&](bool highlight){
+    auto upload_per_mesh_cb = [&](bool highlight, bool is_cloth, bool alpha_test,
+                                  bool no_skin = false){
 
-        cb.params = XMFLOAT4(0.4f, 48.0f,
-                             highlight ? 1.0f : 0.0f, water_time);
+        cb.params = XMFLOAT4(alpha_test ? 1.0f : 0.0f, no_skin ? 1.0f : 0.0f,
+                             is_cloth ? 2.0f : (highlight ? 1.0f : 0.0f),
+                             water_time);
         D3D11_MAPPED_SUBRESOURCE pms{};
         if (SUCCEEDED(ctx->Map(mp.cbuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &pms))) {
             std::memcpy(pms.pData, &cb, sizeof(cb));
@@ -3106,7 +3301,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
 
         const auto& R = TerrainSplat::Get();
         const bool use_direct_terrain =
-            S.dev_mode && mp.ps_terrain_direct;
+            !R.material_weight_array && mp.ps_terrain_direct;
         const bool use_terrain_shader =
             m.is_terrain && R.ok &&
             R.lod_diffuse_array && R.lod_detail_array &&
@@ -3120,7 +3315,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             if (s_logged_splat_generation != R.generation) {
                 s_logged_splat_generation = R.generation;
                 OutputLog::success(std::string(use_direct_terrain
-                    ? "terrain direct layer shader draw active: "
+                    ? "terrain direct layer fallback draw active: "
                     : "terrain SPLAT shader draw active: ")
                     + std::to_string(R.chunk_w) + "x"
                     + std::to_string(R.chunk_h) + " chunks, "
@@ -3398,27 +3593,32 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     ctx->OMSetDepthStencilState(mp.dssWrite, 0);
     for(const auto& m : mp.meshes){
         if (mp_should_hide_mesh(m)) continue;
-        if(!m.vb || !m.ib || m.index_count==0 || m.has_alpha) continue;
+        // Opaque pass: everything except genuinely alpha-tested (cutout) meshes.
+        // A gloss-in-alpha material (has_alpha but alpha_test==false) is opaque
+        // and MUST be drawn here.
+        if(!m.vb || !m.ib || m.index_count==0 || (m.has_alpha && m.alpha_test)) continue;
         if (any_isolated && !m.isolated) continue;
         if (mp.selected_lod >= 0 &&
             m.lod_index != (uint32_t)mp.selected_lod) continue;
-        upload_per_mesh_cb(m.highlight);
+        upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test, m.cloth_sim);
         draw_one(m, mp.bs);
     }
     ctx->OMSetDepthStencilState(mp.dssNoWrite, 0);
     for(const auto& m : mp.meshes){
         if (mp_should_hide_mesh(m)) continue;
-        if(!m.vb || !m.ib || m.index_count==0 || !m.has_alpha) continue;
+        // Only genuinely alpha-tested materials get the blend pass. Opaque meshes
+        // that merely carry a gloss mask in diffuse-alpha must NOT be re-blended.
+        if(!m.vb || !m.ib || m.index_count==0 || !m.has_alpha || !m.alpha_test) continue;
         if (any_isolated && !m.isolated) continue;
         if (mp.selected_lod >= 0 &&
             m.lod_index != (uint32_t)mp.selected_lod) continue;
-        upload_per_mesh_cb(m.highlight);
+        upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test, m.cloth_sim);
         draw_one(m, mp.bsAlpha);
     }
 
     if (mp.selected_pick_id != 0 && mp.dssNoWriteLEqual) {
         ctx->OMSetDepthStencilState(mp.dssNoWriteLEqual, 0);
-        upload_per_mesh_cb(true);
+        upload_per_mesh_cb(true, false, false);
         for (const auto& m : mp.meshes) {
             if (mp_should_hide_mesh(m)) continue;
             if (!m.vb || !m.ib || m.index_count == 0) continue;
@@ -3758,6 +3958,7 @@ bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelP
         }
         m.highlight = false;
         m.isolated  = false;
+        m.is_cloth  = g.is_cloth;
         if (!g.diffuse_tex_name.empty())  { m.tex_diffuse  = load_tex_from_name(g.diffuse_tex_name,  &hasA); }
         if (!g.normal_tex_name.empty())   { m.tex_normal   = load_tex_from_name(g.normal_tex_name,   nullptr); }
         if (!g.specular_tex_name.empty()) { m.tex_specular = load_tex_from_name(g.specular_tex_name, nullptr); }

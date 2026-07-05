@@ -8081,7 +8081,13 @@ static bool decode_ehf_embedded_bc1(const std::vector<uint8_t>& ehf,
     const int rc = (rc_init == Z_OK) ? inflate(&zs, Z_FINISH) : Z_ERRNO;
     const size_t produced = size_t(mip.raw_size) - size_t(zs.avail_out);
     inflateEnd(&zs);
-    if (rc_init != Z_OK || rc != Z_STREAM_END || produced != mip.raw_size) {
+    // The tile-page streams cover the whole mip chain; raw_size is only the
+    // top mip, so inflate stops on a full output buffer WITHOUT reaching
+    // Z_STREAM_END. Requiring the end marker here rejected every page in
+    // every level. Accept a completely-filled top mip instead (same policy
+    // as the huffman-albedo path below).
+    if (rc_init != Z_OK || produced != mip.raw_size ||
+        !(rc == Z_STREAM_END || rc == Z_OK || rc == Z_BUF_ERROR)) {
         return false;
     }
 
@@ -8698,36 +8704,14 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
         return false;
     }
 
-    if (allow_embedded_albedo &&
-        DecodeEhfTerrainAlbedoFromBytes(ehf, hdr.u0, hdr.u1,
-                                        out_rgba, out_w, out_h))
-    {
-        out_picked_name = "embedded_tile_albedo";
-        return true;
-    }
-
-    std::vector<uint8_t> lm_rgba;
-    int lm_w = 0, lm_h = 0;
-    {
-        const uint8_t* p = ehf.data() + hdr.body_offset;
-        std::vector<uint8_t> body_slice(p, p + hdr.body_size);
-        auto dec = TextureAtlas::DecodeAtlas(body_slice);
-        if (!dec.ok || dec.pixel_format != 24u) {
-            OutputLog::warn("bake composite: .ehf body decode failed: " +
-                            dec.error);
-            return false;
-        }
-        lm_rgba = std::move(dec.rgba);
-        lm_w    = dec.width;
-        lm_h    = dec.height;
-    }
-
+    // Parse the body and register the LOD palette FIRST. The embedded-albedo
+    // early return below used to skip this, leaving the palette empty (or
+    // stale from the previous level) whenever the embedded composite
+    // succeeded — which silently killed the LOD thumbnails and the SPLAT
+    // shader for exactly those levels.
     EhfParsedBody parsed;
-    if (!ParseEhfBody(ehf, parsed)) {
-        OutputLog::warn("bake composite: chunk parse failed: " + parsed.error);
-        return false;
-    }
-    {
+    const bool parsed_ok = ParseEhfBody(ehf, parsed);
+    if (parsed_ok) {
         std::ostringstream pos;
         pos << "ehf chunk parse: " << parsed.chunk_w << "x"
             << parsed.chunk_h << " chunks, "
@@ -8735,9 +8719,7 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
             << "  (consumed " << parsed.bytes_consumed
             << "B, remaining " << parsed.bytes_remaining << "B)";
         OutputLog::success(pos.str());
-    }
 
-    {
         std::vector<TerrainTextureRegistry::LodPaletteEntry> pe;
         pe.reserve(parsed.lods.size());
         for (const auto& L : parsed.lods) {
@@ -8753,6 +8735,34 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
             pe.push_back(std::move(e));
         }
         TerrainTextureRegistry::SetLodPalette(std::move(pe));
+    } else {
+        OutputLog::warn("bake composite: chunk parse failed: " + parsed.error);
+    }
+
+    if (allow_embedded_albedo &&
+        DecodeEhfTerrainAlbedoFromBytes(ehf, hdr.u0, hdr.u1,
+                                        out_rgba, out_w, out_h))
+    {
+        out_picked_name = "embedded_tile_albedo";
+        return true;
+    }
+
+    if (!parsed_ok) return false;
+
+    std::vector<uint8_t> lm_rgba;
+    int lm_w = 0, lm_h = 0;
+    {
+        const uint8_t* p = ehf.data() + hdr.body_offset;
+        std::vector<uint8_t> body_slice(p, p + hdr.body_size);
+        auto dec = TextureAtlas::DecodeAtlas(body_slice);
+        if (!dec.ok || dec.pixel_format != 24u) {
+            OutputLog::warn("bake composite: .ehf body decode failed: " +
+                            dec.error);
+            return false;
+        }
+        lm_rgba = std::move(dec.rgba);
+        lm_w    = dec.width;
+        lm_h    = dec.height;
     }
 
     auto basename_lower = [](const std::string& path) {

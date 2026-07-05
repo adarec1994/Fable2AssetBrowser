@@ -867,17 +867,29 @@ bool build_terrain_weight_maps(const EhfParsedBody& parsed,
                                  int px,
                                  int py) -> float
     {
+        // Each chunk layer references its OWN paint mask through name_idx (the
+        // engine samples that per-layer resource, not one shared splat map).
+        // Prefer the layer's referenced resource; fall back to the shared
+        // splat_indices when it isn't a decoded pf99 map.
+        const std::vector<uint8_t>* map = &parsed.splat_indices;
+        int mw = int(parsed.splat_w);
+        int mh = int(parsed.splat_h);
+        if (size_t(layer.name_idx) < parsed.paint_resources.size()) {
+            const auto& pr = parsed.paint_resources[size_t(layer.name_idx)];
+            if (!pr.data.empty() && pr.width > 0 && pr.height > 0) {
+                map = &pr.data;
+                mw  = int(pr.width);
+                mh  = int(pr.height);
+            }
+        }
+        if (map->empty() || mw <= 0 || mh <= 0) return 1.0f;
         const int ox = std::clamp(
-            int(std::floor(layer.tile_uv[0] * float(parsed.splat_w))),
-            0, int(parsed.splat_w) - 1);
+            int(std::floor(layer.tile_uv[0] * float(mw))), 0, mw - 1);
         const int oy = std::clamp(
-            int(std::floor(layer.tile_uv[1] * float(parsed.splat_h))),
-            0, int(parsed.splat_h) - 1);
-        const int sx = std::clamp(ox + px, 0, int(parsed.splat_w) - 1);
-        const int sy = std::clamp(oy + py, 0, int(parsed.splat_h) - 1);
-        return float(parsed.splat_indices[
-                   size_t(sy) * size_t(parsed.splat_w) + size_t(sx)])
-             / 255.0f;
+            int(std::floor(layer.tile_uv[1] * float(mh))), 0, mh - 1);
+        const int sx = std::clamp(ox + px, 0, mw - 1);
+        const int sy = std::clamp(oy + py, 0, mh - 1);
+        return float((*map)[size_t(sy) * size_t(mw) + size_t(sx)]) / 255.0f;
     };
 
     const size_t expected_chunks = size_t(CW) * size_t(CH);

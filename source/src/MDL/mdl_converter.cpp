@@ -242,72 +242,23 @@ static void decode_bc5_block(const uint8_t* b, uint32_t* outRGBA) {
     }
 }
 
+// Xbox 360 BC textures use GPUENDIAN_8IN16 (engine pixel-format table):
+// converting to PC layout = byte-swap every 16-bit word across the surface,
+// including the index/alpha words. The old per-field 32-/48-bit reversals
+// reordered index rows in every block, and never swapped the BC3/BC5 alpha
+// endpoint pair (which flips the interpolation mode when a0<->a1 cross).
 static void swap_bc1_endian(uint8_t* data, size_t size) {
-    for(size_t i = 0; i + 8 <= size; i += 8) {
-        uint16_t c0 = (data[i+0] << 8) | data[i+1];
-        uint16_t c1 = (data[i+2] << 8) | data[i+3];
-        uint32_t idx = (data[i+4] << 24) | (data[i+5] << 16) | (data[i+6] << 8) | data[i+7];
-        data[i+0] = c0 & 0xFF;
-        data[i+1] = (c0 >> 8) & 0xFF;
-        data[i+2] = c1 & 0xFF;
-        data[i+3] = (c1 >> 8) & 0xFF;
-        data[i+4] = idx & 0xFF;
-        data[i+5] = (idx >> 8) & 0xFF;
-        data[i+6] = (idx >> 16) & 0xFF;
-        data[i+7] = (idx >> 24) & 0xFF;
+    for (size_t i = 0; i + 2 <= size; i += 2) {
+        uint8_t t = data[i]; data[i] = data[i+1]; data[i+1] = t;
     }
 }
 
 static void swap_bc3_endian(uint8_t* data, size_t size) {
-    for(size_t i = 0; i + 16 <= size; i += 16) {
-        uint64_t alpha_bits = 0;
-        for(int j = 0; j < 6; j++) {
-            alpha_bits |= ((uint64_t)data[i+2+j]) << (j*8);
-        }
-
-        uint64_t alpha_swapped = 0;
-        for(int j = 0; j < 6; j++) {
-            alpha_swapped |= ((alpha_bits >> (j*8)) & 0xFF) << ((5-j)*8);
-        }
-
-        for(int j = 0; j < 6; j++) {
-            data[i+2+j] = (alpha_swapped >> (j*8)) & 0xFF;
-        }
-
-        swap_bc1_endian(data + i + 8, 8);
-    }
+    swap_bc1_endian(data, size);
 }
 
 static void swap_bc5_endian(uint8_t* data, size_t size) {
-    for(size_t i = 0; i + 16 <= size; i += 16) {
-        uint64_t r_bits = 0;
-        for(int j = 0; j < 6; j++) {
-            r_bits |= ((uint64_t)data[i+2+j]) << (j*8);
-        }
-
-        uint64_t r_swapped = 0;
-        for(int j = 0; j < 6; j++) {
-            r_swapped |= ((r_bits >> (j*8)) & 0xFF) << ((5-j)*8);
-        }
-
-        for(int j = 0; j < 6; j++) {
-            data[i+2+j] = (r_swapped >> (j*8)) & 0xFF;
-        }
-
-        uint64_t g_bits = 0;
-        for(int j = 0; j < 6; j++) {
-            g_bits |= ((uint64_t)data[i+10+j]) << (j*8);
-        }
-
-        uint64_t g_swapped = 0;
-        for(int j = 0; j < 6; j++) {
-            g_swapped |= ((g_bits >> (j*8)) & 0xFF) << ((5-j)*8);
-        }
-
-        for(int j = 0; j < 6; j++) {
-            data[i+10+j] = (g_swapped >> (j*8)) & 0xFF;
-        }
-    }
+    swap_bc1_endian(data, size);
 }
 
 static bool decode_texture_to_png(const std::vector<unsigned char>& tex_buf, std::vector<uint8_t>& png_out) {

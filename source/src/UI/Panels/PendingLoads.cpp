@@ -1267,9 +1267,8 @@ static bool stream_level_prop_batch(ID3D11Device* device)
     const size_t total = g_level_prop_stream.total_instances;
     progress_update((int)loaded, (int)std::max<size_t>(total, 1),
                     S.cancel_requested.load()
-                        ? "Cancelling prop load..."
-                        : ("Loading props " + std::to_string(loaded) + "/" +
-                           std::to_string(total)));
+                        ? std::string("Cancelling prop load...")
+                        : std::string());
 
     if (phase != 2) return true;
 

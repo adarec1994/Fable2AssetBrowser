@@ -701,23 +701,36 @@ bool Build(ID3D11Device*                                       device,
         std::vector<float> weights(size_t(N) * area, 0.0f);
 
         const auto mask_sample = [&](const Level::EhfChunkLayer& layer,
-                                     int px,
-                                     int py) -> float
+                                     int px, int py) -> float
         {
+            // Each chunk layer references its OWN paint mask through name_idx
+            // (the engine samples that per-layer resource, not one shared
+            // splat map). Prefer the layer's referenced resource; fall back
+            // to the shared splat_indices. Mirrors LevelExport::mask_sample
+            // so the preview bake matches the export bake.
+            const std::vector<uint8_t>* map = &parsed.splat_indices;
+            int mw = int(parsed.splat_w);
+            int mh = int(parsed.splat_h);
+            if (size_t(layer.name_idx) < parsed.paint_resources.size()) {
+                const auto& pr =
+                    parsed.paint_resources[size_t(layer.name_idx)];
+                if (!pr.data.empty() && pr.width > 0 && pr.height > 0) {
+                    map = &pr.data;
+                    mw  = int(pr.width);
+                    mh  = int(pr.height);
+                }
+            }
+            if (map->empty() || mw <= 0 || mh <= 0 ||
+                map->size() != size_t(mw) * size_t(mh)) {
+                return 1.0f;
+            }
             const int ox = std::clamp(
-                int(std::floor(layer.tile_uv[0] *
-                               float(parsed.splat_w))),
-                0, int(parsed.splat_w) - 1);
+                int(std::floor(layer.tile_uv[0] * float(mw))), 0, mw - 1);
             const int oy = std::clamp(
-                int(std::floor(layer.tile_uv[1] *
-                               float(parsed.splat_h))),
-                0, int(parsed.splat_h) - 1);
-            const int sx = std::clamp(ox + px, 0,
-                                      int(parsed.splat_w) - 1);
-            const int sy = std::clamp(oy + py, 0,
-                                      int(parsed.splat_h) - 1);
-            return float(parsed.splat_indices[
-                       size_t(sy) * size_t(parsed.splat_w) + size_t(sx)])
+                int(std::floor(layer.tile_uv[1] * float(mh))), 0, mh - 1);
+            const int sx = std::clamp(ox + px, 0, mw - 1);
+            const int sy = std::clamp(oy + py, 0, mh - 1);
+            return float((*map)[size_t(sy) * size_t(mw) + size_t(sx)])
                  / 255.0f;
         };
 
@@ -732,7 +745,6 @@ bool Build(ID3D11Device*                                       device,
             const auto& chunk = parsed.chunks[ci];
             const int layer_count =
                 std::min<int>((int)chunk.layers.size(), kMaxLayers);
-
             for (int li = 0; li < layer_count; ++li) {
                 const auto& layer = chunk.layers[size_t(li)];
                 int mat_corner[4] = {};
@@ -740,21 +752,11 @@ bool Build(ID3D11Device*                                       device,
                     uint32_t mat_idx = layer.material_idx;
                     const uint32_t corner_layer_idx = layer.texture_idx[i];
                     if (corner_layer_idx < chunk.layers.size()) {
-                        mat_idx =
-                            chunk.layers[size_t(corner_layer_idx)]
-                                .material_idx;
+                        mat_idx = chunk.layers[size_t(corner_layer_idx)]
+                                      .material_idx;
                     }
-                    mat_corner[i] = std::clamp<int>(
-                        int(mat_idx), 0, N - 1);
+                    mat_corner[i] = std::clamp<int>(int(mat_idx), 0, N - 1);
                 }
-
-                // Per-corner blend, matching the engine pixel shader (and the
-                // verified dev/direct shader g_terrain_ps):
-                //   weight_k = mask * saturate(blend_k / 3) * bilinear_k
-                // Each corner contributes its OWN blend byte. (The previous code
-                // bilinearly interpolated the blend across corners first, which
-                // smears each corner's blend into its neighbours and produces
-                // wrong transitions.)
                 const float corner_bw[4] = {
                     std::clamp(float(layer.blend[0]) / 3.0f, 0.0f, 1.0f),
                     std::clamp(float(layer.blend[1]) / 3.0f, 0.0f, 1.0f),
@@ -773,7 +775,6 @@ bool Build(ID3D11Device*                                       device,
                         };
                         const float m = mask_sample(layer, px, py);
                         if (m <= 0.0001f) continue;
-
                         const int gx = cx * 32 + px;
                         const int gy = cy * 32 + py;
                         if (gx < 0 || gy < 0 ||

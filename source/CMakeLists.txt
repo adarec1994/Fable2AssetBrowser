@@ -63,6 +63,8 @@ set(APP_SOURCES
         src/Level/TextureAtlasDecoder.h
         src/Level/EhfPalette.cpp
         src/Level/EhfPalette.h
+        src/Level/ShaderBankFile.cpp
+        src/Level/ShaderBankFile.h
         src/Level/TerrainTextureRegistry.cpp
         src/Level/TerrainTextureRegistry.h
         src/Level/EhfChunkParser.cpp

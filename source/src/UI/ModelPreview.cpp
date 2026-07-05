@@ -105,36 +105,18 @@ static void decode_bc3_block(const uint8_t* b, uint32_t* outRGBA){
     }
     for(int i=0;i<16;++i) outRGBA[i]=color[i];
 }
+// Xbox 360 BC textures use GPUENDIAN_8IN16 (engine pixel-format table):
+// converting to PC layout = byte-swap every 16-bit word across the surface,
+// including the index/alpha words. The old per-field 32-/48-bit reversals
+// reordered index rows in every block, and never swapped the BC3/BC5 alpha
+// endpoint pair (which flips the interpolation mode when a0<->a1 cross).
 static void swap_bc1_endian(uint8_t* data, size_t size) {
-    for(size_t i = 0; i + 8 <= size; i += 8) {
-        uint16_t c0 = (data[i+0] << 8) | data[i+1];
-        uint16_t c1 = (data[i+2] << 8) | data[i+3];
-        uint32_t idx = (data[i+4] << 24) | (data[i+5] << 16) | (data[i+6] << 8) | data[i+7];
-        data[i+0] = c0 & 0xFF;
-        data[i+1] = (c0 >> 8) & 0xFF;
-        data[i+2] = c1 & 0xFF;
-        data[i+3] = (c1 >> 8) & 0xFF;
-        data[i+4] = idx & 0xFF;
-        data[i+5] = (idx >> 8) & 0xFF;
-        data[i+6] = (idx >> 16) & 0xFF;
-        data[i+7] = (idx >> 24) & 0xFF;
+    for (size_t i = 0; i + 2 <= size; i += 2) {
+        uint8_t t = data[i]; data[i] = data[i+1]; data[i+1] = t;
     }
 }
 static void swap_bc3_endian(uint8_t* data, size_t size) {
-    for(size_t i = 0; i + 16 <= size; i += 16) {
-        uint64_t alpha_bits = 0;
-        for(int j = 0; j < 6; j++) {
-            alpha_bits |= ((uint64_t)data[i+2+j]) << (j*8);
-        }
-        uint64_t alpha_swapped = 0;
-        for(int j = 0; j < 6; j++) {
-            alpha_swapped |= ((alpha_bits >> (j*8)) & 0xFF) << ((5-j)*8);
-        }
-        for(int j = 0; j < 6; j++) {
-            data[i+2+j] = (alpha_swapped >> (j*8)) & 0xFF;
-        }
-        swap_bc1_endian(data + i + 8, 8);
-    }
+    swap_bc1_endian(data, size);
 }
 
 static void decode_bc4_block(const uint8_t* b, uint8_t* out16) {
@@ -159,17 +141,7 @@ static void decode_bc4_block(const uint8_t* b, uint8_t* out16) {
 }
 
 static void swap_bc5_endian(uint8_t* data, size_t size) {
-    for (size_t i = 0; i + 16 <= size; i += 16) {
-
-        for (int half = 0; half < 2; ++half) {
-            uint8_t* blk = data + i + 8 * half;
-            uint64_t bits = 0;
-            for (int j = 0; j < 6; j++) bits |= ((uint64_t)blk[2+j]) << (j*8);
-            uint64_t sw = 0;
-            for (int j = 0; j < 6; j++) sw |= ((bits >> (j*8)) & 0xFF) << ((5-j)*8);
-            for (int j = 0; j < 6; j++) blk[2+j] = (sw >> (j*8)) & 0xFF;
-        }
-    }
+    swap_bc1_endian(data, size);
 }
 
 static void blit_bc1_to_rgba(const uint8_t* src, int w, int h,
@@ -1083,6 +1055,7 @@ static void mp_release(ModelPreview& mp){
     if(mp.vs_terrain){ mp.vs_terrain->Release(); mp.vs_terrain=nullptr; }
     if(mp.ps_terrain){ mp.ps_terrain->Release(); mp.ps_terrain=nullptr; }
     if(mp.ps_terrain_direct){ mp.ps_terrain_direct->Release(); mp.ps_terrain_direct=nullptr; }
+    if(mp.ps_terrain_landscape){ mp.ps_terrain_landscape->Release(); mp.ps_terrain_landscape=nullptr; }
     if(mp.cbuffer_terrain){ mp.cbuffer_terrain->Release(); mp.cbuffer_terrain=nullptr; }
     if(mp.vs_sky){ mp.vs_sky->Release(); mp.vs_sky=nullptr; }
     if(mp.ps_sky){ mp.ps_sky->Release(); mp.ps_sky=nullptr; }
@@ -1451,6 +1424,104 @@ float3 sample_material(int slice, float2 world_xy, float slope_w){
        blending below and only fix the diffuse tiling scale here. */
     float base_scale = splat_params.y;
     float detail_scale = splat_params.y;
+    float3 base = lod_array.Sample(
+        smp_wrap, float3(world_xy * base_scale, s)).rgb;
+    float3 detail = lod_detail_array.Sample(
+        smp_wrap, float3(world_xy * detail_scale, s)).rgb;
+    float detail_w = slope_w * saturate(mp.z) * saturate(mp.w);
+    return lerp(base, detail, detail_w);
+}
+
+float4 PS(VSOUT i) : SV_Target {
+    float2 mesh_xy  = float2(i.wp.x, i.wp.z);
+    float2 world_xy = mesh_xy * mesh_xform.xy + mesh_xform.zw;
+    float2 origin   = chunk_origin_extent.xy;
+    float2 extent   = chunk_origin_extent.zw;
+    float  CW       = chunk_grid_size.x;
+    float  CH       = chunk_grid_size.y;
+
+    float2 chunk_co = (world_xy - origin) / extent;
+    float2 chunk_clamped = clamp(chunk_co,
+                                 float2(0, 0),
+                                 float2(CW - 0.001, CH - 0.001));
+    float slope_w = saturate((0.82 - abs(normalize(i.n).y)) / 0.35);
+
+    float3 final = float3(0.0, 0.0, 0.0);
+    float  weight_sum = 0.0;
+    float2 inv_weight_size = weight_size.zw;
+    float2 weight_uv = (chunk_clamped * 32.0 + 0.5) * inv_weight_size;
+    float2 edge_uv = 0.5 * inv_weight_size;
+    weight_uv = clamp(weight_uv, edge_uv, 1.0 - edge_uv);
+
+    [loop]
+    for (int mat = 0; mat < 32; ++mat) {
+        if (mat >= (int)chunk_grid_size.z) break;
+        float w = material_weight.SampleLevel(
+            smp_point, float3(weight_uv, mat), 0).r;
+        if (w <= 0.001) continue;
+        final += sample_material(mat, world_xy, slope_w) * w;
+        weight_sum += w;
+    }
+
+    if (weight_sum > 0.001) {
+        final /= weight_sum;
+    } else {
+        final = sample_material(0, world_xy, slope_w);
+    }
+
+    if (params.z > 0.5) {
+        float3 hi = float3(0.10, 0.95, 0.25);
+        final = lerp(final, hi, 0.65);
+    }
+
+    return float4(final, 1.0);
+}
+)";
+
+// Dev-only variant reconciled to the engine's LANDSCAPEMATERIAL blend: samples
+// each layer at its authored PER-MATERIAL tile scale (16/dim, material_params.x/y)
+// instead of the shared reference density the live shader forces. Same
+// weight-normalized accumulation. Toggled via S.terrain_landscape_blend (dev).
+static const char* g_terrain_ps_landscape = R"(
+cbuffer CB : register(b0){
+    float4x4 mvp;
+    float4   lightDir;
+    float4x4 mv;
+    float4   params;
+}
+cbuffer TerrainCB : register(b2){
+    float4 chunk_origin_extent;
+    float4 chunk_grid_size;
+    float4 splat_params;
+    float4 mesh_xform;
+    float4 weight_size;
+    float4 material_params[32];
+}
+Texture2DArray  lod_array     : register(t0);
+Texture2DArray  chunk_idx     : register(t1);
+Texture2DArray  chunk_blend   : register(t2);
+Texture2DArray  chunk_uv      : register(t3);
+Texture2D       splat_mask    : register(t4);
+Texture2D       lightmap      : register(t5);
+Texture2DArray  lod_detail_array : register(t6);
+Texture2DArray  material_weight  : register(t7);
+SamplerState    smp_wrap      : register(s0);
+SamplerState    smp_point     : register(s1);
+
+struct VSOUT{
+    float4 p   : SV_Position;
+    float3 n   : NORMAL;
+    float2 t   : TEXCOORD0;
+    float3 wp  : TEXCOORD1;
+};
+
+float3 sample_material(int slice, float2 world_xy, float slope_w){
+    int max_slice = max((int)chunk_grid_size.z - 1, 0);
+    int s = min(max(slice, 0), max_slice);
+    float4 mp = material_params[s];
+    // Engine: per-material authored tile scale (16/texture_dim), per layer.
+    float base_scale   = (mp.x > 0.0) ? mp.x : splat_params.y;
+    float detail_scale = (mp.y > 0.0) ? mp.y : base_scale;
     float3 base = lod_array.Sample(
         smp_wrap, float3(world_xy * base_scale, s)).rgb;
     float3 detail = lod_detail_array.Sample(
@@ -1987,7 +2058,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
 
     {
         ID3DBlob* tvsb = nullptr; ID3DBlob* tpsb = nullptr;
-        ID3DBlob* tdpsb = nullptr;
+        ID3DBlob* tdpsb = nullptr; ID3DBlob* tlpsb = nullptr;
         if (compile_shader(g_terrain_vs, "VS", "vs_5_0", &tvsb) &&
             compile_shader(g_terrain_ps_live, "PS", "ps_5_0", &tpsb))
         {
@@ -2003,9 +2074,15 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
                                    tdpsb->GetBufferSize(),
                                    nullptr, &mp.ps_terrain_direct);
         }
+        if (compile_shader(g_terrain_ps_landscape, "PS", "ps_5_0", &tlpsb)) {
+            dev->CreatePixelShader(tlpsb->GetBufferPointer(),
+                                   tlpsb->GetBufferSize(),
+                                   nullptr, &mp.ps_terrain_landscape);
+        }
         if (tvsb) tvsb->Release();
         if (tpsb) tpsb->Release();
         if (tdpsb) tdpsb->Release();
+        if (tlpsb) tlpsb->Release();
     }
     {
         D3D11_BUFFER_DESC tcb{};
@@ -3367,9 +3444,16 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 ctx->Unmap(mp.cbuffer_terrain, 0);
             }
 
+            // Dev-only A/B: the engine-reconciled LANDSCAPEMATERIAL blend
+            // (per-material tiling). Uses the same weight-array inputs as the
+            // live shader, so it only applies on the non-direct path.
+            const bool use_landscape_blend =
+                !use_direct_terrain && S.dev_mode &&
+                S.terrain_landscape_blend && mp.ps_terrain_landscape;
             ctx->VSSetShader(mp.vs_terrain, nullptr, 0);
-            ctx->PSSetShader(use_direct_terrain
-                ? mp.ps_terrain_direct : mp.ps_terrain, nullptr, 0);
+            ctx->PSSetShader(use_direct_terrain ? mp.ps_terrain_direct
+                : (use_landscape_blend ? mp.ps_terrain_landscape
+                                       : mp.ps_terrain), nullptr, 0);
             ctx->VSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
             ctx->PSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
 

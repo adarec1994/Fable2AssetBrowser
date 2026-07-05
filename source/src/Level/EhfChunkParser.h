@@ -18,6 +18,7 @@ struct EhfPaintResource {
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t pixel_format = 0;
+    std::vector<uint8_t> data;   // raw pixel bytes (populated for pf=98 weight masks)
 };
 
 struct EhfChunkLayer {
@@ -46,6 +47,7 @@ struct EhfParsedBody {
 
     std::vector<EhfLodEntry>     lods;
     std::vector<EhfPaintResource> paint_resources;
+    std::vector<EhfPaintResource> weight_masks;   // per-layer blend masks (pf=98)
     std::vector<EhfChunk>        chunks;
     std::vector<uint8_t>         splat_indices;
 

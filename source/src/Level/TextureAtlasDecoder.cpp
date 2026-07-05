@@ -69,60 +69,17 @@ void decode_bc3_block(const uint8_t* b, uint32_t* outRGBA) {
     }
 }
 
-void swap_bc1_endian(uint8_t* data, size_t size) {
-    for (size_t i = 0; i + 8 <= size; i += 8) {
-        uint16_t c0 = (data[i+0] << 8) | data[i+1];
-        uint16_t c1 = (data[i+2] << 8) | data[i+3];
-        uint32_t idx = (uint32_t(data[i+4]) << 24) | (uint32_t(data[i+5]) << 16) |
-                       (uint32_t(data[i+6]) <<  8) |  uint32_t(data[i+7]);
-        data[i+0] = c0 & 0xFF;  data[i+1] = (c0 >> 8) & 0xFF;
-        data[i+2] = c1 & 0xFF;  data[i+3] = (c1 >> 8) & 0xFF;
-        data[i+4] = idx & 0xFF;        data[i+5] = (idx >> 8) & 0xFF;
-        data[i+6] = (idx >> 16) & 0xFF; data[i+7] = (idx >> 24) & 0xFF;
-    }
-}
-
-void swap_bc3_endian(uint8_t* data, size_t size) {
-    for (size_t i = 0; i + 16 <= size; i += 16) {
-        uint64_t alpha_bits = 0;
-        for (int j = 0; j < 6; ++j)
-            alpha_bits |= ((uint64_t)data[i+2+j]) << (j*8);
-        uint64_t alpha_swapped = 0;
-        for (int j = 0; j < 6; ++j)
-            alpha_swapped |= ((alpha_bits >> (j*8)) & 0xFF) << ((5-j)*8);
-        for (int j = 0; j < 6; ++j)
-            data[i+2+j] = (alpha_swapped >> (j*8)) & 0xFF;
-        swap_bc1_endian(data + i + 8, 8);
-    }
-}
-
-void swap_bc5_endian(uint8_t* data, size_t size) {
-    for (size_t i = 0; i + 16 <= size; i += 16) {
-        for (int half = 0; half < 2; ++half) {
-            uint8_t* blk = data + i + 8 * half;
-            uint64_t bits = 0;
-            for (int j = 0; j < 6; ++j) bits |= ((uint64_t)blk[2+j]) << (j*8);
-            uint64_t sw = 0;
-            for (int j = 0; j < 6; ++j) sw |= ((bits >> (j*8)) & 0xFF) << ((5-j)*8);
-            for (int j = 0; j < 6; ++j) blk[2+j] = (sw >> (j*8)) & 0xFF;
-        }
-    }
-}
-
-void swap_bc4_endian(uint8_t* data, size_t size) {
-    for (size_t i = 0; i + 8 <= size; i += 8) {
-        uint8_t* blk = data + i;
-        uint64_t bits = 0;
-        for (int j = 0; j < 6; ++j) {
-            bits |= ((uint64_t)blk[2 + j]) << (j * 8);
-        }
-        uint64_t sw = 0;
-        for (int j = 0; j < 6; ++j) {
-            sw |= ((bits >> (j * 8)) & 0xFFu) << ((5 - j) * 8);
-        }
-        for (int j = 0; j < 6; ++j) {
-            blk[2 + j] = (uint8_t)((sw >> (j * 8)) & 0xFFu);
-        }
+// Xbox 360 texture endianness: every BC/16-bit format used here (PF24/35/38/
+// 39/40/98/99/100) carries GPUENDIAN_8IN16 in the engine's format table
+// (g_PixelFormatInfoTable in the XEX, dword>>6 & 3 == 1). Conversion to PC
+// layout is therefore a byte swap of each 16-bit word across the whole
+// surface -- including the BC index/alpha words. The previous per-format
+// 32-/48-bit reversals reordered index rows inside every block.
+void swap16_words(uint8_t* data, size_t size) {
+    for (size_t i = 0; i + 2 <= size; i += 2) {
+        uint8_t t   = data[i];
+        data[i]     = data[i+1];
+        data[i+1]   = t;
     }
 }
 
@@ -454,16 +411,14 @@ DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob)
         r.ok = true;
         return r;
     }
+    swap16_words(linear.data(), linear.size());
     if (PF == 35u) {
-        swap_bc1_endian(linear.data(), linear.size());
         blit_bc_to_rgba<8>(linear.data(), (int)W, (int)H, r.rgba,
                            decode_bc1_block);
     } else if (PF == 39u) {
-        swap_bc3_endian(linear.data(), linear.size());
         blit_bc_to_rgba<16>(linear.data(), (int)W, (int)H, r.rgba,
                             decode_bc3_block);
     } else {
-        swap_bc5_endian(linear.data(), linear.size());
         blit_bc5_to_rgba(linear.data(), (int)W, (int)H, r.rgba);
     }
     r.ok = true;
@@ -495,16 +450,14 @@ bool decode_zlib_bc_page_generic(const uint8_t* zlib_stream,
                              4,
                              block_bytes);
 
+    swap16_words(linear.data(), linear.size());
     if (which == 1) {
-        swap_bc1_endian(linear.data(), linear.size());
         blit_bc_to_rgba<8>(linear.data(), width_pixels, height_pixels,
                            rgba, decode_bc1_block);
     } else if (which == 3) {
-        swap_bc3_endian(linear.data(), linear.size());
         blit_bc_to_rgba<16>(linear.data(), width_pixels, height_pixels,
                             rgba, decode_bc3_block);
     } else {
-        swap_bc5_endian(linear.data(), linear.size());
         blit_bc5_to_rgba(linear.data(), width_pixels, height_pixels, rgba);
     }
     return true;
@@ -631,23 +584,30 @@ bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,
         std::memcpy(linear.data() + dst_off, raw.data() + src_off, 8);
     }
 
-    swap_bc4_endian(linear.data(), linear.size());
+    swap16_words(linear.data(), linear.size());
 
+    // PF99 is GPUTEXTUREFORMAT_DXT3A (engine format table entry 99 =
+    // 0x1A20017A): 8-byte 4x4 blocks of EXPLICIT 4-bit alpha, one 16-bit
+    // word per row, texel x at bits [4x..4x+3]. No endpoints/interpolation
+    // (that's DXT5A = PF100). Decoding these blocks as BC4 happened to give
+    // identical results on uniform 0x00/0xFF blocks but corrupted every
+    // mixed block. Nibbles expand 0..15 -> 0..255 via *17, matching the
+    // GPU's A8 normalization (n/15).
     out_indices.assign((size_t)W * (size_t)H, 0);
     for (uint32_t by = 0; by < blocks_h; ++by) {
         for (uint32_t bx = 0; bx < blocks_w; ++bx) {
             const uint8_t* b8 =
                 linear.data() + ((size_t)by * blocks_w + bx) * 8u;
-            uint8_t alpha[16];
-            decode_bc4_channel(b8, alpha);
             for (int py = 0; py < 4; ++py) {
                 const uint32_t yy = by * 4u + (uint32_t)py;
                 if (yy >= H) break;
+                const uint16_t row =
+                    (uint16_t)(b8[py*2] | (b8[py*2 + 1] << 8));
                 for (int pxn = 0; pxn < 4; ++pxn) {
                     const uint32_t xx = bx * 4u + (uint32_t)pxn;
                     if (xx >= W) continue;
                     out_indices[(size_t)yy * W + xx] =
-                        alpha[py * 4 + pxn];
+                        (uint8_t)(((row >> (4 * pxn)) & 0xF) * 17);
                 }
             }
         }

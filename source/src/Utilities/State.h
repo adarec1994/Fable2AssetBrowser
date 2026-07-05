@@ -143,6 +143,11 @@ struct State {
 
     bool dev_mode = false;
 
+    // Dev-only: render terrain with the engine-reconciled LANDSCAPEMATERIAL blend
+    // (per-material tiling 16/dim, weight-normalized) instead of the current
+    // shared-scale path. A/B toggle; only takes effect in dev mode.
+    bool terrain_landscape_blend = false;
+
     float font_size           = 17.0f;
     float pending_font_size   = 17.0f;
     bool  font_size_dirty     = false;

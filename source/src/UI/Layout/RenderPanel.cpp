@@ -1246,6 +1246,13 @@ void draw_model_in_panel(ID3D11Device* device) {
 
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Wireframe");
             ImGui::Checkbox("Show", &g_mp.wireframe);
+            if (S.terrain_mode) {
+                ImGui::Checkbox("Adjacent terrain", &S.show_adjacent_terrain);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "Show the neighbouring levels' heightfields around "
+                        "this level (textured with their baked ground).");
+            }
             if (S.dev_mode) {
                 ImGui::Checkbox("Terrain: engine blend",
                                 &S.terrain_landscape_blend);

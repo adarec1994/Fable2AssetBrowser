@@ -745,34 +745,18 @@ bool Build(ID3D11Device*                                       device,
             const auto& chunk = parsed.chunks[ci];
             const int layer_count =
                 std::min<int>((int)chunk.layers.size(), kMaxLayers);
+            // Engine near-field blend (LANDSCAPEMATERIAL PS): each layer
+            // contributes its OWN paint-mask weight to its OWN material,
+            // weight-normalized. The per-corner (texture_idx, blend) records
+            // drive the distant background-map compositor, not this blend;
+            // routing weight through them injected foreign materials at
+            // chunk corners (e.g. stray cobblestone patches on hills).
             for (int li = 0; li < layer_count; ++li) {
                 const auto& layer = chunk.layers[size_t(li)];
-                int mat_corner[4] = {};
-                for (int i = 0; i < 4; ++i) {
-                    uint32_t mat_idx = layer.material_idx;
-                    const uint32_t corner_layer_idx = layer.texture_idx[i];
-                    if (corner_layer_idx < chunk.layers.size()) {
-                        mat_idx = chunk.layers[size_t(corner_layer_idx)]
-                                      .material_idx;
-                    }
-                    mat_corner[i] = std::clamp<int>(int(mat_idx), 0, N - 1);
-                }
-                const float corner_bw[4] = {
-                    std::clamp(float(layer.blend[0]) / 3.0f, 0.0f, 1.0f),
-                    std::clamp(float(layer.blend[1]) / 3.0f, 0.0f, 1.0f),
-                    std::clamp(float(layer.blend[2]) / 3.0f, 0.0f, 1.0f),
-                    std::clamp(float(layer.blend[3]) / 3.0f, 0.0f, 1.0f)
-                };
+                const int mat =
+                    std::clamp<int>(int(layer.material_idx), 0, N - 1);
                 for (int py = 0; py <= 32; ++py) {
-                    const float fy = float(py) / 32.0f;
                     for (int px = 0; px <= 32; ++px) {
-                        const float fx = float(px) / 32.0f;
-                        const float cwx[4] = {
-                            (1.0f - fx) * (1.0f - fy),
-                                      fx  * (1.0f - fy),
-                            (1.0f - fx) *        fy,
-                                      fx  *        fy
-                        };
                         const float m = mask_sample(layer, px, py);
                         if (m <= 0.0001f) continue;
                         const int gx = cx * 32 + px;
@@ -781,13 +765,9 @@ bool Build(ID3D11Device*                                       device,
                             gx >= R.weight_w || gy >= R.weight_h) {
                             continue;
                         }
-                        const size_t dst =
-                            size_t(gy) * size_t(R.weight_w) + size_t(gx);
-                        for (int k = 0; k < 4; ++k) {
-                            const float cw = m * corner_bw[k] * cwx[k];
-                            if (cw <= 0.0001f) continue;
-                            weights[size_t(mat_corner[k]) * area + dst] += cw;
-                        }
+                        weights[size_t(mat) * area +
+                                size_t(gy) * size_t(R.weight_w) +
+                                size_t(gx)] += m;
                         ++global_contribs;
                     }
                 }

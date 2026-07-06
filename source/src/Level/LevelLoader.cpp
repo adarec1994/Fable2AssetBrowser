@@ -306,12 +306,23 @@ bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
         float y = -std::numeric_limits<float>::infinity();
         uint32_t count = 0;
     };
-    std::unordered_map<uint64_t, Sample> samples;
-    samples.reserve(size_t(render_tile_count) * 128);
-    std::vector<int32_t> qxs;
-    std::vector<int32_t> qzs;
+    // Meshed PER RENDER TILE: quantizing every tile's samples into one
+    // global grid stitched far-apart tiles (vista heightfields) together
+    // with long degenerate "shard" triangles. Each tile is a small regular
+    // grid on its own, so mesh tiles independently and concatenate.
+    struct TileSamples {
+        std::unordered_map<uint64_t, Sample> samples;
+        std::vector<int32_t> qxs;
+        std::vector<int32_t> qzs;
+    };
+    std::vector<TileSamples> tile_samples;
+    tile_samples.reserve(render_tile_count);
     uint64_t cell_count_total = 0;
     uint64_t vertex_sample_total = 0;
+    float sample_min_x =  std::numeric_limits<float>::infinity();
+    float sample_max_x = -std::numeric_limits<float>::infinity();
+    float sample_min_z =  std::numeric_limits<float>::infinity();
+    float sample_max_z = -std::numeric_limits<float>::infinity();
 
     auto sane_coord = [](float v) {
         return std::isfinite(v) && std::fabs(v) < 100000.0f;
@@ -322,24 +333,6 @@ bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
     auto make_key = [](int32_t qx, int32_t qz) -> uint64_t {
         return (uint64_t(uint32_t(qx)) << 32) | uint32_t(qz);
     };
-    auto add_sample = [&](float x, float z, float y) {
-        const int32_t qx = quant(x);
-        const int32_t qz = quant(z);
-        const uint64_t key = make_key(qx, qz);
-        auto [it, inserted] = samples.try_emplace(key);
-        if (inserted) {
-            qxs.push_back(qx);
-            qzs.push_back(qz);
-        }
-
-
-
-        Sample& s = it->second;
-        s.y = (s.count == 0) ? y : std::max(s.y, y);
-        ++s.count;
-        ++vertex_sample_total;
-    };
-
     for (uint32_t ti = 0; ti < render_tile_count; ++ti) {
         uint32_t sample_w = 0, sample_h = 0, cell_w = 0, cell_h = 0;
         if (!r.u32(sample_w) || !r.u32(sample_h) ||
@@ -360,6 +353,8 @@ bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
             return false;
         }
 
+        TileSamples ts;
+        ts.samples.reserve(size_t(cell_count) * 8);
         const size_t cell_base = r.i;
         cell_count_total += cell_count;
         for (uint64_t ci = 0; ci < cell_count; ++ci) {
@@ -373,87 +368,39 @@ bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
                 if (!sane_coord(x) || !sane_coord(y) || !sane_coord(z)) {
                     continue;
                 }
-                add_sample(x, z, y);
+                const int32_t qx = quant(x);
+                const int32_t qz = quant(z);
+                auto [it, inserted] =
+                    ts.samples.try_emplace(make_key(qx, qz));
+                if (inserted) {
+                    ts.qxs.push_back(qx);
+                    ts.qzs.push_back(qz);
+                }
+                Sample& s = it->second;
+                s.y = (s.count == 0) ? y : std::max(s.y, y);
+                ++s.count;
+                ++vertex_sample_total;
+                sample_min_x = std::min(sample_min_x, x);
+                sample_max_x = std::max(sample_max_x, x);
+                sample_min_z = std::min(sample_min_z, z);
+                sample_max_z = std::max(sample_max_z, z);
             }
         }
 
         r.i += size_t(cell_count) * 160u + 24u;
+        tile_samples.push_back(std::move(ts));
     }
 
-    if (samples.size() < 4) {
+    if (vertex_sample_total < 4) {
         return false;
     }
 
-    std::sort(qxs.begin(), qxs.end());
-    qxs.erase(std::unique(qxs.begin(), qxs.end()), qxs.end());
-    std::sort(qzs.begin(), qzs.end());
-    qzs.erase(std::unique(qzs.begin(), qzs.end()), qzs.end());
-    if (qxs.size() < 2 || qzs.size() < 2 ||
-        qxs.size() > 2048 || qzs.size() > 2048) {
-        return false;
-    }
-
-    const uint32_t W = uint32_t(qxs.size());
-    const uint32_t H = uint32_t(qzs.size());
-    const size_t N = size_t(W) * size_t(H);
-    std::vector<float> heights(N, 0.0f);
-    std::vector<uint8_t> has_height(N, 0);
-
-    auto grid_index = [W](uint32_t x, uint32_t z) {
-        return size_t(z) * size_t(W) + size_t(x);
-    };
-    for (uint32_t z = 0; z < H; ++z) {
-        for (uint32_t x = 0; x < W; ++x) {
-            const auto it = samples.find(make_key(qxs[x], qzs[z]));
-            if (it == samples.end() || it->second.count == 0) continue;
-            const size_t gi = grid_index(x, z);
-            heights[gi] = it->second.y;
-            has_height[gi] = 1;
-        }
-    }
-
-    uint32_t filled_holes = 0;
-    for (uint32_t z = 0; z < H; ++z) {
-        for (uint32_t x = 0; x < W; ++x) {
-            const size_t gi = grid_index(x, z);
-            if (has_height[gi]) continue;
-
-            float best_dist = std::numeric_limits<float>::infinity();
-            float best_h = 0.0f;
-            bool found = false;
-            for (uint32_t zz = 0; zz < H; ++zz) {
-                for (uint32_t xx = 0; xx < W; ++xx) {
-                    const size_t oi = grid_index(xx, zz);
-                    if (!has_height[oi]) continue;
-                    const float dx = float(qxs[xx] - qxs[x]);
-                    const float dz = float(qzs[zz] - qzs[z]);
-                    const float d2 = dx * dx + dz * dz;
-                    if (d2 < best_dist) {
-                        best_dist = d2;
-                        best_h = heights[oi];
-                        found = true;
-                    }
-                }
-            }
-            if (!found) return false;
-            heights[gi] = best_h;
-            has_height[gi] = 1;
-            ++filled_holes;
-        }
-    }
-
-    out.width = W;
-    out.height = H;
-    out.positions.resize(N * 3);
-    out.normals.assign(N * 3, 0.0f);
-    out.uvs.resize(N * 2);
-    out.min_height = std::numeric_limits<float>::infinity();
-    out.max_height = -std::numeric_limits<float>::infinity();
-
-    float tex_min_x = float(qxs.front()) * 0.5f;
-    float tex_max_x = float(qxs.back()) * 0.5f;
-    float tex_min_z = float(qzs.front()) * 0.5f;
-    float tex_max_z = float(qzs.back()) * 0.5f;
+    // Texture extent: the chunk-grid bbox (terrain space, matches the baked
+    // composite), falling back to the union of all sample coordinates.
+    float tex_min_x = sample_min_x;
+    float tex_max_x = sample_max_x;
+    float tex_min_z = sample_min_z;
+    float tex_max_z = sample_max_z;
     EhfParsedBody parsed_body;
     if (ParseEhfBody(ehf, parsed_body) && !parsed_body.chunks.empty()) {
         float chunk_min_x = std::numeric_limits<float>::infinity();
@@ -484,90 +431,483 @@ bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
     const float span_x = std::max(tex_max_x - tex_min_x, 1e-6f);
     const float span_z = std::max(tex_max_z - tex_min_z, 1e-6f);
 
-    for (uint32_t z = 0; z < H; ++z) {
-        for (uint32_t x = 0; x < W; ++x) {
-            const size_t gi = grid_index(x, z);
-            const float wx = float(qxs[x]) * 0.5f;
-            const float wz = float(qzs[z]) * 0.5f;
-            const float wy = heights[gi];
-            out.positions[gi * 3 + 0] = wx;
-            out.positions[gi * 3 + 1] = wy;
-            out.positions[gi * 3 + 2] = wz;
-            out.uvs[gi * 2 + 0] = (wx - tex_min_x) / span_x;
-            out.uvs[gi * 2 + 1] = (wz - tex_min_z) / span_z;
-            out.min_height = std::min(out.min_height, wy);
-            out.max_height = std::max(out.max_height, wy);
-        }
-    }
+    out.min_height = std::numeric_limits<float>::infinity();
+    out.max_height = -std::numeric_limits<float>::infinity();
+    uint32_t filled_holes = 0;
+    uint32_t tiles_meshed = 0;
 
-    auto height_at = [&](int x, int z) {
-        x = std::clamp(x, 0, int(W) - 1);
-        z = std::clamp(z, 0, int(H) - 1);
-        return heights[grid_index(uint32_t(x), uint32_t(z))];
-    };
-    auto world_x_at = [&](int x) {
-        x = std::clamp(x, 0, int(W) - 1);
-        return float(qxs[uint32_t(x)]) * 0.5f;
-    };
-    auto world_z_at = [&](int z) {
-        z = std::clamp(z, 0, int(H) - 1);
-        return float(qzs[uint32_t(z)]) * 0.5f;
-    };
-    for (uint32_t z = 0; z < H; ++z) {
-        for (uint32_t x = 0; x < W; ++x) {
-            const float dx =
-                std::max(world_x_at(int(x) + 1) - world_x_at(int(x) - 1),
-                         1e-6f);
-            const float dz =
-                std::max(world_z_at(int(z) + 1) - world_z_at(int(z) - 1),
-                         1e-6f);
-            float nx = -(height_at(int(x) + 1, int(z)) -
-                         height_at(int(x) - 1, int(z))) / dx;
-            float ny = 1.0f;
-            float nz = -(height_at(int(x), int(z) + 1) -
-                         height_at(int(x), int(z) - 1)) / dz;
-            const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
-            if (len > 1e-6f) {
-                nx /= len;
-                ny /= len;
-                nz /= len;
+    for (auto& ts : tile_samples) {
+        auto& qxs = ts.qxs;
+        auto& qzs = ts.qzs;
+        std::sort(qxs.begin(), qxs.end());
+        qxs.erase(std::unique(qxs.begin(), qxs.end()), qxs.end());
+        std::sort(qzs.begin(), qzs.end());
+        qzs.erase(std::unique(qzs.begin(), qzs.end()), qzs.end());
+        if (qxs.size() < 2 || qzs.size() < 2 ||
+            qxs.size() > 2048 || qzs.size() > 2048) {
+            continue;
+        }
+
+        const uint32_t W = uint32_t(qxs.size());
+        const uint32_t H = uint32_t(qzs.size());
+        const size_t N = size_t(W) * size_t(H);
+        std::vector<float> heights(N, 0.0f);
+        std::vector<uint8_t> has_height(N, 0);
+
+        auto grid_index = [W](uint32_t x, uint32_t z) {
+            return size_t(z) * size_t(W) + size_t(x);
+        };
+        for (uint32_t z = 0; z < H; ++z) {
+            for (uint32_t x = 0; x < W; ++x) {
+                const auto it = ts.samples.find(make_key(qxs[x], qzs[z]));
+                if (it == ts.samples.end() || it->second.count == 0) continue;
+                const size_t gi = grid_index(x, z);
+                heights[gi] = it->second.y;
+                has_height[gi] = 1;
             }
-            const size_t gi = grid_index(x, z);
-            out.normals[gi * 3 + 0] = nx;
-            out.normals[gi * 3 + 1] = ny;
-            out.normals[gi * 3 + 2] = nz;
         }
+
+        bool tile_ok = true;
+        for (uint32_t z = 0; z < H && tile_ok; ++z) {
+            for (uint32_t x = 0; x < W; ++x) {
+                const size_t gi = grid_index(x, z);
+                if (has_height[gi]) continue;
+
+                float best_dist = std::numeric_limits<float>::infinity();
+                float best_h = 0.0f;
+                bool found = false;
+                for (uint32_t zz = 0; zz < H; ++zz) {
+                    for (uint32_t xx = 0; xx < W; ++xx) {
+                        const size_t oi = grid_index(xx, zz);
+                        if (!has_height[oi]) continue;
+                        const float dx = float(qxs[xx] - qxs[x]);
+                        const float dz = float(qzs[zz] - qzs[z]);
+                        const float d2 = dx * dx + dz * dz;
+                        if (d2 < best_dist) {
+                            best_dist = d2;
+                            best_h = heights[oi];
+                            found = true;
+                        }
+                    }
+                }
+                if (!found) { tile_ok = false; break; }
+                heights[gi] = best_h;
+                has_height[gi] = 1;
+                ++filled_holes;
+            }
+        }
+        if (!tile_ok) continue;
+
+        const uint32_t base = uint32_t(out.positions.size() / 3);
+        for (uint32_t z = 0; z < H; ++z) {
+            for (uint32_t x = 0; x < W; ++x) {
+                const size_t gi = grid_index(x, z);
+                const float wx = float(qxs[x]) * 0.5f;
+                const float wz = float(qzs[z]) * 0.5f;
+                const float wy = heights[gi];
+                out.positions.push_back(wx);
+                out.positions.push_back(wy);
+                out.positions.push_back(wz);
+                out.uvs.push_back((wx - tex_min_x) / span_x);
+                out.uvs.push_back((wz - tex_min_z) / span_z);
+                out.min_height = std::min(out.min_height, wy);
+                out.max_height = std::max(out.max_height, wy);
+            }
+        }
+
+        auto height_at = [&](int x, int z) {
+            x = std::clamp(x, 0, int(W) - 1);
+            z = std::clamp(z, 0, int(H) - 1);
+            return heights[grid_index(uint32_t(x), uint32_t(z))];
+        };
+        auto world_x_at = [&](int x) {
+            x = std::clamp(x, 0, int(W) - 1);
+            return float(qxs[uint32_t(x)]) * 0.5f;
+        };
+        auto world_z_at = [&](int z) {
+            z = std::clamp(z, 0, int(H) - 1);
+            return float(qzs[uint32_t(z)]) * 0.5f;
+        };
+        for (uint32_t z = 0; z < H; ++z) {
+            for (uint32_t x = 0; x < W; ++x) {
+                const float dx =
+                    std::max(world_x_at(int(x) + 1) - world_x_at(int(x) - 1),
+                             1e-6f);
+                const float dz =
+                    std::max(world_z_at(int(z) + 1) - world_z_at(int(z) - 1),
+                             1e-6f);
+                float nx = -(height_at(int(x) + 1, int(z)) -
+                             height_at(int(x) - 1, int(z))) / dx;
+                float ny = 1.0f;
+                float nz = -(height_at(int(x), int(z) + 1) -
+                             height_at(int(x), int(z) - 1)) / dz;
+                const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+                if (len > 1e-6f) {
+                    nx /= len;
+                    ny /= len;
+                    nz /= len;
+                }
+                out.normals.push_back(nx);
+                out.normals.push_back(ny);
+                out.normals.push_back(nz);
+            }
+        }
+
+        for (uint32_t z = 0; z + 1 < H; ++z) {
+            for (uint32_t x = 0; x + 1 < W; ++x) {
+                const uint32_t i00 = base + uint32_t(grid_index(x, z));
+                const uint32_t i10 = base + uint32_t(grid_index(x + 1, z));
+                const uint32_t i01 = base + uint32_t(grid_index(x, z + 1));
+                const uint32_t i11 = base + uint32_t(grid_index(x + 1, z + 1));
+                out.indices.push_back(i00);
+                out.indices.push_back(i01);
+                out.indices.push_back(i10);
+                out.indices.push_back(i10);
+                out.indices.push_back(i01);
+                out.indices.push_back(i11);
+            }
+        }
+        ++tiles_meshed;
     }
 
-    out.indices.reserve(size_t(W - 1) * size_t(H - 1) * 6);
-    for (uint32_t z = 0; z + 1 < H; ++z) {
-        for (uint32_t x = 0; x + 1 < W; ++x) {
-            const uint32_t i00 = uint32_t(grid_index(x, z));
-            const uint32_t i10 = uint32_t(grid_index(x + 1, z));
-            const uint32_t i01 = uint32_t(grid_index(x, z + 1));
-            const uint32_t i11 = uint32_t(grid_index(x + 1, z + 1));
-            out.indices.push_back(i00);
-            out.indices.push_back(i01);
-            out.indices.push_back(i10);
-            out.indices.push_back(i10);
-            out.indices.push_back(i01);
-            out.indices.push_back(i11);
-        }
-    }
+    // Concatenation of per-tile grids, not one regular grid.
+    out.width  = 0;
+    out.height = 0;
+    if (!std::isfinite(out.min_height)) out.min_height = 0.0f;
+    if (!std::isfinite(out.max_height)) out.max_height = 0.0f;
 
     out.ok = !out.indices.empty();
     if (out_stats) {
         std::ostringstream ss;
         ss << render_tile_count << " render tile(s), "
+           << tiles_meshed << " meshed, "
            << cell_count_total << " strip cell(s), "
-           << vertex_sample_total << " vertex sample(s), grid "
-           << W << "x" << H
+           << vertex_sample_total << " vertex sample(s)"
            << (filled_holes ? ", filled " + std::to_string(filled_holes)
                             : std::string{})
            << ", " << (out.indices.size() / 3) << " tri(s)";
         *out_stats = ss.str();
     }
     return out.ok;
+}
+
+// Background-patch ("vista") mesh from the .ehf's own LOD data.
+//
+// The .ehf section after the two embedded textures is the background patch
+// list the game renders for non-active heightfields (XEX: HFGF_ReadHeightGrids
+// -> sub_82B250E8 deserializes, per patch, a W x H grid of 160-byte cells of
+// { 4 x vec4 LOD morph distances, 8 x vec3 (x, ground_y, height) entries }
+// plus a 24-byte patch AABB trailer, all in region space -- the same space as
+// the chunk-grid AABBs, so no post-hoc offsetting is needed).
+//
+// Of the 8 vec3 entries, entry 1 is the cell's base-corner vertex at full
+// (LOD0) detail -- verified against neighbouring cells: cell(x,y) entry 0
+// equals cell(x,y-1) entry 1 bit-for-bit. Entry 3 is the same corner's
+// coarse morph height, and entries 4..7 carry footprint-max style data
+// (entry 4 of a border cell hits the patch AABB z-max exactly), so only
+// entry 1 is surface geometry. Building one region-wide lattice from every
+// cell's entry 1 stitches patch seams exactly.
+bool build_ehf_vista_patch_mesh(const std::vector<uint8_t>& ehf,
+                                TerrainMesh& out,
+                                std::string* out_stats = nullptr)
+{
+    out = {};
+    if (out_stats) out_stats->clear();
+
+    static constexpr char kMagic[] = "HeightFieldGraphicsFile";
+    static constexpr size_t kMagicLen = sizeof(kMagic) - 1;
+    static constexpr size_t kHeaderLen = 63;
+    if (ehf.size() < kHeaderLen ||
+        std::memcmp(ehf.data(), kMagic, kMagicLen) != 0) {
+        return false;
+    }
+
+    const uint32_t body_off  = read_be_u32_raw(ehf.data() + 55);
+    const uint32_t body_size = read_be_u32_raw(ehf.data() + 59);
+    if (uint64_t(body_off) + uint64_t(body_size) > ehf.size()) {
+        return false;
+    }
+
+    BeReader r;
+    r.p = ehf.data() + body_off;
+    r.n = body_size;
+    r.i = 0;
+
+    if (!skip_ehf_tex_blob(r) || !skip_ehf_tex_blob(r)) return false;
+
+    float max_height_hint = 0.0f;
+    uint32_t patch_count = 0;
+    if (!r.f32(max_height_hint) || !r.u32(patch_count)) return false;
+    if (patch_count == 0 || patch_count > 4096) return false;
+
+    auto sane_coord = [](float v) {
+        return std::isfinite(v) && std::fabs(v) < 1000000.0f;
+    };
+    // Lattice keys quantized to 1/4 world unit (all observed base corners
+    // are exact multiples of the patch cell size).
+    auto qkey = [](float x, float y) -> uint64_t {
+        const int32_t qx = int32_t(std::lround(double(x) * 4.0));
+        const int32_t qy = int32_t(std::lround(double(y) * 4.0));
+        return (uint64_t(uint32_t(qx)) << 32) | uint32_t(qy);
+    };
+
+    struct VistaPatch {
+        float    aabb_min[3];
+        float    aabb_max[3];
+        uint32_t W = 0, H = 0;
+        size_t   cells_off = 0;   // body-relative offset of the cell array
+    };
+    std::vector<VistaPatch> patches;
+    patches.reserve(patch_count);
+    std::unordered_map<uint64_t, float> lattice;
+    // Secondary lattice from entry 4 (the base+(sx,sy) diagonal sample) --
+    // conservative footprint heights, used only where entry 1 has no
+    // coverage (the outermost row/column of the outermost patches).
+    std::unordered_map<uint64_t, float> lattice_diag;
+
+    uint64_t cell_total = 0;
+    for (uint32_t pi = 0; pi < patch_count; ++pi) {
+        float pf_a = 0.0f, pf_b = 0.0f;
+        uint32_t W = 0, H = 0;
+        if (!r.f32(pf_a) || !r.f32(pf_b) || !r.u32(W) || !r.u32(H)) {
+            return false;
+        }
+        if (W == 0 || H == 0 || W > 1024 || H > 1024) return false;
+        const uint64_t cell_count = uint64_t(W) * uint64_t(H);
+        if (cell_count > 65536 ||
+            uint64_t(r.i) + cell_count * 160ull + 24ull > uint64_t(r.n)) {
+            return false;
+        }
+
+        VistaPatch p;
+        p.W = W;
+        p.H = H;
+        p.cells_off = r.i;
+        cell_total += cell_count;
+
+        const uint8_t* aabb = r.p + r.i + size_t(cell_count) * 160u;
+        for (int k = 0; k < 3; ++k) {
+            p.aabb_min[k] = read_be_f32_raw(aabb + size_t(k) * 4u);
+            p.aabb_max[k] = read_be_f32_raw(aabb + 12u + size_t(k) * 4u);
+        }
+
+        for (uint64_t ci = 0; ci < cell_count; ++ci) {
+            const uint8_t* base_v =
+                r.p + p.cells_off + size_t(ci) * 160u + 64u + 12u;
+            const float bx = read_be_f32_raw(base_v + 0);
+            const float by = read_be_f32_raw(base_v + 4);
+            const float bh = read_be_f32_raw(base_v + 8);
+            if (sane_coord(bx) && sane_coord(by) && sane_coord(bh)) {
+                lattice[qkey(bx, by)] = bh;
+            }
+            const uint8_t* diag_v =
+                r.p + p.cells_off + size_t(ci) * 160u + 64u + 48u;
+            const float dx = read_be_f32_raw(diag_v + 0);
+            const float dy = read_be_f32_raw(diag_v + 4);
+            const float dh = read_be_f32_raw(diag_v + 8);
+            if (sane_coord(dx) && sane_coord(dy) && sane_coord(dh)) {
+                lattice_diag.emplace(qkey(dx, dy), dh);
+            }
+        }
+
+        patches.push_back(p);
+        r.i += size_t(cell_count) * 160u + 24u;
+    }
+    if (patches.empty() || lattice.empty()) return false;
+
+    out.min_height =  std::numeric_limits<float>::infinity();
+    out.max_height = -std::numeric_limits<float>::infinity();
+
+    // One (W+1)x(H+1) grid per patch, heights from the shared lattice so
+    // patch seams match exactly. Lattice misses (region borders, the last
+    // row/column of the outermost patches) clamp to the nearest available
+    // corner of the same quad.
+    for (const VistaPatch& p : patches) {
+        const float ax = p.aabb_min[0];
+        const float ay = p.aabb_min[1];
+        const float sx = (p.aabb_max[0] - p.aabb_min[0]) / float(p.W);
+        const float sy = (p.aabb_max[1] - p.aabb_min[1]) / float(p.H);
+        if (!(sx > 0.0f) || !(sy > 0.0f) ||
+            !std::isfinite(sx) || !std::isfinite(sy)) {
+            continue;
+        }
+
+        const uint32_t VW = p.W + 1;
+        const uint32_t VH = p.H + 1;
+        std::vector<float>  gh(size_t(VW) * size_t(VH), 0.0f);
+        std::vector<uint8_t> ghas(size_t(VW) * size_t(VH), 0);
+        for (uint32_t j = 0; j < VH; ++j) {
+            for (uint32_t i = 0; i < VW; ++i) {
+                const uint64_t key =
+                    qkey(ax + sx * float(i), ay + sy * float(j));
+                float hval = 0.0f;
+                bool  have = false;
+                if (auto it = lattice.find(key); it != lattice.end()) {
+                    hval = it->second;
+                    have = true;
+                } else if (auto it2 = lattice_diag.find(key);
+                           it2 != lattice_diag.end()) {
+                    hval = it2->second;
+                    have = true;
+                }
+                if (have) {
+                    gh[size_t(j) * VW + i]   = hval;
+                    ghas[size_t(j) * VW + i] = 1;
+                }
+            }
+        }
+        // Fill missing lattice points from the nearest present neighbour in
+        // the same grid (outermost row/column of the region).
+        for (uint32_t j = 0; j < VH; ++j) {
+            for (uint32_t i = 0; i < VW; ++i) {
+                const size_t gi = size_t(j) * VW + i;
+                if (ghas[gi]) continue;
+                float best = 0.0f;
+                int   best_d = INT32_MAX;
+                for (uint32_t jj = 0; jj < VH; ++jj) {
+                    for (uint32_t ii = 0; ii < VW; ++ii) {
+                        const size_t oi = size_t(jj) * VW + ii;
+                        if (!ghas[oi]) continue;
+                        const int d = std::abs(int(ii) - int(i)) +
+                                      std::abs(int(jj) - int(j));
+                        if (d < best_d) {
+                            best_d = d;
+                            best   = gh[oi];
+                        }
+                    }
+                }
+                if (best_d == INT32_MAX) { best = p.aabb_min[2]; }
+                gh[gi] = best;
+            }
+        }
+
+        const uint32_t vbase = uint32_t(out.positions.size() / 3);
+        for (uint32_t j = 0; j < VH; ++j) {
+            for (uint32_t i = 0; i < VW; ++i) {
+                const float wx = ax + sx * float(i);
+                const float wy = ay + sy * float(j);
+                const float wh = gh[size_t(j) * VW + i];
+                out.positions.push_back(wx);
+                out.positions.push_back(wh);
+                out.positions.push_back(wy);
+                // Placeholder; remapped to the chunk-grid bbox below.
+                out.uvs.push_back(wx);
+                out.uvs.push_back(wy);
+                out.min_height = std::min(out.min_height, wh);
+                out.max_height = std::max(out.max_height, wh);
+            }
+        }
+
+        // Normals from the lattice (falling back to this grid at borders) so
+        // shading agrees across patch seams.
+        auto h_at = [&](int i, int j) -> float {
+            const float wx = ax + sx * float(i);
+            const float wy = ay + sy * float(j);
+            const uint64_t key = qkey(wx, wy);
+            if (auto it = lattice.find(key); it != lattice.end()) {
+                return it->second;
+            }
+            if (auto it2 = lattice_diag.find(key);
+                it2 != lattice_diag.end()) {
+                return it2->second;
+            }
+            const int ci = std::clamp(i, 0, int(VW) - 1);
+            const int cj = std::clamp(j, 0, int(VH) - 1);
+            return gh[size_t(cj) * VW + size_t(ci)];
+        };
+        for (uint32_t j = 0; j < VH; ++j) {
+            for (uint32_t i = 0; i < VW; ++i) {
+                const float hl = h_at(int(i) - 1, int(j));
+                const float hr = h_at(int(i) + 1, int(j));
+                const float hd = h_at(int(i), int(j) - 1);
+                const float hu = h_at(int(i), int(j) + 1);
+                float nx = (hl - hr) * sy;
+                float ny = 2.0f * sx * sy;
+                float nz = (hd - hu) * sx;
+                const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+                if (len > 1e-6f) {
+                    nx /= len; ny /= len; nz /= len;
+                } else {
+                    nx = 0.0f; ny = 1.0f; nz = 0.0f;
+                }
+                out.normals.push_back(nx);
+                out.normals.push_back(ny);
+                out.normals.push_back(nz);
+            }
+        }
+
+        for (uint32_t j = 0; j + 1 < VH; ++j) {
+            for (uint32_t i = 0; i + 1 < VW; ++i) {
+                const uint32_t i00 = vbase + uint32_t(size_t(j) * VW + i);
+                const uint32_t i10 = i00 + 1;
+                const uint32_t i01 = vbase +
+                    uint32_t(size_t(j + 1) * VW + i);
+                const uint32_t i11 = i01 + 1;
+                out.indices.push_back(i00);
+                out.indices.push_back(i01);
+                out.indices.push_back(i10);
+                out.indices.push_back(i10);
+                out.indices.push_back(i01);
+                out.indices.push_back(i11);
+            }
+        }
+    }
+
+    if (out.indices.empty()) return false;
+
+    // Texture extent: the union of the patch AABBs -- the exact rect
+    // BakeEhfVistaPageComposite composites the background-map pages over
+    // (mirroring the runtime planar g_OffSetX/g_WidthTextureMeters mapping
+    // of VSHADER_LANDSCAPE_BACKGROUND_RENDER), with the union of the vertex
+    // coordinates as fallback.
+    float tex_min_x =  std::numeric_limits<float>::infinity();
+    float tex_max_x = -std::numeric_limits<float>::infinity();
+    float tex_min_z =  std::numeric_limits<float>::infinity();
+    float tex_max_z = -std::numeric_limits<float>::infinity();
+    for (const VistaPatch& p : patches) {
+        if (!std::isfinite(p.aabb_min[0]) || !std::isfinite(p.aabb_min[1]) ||
+            !std::isfinite(p.aabb_max[0]) || !std::isfinite(p.aabb_max[1])) {
+            continue;
+        }
+        tex_min_x = std::min(tex_min_x, p.aabb_min[0]);
+        tex_min_z = std::min(tex_min_z, p.aabb_min[1]);
+        tex_max_x = std::max(tex_max_x, p.aabb_max[0]);
+        tex_max_z = std::max(tex_max_z, p.aabb_max[1]);
+    }
+    if (!std::isfinite(tex_min_x) || !std::isfinite(tex_min_z) ||
+        !(tex_max_x > tex_min_x) || !(tex_max_z > tex_min_z)) {
+        tex_min_x =  std::numeric_limits<float>::infinity();
+        tex_max_x = -std::numeric_limits<float>::infinity();
+        tex_min_z =  std::numeric_limits<float>::infinity();
+        tex_max_z = -std::numeric_limits<float>::infinity();
+        for (size_t v = 0; v + 1 < out.uvs.size(); v += 2) {
+            tex_min_x = std::min(tex_min_x, out.uvs[v + 0]);
+            tex_max_x = std::max(tex_max_x, out.uvs[v + 0]);
+            tex_min_z = std::min(tex_min_z, out.uvs[v + 1]);
+            tex_max_z = std::max(tex_max_z, out.uvs[v + 1]);
+        }
+    }
+    const float span_x = std::max(tex_max_x - tex_min_x, 1e-6f);
+    const float span_z = std::max(tex_max_z - tex_min_z, 1e-6f);
+    for (size_t v = 0; v + 1 < out.uvs.size(); v += 2) {
+        out.uvs[v + 0] = (out.uvs[v + 0] - tex_min_x) / span_x;
+        out.uvs[v + 1] = (out.uvs[v + 1] - tex_min_z) / span_z;
+    }
+
+    if (!std::isfinite(out.min_height)) out.min_height = 0.0f;
+    if (!std::isfinite(out.max_height)) out.max_height = 0.0f;
+
+    // Concatenation of per-cell triangles, not one regular grid.
+    out.width  = 0;
+    out.height = 0;
+    out.ok = true;
+    if (out_stats) {
+        std::ostringstream ss;
+        ss << patch_count << " bg patch(es), " << cell_total << " cell(s), "
+           << (out.indices.size() / 3) << " tri(s)";
+        *out_stats = ss.str();
+    }
+    return true;
 }
 
 struct StreamingModelCandidate {
@@ -7169,50 +7509,97 @@ bool Open(const FlatAssetEntry& entry)
                         const std::string main_ehf_norm = norm_path(res.ehf_path);
                         for (const auto& adj_ehf_path : all_ehf_refs) {
                             if (norm_path(adj_ehf_path) == main_ehf_norm) continue;
-                            const std::string adj_ghf_path =
-                                resolve_adjacent_ghf(adj_ehf_path);
 
                             HeightfieldFiles adj_hf;
-                            if (!LoadHeightfieldFiles(adj_ehf_path, adj_ghf_path,
+                            if (!LoadHeightfieldFiles(adj_ehf_path, {},
                                                       {}, {}, adj_hf)) {
                                 OutputLog::warn("adjacent terrain load failed: " +
                                                 adj_ehf_path + " (" + adj_hf.error + ")");
-                                if (!adj_ghf_path.empty() &&
-                                    LoadHeightfieldFiles(adj_ehf_path, {},
-                                                         {}, {}, adj_hf)) {
-                                    OutputLog::info("adjacent terrain using .ehf only "
-                                                    "(resolved .ghf failed): " +
-                                                    adj_ehf_path);
-                                } else {
-                                    continue;
-                                }
+                                continue;
                             }
 
                             if (S.cancel_requested.load()) {
                                 OutputLog::warn("level load cancelled during adjacent terrain loop");
                                 return false;
                             }
+
+                            // Primary path: the .ehf's own background-patch
+                            // section -- the exact vista geometry the game
+                            // renders for non-active heightfields, already in
+                            // region space.
                             TerrainMesh adj_mesh;
-                            bool used_ehf_proxy = false;
+                            bool used_vista_mesh = false;
                             bool used_ehf_render_mesh = false;
-                            if (!adj_hf.ghf_bytes_raw.empty()) {
-                                GhfHeights adj_hg;
-                                if (!DecodeGhfHeights(adj_hf.ghf_bytes_raw, adj_hg)) {
-                                    OutputLog::warn("adjacent terrain .ghf decode failed: " +
-                                                    adj_ghf_path + " (" + adj_hg.error + ")");
-                                } else {
-                                    if (adj_hg.tile_size <= 0.0f) {
-                                        const float ehf_tile = adj_hf.ehf_header.ok
-                                            ? adj_hf.ehf_header.f2 : 0.0f;
-                                        adj_hg.tile_size =
-                                            (ehf_tile > 0.0f &&
-                                             std::isfinite(ehf_tile))
-                                                ? ehf_tile : hg.tile_size;
+                            {
+                                std::string vista_stats;
+                                if (build_ehf_vista_patch_mesh(
+                                        adj_hf.ehf_bytes, adj_mesh,
+                                        &vista_stats)) {
+                                    used_vista_mesh = true;
+                                    OutputLog::info("adjacent terrain using "
+                                                    ".ehf bg patches: " +
+                                                    adj_ehf_path + " (" +
+                                                    vista_stats + ")");
+                                }
+                            }
+
+                            // Fallbacks for files without a usable patch
+                            // section: full-res .ghf grid, then the legacy
+                            // strip/proxy reconstructions.
+                            if (!adj_mesh.ok) {
+                                const std::string adj_ghf_path =
+                                    resolve_adjacent_ghf(adj_ehf_path);
+                                HeightfieldFiles adj_ghf;
+                                if (!adj_ghf_path.empty() &&
+                                    LoadHeightfieldFiles({}, adj_ghf_path,
+                                                         {}, {}, adj_ghf) &&
+                                    !adj_ghf.ghf_bytes_raw.empty()) {
+                                    GhfHeights adj_hg;
+                                    if (!DecodeGhfHeights(adj_ghf.ghf_bytes_raw,
+                                                          adj_hg)) {
+                                        OutputLog::warn("adjacent terrain .ghf decode failed: " +
+                                                        adj_ghf_path + " (" + adj_hg.error + ")");
+                                    } else {
+                                        if (adj_hg.tile_size <= 0.0f) {
+                                            const float ehf_tile = adj_hf.ehf_header.ok
+                                                ? adj_hf.ehf_header.f2 : 0.0f;
+                                            adj_hg.tile_size =
+                                                (ehf_tile > 0.0f &&
+                                                 std::isfinite(ehf_tile))
+                                                    ? ehf_tile : hg.tile_size;
+                                        }
+                                        if (!BuildTerrainMesh(adj_hg, adj_mesh)) {
+                                            OutputLog::warn("adjacent terrain mesh build failed: " +
+                                                            adj_ehf_path);
+                                        }
                                     }
-                                    if (!BuildTerrainMesh(adj_hg, adj_mesh)) {
-                                        OutputLog::warn("adjacent terrain mesh build failed: " +
-                                                        adj_ehf_path);
+                                }
+                                if (adj_mesh.ok) {
+                                    // .ghf grids are heightfield-local; place
+                                    // them at the chunk-grid origin.
+                                    EhfParsedBody adj_body;
+                                    if (ParseEhfBody(adj_hf.ehf_bytes, adj_body) &&
+                                        !adj_body.chunks.empty()) {
+                                        float min_x = 1e30f, min_z = 1e30f;
+                                        for (const auto& c : adj_body.chunks) {
+                                            min_x = std::min(min_x, c.origin[0]);
+                                            min_z = std::min(min_z, c.origin[1]);
+                                        }
+                                        if (std::isfinite(min_x) &&
+                                            std::isfinite(min_z) &&
+                                            (std::fabs(min_x) > 1e-4f ||
+                                             std::fabs(min_z) > 1e-4f)) {
+                                            for (size_t pi = 0;
+                                                 pi + 2 < adj_mesh.positions.size();
+                                                 pi += 3) {
+                                                adj_mesh.positions[pi + 0] += min_x;
+                                                adj_mesh.positions[pi + 2] += min_z;
+                                            }
+                                        }
                                     }
+                                    OutputLog::info("adjacent terrain using .ghf "
+                                                    "grid (no bg patches): " +
+                                                    adj_ehf_path);
                                 }
                             }
                             if (!adj_mesh.ok) {
@@ -7220,7 +7607,6 @@ bool Open(const FlatAssetEntry& entry)
                                 if (build_ehf_render_strip_mesh(
                                         adj_hf.ehf_bytes, adj_mesh,
                                         &render_stats)) {
-                                    used_ehf_proxy = true;
                                     used_ehf_render_mesh = true;
                                     OutputLog::info("adjacent terrain using "
                                                     ".ehf render mesh: " +
@@ -7229,7 +7615,6 @@ bool Open(const FlatAssetEntry& entry)
                                 } else if (build_ehf_proxy_mesh(adj_hf,
                                                                  hg.min_height,
                                                                  adj_mesh)) {
-                                    used_ehf_proxy = true;
                                     OutputLog::info("adjacent terrain using .ehf "
                                                     "chunk proxy (last resort): " +
                                                     adj_ehf_path);
@@ -7239,33 +7624,6 @@ bool Open(const FlatAssetEntry& entry)
                                                     adj_ehf_path);
                                     continue;
                                 }
-                            } else if (!adj_ghf_path.empty() &&
-                                       norm_path(adj_ghf_path) !=
-                                       norm_path(with_ext(adj_ehf_path, ".ghf"))) {
-                                OutputLog::info("adjacent terrain .ghf resolved: " +
-                                                adj_ehf_path + " -> " +
-                                                adj_ghf_path);
-                            }
-
-                            EhfParsedBody adj_body;
-                            if (!used_ehf_proxy &&
-                                ParseEhfBody(adj_hf.ehf_bytes, adj_body) &&
-                                !adj_body.chunks.empty()) {
-                                float min_x = 1e30f, min_z = 1e30f;
-                                for (const auto& c : adj_body.chunks) {
-                                    min_x = std::min(min_x, c.origin[0]);
-                                    min_z = std::min(min_z, c.origin[1]);
-                                }
-                                if (std::isfinite(min_x) && std::isfinite(min_z) &&
-                                    (std::fabs(min_x) > 1e-4f ||
-                                     std::fabs(min_z) > 1e-4f)) {
-                                    for (size_t pi = 0;
-                                         pi + 2 < adj_mesh.positions.size();
-                                         pi += 3) {
-                                        adj_mesh.positions[pi + 0] += min_x;
-                                        adj_mesh.positions[pi + 2] += min_z;
-                                    }
-                                }
                             }
 
                             Level::PendingAdjacentTerrain adj;
@@ -7274,8 +7632,17 @@ bool Open(const FlatAssetEntry& entry)
                             adj.preferred_bnk = g_pending_terrain_level_entry.bnk_path;
                             adj.ehf_bytes = std::move(adj_hf.ehf_bytes);
                             adj.mesh = std::move(adj_mesh);
-                            adj.preserve_mesh_uvs = used_ehf_render_mesh;
-                            adj.prefer_embedded_albedo = used_ehf_render_mesh;
+                            adj.preserve_mesh_uvs =
+                                used_vista_mesh || used_ehf_render_mesh;
+                            // Always allow the embedded tile albedo (the
+                            // game-baked ground pages) for adjacents: it's
+                            // terrain-space, so it maps cleanly onto both the
+                            // .ehf render mesh (authored UVs) and the .ghf
+                            // grid mesh (grid-normalized UVs cover the same
+                            // world extent). Previously gated to the render-
+                            // mesh fallback only, which left .ghf-meshed
+                            // adjacents on the low-fidelity palette bake.
+                            adj.prefer_embedded_albedo = true;
                             g_pending_adjacent_terrain_meshes.push_back(std::move(adj));
                         }
                         if (!g_pending_adjacent_terrain_meshes.empty()) {
@@ -8255,6 +8622,183 @@ static bool DecodeEhfEmbeddedTileComposite(const std::vector<uint8_t>& ehf,
 
 }
 
+// Vista texture composite from the .ehf's own per-patch background-map pages.
+//
+// Every background patch owns a background map whose page table (exact
+// {file_offset, size} pairs, no heuristics) is stored in the body's final
+// section; page 0 is the highest-resolution BC1 level and maps planarly onto
+// the patch's world AABB (the runtime samples it with the planar
+// g_OffSetX/g_WidthTextureMeters transform of
+// VSHADER_LANDSCAPE_BACKGROUND_RENDER). The composite covers the union of
+// the patch AABBs -- the same rect build_ehf_vista_patch_mesh uses for its
+// UVs -- at the pages' own texel density, which for the dedicated vista
+// filler heightfields is far higher than the terrain-cell grid the older
+// embedded-tile composite was sized from.
+bool Level::BakeEhfVistaPageComposite(const std::vector<uint8_t>& ehf,
+                                      std::vector<uint8_t>& out_rgba,
+                                      int&                  out_w,
+                                      int&                  out_h,
+                                      std::string&          out_name)
+{
+    out_rgba.clear();
+    out_w = 0;
+    out_h = 0;
+    out_name.clear();
+
+    EhfParsedBody parsed;
+    if (!ParseEhfBody(ehf, parsed) || parsed.bg_patches.empty()) {
+        return false;
+    }
+
+    float min_x =  std::numeric_limits<float>::infinity();
+    float min_z =  std::numeric_limits<float>::infinity();
+    float max_x = -std::numeric_limits<float>::infinity();
+    float max_z = -std::numeric_limits<float>::infinity();
+    for (const EhfBgPatch& p : parsed.bg_patches) {
+        if (!std::isfinite(p.aabb_min[0]) || !std::isfinite(p.aabb_min[1]) ||
+            !std::isfinite(p.aabb_max[0]) || !std::isfinite(p.aabb_max[1])) {
+            continue;
+        }
+        min_x = std::min(min_x, p.aabb_min[0]);
+        min_z = std::min(min_z, p.aabb_min[1]);
+        max_x = std::max(max_x, p.aabb_max[0]);
+        max_z = std::max(max_z, p.aabb_max[1]);
+    }
+    if (!std::isfinite(min_x) || !std::isfinite(min_z) ||
+        !(max_x > min_x) || !(max_z > min_z)) {
+        return false;
+    }
+    const float span_x = max_x - min_x;
+    const float span_z = max_z - min_z;
+
+    struct PatchTex {
+        const EhfBgPatch*    patch = nullptr;
+        std::vector<uint8_t> rgba;
+        int                  w = 0, h = 0;
+    };
+    std::vector<PatchTex> decoded;
+    decoded.reserve(parsed.bg_patches.size());
+    std::vector<float> dens_x, dens_z;
+    for (const EhfBgPatch& p : parsed.bg_patches) {
+        if (p.pages.empty()) continue;
+        const uint32_t off = p.pages[0].first;
+        const uint32_t len = p.pages[0].second;
+        if (uint64_t(off) + len > ehf.size() || len < 0x60) continue;
+        if (ehf_be32(ehf, off) != 0xFFFFFFFEu) continue;
+        const uint32_t pf = ehf_be32(ehf, off + 0x18);
+        const uint32_t mt = ehf_be32(ehf, off + 0x20);
+        if (pf != 35u || mt < 0x54 || mt > 0x200) continue;
+        if (size_t(off) + mt + 8 > ehf.size()) continue;
+
+        EhfEmbeddedBc1Mip mip;
+        mip.offset    = off;
+        mip.header_w  = ehf_be32(ehf, off + 0x10);
+        mip.header_h  = ehf_be32(ehf, off + 0x14);
+        mip.raw_size  = ehf_be32(ehf, off + mt);
+        mip.comp_size = ehf_be32(ehf, off + mt + 4);
+
+        PatchTex pt;
+        pt.patch = &p;
+        if (!decode_ehf_embedded_bc1(ehf, mip, pt.rgba, pt.w, pt.h)) {
+            continue;
+        }
+        const float sx = p.aabb_max[0] - p.aabb_min[0];
+        const float sz = p.aabb_max[1] - p.aabb_min[1];
+        if (sx > 0.0f && sz > 0.0f) {
+            dens_x.push_back(float(pt.w) / sx);
+            dens_z.push_back(float(pt.h) / sz);
+        }
+        decoded.push_back(std::move(pt));
+    }
+    if (decoded.empty() || dens_x.empty()) return false;
+
+    auto median = [](std::vector<float>& v) {
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    };
+    float density_x = std::clamp(median(dens_x), 0.5f, 16.0f);
+    float density_z = std::clamp(median(dens_z), 0.5f, 16.0f);
+    // Fit within a sane texture budget while keeping the aspect.
+    constexpr float kMaxDim = 4096.0f;
+    if (span_x * density_x > kMaxDim) density_x = kMaxDim / span_x;
+    if (span_z * density_z > kMaxDim) density_z = kMaxDim / span_z;
+
+    out_w = std::max(4, int(std::lround(span_x * density_x)));
+    out_h = std::max(4, int(std::lround(span_z * density_z)));
+    out_rgba.assign(size_t(out_w) * size_t(out_h) * 4, 0);
+    std::vector<uint8_t> filled(size_t(out_w) * size_t(out_h), 0);
+
+    size_t blitted = 0;
+    for (const PatchTex& pt : decoded) {
+        const EhfBgPatch& p = *pt.patch;
+        const int dx = int(std::lround((p.aabb_min[0] - min_x) /
+                                       span_x * float(out_w)));
+        const int dy = int(std::lround((p.aabb_min[1] - min_z) /
+                                       span_z * float(out_h)));
+        const int dw = int(std::lround((p.aabb_max[0] - p.aabb_min[0]) /
+                                       span_x * float(out_w)));
+        const int dh = int(std::lround((p.aabb_max[1] - p.aabb_min[1]) /
+                                       span_z * float(out_h)));
+        if (dw <= 0 || dh <= 0 || dx < 0 || dy < 0) continue;
+        blit_resampled_rgba(pt.rgba, pt.w, pt.h,
+                            out_rgba, out_w, out_h,
+                            dx, dy, dw, dh);
+        const int cw = std::min(dw, out_w - dx);
+        const int ch = std::min(dh, out_h - dy);
+        for (int y = 0; y < ch; ++y) {
+            std::memset(filled.data() + size_t(dy + y) * out_w + dx, 1, cw);
+        }
+        ++blitted;
+    }
+    if (blitted == 0) {
+        out_rgba.clear();
+        out_w = 0;
+        out_h = 0;
+        return false;
+    }
+
+    // Dilate a few texels into unfilled space (holes between patches of
+    // L-shaped fillers) so bilinear filtering at patch borders doesn't pull
+    // in black.
+    for (int pass = 0; pass < 4; ++pass) {
+        std::vector<uint8_t> next = filled;
+        bool changed = false;
+        for (int y = 0; y < out_h; ++y) {
+            for (int x = 0; x < out_w; ++x) {
+                const size_t i = size_t(y) * out_w + x;
+                if (filled[i]) continue;
+                static const int dxs[4] = { 1, -1, 0,  0 };
+                static const int dys[4] = { 0,  0, 1, -1 };
+                for (int k = 0; k < 4; ++k) {
+                    const int nx = x + dxs[k];
+                    const int ny = y + dys[k];
+                    if (nx < 0 || ny < 0 || nx >= out_w || ny >= out_h) continue;
+                    const size_t ni = size_t(ny) * out_w + nx;
+                    if (!filled[ni]) continue;
+                    std::memcpy(out_rgba.data() + i * 4,
+                                out_rgba.data() + ni * 4, 4);
+                    next[i] = 1;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        filled.swap(next);
+        if (!changed) break;
+    }
+
+    std::ostringstream os;
+    os << "vista_pages[" << blitted << "/" << parsed.bg_patches.size()
+       << " patches, " << out_w << "x" << out_h << "]";
+    out_name = os.str();
+    OutputLog::success("ehf: vista page composite " + std::to_string(out_w) +
+                       "x" + std::to_string(out_h) + " from " +
+                       std::to_string(blitted) + "/" +
+                       std::to_string(parsed.bg_patches.size()) +
+                       " bg-map pages");
+    return true;
+}
+
 bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
                                      uint32_t              cells_w,
                                      uint32_t              cells_h,
@@ -8425,6 +8969,27 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
                (uint32_t(p[2]) <<  8) |  uint32_t(p[3]);
     };
 
+    // If this zlib stream is the mip payload of a pf35 tex-blob page, the
+    // page header (0xFFFFFFFE, dims at +0x10/+0x14) states its TRUE size.
+    // Returns true when a header is found and its dims DISAGREE with the
+    // guessed candidate -- decoding those with guessed dims scrambled the
+    // vista tile pages (e.g. a 128x48 strip decoded as 128x128).
+    auto header_contradicts = [&](size_t zlib_at,
+                                  uint32_t cand_w,
+                                  uint32_t cand_h) -> bool {
+        for (uint32_t mt = 0x54; mt <= 0x200; mt += 4) {
+            if (zlib_at < size_t(mt) + 8) break;
+            const size_t h0 = zlib_at - 8 - mt;
+            if (u32be(d + h0) != 0xFFFFFFFEu) continue;
+            if (u32be(d + h0 + 0x20) != mt) continue;
+            const uint32_t pw = u32be(d + h0 + 0x10);
+            const uint32_t ph = u32be(d + h0 + 0x14);
+            if (pw == 0 || ph == 0 || pw > 8192 || ph > 8192) continue;
+            return pw != cand_w || ph != cand_h;
+        }
+        return false;
+    };
+
     struct Hit { uint32_t W, H; size_t bytes; size_t offset; uint32_t comp; };
     std::vector<Hit> hits;
     size_t i = 8;
@@ -8438,7 +9003,8 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
             if (cs > 16 && (size_t)i + cs <= n) {
                 for (const auto& c : cands) {
                     if (rs == (uint32_t)c.bytes &&
-                        aspect_ok(c.W, c.H))
+                        aspect_ok(c.W, c.H) &&
+                        !header_contradicts(i, c.W, c.H))
                     {
                         hits.push_back({c.W, c.H, c.bytes, i, cs});
                         break;

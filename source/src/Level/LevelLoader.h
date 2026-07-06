@@ -110,6 +110,14 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
                                     std::string& out_picked_name,
                                     bool allow_embedded_albedo = true);
 
+// Composite the .ehf's own per-patch background-map pages (the game's baked
+// vista textures) over the union of the bg-patch AABBs -- the rect
+// build_ehf_vista_patch_mesh keys its UVs to.
+bool BakeEhfVistaPageComposite(const std::vector<uint8_t>& ehf,
+                               std::vector<uint8_t>& out_rgba,
+                               int& out_w, int& out_h,
+                               std::string& out_name);
+
 bool BakeEhfTerrainCompositeAndSplat(
     const std::vector<uint8_t>& ehf,
     const std::string& preferred_bnk,

@@ -49,7 +49,7 @@ static bool mp_is_adjacent_terrain_mesh(const MPPerMesh& m)
 }
 static bool mp_should_hide_mesh(const MPPerMesh& m)
 {
-    return !S.dev_mode && mp_is_adjacent_terrain_mesh(m);
+    return !S.show_adjacent_terrain && mp_is_adjacent_terrain_mesh(m);
 }
 static inline std::string force_tex_ext(const std::string& s){
     std::string base = std::filesystem::path(s).filename().string();
@@ -1444,7 +1444,12 @@ float4 PS(VSOUT i) : SV_Target {
     float2 chunk_clamped = clamp(chunk_co,
                                  float2(0, 0),
                                  float2(CW - 0.001, CH - 0.001));
-    float slope_w = saturate((0.82 - abs(normalize(i.n).y)) / 0.35);
+    /* Engine cliff selection is a hard slope threshold (cndgt on normal.y vs
+       g_CliffBlendOffsetAndScale). Approximate with a tight ramp that engages
+       at ~26 deg and saturates by ~37 deg; the old (0.82, 0.35) curve only
+       started at ~35 deg and never saturated below ~62 deg, which hid the
+       cliff texture on most real slopes. */
+    float slope_w = saturate((0.90 - abs(normalize(i.n).y)) / 0.10);
 
     float3 final = float3(0.0, 0.0, 0.0);
     float  weight_sum = 0.0;
@@ -1542,7 +1547,12 @@ float4 PS(VSOUT i) : SV_Target {
     float2 chunk_clamped = clamp(chunk_co,
                                  float2(0, 0),
                                  float2(CW - 0.001, CH - 0.001));
-    float slope_w = saturate((0.82 - abs(normalize(i.n).y)) / 0.35);
+    /* Engine cliff selection is a hard slope threshold (cndgt on normal.y vs
+       g_CliffBlendOffsetAndScale). Approximate with a tight ramp that engages
+       at ~26 deg and saturates by ~37 deg; the old (0.82, 0.35) curve only
+       started at ~35 deg and never saturated below ~62 deg, which hid the
+       cliff texture on most real slopes. */
+    float slope_w = saturate((0.90 - abs(normalize(i.n).y)) / 0.10);
 
     float3 final = float3(0.0, 0.0, 0.0);
     float  weight_sum = 0.0;

@@ -152,6 +152,7 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
         uint32_t cnt;
         if (!w.u32(cnt)) { out.error = "850A0 count: " + w.err; return false; }
         if (cnt > 10000) { out.error = "850A0 count implausible"; return false; }
+        out.bg_patches.resize(cnt);
         for (uint32_t k = 0; k < cnt; ++k) {
             float f_a, f_b;
             uint32_t w_sub, h_sub;
@@ -165,9 +166,16 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
                 out.error = "850A0 sub dims implausible";
                 return false;
             }
-            if (!w.skip(size_t(w_sub) * size_t(h_sub) * 160 + 24)) {
+            if (!w.skip(size_t(w_sub) * size_t(h_sub) * 160)) {
                 out.error = "850A0 grid: " + w.err;
                 return false;
+            }
+            EhfBgPatch& p = out.bg_patches[k];
+            for (int c = 0; c < 3; ++c) {
+                if (!w.f32(p.aabb_min[c])) { out.error = "850A0 aabb min"; return false; }
+            }
+            for (int c = 0; c < 3; ++c) {
+                if (!w.f32(p.aabb_max[c])) { out.error = "850A0 aabb max"; return false; }
             }
         }
     }
@@ -355,16 +363,30 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
         }
     }
 
+    // Final section: per background map (one per bg patch, in order), the
+    // page table of its streamed textures as {file_offset, size} pairs.
+    // Offsets are absolute within the .ehf file (the pages live past the
+    // parsed body).
     uint8_t flag;
     if (!w.u8(flag)) { out.error = "final flag"; return false; }
     for (uint32_t k = 0; k < cnt_860e8; ++k) {
         uint32_t sub_cnt;
         if (!w.u32(sub_cnt)) { out.error = "final sub_count"; return false; }
         if (sub_cnt > 65535) { out.error = "final sub_count implausible"; return false; }
-        if (!w.skip(size_t(sub_cnt) * 8)) {
+        if (!w.need(size_t(sub_cnt) * 8)) {
             out.error = "final sub data";
             return false;
         }
+        if (k < out.bg_patches.size()) {
+            auto& pages = out.bg_patches[k].pages;
+            pages.reserve(sub_cnt);
+            for (uint32_t s = 0; s < sub_cnt; ++s) {
+                const uint32_t off = be_u32(w.p + w.pos + size_t(s) * 8);
+                const uint32_t len = be_u32(w.p + w.pos + size_t(s) * 8 + 4);
+                pages.emplace_back(off, len);
+            }
+        }
+        w.pos += size_t(sub_cnt) * 8;
     }
 
     out.bytes_consumed = w.pos;

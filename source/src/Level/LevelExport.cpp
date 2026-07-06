@@ -902,47 +902,25 @@ bool build_terrain_weight_maps(const EhfParsedBody& parsed,
         const int layer_count =
             std::min<int>(int(chunk.layers.size()), 16);
 
+        // Engine near-field blend: per-layer paint mask -> the layer's own
+        // material, weight-normalized. The corner (texture_idx, blend)
+        // records belong to the distant background-map compositor; routing
+        // weight through them bled foreign materials across chunk corners.
+        // Kept in sync with TerrainSplat::Build's weight bake.
         for (int li = 0; li < layer_count; ++li) {
             const auto& layer = chunk.layers[size_t(li)];
-            int mat_corner[4] = {};
-            for (int i = 0; i < 4; ++i) {
-                uint32_t mat_idx = layer.material_idx;
-                const uint32_t corner_layer_idx = layer.texture_idx[i];
-                if (corner_layer_idx < chunk.layers.size()) {
-                    mat_idx = chunk.layers[size_t(corner_layer_idx)]
-                                  .material_idx;
-                }
-                mat_corner[i] = std::clamp<int>(int(mat_idx), 0, N - 1);
-            }
-
+            const int mat =
+                std::clamp<int>(int(layer.material_idx), 0, N - 1);
             for (int py = 0; py <= 32; ++py) {
-                const float fy = float(py) / 32.0f;
                 for (int px = 0; px <= 32; ++px) {
-                    const float fx = float(px) / 32.0f;
-                    const float cwx[4] = {
-                        (1.0f - fx) * (1.0f - fy),
-                                  fx  * (1.0f - fy),
-                        (1.0f - fx) *        fy,
-                                  fx  *        fy
-                    };
-                    const float blend =
-                        (float(layer.blend[0]) * cwx[0] +
-                         float(layer.blend[1]) * cwx[1] +
-                         float(layer.blend[2]) * cwx[2] +
-                         float(layer.blend[3]) * cwx[3]) / 3.0f;
-                    const float layer_w = mask_sample(layer, px, py) *
-                        std::clamp(blend, 0.0f, 1.0f);
+                    const float layer_w = mask_sample(layer, px, py);
                     if (layer_w <= 0.0001f) continue;
 
                     const int gx = cx * 32 + px;
                     const int gy = cy * 32 + py;
                     if (gx < 0 || gy < 0 || gx >= W || gy >= H) continue;
-                    const size_t dst = size_t(gy) * size_t(W) + size_t(gx);
-                    for (int k = 0; k < 4; ++k) {
-                        if (cwx[k] <= 0.0001f) continue;
-                        weights[size_t(mat_corner[k]) * area + dst] +=
-                            layer_w * cwx[k];
-                    }
+                    weights[size_t(mat) * area +
+                            size_t(gy) * size_t(W) + size_t(gx)] += layer_w;
                 }
             }
         }

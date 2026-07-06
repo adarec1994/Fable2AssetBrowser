@@ -2401,7 +2401,16 @@ void process_pending_loads() {
                 std::vector<uint8_t> adj_rgba;
                 int adj_w = 0, adj_h = 0;
                 std::string adj_name;
-                if (!Level::BakeEhfTerrainCompositeWithBnk(
+                // The per-patch background-map pages are the game's own
+                // baked vista textures (far denser than the terrain-grid
+                // composite for the dedicated vista fillers, and keyed to
+                // the same patch-union rect the vista mesh UVs use); fall
+                // back to the splat/embedded composite when a file carries
+                // no usable pages.
+                const bool adj_from_pages = Level::BakeEhfVistaPageComposite(
+                    adj.ehf_bytes, adj_rgba, adj_w, adj_h, adj_name);
+                if (!adj_from_pages &&
+                    !Level::BakeEhfTerrainCompositeWithBnk(
                         adj.ehf_bytes, adj.preferred_bnk,
                         adj_rgba, adj_w, adj_h, adj_name,
                         adj.prefer_embedded_albedo)) {
@@ -2415,9 +2424,11 @@ void process_pending_loads() {
                 m.srv_diffuse = adj_srv;
                 m.diffuse_visible = true;
                 m.diffuse_tex_name =
-                    (adj_name == "embedded_tile_albedo")
-                        ? ("ehf_embedded_tile_albedo[" + adj.label + "]")
-                        : ("ehf_composite[" + adj_name + "]");
+                    adj_from_pages
+                        ? ("ehf_vista_pages[" + adj.label + "]")
+                        : (adj_name == "embedded_tile_albedo")
+                            ? ("ehf_embedded_tile_albedo[" + adj.label + "]")
+                            : ("ehf_composite[" + adj_name + "]");
 
                 GeneratedTerrainTexture gt;
                 gt.mesh_index = mesh_idx;

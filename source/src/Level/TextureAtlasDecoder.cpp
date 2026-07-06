@@ -69,12 +69,6 @@ void decode_bc3_block(const uint8_t* b, uint32_t* outRGBA) {
     }
 }
 
-// Xbox 360 texture endianness: every BC/16-bit format used here (PF24/35/38/
-// 39/40/98/99/100) carries GPUENDIAN_8IN16 in the engine's format table
-// (g_PixelFormatInfoTable in the XEX, dword>>6 & 3 == 1). Conversion to PC
-// layout is therefore a byte swap of each 16-bit word across the whole
-// surface -- including the BC index/alpha words. The previous per-format
-// 32-/48-bit reversals reordered index rows inside every block.
 void swap16_words(uint8_t* data, size_t size) {
     for (size_t i = 0; i + 2 <= size; i += 2) {
         uint8_t t   = data[i];
@@ -586,13 +580,6 @@ bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,
 
     swap16_words(linear.data(), linear.size());
 
-    // PF99 is GPUTEXTUREFORMAT_DXT3A (engine format table entry 99 =
-    // 0x1A20017A): 8-byte 4x4 blocks of EXPLICIT 4-bit alpha, one 16-bit
-    // word per row, texel x at bits [4x..4x+3]. No endpoints/interpolation
-    // (that's DXT5A = PF100). Decoding these blocks as BC4 happened to give
-    // identical results on uniform 0x00/0xFF blocks but corrupted every
-    // mixed block. Nibbles expand 0..15 -> 0..255 via *17, matching the
-    // GPU's A8 normalization (n/15).
     out_indices.assign((size_t)W * (size_t)H, 0);
     for (uint32_t by = 0; by < blocks_h; ++by) {
         for (uint32_t bx = 0; bx < blocks_w; ++bx) {

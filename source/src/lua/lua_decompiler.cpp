@@ -138,7 +138,7 @@ bool Constant::isIdentifier() const {
     return isLuaIdentifierString(s);
 }
 
-void Constant::print(Output& out, bool /*braced*/) const {
+void Constant::print(Output& out, bool  ) const {
     switch (type) {
         case 0: out.print("nil"); return;
         case 1: out.print(b ? "true" : "false"); return;

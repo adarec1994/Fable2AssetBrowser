@@ -186,7 +186,6 @@ void draw_lua_in_panel() {
     ImGui::PopStyleColor();
 
     {
-        // [Copy] [Close]  — anchored to the right edge.
         const float pad      = ImGui::GetStyle().FramePadding.x * 2.0f;
         const float copy_w   = ImGui::CalcTextSize("Copy").x  + pad + 8.0f;
         const float close_w  = ImGui::CalcTextSize("Close").x + pad + 8.0f;
@@ -217,9 +216,6 @@ void draw_lua_in_panel() {
         return;
     }
 
-    // Read-only multiline text box — lets the user click-drag to select and
-    // Ctrl+C / Ctrl+A like a normal text widget. Using const_cast here is the
-    // ImGui-sanctioned pattern for ReadOnly inputs (the widget never writes).
     ImVec2 sz = ImGui::GetContentRegionAvail();
     ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(0.08f, 0.08f, 0.10f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.10f, 0.10f, 0.12f, 1.0f));

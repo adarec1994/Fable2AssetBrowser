@@ -91,9 +91,6 @@ static bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_
         BNKReader r_headers(*p_headers);
         const auto& header_files = r_headers.list_files();
 
-        // Match the header by FULL PATH (many buildings share basenames like
-        // "interior.mdl"/"exterior.mdl"; a basename match grabs the wrong
-        // building's header and the model fails to parse). Basename fallback only.
         auto norm = [](std::string s) {
             std::transform(s.begin(), s.end(), s.begin(), ::tolower);
             std::replace(s.begin(), s.end(), '\\', '/');
@@ -487,9 +484,6 @@ void draw_hex_window() {
                     S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info, S.hex_file_path);
                 }
 
-                // Developer mode: extract cloth/soft-body extension blocks.
-                // Re-walks only when the shown buffer changes (independent of
-                // whichever panel last populated S.mdl_info).
                 {
                     static const unsigned char* cloth_buf_ptr = nullptr;
                     static size_t cloth_buf_sz = 0;

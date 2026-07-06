@@ -68,9 +68,9 @@ struct MPPerMesh {
     bool is_terrain = false;
     bool is_water   = false;
     bool is_cloth   = false;
-    bool alpha_test = true;   // diffuse.a<0.25 discard (off for engine geom)
-    bool cloth_sim  = false;  // render via cloth solver (dynamic VB, no GPU skin)
-    std::shared_ptr<struct ClothSim> cloth;  // per-mesh soft-body state
+    bool alpha_test = true;
+    bool cloth_sim  = false;
+    std::shared_ptr<struct ClothSim> cloth;
     float water_params[38] = {};
     bool has_water_theme = false;
     float water_opacity = 1.0f;
@@ -123,7 +123,7 @@ struct ModelPreview {
     ID3D11VertexShader* vs_terrain = nullptr;
     ID3D11PixelShader*  ps_terrain = nullptr;
     ID3D11PixelShader*  ps_terrain_direct = nullptr;
-    ID3D11PixelShader*  ps_terrain_landscape = nullptr;  // dev: engine-reconciled blend
+    ID3D11PixelShader*  ps_terrain_landscape = nullptr;
     ID3D11Buffer*       cbuffer_terrain = nullptr;
     ID3D11VertexShader* vs_sky = nullptr;
     ID3D11PixelShader*  ps_sky = nullptr;

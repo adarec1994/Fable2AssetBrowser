@@ -880,11 +880,6 @@ std::string decompile(const Function& f) {
 
 }
 
-// Public entry: forward to the (in-progress) unluac C++ port. The in-house
-// Lua 5.1 reader/decompiler that used to live above is kept in tree as
-// `lua51::*` (dead code for now) so we can lift any opcode handling we
-// haven't yet ported from unluac. It produced garbage output — see the
-// commit that swapped this entry point for the rationale.
 std::string decompile_lua51_bytecode(const uint8_t* data, size_t size) {
     return lua::decompile_lua_bytecode(data, size);
 }

@@ -370,7 +370,6 @@ if (!can_preview) {
                             MDLInfo mdl_info;
                             if (parse_mdl_info(buf, mdl_info, mdl_path)) {
                                 std::vector<MDLMeshGeom> meshes;
-                                // Engine-faithful geometry is the sole model renderer.
                                 if (build_mdl_engine_geometry(buf, meshes)) {
                                     all_meshes.insert(all_meshes.end(), meshes.begin(), meshes.end());
                                     if (!any_success) {
@@ -451,7 +450,6 @@ if (!can_preview) {
                                 MDLInfo mdl_info;
                                 if (parse_mdl_info(buf, mdl_info, mdl_name)) {
                                     std::vector<MDLMeshGeom> meshes;
-                                    // Engine-faithful geometry is the sole model renderer.
                                     if (build_mdl_engine_geometry(buf, meshes)) {
                                         all_meshes.insert(all_meshes.end(), meshes.begin(), meshes.end());
                                         if (!any_success) {
@@ -597,7 +595,6 @@ if (!can_preview) {
                     S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info, name);
                     if (S.mdl_info_ok) {
                         S.mdl_meshes.clear();
-                        // Engine-faithful geometry is the sole model renderer.
                         build_mdl_engine_geometry(S.hex_data, S.mdl_meshes);
                         S.cam_yaw = 0.0f; S.cam_pitch = 0.2f; S.cam_dist = 3.0f;
                         S.pending_preview_build = true;
@@ -636,7 +633,6 @@ if (!can_preview) {
                             MDLInfo mdl_info;
                             if (parse_mdl_info(buf, mdl_info, mdl_path)) {
                                 std::vector<MDLMeshGeom> meshes;
-                                // Engine-faithful geometry is the sole model renderer.
                                 if (build_mdl_engine_geometry(buf, meshes)) {
                                     all_meshes.insert(all_meshes.end(), meshes.begin(), meshes.end());
                                     if (!any_success) {
@@ -682,7 +678,6 @@ if (!can_preview) {
                     MDLInfo mdl_info;
                     if (parse_mdl_info(buf, mdl_info, name)) {
                         std::vector<MDLMeshGeom> meshes;
-                        // Engine-faithful geometry is the sole model renderer.
                         if (build_mdl_engine_geometry(buf, meshes)) {
                             S.hex_data.clear();
                             S.mdl_info_ok = true;
@@ -1069,7 +1064,6 @@ if (!can_preview) {
                             S.anim_authored_signature = 0;
                             S.anim_authored_cache.clear();
                             S.mdl_meshes.clear();
-                            // Engine-faithful geometry is the sole model renderer.
                             build_mdl_engine_geometry(buf, S.mdl_meshes);
                             bool geom_ok = true;
                             if (geom_ok) {

@@ -6,10 +6,6 @@
 namespace ShaderBank {
 namespace {
 
-// Sequential big-endian reader mirroring the engine's stream reads. The XEX
-// loader byteswaps each field when its endian flag is set; the shipped .sbk is
-// big-endian, so we read big-endian directly (validated: version=3, 147 blobs,
-// clean LANDSCAPE* names all decode).
 struct R {
     const uint8_t* p;
     size_t         n;
@@ -32,14 +28,13 @@ struct R {
     bool strz(std::string& s) {
         size_t j = i;
         while (j < n && p[j] != 0) ++j;
-        if (j >= n) return false;                 // unterminated
+        if (j >= n) return false;
         s.assign(reinterpret_cast<const char*>(p + i), j - i);
         i = j + 1;
         return true;
     }
 };
 
-// Inflate one zlib stream (78 da …) into a buffer sized to `expected`.
 bool inflate_zlib(const uint8_t* src, size_t src_len,
                   std::vector<uint8_t>& out, size_t expected) {
     out.assign(expected, 0);
@@ -57,13 +52,13 @@ bool inflate_zlib(const uint8_t* src, size_t src_len,
     return (ret == Z_STREAM_END || ret == Z_OK) && produced == expected;
 }
 
-}  // namespace
+}
 
 bool ParseShaderBank(const std::vector<uint8_t>& data, Bank& out) {
     out = Bank{};
     R r{ data.data(), data.size() };
 
-    static const char kMagic[] = "ShaderBankFile";  // 14 bytes
+    static const char kMagic[] = "ShaderBankFile";
     if (r.n < 19 || std::memcmp(r.p, kMagic, 14) != 0) {
         out.error = "bad magic";
         return false;
@@ -72,7 +67,6 @@ bool ParseShaderBank(const std::vector<uint8_t>& data, Bank& out) {
     if (!r.u32(out.version) || out.version != 3) { out.error = "bad version"; return false; }
     if (!r.u8(out.endian)) { out.error = "endian"; return false; }
 
-    // --- global parameter table (sub_82B7C488 / sub_82B7BCB0) ---
     uint32_t pcnt = 0;
     if (!r.u32(pcnt) || pcnt > 100000) { out.error = "param count"; return false; }
     out.params.resize(pcnt);
@@ -88,14 +82,12 @@ bool ParseShaderBank(const std::vector<uint8_t>& data, Bank& out) {
         }
     }
 
-    // --- resource-binding name table (sub_82B7C5A8): count + count x strz ---
     uint32_t rcnt = 0;
     if (!r.u32(rcnt) || rcnt > 100000) { out.error = "resource count"; return false; }
     out.resources.resize(rcnt);
     for (uint32_t k = 0; k < rcnt; ++k)
         if (!r.strz(out.resources[k])) { out.error = "resource name"; return false; }
 
-    // --- program section (sub_82B7C858 / sub_82B8A758) ---
     uint32_t shaderCount = 0;
     if (!r.u32(shaderCount) || shaderCount > 1000000) { out.error = "shader count"; return false; }
     if (!r.u32(out.bank_hash)) { out.error = "bank hash"; return false; }
@@ -118,7 +110,6 @@ bool ParseShaderBank(const std::vector<uint8_t>& data, Bank& out) {
     if (!r.u32(blobLen) || !r.need(blobLen)) { out.error = "blob length"; return false; }
     const uint8_t* blob = r.p + r.i;
 
-    // Each program blob = [u32 BE compressed_len][zlib stream] (chunked to dsize).
     out.programs.resize(nA);
     for (uint32_t k = 0; k < nA; ++k) {
         out.programs[k].offset            = offsets[k];
@@ -134,4 +125,4 @@ bool ParseShaderBank(const std::vector<uint8_t>& data, Bank& out) {
     return true;
 }
 
-}  // namespace ShaderBank
+}

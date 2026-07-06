@@ -511,12 +511,6 @@ bool reconstruct_nested_mdl(const std::string& nested_bnk_path, int file_index, 
         BNKReader r_headers(*p_headers);
         const auto& header_files = r_headers.list_files();
 
-        // Match the header by FULL PATH, not just basename: dozens of buildings
-        // each ship an "interior.mdl"/"exterior.mdl", so a basename match grabs
-        // the FIRST such header (the wrong building) -> its LOD sizes/mesh
-        // headers don't match this body -> the mesh walker drifts and the model
-        // fails to parse (renders nothing). Prefer an exact full-path match;
-        // fall back to basename only if no full-path match is found.
         auto norm = [](std::string s) {
             std::transform(s.begin(), s.end(), s.begin(), ::tolower);
             std::replace(s.begin(), s.end(), '\\', '/');

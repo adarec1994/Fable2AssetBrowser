@@ -201,11 +201,6 @@ static bool parse_prop_model_buffer(const std::vector<unsigned char>& buf,
         return false;
     }
 
-    // Prefer the engine-faithful renderer — the same byte-exact decode the model
-    // preview now uses. It requires the MeshFile header, which is present on full
-    // files and on body+header assemblies (globals header + level body). A
-    // header-less body (which the engine walker cannot decode) falls back to the
-    // heuristic raw-scan parser.
     const bool has_mesh_header =
         buf.size() >= 8 &&
         (std::memcmp(buf.data(), "MeshFile", 8) == 0 ||
@@ -213,8 +208,6 @@ static bool parse_prop_model_buffer(const std::vector<unsigned char>& buf,
     if (has_mesh_header) {
         tmp.geoms.clear();
         if (!build_mdl_engine_geometry(buf, tmp.geoms) || tmp.geoms.empty()) {
-            // Header present but undecodable → corrupt or mismatched header.
-            // Reject so the caller can try another candidate (e.g. the raw body).
             if (reason) {
                 *reason = "engine decode produced 0 geoms, bytes=" +
                           std::to_string(buf.size());
@@ -305,10 +298,6 @@ static bool try_prop_model_candidate(const FlatAssetEntry& entry,
                                      std::string& method,
                                      std::string* fail_reason = nullptr)
 {
-    // Try the body+header assembly FIRST: globals header + level body yields a
-    // full MeshFile that the engine-faithful renderer can decode byte-exactly.
-    // (When no global header exists, the assembly returns the raw body, which for
-    // a self-contained level model already carries its own MeshFile header.)
     std::vector<unsigned char> buf;
     if (build_mdl_buffer_for_name_with_body(model_path, entry.bnk_path, buf)) {
         std::string parse_reason;
@@ -323,8 +312,6 @@ static bool try_prop_model_candidate(const FlatAssetEntry& entry,
         *fail_reason = "body+header build failed";
     }
 
-    // Fallback: the raw header-less body, decoded by the heuristic raw-scan parser
-    // (used when the body+header assembly picked a wrong/mismatched header).
     try {
         std::vector<unsigned char> body =
             BnkCache::extract_bytes(entry.bnk_path, entry.file_index);
@@ -1682,9 +1669,6 @@ void process_pending_loads() {
                         }
                     }
                     S.mdl_meshes.clear();
-                    // Engine-faithful geometry is the sole model renderer: a
-                    // byte-exact decode with no heuristic fallback (a mis-parse
-                    // shows as no geometry). Cloth is rendered textured inline.
                     build_mdl_engine_geometry(buf, S.mdl_meshes);
                     OutputLog::info("MDL: engine geometry produced " +
                                     std::to_string(S.mdl_meshes.size()) + " mesh(es)");
@@ -2401,12 +2385,6 @@ void process_pending_loads() {
                 std::vector<uint8_t> adj_rgba;
                 int adj_w = 0, adj_h = 0;
                 std::string adj_name;
-                // The per-patch background-map pages are the game's own
-                // baked vista textures (far denser than the terrain-grid
-                // composite for the dedicated vista fillers, and keyed to
-                // the same patch-union rect the vista mesh UVs use); fall
-                // back to the splat/embedded composite when a file carries
-                // no usable pages.
                 const bool adj_from_pages = Level::BakeEhfVistaPageComposite(
                     adj.ehf_bytes, adj_rgba, adj_w, adj_h, adj_name);
                 if (!adj_from_pages &&

@@ -242,11 +242,6 @@ static void decode_bc5_block(const uint8_t* b, uint32_t* outRGBA) {
     }
 }
 
-// Xbox 360 BC textures use GPUENDIAN_8IN16 (engine pixel-format table):
-// converting to PC layout = byte-swap every 16-bit word across the surface,
-// including the index/alpha words. The old per-field 32-/48-bit reversals
-// reordered index rows in every block, and never swapped the BC3/BC5 alpha
-// endpoint pair (which flips the interpolation mode when a0<->a1 cross).
 static void swap_bc1_endian(uint8_t* data, size_t size) {
     for (size_t i = 0; i + 2 <= size; i += 2) {
         uint8_t t = data[i]; data[i] = data[i+1]; data[i+1] = t;

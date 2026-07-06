@@ -97,10 +97,6 @@ bool skip_tex_blob(Walker& w) {
     if (!w.need(mt + 8)) return false;
 
     if (pf == 98u) {
-        // Uncompressed 16-bit paint/splat mask: header(mt) + width*height*2
-        // bytes of pixel data. (The previous raw_size@(mt) read was wrong — that
-        // offset is the first row of pixels, not a size field. Verified byte-exact
-        // across all 184 HeightFieldGraphicsFile in streaming.bnk.)
         const uint32_t tw = be_u32(w.p + tex_start + 0x10);
         const uint32_t th = be_u32(w.p + tex_start + 0x14);
         w.pos = tex_start + mt + size_t(tw) * size_t(th) * 2;
@@ -194,11 +190,6 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
     }
     const uint32_t cnt_860e8 = uint32_t(out.bytes_consumed);
 
-    // Paint/splat weight-mask blobs: a run of .tex blobs (magic 0xFFFFFFFE) sits
-    // between the 860E8 stage and the LOD section. The engine walks them by size;
-    // parse them exactly (instead of the old scan for an "art\\" anchor, which
-    // only worked because it happened to land on the LOD strings). Capturing them
-    // exposes the per-layer blend masks for terrain splatting.
     while (w.pos + 4 <= w.n && be_u32(w.p + w.pos) == 0xFFFFFFFEu) {
         EhfPaintResource m;
         const size_t   ts = w.pos;
@@ -206,7 +197,6 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
         m.height       = be_u32(w.p + ts + 0x14);
         m.pixel_format = be_u32(w.p + ts + 0x18);
         const uint32_t mt = be_u32(w.p + ts + 0x20);
-        // pf=98 mask pixel data = header(mt) .. + width*height*2 (16-bit texels).
         if (m.pixel_format == 98u) {
             const size_t data_off = ts + mt;
             const size_t data_len = size_t(m.width) * size_t(m.height) * 2u;
@@ -283,17 +273,9 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
                     w.p + tex_start, w.n - tex_start,
                     decoded, sw, sh, err))
             {
-                // Per-resource index map. Each chunk layer references a
-                // specific paint resource via its name_idx (see below), and the
-                // engine samples THAT layer's own mask -- not one shared splat
-                // map. Store the decoded map on the resource so the bake can
-                // sample per-layer instead of collapsing every layer onto the
-                // last-decoded map.
                 out.paint_resources.back().data   = decoded;
                 out.paint_resources.back().width  = (uint32_t)sw;
                 out.paint_resources.back().height = (uint32_t)sh;
-                // Keep the shared splat map (last-decoded) as a fallback for
-                // layers whose name_idx points at a non-pf99 resource.
                 out.splat_indices = std::move(decoded);
                 out.splat_w = (uint32_t)sw;
                 out.splat_h = (uint32_t)sh;
@@ -363,10 +345,6 @@ bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
         }
     }
 
-    // Final section: per background map (one per bg patch, in order), the
-    // page table of its streamed textures as {file_offset, size} pairs.
-    // Offsets are absolute within the .ehf file (the pages live past the
-    // parsed body).
     uint8_t flag;
     if (!w.u8(flag)) { out.error = "final flag"; return false; }
     for (uint32_t k = 0; k < cnt_860e8; ++k) {

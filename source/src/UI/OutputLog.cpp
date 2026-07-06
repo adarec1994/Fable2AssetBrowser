@@ -228,9 +228,6 @@ bool is_noisy_message(Level lvl, const std::string& msg) {
 }
 
 void log(Level lvl, std::string msg) {
-    // Unfiltered file sink: the UI panel suppresses most terrain/texture
-    // diagnostics as noise, which makes load issues undiagnosable. Everything
-    // (including "noisy" lines) goes to %TEMP%\f2ab_output.log.
     {
         static std::mutex file_mx;
         static FILE*      file    = nullptr;

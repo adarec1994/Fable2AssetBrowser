@@ -867,10 +867,6 @@ bool build_terrain_weight_maps(const EhfParsedBody& parsed,
                                  int px,
                                  int py) -> float
     {
-        // Each chunk layer references its OWN paint mask through name_idx (the
-        // engine samples that per-layer resource, not one shared splat map).
-        // Prefer the layer's referenced resource; fall back to the shared
-        // splat_indices when it isn't a decoded pf99 map.
         const std::vector<uint8_t>* map = &parsed.splat_indices;
         int mw = int(parsed.splat_w);
         int mh = int(parsed.splat_h);
@@ -902,11 +898,6 @@ bool build_terrain_weight_maps(const EhfParsedBody& parsed,
         const int layer_count =
             std::min<int>(int(chunk.layers.size()), 16);
 
-        // Engine near-field blend: per-layer paint mask -> the layer's own
-        // material, weight-normalized. The corner (texture_idx, blend)
-        // records belong to the distant background-map compositor; routing
-        // weight through them bled foreign materials across chunk corners.
-        // Kept in sync with TerrainSplat::Build's weight bake.
         for (int li = 0; li < layer_count; ++li) {
             const auto& layer = chunk.layers[size_t(li)];
             const int mat =

@@ -253,9 +253,6 @@ bool skip_ehf_tex_blob(BeReader& r)
 
     size_t end = 0;
     if (pf == 98u) {
-        // 16-bit paint/splat mask: header(mt) + width*height*2 (dims @0x10/0x14).
-        // (The old raw_size@(mt) reading was pixel data, not a size — byte-exact
-        // verified across all HeightFieldGraphicsFile in streaming.bnk.)
         const uint32_t tw = read_be_u32_raw(r.p + tex_start + 0x10);
         const uint32_t th = read_be_u32_raw(r.p + tex_start + 0x14);
         end = tex_start + size_t(mt) + size_t(tw) * size_t(th) * 2;
@@ -306,10 +303,6 @@ bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
         float y = -std::numeric_limits<float>::infinity();
         uint32_t count = 0;
     };
-    // Meshed PER RENDER TILE: quantizing every tile's samples into one
-    // global grid stitched far-apart tiles (vista heightfields) together
-    // with long degenerate "shard" triangles. Each tile is a small regular
-    // grid on its own, so mesh tiles independently and concatenate.
     struct TileSamples {
         std::unordered_map<uint64_t, Sample> samples;
         std::vector<int32_t> qxs;
@@ -395,8 +388,6 @@ bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
         return false;
     }
 
-    // Texture extent: the chunk-grid bbox (terrain space, matches the baked
-    // composite), falling back to the union of all sample coordinates.
     float tex_min_x = sample_min_x;
     float tex_max_x = sample_max_x;
     float tex_min_z = sample_min_z;
@@ -570,7 +561,6 @@ bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
         ++tiles_meshed;
     }
 
-    // Concatenation of per-tile grids, not one regular grid.
     out.width  = 0;
     out.height = 0;
     if (!std::isfinite(out.min_height)) out.min_height = 0.0f;
@@ -591,22 +581,6 @@ bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
     return out.ok;
 }
 
-// Background-patch ("vista") mesh from the .ehf's own LOD data.
-//
-// The .ehf section after the two embedded textures is the background patch
-// list the game renders for non-active heightfields (XEX: HFGF_ReadHeightGrids
-// -> sub_82B250E8 deserializes, per patch, a W x H grid of 160-byte cells of
-// { 4 x vec4 LOD morph distances, 8 x vec3 (x, ground_y, height) entries }
-// plus a 24-byte patch AABB trailer, all in region space -- the same space as
-// the chunk-grid AABBs, so no post-hoc offsetting is needed).
-//
-// Of the 8 vec3 entries, entry 1 is the cell's base-corner vertex at full
-// (LOD0) detail -- verified against neighbouring cells: cell(x,y) entry 0
-// equals cell(x,y-1) entry 1 bit-for-bit. Entry 3 is the same corner's
-// coarse morph height, and entries 4..7 carry footprint-max style data
-// (entry 4 of a border cell hits the patch AABB z-max exactly), so only
-// entry 1 is surface geometry. Building one region-wide lattice from every
-// cell's entry 1 stitches patch seams exactly.
 bool build_ehf_vista_patch_mesh(const std::vector<uint8_t>& ehf,
                                 TerrainMesh& out,
                                 std::string* out_stats = nullptr)
@@ -643,8 +617,6 @@ bool build_ehf_vista_patch_mesh(const std::vector<uint8_t>& ehf,
     auto sane_coord = [](float v) {
         return std::isfinite(v) && std::fabs(v) < 1000000.0f;
     };
-    // Lattice keys quantized to 1/4 world unit (all observed base corners
-    // are exact multiples of the patch cell size).
     auto qkey = [](float x, float y) -> uint64_t {
         const int32_t qx = int32_t(std::lround(double(x) * 4.0));
         const int32_t qy = int32_t(std::lround(double(y) * 4.0));
@@ -655,14 +627,11 @@ bool build_ehf_vista_patch_mesh(const std::vector<uint8_t>& ehf,
         float    aabb_min[3];
         float    aabb_max[3];
         uint32_t W = 0, H = 0;
-        size_t   cells_off = 0;   // body-relative offset of the cell array
+        size_t   cells_off = 0;
     };
     std::vector<VistaPatch> patches;
     patches.reserve(patch_count);
     std::unordered_map<uint64_t, float> lattice;
-    // Secondary lattice from entry 4 (the base+(sx,sy) diagonal sample) --
-    // conservative footprint heights, used only where entry 1 has no
-    // coverage (the outermost row/column of the outermost patches).
     std::unordered_map<uint64_t, float> lattice_diag;
 
     uint64_t cell_total = 0;
@@ -718,10 +687,6 @@ bool build_ehf_vista_patch_mesh(const std::vector<uint8_t>& ehf,
     out.min_height =  std::numeric_limits<float>::infinity();
     out.max_height = -std::numeric_limits<float>::infinity();
 
-    // One (W+1)x(H+1) grid per patch, heights from the shared lattice so
-    // patch seams match exactly. Lattice misses (region borders, the last
-    // row/column of the outermost patches) clamp to the nearest available
-    // corner of the same quad.
     for (const VistaPatch& p : patches) {
         const float ax = p.aabb_min[0];
         const float ay = p.aabb_min[1];
@@ -756,8 +721,6 @@ bool build_ehf_vista_patch_mesh(const std::vector<uint8_t>& ehf,
                 }
             }
         }
-        // Fill missing lattice points from the nearest present neighbour in
-        // the same grid (outermost row/column of the region).
         for (uint32_t j = 0; j < VH; ++j) {
             for (uint32_t i = 0; i < VW; ++i) {
                 const size_t gi = size_t(j) * VW + i;
@@ -790,7 +753,6 @@ bool build_ehf_vista_patch_mesh(const std::vector<uint8_t>& ehf,
                 out.positions.push_back(wx);
                 out.positions.push_back(wh);
                 out.positions.push_back(wy);
-                // Placeholder; remapped to the chunk-grid bbox below.
                 out.uvs.push_back(wx);
                 out.uvs.push_back(wy);
                 out.min_height = std::min(out.min_height, wh);
@@ -798,8 +760,6 @@ bool build_ehf_vista_patch_mesh(const std::vector<uint8_t>& ehf,
             }
         }
 
-        // Normals from the lattice (falling back to this grid at borders) so
-        // shading agrees across patch seams.
         auto h_at = [&](int i, int j) -> float {
             const float wx = ax + sx * float(i);
             const float wy = ay + sy * float(j);
@@ -855,11 +815,6 @@ bool build_ehf_vista_patch_mesh(const std::vector<uint8_t>& ehf,
 
     if (out.indices.empty()) return false;
 
-    // Texture extent: the union of the patch AABBs -- the exact rect
-    // BakeEhfVistaPageComposite composites the background-map pages over
-    // (mirroring the runtime planar g_OffSetX/g_WidthTextureMeters mapping
-    // of VSHADER_LANDSCAPE_BACKGROUND_RENDER), with the union of the vertex
-    // coordinates as fallback.
     float tex_min_x =  std::numeric_limits<float>::infinity();
     float tex_max_x = -std::numeric_limits<float>::infinity();
     float tex_min_z =  std::numeric_limits<float>::infinity();
@@ -897,7 +852,6 @@ bool build_ehf_vista_patch_mesh(const std::vector<uint8_t>& ehf,
     if (!std::isfinite(out.min_height)) out.min_height = 0.0f;
     if (!std::isfinite(out.max_height)) out.max_height = 0.0f;
 
-    // Concatenation of per-cell triangles, not one regular grid.
     out.width  = 0;
     out.height = 0;
     out.ok = true;
@@ -7523,10 +7477,6 @@ bool Open(const FlatAssetEntry& entry)
                                 return false;
                             }
 
-                            // Primary path: the .ehf's own background-patch
-                            // section -- the exact vista geometry the game
-                            // renders for non-active heightfields, already in
-                            // region space.
                             TerrainMesh adj_mesh;
                             bool used_vista_mesh = false;
                             bool used_ehf_render_mesh = false;
@@ -7543,9 +7493,6 @@ bool Open(const FlatAssetEntry& entry)
                                 }
                             }
 
-                            // Fallbacks for files without a usable patch
-                            // section: full-res .ghf grid, then the legacy
-                            // strip/proxy reconstructions.
                             if (!adj_mesh.ok) {
                                 const std::string adj_ghf_path =
                                     resolve_adjacent_ghf(adj_ehf_path);
@@ -7575,8 +7522,6 @@ bool Open(const FlatAssetEntry& entry)
                                     }
                                 }
                                 if (adj_mesh.ok) {
-                                    // .ghf grids are heightfield-local; place
-                                    // them at the chunk-grid origin.
                                     EhfParsedBody adj_body;
                                     if (ParseEhfBody(adj_hf.ehf_bytes, adj_body) &&
                                         !adj_body.chunks.empty()) {
@@ -7634,14 +7579,6 @@ bool Open(const FlatAssetEntry& entry)
                             adj.mesh = std::move(adj_mesh);
                             adj.preserve_mesh_uvs =
                                 used_vista_mesh || used_ehf_render_mesh;
-                            // Always allow the embedded tile albedo (the
-                            // game-baked ground pages) for adjacents: it's
-                            // terrain-space, so it maps cleanly onto both the
-                            // .ehf render mesh (authored UVs) and the .ghf
-                            // grid mesh (grid-normalized UVs cover the same
-                            // world extent). Previously gated to the render-
-                            // mesh fallback only, which left .ghf-meshed
-                            // adjacents on the low-fidelity palette bake.
                             adj.prefer_embedded_albedo = true;
                             g_pending_adjacent_terrain_meshes.push_back(std::move(adj));
                         }
@@ -8187,8 +8124,6 @@ struct EhfRenderTileDesc {
     uint32_t cell_h = 0;
     uint32_t sub_w  = 0;
     uint32_t sub_h  = 0;
-    // World-space bbox from the 24-byte trailer after the tile's height
-    // cells: {min_x, min_y, min_z, max_x, max_y, max_z} as BE floats.
     float    min_x  = 0.0f;
     float    min_y  = 0.0f;
     float    max_x  = 0.0f;
@@ -8225,9 +8160,6 @@ static bool ehf_skip_tex_blob(const std::vector<uint8_t>& ehf,
 
     const size_t table = pos + mt;
     if (table + 8 > limit) return false;
-    // pf=98 blobs are raw 16-bit masks: header(mt) + w*h*2 bytes of pixels
-    // (no size fields at mt -- that dword is the first row of texels).
-    // Everything else is compressed: {raw_size, comp_size} @ mt, then zlib.
     size_t next;
     if (pf == 98u) {
         const uint32_t tw = ehf_be32(ehf, pos + 0x10);
@@ -8304,10 +8236,6 @@ static bool parse_ehf_render_tiles(const std::vector<uint8_t>& ehf,
         out.push_back(t);
     }
 
-    // Preferred placement: each tile's grid trailer stores its world bbox, so
-    // its cell position is exact. Levels with uniform tiles (most outdoor
-    // heightfields) coincide with the old row-packing guess, but irregular
-    // layouts (caves) do not and were stitched scrambled.
     bool placed_exact = false;
     {
         size_t bbox_count = 0;
@@ -8350,7 +8278,6 @@ static bool parse_ehf_render_tiles(const std::vector<uint8_t>& ehf,
     }
 
     if (!placed_exact) {
-        // Fallback: legacy row-packing guess.
         uint32_t x = 0;
         uint32_t y = 0;
         uint32_t row_h = 0;
@@ -8448,11 +8375,6 @@ static bool decode_ehf_embedded_bc1(const std::vector<uint8_t>& ehf,
     const int rc = (rc_init == Z_OK) ? inflate(&zs, Z_FINISH) : Z_ERRNO;
     const size_t produced = size_t(mip.raw_size) - size_t(zs.avail_out);
     inflateEnd(&zs);
-    // The tile-page streams cover the whole mip chain; raw_size is only the
-    // top mip, so inflate stops on a full output buffer WITHOUT reaching
-    // Z_STREAM_END. Requiring the end marker here rejected every page in
-    // every level. Accept a completely-filled top mip instead (same policy
-    // as the huffman-albedo path below).
     if (rc_init != Z_OK || produced != mip.raw_size ||
         !(rc == Z_STREAM_END || rc == Z_OK || rc == Z_BUF_ERROR)) {
         return false;
@@ -8622,18 +8544,6 @@ static bool DecodeEhfEmbeddedTileComposite(const std::vector<uint8_t>& ehf,
 
 }
 
-// Vista texture composite from the .ehf's own per-patch background-map pages.
-//
-// Every background patch owns a background map whose page table (exact
-// {file_offset, size} pairs, no heuristics) is stored in the body's final
-// section; page 0 is the highest-resolution BC1 level and maps planarly onto
-// the patch's world AABB (the runtime samples it with the planar
-// g_OffSetX/g_WidthTextureMeters transform of
-// VSHADER_LANDSCAPE_BACKGROUND_RENDER). The composite covers the union of
-// the patch AABBs -- the same rect build_ehf_vista_patch_mesh uses for its
-// UVs -- at the pages' own texel density, which for the dedicated vista
-// filler heightfields is far higher than the terrain-cell grid the older
-// embedded-tile composite was sized from.
 bool Level::BakeEhfVistaPageComposite(const std::vector<uint8_t>& ehf,
                                       std::vector<uint8_t>& out_rgba,
                                       int&                  out_w,
@@ -8718,7 +8628,6 @@ bool Level::BakeEhfVistaPageComposite(const std::vector<uint8_t>& ehf,
     };
     float density_x = std::clamp(median(dens_x), 0.5f, 16.0f);
     float density_z = std::clamp(median(dens_z), 0.5f, 16.0f);
-    // Fit within a sane texture budget while keeping the aspect.
     constexpr float kMaxDim = 4096.0f;
     if (span_x * density_x > kMaxDim) density_x = kMaxDim / span_x;
     if (span_z * density_z > kMaxDim) density_z = kMaxDim / span_z;
@@ -8757,9 +8666,6 @@ bool Level::BakeEhfVistaPageComposite(const std::vector<uint8_t>& ehf,
         return false;
     }
 
-    // Dilate a few texels into unfilled space (holes between patches of
-    // L-shaped fillers) so bilinear filtering at patch borders doesn't pull
-    // in black.
     for (int pass = 0; pass < 4; ++pass) {
         std::vector<uint8_t> next = filled;
         bool changed = false;
@@ -8969,11 +8875,6 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
                (uint32_t(p[2]) <<  8) |  uint32_t(p[3]);
     };
 
-    // If this zlib stream is the mip payload of a pf35 tex-blob page, the
-    // page header (0xFFFFFFFE, dims at +0x10/+0x14) states its TRUE size.
-    // Returns true when a header is found and its dims DISAGREE with the
-    // guessed candidate -- decoding those with guessed dims scrambled the
-    // vista tile pages (e.g. a 128x48 strip decoded as 128x128).
     auto header_contradicts = [&](size_t zlib_at,
                                   uint32_t cand_w,
                                   uint32_t cand_h) -> bool {
@@ -9270,11 +9171,6 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
         return false;
     }
 
-    // Parse the body and register the LOD palette FIRST. The embedded-albedo
-    // early return below used to skip this, leaving the palette empty (or
-    // stale from the previous level) whenever the embedded composite
-    // succeeded — which silently killed the LOD thumbnails and the SPLAT
-    // shader for exactly those levels.
     EhfParsedBody parsed;
     const bool parsed_ok = ParseEhfBody(ehf, parsed);
     if (parsed_ok) {

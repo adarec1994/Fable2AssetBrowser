@@ -105,11 +105,6 @@ static void decode_bc3_block(const uint8_t* b, uint32_t* outRGBA){
     }
     for(int i=0;i<16;++i) outRGBA[i]=color[i];
 }
-// Xbox 360 BC textures use GPUENDIAN_8IN16 (engine pixel-format table):
-// converting to PC layout = byte-swap every 16-bit word across the surface,
-// including the index/alpha words. The old per-field 32-/48-bit reversals
-// reordered index rows in every block, and never swapped the BC3/BC5 alpha
-// endpoint pair (which flips the interpolation mode when a0<->a1 cross).
 static void swap_bc1_endian(uint8_t* data, size_t size) {
     for (size_t i = 0; i + 2 <= size; i += 2) {
         uint8_t t = data[i]; data[i] = data[i+1]; data[i+1] = t;
@@ -1121,8 +1116,6 @@ struct VSOUT{ float4 p:SV_Position; float3 n:NORMAL; float2 t:TEXCOORD0; };
 VSOUT VS(VSIN i){
     VSOUT o;
 
-    // params.y > 0.5 = "no skin": vertex is already in model space (cloth solver
-    // writes solved positions into a dynamic VB each frame).
     float4x4 skin = (params.y > 0.5)
         ? float4x4(1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1)
         : bones[i.bid.x] * i.bw.x +
@@ -1185,8 +1178,6 @@ float4 PS(VSOUT i) : SV_Target {
     float3 color = albedo * diff_term + spec.xxx;
 
     if (params.z > 1.5) {
-        // cloth/soft-body sim overlay (dev): lit flat green, texture-independent,
-        // always opaque so the untextured sim mesh is never alpha-discarded.
         return float4(float3(0.20, 0.95, 0.40) * (0.4 + 0.6 * diff_term), 1.0);
     }
     if (params.z > 0.5) {
@@ -1194,8 +1185,6 @@ float4 PS(VSOUT i) : SV_Target {
         color = lerp(color, hi, 0.65);
     }
 
-    // params.x = alpha-test flag. Opaque materials (engine geom) pack a gloss
-    // mask in diffuse-alpha, not opacity, so they must NOT discard or blend.
     if (params.x > 0.5 && alpha < 0.25) discard;
     if (params.x < 0.5) alpha = 1.0;
 
@@ -1416,12 +1405,6 @@ float3 sample_material(int slice, float2 world_xy, float slope_w){
     int max_slice = max((int)chunk_grid_size.z - 1, 0);
     int s = min(max(slice, 0), max_slice);
     float4 mp = material_params[s];
-    /* Tile every layer at the shared reference density (splat_params.y =
-       R.tile_scale). The per-material authored base scale (mp.x) varies per
-       layer (e.g. grass 0.125 vs cobbles 0.25) and magnifies the low-scale
-       layers ~2x, reading as "blown up" / low-LOD. Dev mode samples uniformly
-       at this same density and looks correct; we keep the per-material WEIGHT
-       blending below and only fix the diffuse tiling scale here. */
     float base_scale = splat_params.y;
     float detail_scale = splat_params.y;
     float3 base = lod_array.Sample(
@@ -1444,11 +1427,6 @@ float4 PS(VSOUT i) : SV_Target {
     float2 chunk_clamped = clamp(chunk_co,
                                  float2(0, 0),
                                  float2(CW - 0.001, CH - 0.001));
-    /* Engine cliff selection is a hard slope threshold (cndgt on normal.y vs
-       g_CliffBlendOffsetAndScale). Approximate with a tight ramp that engages
-       at ~26 deg and saturates by ~37 deg; the old (0.82, 0.35) curve only
-       started at ~35 deg and never saturated below ~62 deg, which hid the
-       cliff texture on most real slopes. */
     float slope_w = saturate((0.90 - abs(normalize(i.n).y)) / 0.10);
 
     float3 final = float3(0.0, 0.0, 0.0);
@@ -1483,10 +1461,6 @@ float4 PS(VSOUT i) : SV_Target {
 }
 )";
 
-// Dev-only variant reconciled to the engine's LANDSCAPEMATERIAL blend: samples
-// each layer at its authored PER-MATERIAL tile scale (16/dim, material_params.x/y)
-// instead of the shared reference density the live shader forces. Same
-// weight-normalized accumulation. Toggled via S.terrain_landscape_blend (dev).
 static const char* g_terrain_ps_landscape = R"(
 cbuffer CB : register(b0){
     float4x4 mvp;
@@ -1524,7 +1498,6 @@ float3 sample_material(int slice, float2 world_xy, float slope_w){
     int max_slice = max((int)chunk_grid_size.z - 1, 0);
     int s = min(max(slice, 0), max_slice);
     float4 mp = material_params[s];
-    // Engine: per-material authored tile scale (16/texture_dim), per layer.
     float base_scale   = (mp.x > 0.0) ? mp.x : splat_params.y;
     float detail_scale = (mp.y > 0.0) ? mp.y : base_scale;
     float3 base = lod_array.Sample(
@@ -1547,11 +1520,6 @@ float4 PS(VSOUT i) : SV_Target {
     float2 chunk_clamped = clamp(chunk_co,
                                  float2(0, 0),
                                  float2(CW - 0.001, CH - 0.001));
-    /* Engine cliff selection is a hard slope threshold (cndgt on normal.y vs
-       g_CliffBlendOffsetAndScale). Approximate with a tight ramp that engages
-       at ~26 deg and saturates by ~37 deg; the old (0.82, 0.35) curve only
-       started at ~35 deg and never saturated below ~62 deg, which hid the
-       cliff texture on most real slopes. */
     float slope_w = saturate((0.90 - abs(normalize(i.n).y)) / 0.10);
 
     float3 final = float3(0.0, 0.0, 0.0);
@@ -2335,26 +2303,18 @@ static void compute_rest_world(const MDLInfo& info,
     }
 }
 
-// ==== Cloth soft-body solver ================================================
-// Position-Based-Dynamics cloth on a cloth record's render mesh. Particles =
-// mesh vertices; distance constraints = mesh edges (rest length from bind pose);
-// pinned = the top ~22% by Y (the attachment band). Each frame the free
-// particles are Verlet-integrated under gravity, attracted toward the
-// skeleton-driven (skinned) pose, and the distance constraints are projected.
-// Solved model-space positions + recomputed normals go into a dynamic VB drawn
-// with no_skin (params.y). Tunables below.
 struct ClothSim {
-    std::vector<float>    bind;    // 3*N bind-space positions
-    std::vector<uint8_t>  bid;     // 4*N bone ids
-    std::vector<float>    bw;      // 4*N bone weights
-    std::vector<uint32_t> idx;     // triangle index list
-    std::vector<uint32_t> e0, e1;  // distance-constraint endpoints
-    std::vector<float>    rest;    // rest lengths
-    std::vector<uint8_t>  pinned;  // 1*N
-    std::vector<float>    pos, prev; // 3*N solved (model space)
-    std::vector<MPVertex> vtx;     // full vertex array (uv/bones kept; pos/nrm updated)
-    float scale = 1.0f;            // bbox diagonal (for gravity scaling)
-    float damping = 0.05f;         // sim-param damping (from cloth block)
+    std::vector<float>    bind;
+    std::vector<uint8_t>  bid;
+    std::vector<float>    bw;
+    std::vector<uint32_t> idx;
+    std::vector<uint32_t> e0, e1;
+    std::vector<float>    rest;
+    std::vector<uint8_t>  pinned;
+    std::vector<float>    pos, prev;
+    std::vector<MPVertex> vtx;
+    float scale = 1.0f;
+    float damping = 0.05f;
     bool  inited = false;
 };
 
@@ -2396,16 +2356,12 @@ static std::shared_ptr<ClothSim> mp_build_cloth(const MDLMeshGeom& g,
     if(c->scale<1e-4f) c->scale=1.0f;
     c->damping = g.cloth_damping;
 
-    // --- Anchoring: real per-vertex attachment flags from the cloth block,
-    //     with per-connected-component safety so no island can float free. ---
     c->pinned.assign(N,0);
     size_t realPins=0;
     if(g.cloth_pin.size()==N)
         for(size_t v=0;v<N;v++) if(g.cloth_pin[v]){ c->pinned[v]=1; ++realPins; }
-    // reject degenerate flag sets (nothing pinned, or ~everything pinned)
     if(!(realPins>0 && realPins < N*9/10)) std::fill(c->pinned.begin(),c->pinned.end(),0);
 
-    // union-find over the mesh edges → connected components (islands)
     std::vector<uint32_t> par(N); for(uint32_t v=0;v<(uint32_t)N;v++) par[v]=v;
     std::function<uint32_t(uint32_t)> find=[&](uint32_t x){ while(par[x]!=x){ par[x]=par[par[x]]; x=par[x]; } return x; };
     for(size_t e=0;e<c->e0.size();e++){ uint32_t a=find(c->e0[e]),b=find(c->e1[e]); if(a!=b) par[a]=b; }
@@ -2416,7 +2372,6 @@ static std::shared_ptr<ClothSim> mp_build_cloth(const MDLMeshGeom& g,
         if(it==cMax.end()){ cMax[r]=y; cMin[r]=y; } else { it->second=std::max(it->second,y); cMin[r]=std::min(cMin[r],y); }
         if(c->pinned[v]) cPinned[r]=1;
     }
-    // any island with no real pin → anchor its top ~18% by Y
     for(uint32_t v=0;v<(uint32_t)N;v++){
         uint32_t r=find(v); if(cPinned.count(r)) continue;
         float t = cMax[r] - (cMax[r]-cMin[r])*0.18f;
@@ -2426,7 +2381,6 @@ static std::shared_ptr<ClothSim> mp_build_cloth(const MDLMeshGeom& g,
     return c;
 }
 
-// Advances the sim one frame and refreshes c.vtx (pos + recomputed normals).
 static void mp_step_cloth(ClothSim& c, const XMFLOAT4X4* bmats, uint32_t nbones){
     const size_t N = c.pos.size()/3;
     std::vector<float> tgt(N*3);
@@ -2444,10 +2398,9 @@ static void mp_step_cloth(ClothSim& c, const XMFLOAT4X4* bmats, uint32_t nbones)
     }
     if(!c.inited){ c.pos=tgt; c.prev=tgt; c.inited=true; }
 
-    // sim-param damping (~0.01–0.2) → Verlet velocity retention
     const float damp = 1.0f - std::min(std::max(c.damping,0.0f),0.4f);
-    const float grav = c.scale * 0.0016f;     // per-step downward pull (model units)
-    const float attract = 0.03f;              // pull toward skinned pose (keeps it near body)
+    const float grav = c.scale * 0.0016f;
+    const float attract = 0.03f;
     for(size_t v=0;v<N;v++){
         if(c.pinned[v]){
             for(int a=0;a<3;a++){ c.pos[v*3+a]=tgt[v*3+a]; c.prev[v*3+a]=tgt[v*3+a]; }
@@ -2631,8 +2584,6 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             continue;
         }
 
-        // Cloth meshes need a CPU-writable (dynamic) VB — the solver rewrites
-        // positions/normals every frame.
         D3D11_BUFFER_DESC vb{}; vb.BindFlags=D3D11_BIND_VERTEX_BUFFER; vb.ByteWidth=(UINT)vb_bytes;
         if(g.cloth_sim){ vb.Usage=D3D11_USAGE_DYNAMIC; vb.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE; }
         else           { vb.Usage=D3D11_USAGE_IMMUTABLE; }
@@ -2681,7 +2632,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         m.is_water   = g.is_water;
         m.is_cloth   = g.is_cloth;
         m.alpha_test = g.alpha_test;
-        m.cloth_sim  = g.cloth_sim && (bool)m.cloth;   // only if solver built
+        m.cloth_sim  = g.cloth_sim && (bool)m.cloth;
         std::memcpy(m.water_params, g.water_params,
                     sizeof(m.water_params));
         m.has_water_theme = g.has_water_theme;
@@ -3344,8 +3295,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         ctx->VSSetConstantBuffers(1, 1, &mp.bone_cb);
     }
 
-    // Step cloth soft-body sims (anchored to the skinned pose) and refresh their
-    // dynamic vertex buffers with the solved model-space positions/normals.
     for (auto& m : mp.meshes){
         if (!m.cloth_sim || !m.cloth || !m.vb) continue;
         mp_step_cloth(*m.cloth, bone_mats.data(), MP_MAX_BONES);
@@ -3454,9 +3403,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 ctx->Unmap(mp.cbuffer_terrain, 0);
             }
 
-            // Dev-only A/B: the engine-reconciled LANDSCAPEMATERIAL blend
-            // (per-material tiling). Uses the same weight-array inputs as the
-            // live shader, so it only applies on the non-direct path.
             const bool use_landscape_blend =
                 !use_direct_terrain && S.dev_mode &&
                 S.terrain_landscape_blend && mp.ps_terrain_landscape;
@@ -3687,9 +3633,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     ctx->OMSetDepthStencilState(mp.dssWrite, 0);
     for(const auto& m : mp.meshes){
         if (mp_should_hide_mesh(m)) continue;
-        // Opaque pass: everything except genuinely alpha-tested (cutout) meshes.
-        // A gloss-in-alpha material (has_alpha but alpha_test==false) is opaque
-        // and MUST be drawn here.
         if(!m.vb || !m.ib || m.index_count==0 || (m.has_alpha && m.alpha_test)) continue;
         if (any_isolated && !m.isolated) continue;
         if (mp.selected_lod >= 0 &&
@@ -3700,8 +3643,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     ctx->OMSetDepthStencilState(mp.dssNoWrite, 0);
     for(const auto& m : mp.meshes){
         if (mp_should_hide_mesh(m)) continue;
-        // Only genuinely alpha-tested materials get the blend pass. Opaque meshes
-        // that merely carry a gloss mask in diffuse-alpha must NOT be re-blended.
         if(!m.vb || !m.ib || m.index_count==0 || !m.has_alpha || !m.alpha_test) continue;
         if (any_isolated && !m.isolated) continue;
         if (mp.selected_lod >= 0 &&

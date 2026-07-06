@@ -15,9 +15,6 @@
 #include <thread>
 #include <vector>
 
-// Externs from PendingLoads.cpp — used to cancel any in-flight model/texture
-// load that would otherwise resurrect the model/texture render panel and
-// hide the Lua script preview right after the user clicks a .lua leaf.
 extern std::atomic<bool> g_pending_mdl_load;
 extern std::atomic<bool> g_pending_tex_load;
 extern int               g_pending_mdl_index;
@@ -259,14 +256,6 @@ void draw_tree_node(TreeNode& node) {
                             node.bnk_source, node.bnk_index, node.name);
                     }
                     if (is_lua(node.name)) {
-                        // Lua leaves clicked in the file tree come from
-                        // inside a BNK (the tree only contains BNK contents).
-                        // Extract the bytes, decompile if it's compiled Lua
-                        // 5.1 bytecode (\x1BLua header), otherwise just show
-                        // the raw source. The render-panel priority chain is
-                        // GDB > model > texture > lua, so we also cancel any
-                        // pending model/texture load that would otherwise
-                        // hide the lua panel a frame after the click lands.
                         g_pending_mdl_load = false;
                         g_pending_tex_load = false;
                         g_pending_mdl_index = -1;

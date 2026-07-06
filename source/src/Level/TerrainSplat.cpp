@@ -703,11 +703,6 @@ bool Build(ID3D11Device*                                       device,
         const auto mask_sample = [&](const Level::EhfChunkLayer& layer,
                                      int px, int py) -> float
         {
-            // Each chunk layer references its OWN paint mask through name_idx
-            // (the engine samples that per-layer resource, not one shared
-            // splat map). Prefer the layer's referenced resource; fall back
-            // to the shared splat_indices. Mirrors LevelExport::mask_sample
-            // so the preview bake matches the export bake.
             const std::vector<uint8_t>* map = &parsed.splat_indices;
             int mw = int(parsed.splat_w);
             int mh = int(parsed.splat_h);
@@ -745,12 +740,6 @@ bool Build(ID3D11Device*                                       device,
             const auto& chunk = parsed.chunks[ci];
             const int layer_count =
                 std::min<int>((int)chunk.layers.size(), kMaxLayers);
-            // Engine near-field blend (LANDSCAPEMATERIAL PS): each layer
-            // contributes its OWN paint-mask weight to its OWN material,
-            // weight-normalized. The per-corner (texture_idx, blend) records
-            // drive the distant background-map compositor, not this blend;
-            // routing weight through them injected foreign materials at
-            // chunk corners (e.g. stray cobblestone patches on hills).
             for (int li = 0; li < layer_count; ++li) {
                 const auto& layer = chunk.layers[size_t(li)];
                 const int mat =

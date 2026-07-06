@@ -581,6 +581,12 @@ bool build_ehf_render_strip_mesh(const std::vector<uint8_t>& ehf,
     return out.ok;
 }
 
+// Defined later (after the .tex / DecodeAtlas helpers are in scope). Emits one
+// grid sub-mesh + one decoded background-map page per vista patch.
+bool build_ehf_vista_patch_geoms(const std::vector<uint8_t>& ehf,
+                                 std::vector<Level::VistaPatchGeom>& out_geoms,
+                                 std::string* out_stats = nullptr);
+
 bool build_ehf_vista_patch_mesh(const std::vector<uint8_t>& ehf,
                                 TerrainMesh& out,
                                 std::string* out_stats = nullptr)
@@ -7478,6 +7484,7 @@ bool Open(const FlatAssetEntry& entry)
                             }
 
                             TerrainMesh adj_mesh;
+                            std::vector<Level::VistaPatchGeom> adj_patch_geoms;
                             bool used_vista_mesh = false;
                             bool used_ehf_render_mesh = false;
                             {
@@ -7490,6 +7497,16 @@ bool Open(const FlatAssetEntry& entry)
                                                     ".ehf bg patches: " +
                                                     adj_ehf_path + " (" +
                                                     vista_stats + ")");
+                                    // Engine-exact per-patch geometry: one grid
+                                    // sub-mesh + its own tiled page per patch.
+                                    std::string geom_stats;
+                                    if (build_ehf_vista_patch_geoms(
+                                            adj_hf.ehf_bytes, adj_patch_geoms,
+                                            &geom_stats)) {
+                                        OutputLog::info(
+                                            "adjacent terrain per-patch geoms: " +
+                                            geom_stats);
+                                    }
                                 }
                             }
 
@@ -7577,6 +7594,7 @@ bool Open(const FlatAssetEntry& entry)
                             adj.preferred_bnk = g_pending_terrain_level_entry.bnk_path;
                             adj.ehf_bytes = std::move(adj_hf.ehf_bytes);
                             adj.mesh = std::move(adj_mesh);
+                            adj.patch_geoms = std::move(adj_patch_geoms);
                             adj.preserve_mesh_uvs =
                                 used_vista_mesh || used_ehf_render_mesh;
                             adj.prefer_embedded_albedo = true;
@@ -8542,6 +8560,403 @@ static bool DecodeEhfEmbeddedTileComposite(const std::vector<uint8_t>& ehf,
     return true;
 }
 
+// Decode a background-map page (a self-contained pf35 BC1 tex blob at file
+// offset `off`, whose payload is Xbox-360-tiled BC1) via DecodeAtlas. The
+// page-table `len` is the streamed-record size (smaller than header+zlib), so
+// the blob is bounded by mip_table_offset + 8 + compressed_size instead.
+static bool decode_bg_page(const std::vector<uint8_t>& ehf, uint32_t off,
+                           std::vector<uint8_t>& rgba, int& w, int& h)
+{
+    if (uint64_t(off) + 0x60 > ehf.size()) return false;
+    if (ehf_be32(ehf, off) != 0xFFFFFFFEu) return false;
+    if (ehf_be32(ehf, off + 0x18) != 35u) return false;
+    const uint32_t mt = ehf_be32(ehf, off + 0x20);
+    if (mt < 0x54 || mt > 0x200 || size_t(off) + mt + 8 > ehf.size()) {
+        return false;
+    }
+    const uint32_t comp = ehf_be32(ehf, off + mt + 4);
+    size_t blob_end = size_t(off) + mt + 8 + comp;
+    if (blob_end > ehf.size()) blob_end = ehf.size();
+    std::vector<uint8_t> blob(ehf.begin() + off, ehf.begin() + blob_end);
+    TextureAtlas::DecodedAtlas dec = TextureAtlas::DecodeAtlas(blob);
+    if (!dec.ok || dec.rgba.empty()) return false;
+    rgba = std::move(dec.rgba);
+    w = dec.width;
+    h = dec.height;
+    return true;
+}
+
+bool build_ehf_vista_patch_geoms(const std::vector<uint8_t>& ehf,
+                                 std::vector<Level::VistaPatchGeom>& out_geoms,
+                                 std::string* out_stats)
+{
+    out_geoms.clear();
+    if (out_stats) out_stats->clear();
+
+    static constexpr char kMagic[] = "HeightFieldGraphicsFile";
+    static constexpr size_t kMagicLen = sizeof(kMagic) - 1;
+    static constexpr size_t kHeaderLen = 63;
+    if (ehf.size() < kHeaderLen ||
+        std::memcmp(ehf.data(), kMagic, kMagicLen) != 0) {
+        return false;
+    }
+    const uint32_t body_off  = read_be_u32_raw(ehf.data() + 55);
+    const uint32_t body_size = read_be_u32_raw(ehf.data() + 59);
+    if (uint64_t(body_off) + uint64_t(body_size) > ehf.size()) return false;
+
+    // M = header.f2 * 16 (the cell size / tile period). uv = (world - min)/M.
+    float f2 = read_be_f32_raw(ehf.data() + 43);
+    const float M = (std::isfinite(f2) && f2 > 0.0f) ? f2 * 16.0f : 8.0f;
+
+    BeReader r;
+    r.p = ehf.data() + body_off;
+    r.n = body_size;
+    r.i = 0;
+    if (!skip_ehf_tex_blob(r) || !skip_ehf_tex_blob(r)) return false;
+
+    float max_height_hint = 0.0f;
+    uint32_t patch_count = 0;
+    if (!r.f32(max_height_hint) || !r.u32(patch_count)) return false;
+    if (patch_count == 0 || patch_count > 4096) return false;
+
+    auto sane = [](float v) {
+        return std::isfinite(v) && std::fabs(v) < 1000000.0f;
+    };
+    auto qkey = [](float x, float y) -> uint64_t {
+        const int32_t qx = int32_t(std::lround(double(x) * 4.0));
+        const int32_t qy = int32_t(std::lround(double(y) * 4.0));
+        return (uint64_t(uint32_t(qx)) << 32) | uint32_t(qy);
+    };
+
+    struct VP { float amin[3]; float amax[3]; uint32_t W, H; };
+    std::vector<VP> patches;
+    patches.reserve(patch_count);
+    std::unordered_map<uint64_t, float> lattice, lattice_diag;
+
+    for (uint32_t pi = 0; pi < patch_count; ++pi) {
+        float a = 0.0f, b = 0.0f;
+        uint32_t W = 0, H = 0;
+        if (!r.f32(a) || !r.f32(b) || !r.u32(W) || !r.u32(H)) return false;
+        if (W == 0 || H == 0 || W > 1024 || H > 1024) return false;
+        const uint64_t cells = uint64_t(W) * uint64_t(H);
+        if (cells > 65536 ||
+            uint64_t(r.i) + cells * 160ull + 24ull > uint64_t(r.n)) {
+            return false;
+        }
+        VP p;
+        p.W = W;
+        p.H = H;
+        const size_t cell_base = r.i;
+        const uint8_t* aabb = r.p + cell_base + size_t(cells) * 160u;
+        for (int k = 0; k < 3; ++k) {
+            p.amin[k] = read_be_f32_raw(aabb + size_t(k) * 4u);
+            p.amax[k] = read_be_f32_raw(aabb + 12u + size_t(k) * 4u);
+        }
+        for (uint64_t ci = 0; ci < cells; ++ci) {
+            const uint8_t* bv = r.p + cell_base + size_t(ci) * 160u + 64u + 12u;
+            const float bx = read_be_f32_raw(bv + 0);
+            const float by = read_be_f32_raw(bv + 4);
+            const float bh = read_be_f32_raw(bv + 8);
+            if (sane(bx) && sane(by) && sane(bh)) lattice[qkey(bx, by)] = bh;
+            const uint8_t* dv = r.p + cell_base + size_t(ci) * 160u + 64u + 48u;
+            const float dx = read_be_f32_raw(dv + 0);
+            const float dy = read_be_f32_raw(dv + 4);
+            const float dh = read_be_f32_raw(dv + 8);
+            if (sane(dx) && sane(dy) && sane(dh)) {
+                lattice_diag.emplace(qkey(dx, dy), dh);
+            }
+        }
+        patches.push_back(p);
+        r.i += size_t(cells) * 160u + 24u;
+    }
+    if (patches.empty() || lattice.empty()) return false;
+
+    // Atlas UV lookup tables (reversed from the XEX loader + Shaders.sbk).
+    // Each M x M cell has its own tile packed at an ARBITRARY spot in its
+    // patch's page, and the mapping lives in two pf98 16-bit textures right
+    // after the 18-byte-record section: texel (cx*17 + i, cy) of the first
+    // is the atlas u (0..65535 -> 0..1) for grid column i (0..16) of file
+    // cell (cx,cy); the second is the same for grid rows / v. The 17 values
+    // per axis are monotonic but NON-uniform (texel density adapts), which
+    // is why no analytic world->uv mapping ever matched. The engine's
+    // VSHADER_LANDSCAPE_BACKGROUND_RENDER fetches them per vertex via
+    // g_BackgroundUSampler / g_BackgroundVSampler.
+    std::vector<uint16_t> uv_u, uv_v;
+    uint32_t uvt_w = 0, uvt_h = 0;
+    {
+        float rec_f = 0.0f;
+        uint32_t rec_n = 0;
+        if (r.f32(rec_f) && r.u32(rec_n) && rec_n <= 100000 &&
+            r.skip(size_t(rec_n) * 18u)) {
+            for (int t = 0; t < 2; ++t) {
+                if (uint64_t(r.i) + 0x60 > uint64_t(r.n)) break;
+                const uint8_t* tb = r.p + r.i;
+                if (read_be_u32_raw(tb) != 0xFFFFFFFEu) break;
+                if (read_be_u32_raw(tb + 0x18) != 98u) break;
+                const uint32_t tw = read_be_u32_raw(tb + 0x10);
+                const uint32_t th = read_be_u32_raw(tb + 0x14);
+                const uint32_t mt = read_be_u32_raw(tb + 0x20);
+                if (tw == 0 || th == 0 || tw > 65536 || th > 65536 ||
+                    mt < 0x24 || mt > 0x200 ||
+                    uint64_t(r.i) + mt + uint64_t(tw) * th * 2u >
+                        uint64_t(r.n)) {
+                    break;
+                }
+                std::vector<uint16_t>& dst = (t == 0) ? uv_u : uv_v;
+                if (t == 1 && (tw != uvt_w || th != uvt_h)) break;
+                dst.resize(size_t(tw) * th);
+                const uint8_t* px = tb + mt;
+                for (size_t k = 0; k < dst.size(); ++k) {
+                    dst[k] = uint16_t((px[k * 2] << 8) | px[k * 2 + 1]);
+                }
+                uvt_w = tw;
+                uvt_h = th;
+                r.i += size_t(mt) + size_t(tw) * th * 2u;
+            }
+        }
+    }
+    const bool have_uv_tables =
+        !uv_u.empty() && uv_v.size() == uv_u.size() &&
+        uvt_w >= 17 && (uvt_w % 17u) == 0;
+    const float org_x = read_be_f32_raw(ehf.data() + 27);
+    const float org_y = read_be_f32_raw(ehf.data() + 31);
+
+    // Page tables (index-aligned with the patch list).
+    EhfParsedBody parsed;
+    const bool have_pages = ParseEhfBody(ehf, parsed) &&
+                            parsed.bg_patches.size() == patches.size();
+
+    out_geoms.reserve(patches.size());
+    size_t textured = 0;
+    for (size_t pi = 0; pi < patches.size(); ++pi) {
+        const VP& p = patches[pi];
+        const float ax = p.amin[0];
+        const float ay = p.amin[1];
+        const float sx = (p.amax[0] - p.amin[0]) / float(p.W);
+        const float sy = (p.amax[1] - p.amin[1]) / float(p.H);
+        if (!(sx > 0.0f) || !(sy > 0.0f) ||
+            !std::isfinite(sx) || !std::isfinite(sy)) {
+            continue;
+        }
+        const uint32_t VW = p.W + 1;
+        const uint32_t VH = p.H + 1;
+
+        std::vector<float>  gh(size_t(VW) * size_t(VH), 0.0f);
+        std::vector<uint8_t> ghas(size_t(VW) * size_t(VH), 0);
+        for (uint32_t j = 0; j < VH; ++j) {
+            for (uint32_t i = 0; i < VW; ++i) {
+                const uint64_t key = qkey(ax + sx * float(i), ay + sy * float(j));
+                float hv = 0.0f;
+                bool have = false;
+                if (auto it = lattice.find(key); it != lattice.end()) {
+                    hv = it->second; have = true;
+                } else if (auto it2 = lattice_diag.find(key);
+                           it2 != lattice_diag.end()) {
+                    hv = it2->second; have = true;
+                }
+                if (have) {
+                    gh[size_t(j) * VW + i]   = hv;
+                    ghas[size_t(j) * VW + i] = 1;
+                }
+            }
+        }
+        for (uint32_t j = 0; j < VH; ++j) {
+            for (uint32_t i = 0; i < VW; ++i) {
+                const size_t gi = size_t(j) * VW + i;
+                if (ghas[gi]) continue;
+                float best = p.amin[2];
+                int best_d = INT32_MAX;
+                for (uint32_t jj = 0; jj < VH; ++jj) {
+                    for (uint32_t ii = 0; ii < VW; ++ii) {
+                        const size_t oi = size_t(jj) * VW + ii;
+                        if (!ghas[oi]) continue;
+                        const int d = std::abs(int(ii) - int(i)) +
+                                      std::abs(int(jj) - int(j));
+                        if (d < best_d) { best_d = d; best = gh[oi]; }
+                    }
+                }
+                gh[gi] = best;
+            }
+        }
+
+        auto h_at = [&](int i, int j) -> float {
+            const int ci = std::clamp(i, 0, int(VW) - 1);
+            const int cj = std::clamp(j, 0, int(VH) - 1);
+            return gh[size_t(cj) * VW + size_t(ci)];
+        };
+        auto n_at = [&](int i, int j, float out[3]) {
+            const float hl = h_at(i - 1, j);
+            const float hr = h_at(i + 1, j);
+            const float hd = h_at(i, j - 1);
+            const float hu = h_at(i, j + 1);
+            float nx = (hl - hr) * sy;
+            float ny = 2.0f * sx * sy;
+            float nz = (hd - hu) * sx;
+            const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (len > 1e-6f) { nx /= len; ny /= len; nz /= len; }
+            else { nx = 0.0f; ny = 1.0f; nz = 0.0f; }
+            out[0] = nx; out[1] = ny; out[2] = nz;
+        };
+
+        Level::VistaPatchGeom vg;
+        TerrainMesh& m = vg.mesh;
+        m.min_height =  std::numeric_limits<float>::infinity();
+        m.max_height = -std::numeric_limits<float>::infinity();
+
+        const int file_cells_w = have_uv_tables ? int(uvt_w / 17u) : 0;
+        const int cgx0 = int(std::lround((ax - org_x) / M));
+        const int cgy0 = int(std::lround((ay - org_y) / M));
+        const bool cells_in_table =
+            have_uv_tables && cgx0 >= 0 && cgy0 >= 0 &&
+            cgx0 + int(p.W) <= file_cells_w &&
+            cgy0 + int(p.H) <= int(uvt_h) &&
+            uint64_t(p.W) * p.H <= 4096;
+
+        if (cells_in_table) {
+            // Engine-exact texturing: one 16x16 sub-grid per cell, positions
+            // bilinear across the cell's corner heights, uv from the per-cell
+            // lookup strips. Vertices are NOT shared across cell borders --
+            // neighbouring cells' tiles sit at unrelated spots in the page.
+            const size_t vtx_per_cell = 17u * 17u;
+            m.positions.reserve(size_t(p.W) * p.H * vtx_per_cell * 3);
+            m.uvs.reserve(size_t(p.W) * p.H * vtx_per_cell * 2);
+            m.normals.reserve(size_t(p.W) * p.H * vtx_per_cell * 3);
+            for (uint32_t cj = 0; cj < p.H; ++cj) {
+                for (uint32_t ci = 0; ci < p.W; ++ci) {
+                    const size_t row = size_t(cgy0 + int(cj)) * uvt_w;
+                    const uint16_t* us = &uv_u[row + size_t(cgx0 + int(ci)) * 17u];
+                    const uint16_t* vs = &uv_v[row + size_t(cgx0 + int(ci)) * 17u];
+                    const float h00 = h_at(int(ci),     int(cj));
+                    const float h10 = h_at(int(ci) + 1, int(cj));
+                    const float h01 = h_at(int(ci),     int(cj) + 1);
+                    const float h11 = h_at(int(ci) + 1, int(cj) + 1);
+                    float n00[3], n10[3], n01[3], n11[3];
+                    n_at(int(ci),     int(cj),     n00);
+                    n_at(int(ci) + 1, int(cj),     n10);
+                    n_at(int(ci),     int(cj) + 1, n01);
+                    n_at(int(ci) + 1, int(cj) + 1, n11);
+                    const uint32_t base = uint32_t(m.positions.size() / 3);
+                    for (int j2 = 0; j2 <= 16; ++j2) {
+                        const float fy = float(j2) / 16.0f;
+                        for (int i2 = 0; i2 <= 16; ++i2) {
+                            const float fx = float(i2) / 16.0f;
+                            const float wx = ax + sx * (float(ci) + fx);
+                            const float wy = ay + sy * (float(cj) + fy);
+                            const float wh =
+                                (h00 * (1.0f - fx) + h10 * fx) * (1.0f - fy) +
+                                (h01 * (1.0f - fx) + h11 * fx) * fy;
+                            m.positions.push_back(wx);
+                            m.positions.push_back(wh);
+                            m.positions.push_back(wy);
+                            m.uvs.push_back(float(us[i2]) / 65535.0f);
+                            m.uvs.push_back(float(vs[j2]) / 65535.0f);
+                            float nv[3];
+                            for (int k = 0; k < 3; ++k) {
+                                nv[k] =
+                                    (n00[k] * (1.0f - fx) + n10[k] * fx) *
+                                        (1.0f - fy) +
+                                    (n01[k] * (1.0f - fx) + n11[k] * fx) * fy;
+                            }
+                            const float nl = std::sqrt(nv[0] * nv[0] +
+                                                       nv[1] * nv[1] +
+                                                       nv[2] * nv[2]);
+                            if (nl > 1e-6f) {
+                                nv[0] /= nl; nv[1] /= nl; nv[2] /= nl;
+                            }
+                            m.normals.push_back(nv[0]);
+                            m.normals.push_back(nv[1]);
+                            m.normals.push_back(nv[2]);
+                            m.min_height = std::min(m.min_height, wh);
+                            m.max_height = std::max(m.max_height, wh);
+                        }
+                    }
+                    for (int j2 = 0; j2 < 16; ++j2) {
+                        for (int i2 = 0; i2 < 16; ++i2) {
+                            const uint32_t i00 = base + uint32_t(j2 * 17 + i2);
+                            const uint32_t i10 = i00 + 1;
+                            const uint32_t i01 = i00 + 17;
+                            const uint32_t i11 = i01 + 1;
+                            m.indices.push_back(i00);
+                            m.indices.push_back(i01);
+                            m.indices.push_back(i10);
+                            m.indices.push_back(i10);
+                            m.indices.push_back(i01);
+                            m.indices.push_back(i11);
+                        }
+                    }
+                }
+            }
+        } else {
+            // No lookup tables (or patch outside the table grid): coarse
+            // whole-patch mesh with the page stretched 0..1 across it.
+            const float patch_w = p.amax[0] - p.amin[0];
+            const float patch_h = p.amax[1] - p.amin[1];
+            const float inv_pw = patch_w > 0.0f ? 1.0f / patch_w : 0.0f;
+            const float inv_ph = patch_h > 0.0f ? 1.0f / patch_h : 0.0f;
+            m.positions.reserve(size_t(VW) * VH * 3);
+            m.uvs.reserve(size_t(VW) * VH * 2);
+            m.normals.reserve(size_t(VW) * VH * 3);
+            for (uint32_t j = 0; j < VH; ++j) {
+                for (uint32_t i = 0; i < VW; ++i) {
+                    const float wx = ax + sx * float(i);
+                    const float wy = ay + sy * float(j);
+                    const float wh = gh[size_t(j) * VW + i];
+                    m.positions.push_back(wx);
+                    m.positions.push_back(wh);
+                    m.positions.push_back(wy);
+                    m.uvs.push_back((wx - ax) * inv_pw);
+                    m.uvs.push_back((wy - ay) * inv_ph);
+                    m.min_height = std::min(m.min_height, wh);
+                    m.max_height = std::max(m.max_height, wh);
+                    float nv[3];
+                    n_at(int(i), int(j), nv);
+                    m.normals.push_back(nv[0]);
+                    m.normals.push_back(nv[1]);
+                    m.normals.push_back(nv[2]);
+                }
+            }
+            for (uint32_t j = 0; j + 1 < VH; ++j) {
+                for (uint32_t i = 0; i + 1 < VW; ++i) {
+                    const uint32_t i00 = uint32_t(size_t(j) * VW + i);
+                    const uint32_t i10 = i00 + 1;
+                    const uint32_t i01 = uint32_t(size_t(j + 1) * VW + i);
+                    const uint32_t i11 = i01 + 1;
+                    m.indices.push_back(i00);
+                    m.indices.push_back(i01);
+                    m.indices.push_back(i10);
+                    m.indices.push_back(i10);
+                    m.indices.push_back(i01);
+                    m.indices.push_back(i11);
+                }
+            }
+        }
+        if (!std::isfinite(m.min_height)) m.min_height = 0.0f;
+        if (!std::isfinite(m.max_height)) m.max_height = 0.0f;
+        m.width  = VW;
+        m.height = VH;
+        m.ok = !m.indices.empty();
+        if (!m.ok) continue;
+
+        if (have_pages && !parsed.bg_patches[pi].pages.empty()) {
+            const uint32_t off = parsed.bg_patches[pi].pages[0].first;
+            if (decode_bg_page(ehf, off, vg.page_rgba, vg.page_w, vg.page_h)) {
+                ++textured;
+            }
+        }
+        out_geoms.push_back(std::move(vg));
+    }
+
+    if (out_geoms.empty()) return false;
+    if (out_stats) {
+        std::ostringstream ss;
+        ss << out_geoms.size() << " patch mesh(es), " << textured
+           << " textured, M=" << M
+           << (have_uv_tables ? ", cell-atlas uv tables" : ", NO uv tables");
+        *out_stats = ss.str();
+    }
+    return true;
+}
+
 }
 
 bool Level::BakeEhfVistaPageComposite(const std::vector<uint8_t>& ehf,
@@ -8556,7 +8971,12 @@ bool Level::BakeEhfVistaPageComposite(const std::vector<uint8_t>& ehf,
     out_name.clear();
 
     EhfParsedBody parsed;
-    if (!ParseEhfBody(ehf, parsed) || parsed.bg_patches.empty()) {
+    if (!ParseEhfBody(ehf, parsed)) {
+        OutputLog::warn("vista pages: body parse failed: " + parsed.error);
+        return false;
+    }
+    if (parsed.bg_patches.empty()) {
+        OutputLog::warn("vista pages: no bg patches in body");
         return false;
     }
 
@@ -8589,29 +9009,58 @@ bool Level::BakeEhfVistaPageComposite(const std::vector<uint8_t>& ehf,
     std::vector<PatchTex> decoded;
     decoded.reserve(parsed.bg_patches.size());
     std::vector<float> dens_x, dens_z;
+    size_t n_nopages = 0, n_badhdr = 0, n_baddec = 0;
     for (const EhfBgPatch& p : parsed.bg_patches) {
-        if (p.pages.empty()) continue;
+        if (p.pages.empty()) { ++n_nopages; continue; }
         const uint32_t off = p.pages[0].first;
         const uint32_t len = p.pages[0].second;
-        if (uint64_t(off) + len > ehf.size() || len < 0x60) continue;
-        if (ehf_be32(ehf, off) != 0xFFFFFFFEu) continue;
+        if (uint64_t(off) + len > ehf.size() || len < 0x60 ||
+            ehf_be32(ehf, off) != 0xFFFFFFFEu) {
+            ++n_badhdr;
+            continue;
+        }
         const uint32_t pf = ehf_be32(ehf, off + 0x18);
-        const uint32_t mt = ehf_be32(ehf, off + 0x20);
-        if (pf != 35u || mt < 0x54 || mt > 0x200) continue;
-        if (size_t(off) + mt + 8 > ehf.size()) continue;
+        if (pf != 35u) { ++n_badhdr; continue; }
 
-        EhfEmbeddedBc1Mip mip;
-        mip.offset    = off;
-        mip.header_w  = ehf_be32(ehf, off + 0x10);
-        mip.header_h  = ehf_be32(ehf, off + 0x14);
-        mip.raw_size  = ehf_be32(ehf, off + mt);
-        mip.comp_size = ehf_be32(ehf, off + mt + 4);
+        // Background-map pages are self-contained pf35 tex blobs whose payload
+        // is raw Xbox-360-tiled BC1 (inflate -> untile -> byte-swap -> BC1),
+        // NOT the LH-huffman mips the main-terrain tile pages use. DecodeAtlas
+        // runs exactly that path.
+        //
+        // The page-table entry's `len` is the streamed-record size, which is
+        // SMALLER than the header+zlib stream -- slicing by it truncated the
+        // compressed data and DecodeAtlas inflated garbage. Slice by the real
+        // blob size = mip_table_offset + 8 + compressed_size instead.
+        const uint32_t mt = ehf_be32(ehf, off + 0x20);
+        if (mt < 0x54 || mt > 0x200 ||
+            size_t(off) + mt + 8 > ehf.size()) { ++n_badhdr; continue; }
+        const uint32_t comp_size = ehf_be32(ehf, off + mt + 4);
+        size_t blob_end = size_t(off) + mt + 8 + comp_size;
+        if (blob_end > ehf.size()) blob_end = ehf.size();
+        std::vector<uint8_t> page(ehf.begin() + off, ehf.begin() + blob_end);
+        TextureAtlas::DecodedAtlas dec = TextureAtlas::DecodeAtlas(page);
+        if (!dec.ok || dec.rgba.empty()) { ++n_baddec; continue; }
+
+        if (const char* dir = std::getenv("F2AB_DUMP_VISTA")) {
+            static int s_pg = 0;
+            if (s_pg < 4) {
+                const std::string pp = std::string(dir) + "/page_" +
+                    std::to_string(s_pg) + "_off" + std::to_string(off) +
+                    "_" + std::to_string(dec.width) + "x" +
+                    std::to_string(dec.height) + ".png";
+                tex_export_png(pp, dec.rgba.data(), dec.width, dec.height);
+                OutputLog::info("vista pages: dumped raw page " + pp +
+                    " (blob " + std::to_string(blob_end - off) +
+                    "B, comp " + std::to_string(comp_size) + ")");
+                ++s_pg;
+            }
+        }
 
         PatchTex pt;
         pt.patch = &p;
-        if (!decode_ehf_embedded_bc1(ehf, mip, pt.rgba, pt.w, pt.h)) {
-            continue;
-        }
+        pt.rgba  = std::move(dec.rgba);
+        pt.w     = dec.width;
+        pt.h     = dec.height;
         const float sx = p.aabb_max[0] - p.aabb_min[0];
         const float sz = p.aabb_max[1] - p.aabb_min[1];
         if (sx > 0.0f && sz > 0.0f) {
@@ -8620,14 +9069,35 @@ bool Level::BakeEhfVistaPageComposite(const std::vector<uint8_t>& ehf,
         }
         decoded.push_back(std::move(pt));
     }
-    if (decoded.empty() || dens_x.empty()) return false;
+    if (decoded.empty() || dens_x.empty()) {
+        OutputLog::warn("vista pages: no decodable pages (" +
+                        std::to_string(parsed.bg_patches.size()) +
+                        " patches: " + std::to_string(n_nopages) +
+                        " without pages, " + std::to_string(n_badhdr) +
+                        " bad header, " + std::to_string(n_baddec) +
+                        " decode failed)");
+        return false;
+    }
+
+    // Tile size M = header.f2 * 16 (the engine's per-file cell size). The
+    // background render samples uv = (world - patchMin) / M, so each page
+    // repeats every M world-units across its patch -- confirmed against the
+    // XEX (sub_82204408 UV upload, sub_82226418[+80] = f2). Reversed here so
+    // the composite tiles each page at its true cell scale instead of
+    // stretching a whole page across the (differently-shaped) patch.
+    float f2 = 0.5f;
+    if (ehf.size() >= 47) {
+        f2 = read_be_f32_raw(ehf.data() + 43);
+    }
+    const float M = (std::isfinite(f2) && f2 > 0.0f) ? f2 * 16.0f : 8.0f;
 
     auto median = [](std::vector<float>& v) {
         std::sort(v.begin(), v.end());
         return v[v.size() / 2];
     };
-    float density_x = std::clamp(median(dens_x), 0.5f, 16.0f);
-    float density_z = std::clamp(median(dens_z), 0.5f, 16.0f);
+    // Texel density from the pages' own resolution over one tile (M meters).
+    float density_x = std::clamp(median(dens_x), 0.5f, 32.0f);
+    float density_z = std::clamp(median(dens_z), 0.5f, 32.0f);
     constexpr float kMaxDim = 4096.0f;
     if (span_x * density_x > kMaxDim) density_x = kMaxDim / span_x;
     if (span_z * density_z > kMaxDim) density_z = kMaxDim / span_z;
@@ -8649,9 +9119,32 @@ bool Level::BakeEhfVistaPageComposite(const std::vector<uint8_t>& ehf,
         const int dh = int(std::lround((p.aabb_max[1] - p.aabb_min[1]) /
                                        span_z * float(out_h)));
         if (dw <= 0 || dh <= 0 || dx < 0 || dy < 0) continue;
-        blit_resampled_rgba(pt.rgba, pt.w, pt.h,
-                            out_rgba, out_w, out_h,
-                            dx, dy, dw, dh);
+
+        // Fill the patch rect by tiling the page every M world-units,
+        // matching the runtime uv = (world - patchMin) / M with wrap. Tiles
+        // are computed in whole-page steps and resampled per tile so the
+        // page keeps its own aspect (M x M world square) instead of being
+        // stretched across the differently-shaped patch.
+        const float tiles_x = std::max(1.0f, (p.aabb_max[0] - p.aabb_min[0]) / M);
+        const float tiles_z = std::max(1.0f, (p.aabb_max[1] - p.aabb_min[1]) / M);
+        const int nx = std::max(1, int(std::lround(tiles_x)));
+        const int nz = std::max(1, int(std::lround(tiles_z)));
+        for (int tz = 0; tz < nz; ++tz) {
+            for (int tx = 0; tx < nx; ++tx) {
+                const int tdx = dx + int(std::lround(float(tx) / float(nx)
+                                                     * float(dw)));
+                const int tdy = dy + int(std::lround(float(tz) / float(nz)
+                                                     * float(dh)));
+                const int tdw = dx + int(std::lround(float(tx + 1) / float(nx)
+                                                     * float(dw))) - tdx;
+                const int tdh = dy + int(std::lround(float(tz + 1) / float(nz)
+                                                     * float(dh))) - tdy;
+                if (tdw <= 0 || tdh <= 0) continue;
+                blit_resampled_rgba(pt.rgba, pt.w, pt.h,
+                                    out_rgba, out_w, out_h,
+                                    tdx, tdy, tdw, tdh);
+            }
+        }
         const int cw = std::min(dw, out_w - dx);
         const int ch = std::min(dh, out_h - dy);
         for (int y = 0; y < ch; ++y) {
@@ -8691,6 +9184,14 @@ bool Level::BakeEhfVistaPageComposite(const std::vector<uint8_t>& ehf,
         }
         filled.swap(next);
         if (!changed) break;
+    }
+
+    if (const char* dir = std::getenv("F2AB_DUMP_VISTA")) {
+        static int s_seq = 0;
+        const std::string path = std::string(dir) + "/vista_comp_" +
+                                 std::to_string(s_seq++) + ".png";
+        tex_export_png(path, out_rgba.data(), out_w, out_h);
+        OutputLog::info("vista pages: dumped composite to " + path);
     }
 
     std::ostringstream os;

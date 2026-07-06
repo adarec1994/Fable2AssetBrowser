@@ -262,6 +262,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                         int mip_index = -1);
 #ifdef _WIN32
 ID3D11ShaderResourceView* create_srv_from_rgba(ID3D11Device* dev, int w, int h, const std::vector<uint8_t>& rgba);
+ID3D11ShaderResourceView* create_srv_from_rgba_mipped(ID3D11Device* dev, int w, int h, const std::vector<uint8_t>& rgba);
 #else
 unsigned int create_gl_texture_from_rgba(int w, int h, const uint8_t* rgba);
 #endif

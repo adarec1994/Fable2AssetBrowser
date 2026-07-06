@@ -47,8 +47,10 @@ static bool mp_is_adjacent_terrain_mesh(const MPPerMesh& m)
 {
     return m.name.rfind("adjacent terrain", 0) == 0;
 }
+bool g_mp_vista_only = false;   // debug: draw ONLY adjacent (vista) terrain
 static bool mp_should_hide_mesh(const MPPerMesh& m)
 {
+    if (g_mp_vista_only && !mp_is_adjacent_terrain_mesh(m)) return true;
     return !S.show_adjacent_terrain && mp_is_adjacent_terrain_mesh(m);
 }
 static inline std::string force_tex_ext(const std::string& s){
@@ -1964,6 +1966,80 @@ ID3D11ShaderResourceView* create_srv_from_rgba(ID3D11Device* dev, int w, int h, 
     if (FAILED(dev->CreateShaderResourceView(t, nullptr, &v))) {
         OutputLog::warn("texture upload failed: CreateShaderResourceView " +
                         std::to_string(w) + "x" + std::to_string(h));
+        t->Release();
+        return nullptr;
+    }
+    t->Release();
+    return v;
+}
+
+// Like create_srv_from_rgba but with a full mip chain. Vista/background
+// terrain recedes to the horizon at grazing angles, so without mips its pages
+// minify into RGB static. The chain is built on the CPU (box filter) and
+// uploaded as an IMMUTABLE texture -- GenerateMips proved unreliable in this
+// device/context setup, this is deterministic.
+ID3D11ShaderResourceView* create_srv_from_rgba_mipped(
+        ID3D11Device* dev, int w, int h, const std::vector<uint8_t>& rgba){
+    constexpr int kMaxUploadDim = 8192;
+    if (!dev || w <= 0 || h <= 0 || w > kMaxUploadDim || h > kMaxUploadDim) {
+        return nullptr;
+    }
+    const uint64_t expected = uint64_t(w) * uint64_t(h) * 4ull;
+    if (expected == 0 || rgba.size() < expected) return nullptr;
+
+    // Build the box-filtered mip chain down to 1x1.
+    std::vector<std::vector<uint8_t>> mips;
+    std::vector<std::pair<int,int>> dims;
+    mips.emplace_back(rgba.begin(), rgba.begin() + size_t(expected));
+    dims.emplace_back(w, h);
+    while (dims.back().first > 1 || dims.back().second > 1) {
+        const int sw = dims.back().first;
+        const int sh = dims.back().second;
+        const int dw = std::max(1, sw / 2);
+        const int dh = std::max(1, sh / 2);
+        const std::vector<uint8_t>& src = mips.back();
+        std::vector<uint8_t> dst(size_t(dw) * dh * 4);
+        for (int y = 0; y < dh; ++y) {
+            const int y0 = std::min(y * 2, sh - 1);
+            const int y1 = std::min(y0 + 1, sh - 1);
+            for (int x = 0; x < dw; ++x) {
+                const int x0 = std::min(x * 2, sw - 1);
+                const int x1 = std::min(x0 + 1, sw - 1);
+                const uint8_t* a = &src[(size_t(y0) * sw + x0) * 4];
+                const uint8_t* b = &src[(size_t(y0) * sw + x1) * 4];
+                const uint8_t* c = &src[(size_t(y1) * sw + x0) * 4];
+                const uint8_t* d = &src[(size_t(y1) * sw + x1) * 4];
+                uint8_t* o = &dst[(size_t(y) * dw + x) * 4];
+                for (int k = 0; k < 4; ++k) {
+                    o[k] = uint8_t((int(a[k]) + b[k] + c[k] + d[k] + 2) / 4);
+                }
+            }
+        }
+        mips.push_back(std::move(dst));
+        dims.emplace_back(dw, dh);
+    }
+
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = (UINT)w;
+    td.Height = (UINT)h;
+    td.MipLevels = (UINT)mips.size();
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_IMMUTABLE;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    std::vector<D3D11_SUBRESOURCE_DATA> sd(mips.size());
+    for (size_t i = 0; i < mips.size(); ++i) {
+        sd[i].pSysMem = mips[i].data();
+        sd[i].SysMemPitch = (UINT)dims[i].first * 4u;
+        sd[i].SysMemSlicePitch = 0;
+    }
+
+    ID3D11Texture2D* t = nullptr;
+    if (FAILED(dev->CreateTexture2D(&td, sd.data(), &t)) || !t) return nullptr;
+    ID3D11ShaderResourceView* v = nullptr;
+    if (FAILED(dev->CreateShaderResourceView(t, nullptr, &v))) {
         t->Release();
         return nullptr;
     }

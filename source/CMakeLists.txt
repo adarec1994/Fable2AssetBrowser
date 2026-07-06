@@ -11,6 +11,7 @@ set(APP_SOURCES
         src/Utilities/State.cpp
         src/Utilities/Utils.cpp
         src/Utilities/Files.cpp
+        src/Utilities/AutoPilot.cpp
         src/textures/TexParser.cpp
         src/textures/LhTexCodec.cpp
         src/animations/AnimBank.cpp

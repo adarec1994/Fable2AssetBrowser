@@ -168,8 +168,25 @@ void untile_xbox360_imageheat(const uint8_t* tiled,
 {
     const uint32_t width_in_blocks  = (uint32_t)width_pixels  / block_pixel_size;
     const uint32_t height_in_blocks = (uint32_t)height_pixels / block_pixel_size;
-    const uint32_t padded_w = (width_in_blocks  + 31u) & ~31u;
-    const uint32_t padded_h = (height_in_blocks + 31u) & ~31u;
+
+    // Xbox 360 "packed mip" layout: textures 16 texels or smaller along an
+    // axis live inside a shared 32x32-block tile at a 16-texel offset on
+    // that axis (mip0 of the packed tail). Verified against the Fable 2
+    // vista background-map pages (128x16 / 64x8 / 32x4: content sits at
+    // block row 16/block_pixel_size, i.e. +16 texels in y).
+    uint32_t block_off_x = 0;
+    uint32_t block_off_y = 0;
+    if (width_pixels <= 16 && height_pixels <= 16) {
+        block_off_x = 16u / block_pixel_size;
+        block_off_y = 16u / block_pixel_size;
+    } else if (height_pixels <= 16) {
+        block_off_y = 16u / block_pixel_size;
+    } else if (width_pixels <= 16) {
+        block_off_x = 16u / block_pixel_size;
+    }
+
+    const uint32_t padded_w = (block_off_x + width_in_blocks  + 31u) & ~31u;
+    const uint32_t padded_h = (block_off_y + height_in_blocks + 31u) & ~31u;
     const uint32_t total    = padded_w * padded_h;
 
     linear_out.assign((size_t)width_in_blocks
@@ -179,10 +196,13 @@ void untile_xbox360_imageheat(const uint8_t* tiled,
     for (uint32_t off = 0; off < total; ++off) {
         const uint32_t x = xg_address_2d_tiled_x(off, padded_w, texel_byte_pitch);
         const uint32_t y = xg_address_2d_tiled_y(off, padded_w, texel_byte_pitch);
-        if (x >= width_in_blocks || y >= height_in_blocks) continue;
+        if (x < block_off_x || y < block_off_y) continue;
+        const uint32_t lx = x - block_off_x;
+        const uint32_t ly = y - block_off_y;
+        if (lx >= width_in_blocks || ly >= height_in_blocks) continue;
         const size_t src = (size_t)off * (size_t)texel_byte_pitch;
         if (src + texel_byte_pitch > tiled_size) continue;
-        const size_t dst = ((size_t)y * (size_t)width_in_blocks + (size_t)x)
+        const size_t dst = ((size_t)ly * (size_t)width_in_blocks + (size_t)lx)
                          * (size_t)texel_byte_pitch;
         std::memcpy(linear_out.data() + dst,
                     tiled + src, (size_t)texel_byte_pitch);

@@ -397,6 +397,7 @@ struct GeneratedTerrainTexture {
     std::vector<uint8_t> rgba;
     int                  width = 0;
     int                  height = 0;
+    bool                 mipped = false;   // vista pages: mip to kill grazing aliasing
 };
 
 static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
@@ -1214,7 +1215,9 @@ static void bind_generated_terrain_textures(
         if (t.mesh_index >= g_mp.meshes.size()) continue;
 
         ID3D11ShaderResourceView* srv =
-            create_srv_from_rgba(device, t.width, t.height, t.rgba);
+            t.mipped
+                ? create_srv_from_rgba_mipped(device, t.width, t.height, t.rgba)
+                : create_srv_from_rgba(device, t.width, t.height, t.rgba);
         if (!srv) continue;
 
         MPPerMesh& m = g_mp.meshes[t.mesh_index];
@@ -2022,26 +2025,75 @@ void process_pending_loads() {
 
             std::vector<MDLMeshGeom> geoms;
             geoms.push_back(std::move(g));
-            for (const auto& adj : g_pending_adjacent_terrain_meshes) {
-                const Level::TerrainMesh& am = adj.mesh;
-                if (!am.ok || am.indices.empty()) continue;
+
+            // Per-geom deferred texture bind, parallel to `geoms`. A non-empty
+            // page_rgba means a per-patch vista geom (bind its own tiled page);
+            // fallback_adj >= 0 means a single-mesh adjacent whose composite is
+            // baked at bind time. Index 0 (main terrain) is left empty.
+            struct AdjGeomBind {
+                const std::vector<uint8_t>* page_rgba = nullptr;
+                int page_w = 0, page_h = 0;
+                int fallback_adj = -1;
+                std::string label;
+            };
+            std::vector<AdjGeomBind> geom_binds(geoms.size());
+
+            auto make_terrain_geom = [](const Level::TerrainMesh& tm,
+                                        bool preserve_uvs,
+                                        const std::string& name) {
                 MDLMeshGeom ag;
-                ag.positions = am.positions;
-                ag.normals   = am.normals;
-                ag.uvs       = am.uvs;
-                ag.indices   = am.indices;
-                if (!adj.preserve_mesh_uvs) {
-                    normalize_grid_uvs(ag, am.width, am.height);
+                ag.positions = tm.positions;
+                ag.normals   = tm.normals;
+                ag.uvs       = tm.uvs;
+                ag.indices   = tm.indices;
+                if (!preserve_uvs) {
+                    normalize_grid_uvs(ag, tm.width, tm.height);
                 }
-                ag.bone_ids.assign(am.positions.size() / 3 * 4, 0);
-                ag.bone_weights.assign(am.positions.size() / 3 * 4, 0.f);
-                for (size_t v = 0; v < am.positions.size() / 3; ++v) {
-                    ag.bone_weights[v * 4 + 0] = 1.0f;
-                }
-                ag.name = adj.label.empty()
+                const size_t vn = tm.positions.size() / 3;
+                ag.bone_ids.assign(vn * 4, 0);
+                ag.bone_weights.assign(vn * 4, 0.f);
+                for (size_t v = 0; v < vn; ++v) ag.bone_weights[v * 4 + 0] = 1.0f;
+                ag.name = name;
+                return ag;
+            };
+
+            for (size_t ai = 0; ai < g_pending_adjacent_terrain_meshes.size(); ++ai) {
+                const auto& adj = g_pending_adjacent_terrain_meshes[ai];
+                const std::string base = adj.label.empty()
                     ? std::string("adjacent terrain")
                     : std::string("adjacent terrain: ") + adj.label;
-                geoms.push_back(std::move(ag));
+
+                if (!adj.patch_geoms.empty()) {
+                    // Engine-exact: one grid sub-mesh per patch, each carrying
+                    // its own decoded background-map page (uv in cell units,
+                    // tiled by the wrap sampler). No composite/atlas.
+                    for (size_t k = 0; k < adj.patch_geoms.size(); ++k) {
+                        const Level::VistaPatchGeom& vg = adj.patch_geoms[k];
+                        if (!vg.mesh.ok || vg.mesh.indices.empty()) continue;
+                        geoms.push_back(make_terrain_geom(
+                            vg.mesh, true,
+                            base + " #" + std::to_string(k)));
+                        AdjGeomBind bind;
+                        if (!vg.page_rgba.empty() &&
+                            vg.page_w > 0 && vg.page_h > 0) {
+                            bind.page_rgba = &vg.page_rgba;
+                            bind.page_w = vg.page_w;
+                            bind.page_h = vg.page_h;
+                        }
+                        bind.label = "ehf_vista_page[" + adj.label + " #" +
+                                     std::to_string(k) + "]";
+                        geom_binds.push_back(std::move(bind));
+                    }
+                    continue;
+                }
+
+                const Level::TerrainMesh& am = adj.mesh;
+                if (!am.ok || am.indices.empty()) continue;
+                geoms.push_back(make_terrain_geom(am, adj.preserve_mesh_uvs,
+                                                  base));
+                AdjGeomBind bind;
+                bind.fallback_adj = int(ai);
+                geom_binds.push_back(std::move(bind));
             }
 
             size_t water_geom_first = geoms.size();
@@ -2378,47 +2430,90 @@ void process_pending_loads() {
             const std::vector<TerrainTextureRegistry::LodPaletteEntry>
                 main_lod_palette = TerrainTextureRegistry::GetLodPalette();
 
-            for (size_t ai = 0; ai < g_pending_adjacent_terrain_meshes.size(); ++ai) {
-                const size_t mesh_idx = ai + 1;
-                if (mesh_idx >= g_mp.meshes.size()) break;
-                const auto& adj = g_pending_adjacent_terrain_meshes[ai];
-                std::vector<uint8_t> adj_rgba;
-                int adj_w = 0, adj_h = 0;
-                std::string adj_name;
-                const bool adj_from_pages = Level::BakeEhfVistaPageComposite(
-                    adj.ehf_bytes, adj_rgba, adj_w, adj_h, adj_name);
-                if (!adj_from_pages &&
-                    !Level::BakeEhfTerrainCompositeWithBnk(
-                        adj.ehf_bytes, adj.preferred_bnk,
-                        adj_rgba, adj_w, adj_h, adj_name,
-                        adj.prefer_embedded_albedo)) {
-                    continue;
+            // Bind each adjacent geom's texture by geom index (geom_binds is
+            // parallel to `geoms`, hence to g_mp.meshes). Per-patch vista geoms
+            // carry their own decoded page (tiled by the wrap sampler);
+            // single-mesh fallbacks bake a composite here.
+            std::vector<std::vector<uint8_t>> adj_composite_cache(
+                g_pending_adjacent_terrain_meshes.size());
+            std::vector<int> adj_composite_wh(
+                g_pending_adjacent_terrain_meshes.size() * 2, 0);
+            std::vector<std::string> adj_composite_name(
+                g_pending_adjacent_terrain_meshes.size());
+            std::vector<uint8_t> adj_composite_done(
+                g_pending_adjacent_terrain_meshes.size(), 0);
+
+            for (size_t gi = 1; gi < geom_binds.size() &&
+                                gi < g_mp.meshes.size(); ++gi) {
+                const AdjGeomBind& b = geom_binds[gi];
+
+                const std::vector<uint8_t>* rgba = nullptr;
+                int w = 0, h = 0;
+                std::string label;
+
+                if (b.page_rgba) {
+                    rgba  = b.page_rgba;
+                    w     = b.page_w;
+                    h     = b.page_h;
+                    label = b.label;
+                } else if (b.fallback_adj >= 0) {
+                    const size_t ci = size_t(b.fallback_adj);
+                    if (!adj_composite_done[ci]) {
+                        adj_composite_done[ci] = 1;
+                        const auto& adj =
+                            g_pending_adjacent_terrain_meshes[ci];
+                        int cw = 0, ch = 0;
+                        std::string cn;
+                        const bool from_pages = Level::BakeEhfVistaPageComposite(
+                            adj.ehf_bytes, adj_composite_cache[ci], cw, ch, cn);
+                        if (!from_pages &&
+                            !Level::BakeEhfTerrainCompositeWithBnk(
+                                adj.ehf_bytes, adj.preferred_bnk,
+                                adj_composite_cache[ci], cw, ch, cn,
+                                adj.prefer_embedded_albedo)) {
+                            adj_composite_cache[ci].clear();
+                        }
+                        adj_composite_wh[ci * 2 + 0] = cw;
+                        adj_composite_wh[ci * 2 + 1] = ch;
+                        adj_composite_name[ci] =
+                            from_pages
+                                ? ("ehf_vista_pages[" + adj.label + "]")
+                                : (cn == "embedded_tile_albedo")
+                                    ? ("ehf_embedded_tile_albedo[" + adj.label + "]")
+                                    : ("ehf_composite[" + cn + "]");
+                    }
+                    if (adj_composite_cache[ci].empty()) continue;
+                    rgba  = &adj_composite_cache[ci];
+                    w     = adj_composite_wh[ci * 2 + 0];
+                    h     = adj_composite_wh[ci * 2 + 1];
+                    label = adj_composite_name[ci];
                 }
+
+                if (!rgba || rgba->empty() || w <= 0 || h <= 0) continue;
+                // Mipmapped: the vista ring recedes to the horizon at grazing
+                // angles and its pages tile several times per patch, so an
+                // unmipped texture minifies into RGB static.
                 ID3D11ShaderResourceView* adj_srv =
-                    create_srv_from_rgba(device, adj_w, adj_h, adj_rgba);
+                    create_srv_from_rgba_mipped(device, w, h, *rgba);
                 if (!adj_srv) continue;
-                MPPerMesh& m = g_mp.meshes[mesh_idx];
+                MPPerMesh& m = g_mp.meshes[gi];
                 if (m.srv_diffuse) m.srv_diffuse->Release();
                 m.srv_diffuse = adj_srv;
                 m.diffuse_visible = true;
-                m.diffuse_tex_name =
-                    adj_from_pages
-                        ? ("ehf_vista_pages[" + adj.label + "]")
-                        : (adj_name == "embedded_tile_albedo")
-                            ? ("ehf_embedded_tile_albedo[" + adj.label + "]")
-                            : ("ehf_composite[" + adj_name + "]");
+                m.diffuse_tex_name = label;
 
                 GeneratedTerrainTexture gt;
-                gt.mesh_index = mesh_idx;
-                gt.label      = m.diffuse_tex_name;
-                gt.rgba       = adj_rgba;
-                gt.width      = adj_w;
-                gt.height     = adj_h;
+                gt.mesh_index = gi;
+                gt.label      = label;
+                gt.rgba       = *rgba;
+                gt.width      = w;
+                gt.height     = h;
+                gt.mipped     = true;
                 generated_terrain_textures.push_back(std::move(gt));
 
                 OutputLog::success("adjacent terrain texture bound: " +
-                    m.diffuse_tex_name + " (" + std::to_string(adj_w) +
-                    "x" + std::to_string(adj_h) + ")");
+                    label + " (" + std::to_string(w) + "x" +
+                    std::to_string(h) + ")");
             }
             TerrainTextureRegistry::SetLodPalette(main_lod_palette);
 

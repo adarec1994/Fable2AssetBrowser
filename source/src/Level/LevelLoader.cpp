@@ -70,6 +70,7 @@ bool                          g_pending_level_water_present = false;
 Gdb::WaterTheme               g_pending_level_water_theme;
 Gdb::SkyTheme                 g_pending_level_sky_theme;
 Gdb::CloudTheme               g_pending_level_cloud_theme;
+Gdb::WeatherTheme             g_pending_level_weather_theme;
 Gdb::EnvironmentThemeTimeline g_pending_level_environment_timeline;
 std::vector<std::string>           g_level_vfs_texture_body_bnks;
 std::vector<std::string>           g_level_vfs_model_bnks;
@@ -122,6 +123,7 @@ void OpenAsync(const FlatAssetEntry& entry)
             g_pending_level_water_theme = Gdb::WaterTheme{};
             g_pending_level_sky_theme = Gdb::SkyTheme{};
             g_pending_level_cloud_theme = Gdb::CloudTheme{};
+            g_pending_level_weather_theme = Gdb::WeatherTheme{};
             g_pending_level_environment_timeline =
                 Gdb::EnvironmentThemeTimeline{};
             g_level_havok_collision.clear();
@@ -2728,6 +2730,7 @@ bool Open(const FlatAssetEntry& entry)
     g_pending_level_water_theme = Gdb::WaterTheme{};
     g_pending_level_sky_theme = Gdb::SkyTheme{};
     g_pending_level_cloud_theme = Gdb::CloudTheme{};
+    g_pending_level_weather_theme = Gdb::WeatherTheme{};
     g_pending_level_environment_timeline =
         Gdb::EnvironmentThemeTimeline{};
 
@@ -3437,6 +3440,7 @@ bool Open(const FlatAssetEntry& entry)
                 "data\\Globals\\SpeechAction.gdb",
                 "data\\InteractiveCutscenes\\InteractiveCutscenes.gdb",
                 "data\\Entity\\Entity.gdb",
+                "data\\EnvironmentThemes\\EnvironmentThemes.gdb",
             };
             for (const char* game_gdb_path : game_gdb_paths) {
                 std::vector<uint8_t> bytes;
@@ -3559,6 +3563,43 @@ bool Open(const FlatAssetEntry& entry)
                       OutputLog::info(
                           "cloud theme: no GDB environment cloud params found; "
                           "using clear sky");
+                  }
+
+                  Gdb::WeatherTheme weather_theme;
+                  if (Gdb::ExtractWeatherTheme(water_theme_gdbs,
+                                               weather_theme)) {
+                      g_pending_level_weather_theme = weather_theme;
+                      std::ostringstream ss;
+                      ss << "weather theme: GDB env params found";
+                      if (weather_theme.has_rain) {
+                          ss << " rain(density="
+                             << std::fixed << std::setprecision(3)
+                             << weather_theme.rain_density
+                             << ", size=" << weather_theme.rain_size << ')';
+                      }
+                      if (weather_theme.has_snow) {
+                          ss << " snow(fallspeed="
+                             << std::fixed << std::setprecision(3)
+                             << weather_theme.snow_fall_speed
+                             << ", size=" << weather_theme.snow_size << ')';
+                      }
+                      if (weather_theme.has_wind) {
+                          ss << " wind(strength="
+                             << std::fixed << std::setprecision(2)
+                             << weather_theme.wind_strength_min << ".."
+                             << weather_theme.wind_strength_max << ')';
+                      }
+                      if (weather_theme.has_ground_mist) {
+                          ss << " mist(strength="
+                             << std::fixed << std::setprecision(2)
+                             << weather_theme.ground_mist_strength << ')';
+                      }
+                      OutputLog::success(ss.str());
+                  } else {
+                      g_pending_level_weather_theme = Gdb::WeatherTheme{};
+                      OutputLog::info(
+                          "weather theme: no GDB environment weather params "
+                          "found; weather effects idle");
                   }
 
                   Gdb::EnvironmentThemeTimeline env_timeline;

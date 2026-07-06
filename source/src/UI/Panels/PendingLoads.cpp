@@ -735,6 +735,8 @@ static void apply_sky_texture_hashes_to_preview(ModelPreview& mp,
         }
         mp.sky_moon_tried = false;
         mp.sky_moon_tex_name.clear();
+        mp.sky_moon_tiles[0] = 1.0f;
+        mp.sky_moon_tiles[1] = 1.0f;
     };
     auto reset_sun_disc = [&]() {
         if (mp.sky_sun_disc_srv) {
@@ -805,6 +807,16 @@ static void apply_sky_theme_to_preview(ModelPreview& mp,
     mp.sky_params[2] = sky.rayleigh;
     mp.sky_params[3] = sky.mie;
     mp.sky_time_of_day = sky.source_time_of_day;
+    mp.has_sun_axis = sky.has_sun_axis;
+    mp.sun_axis[0] = std::isfinite(sky.sun_axis_elevation)
+        ? sky.sun_axis_elevation : 26.0f;
+    mp.sun_axis[1] = std::isfinite(sky.sun_axis_z_offset)
+        ? sky.sun_axis_z_offset : 0.0f;
+    mp.sun_axis[2] = std::isfinite(sky.sun_axis_xy_rotation)
+        ? sky.sun_axis_xy_rotation : 0.0f;
+    mp.sun_axis[3] = (std::isfinite(sky.main_light_time_factor) &&
+                      sky.main_light_time_factor > 0.0f)
+        ? sky.main_light_time_factor : 1.0f;
     apply_sky_texture_hashes_to_preview(mp, sky);
 }
 
@@ -846,6 +858,7 @@ static void apply_cloud_theme_to_preview(ModelPreview& mp,
             mp.cloud_density_srv[i] = nullptr;
         }
         mp.cloud_density_tried[i] = false;
+        mp.cloud_density_has_alpha[i] = false;
 #endif
         mp.cloud_density_tex_name[i].clear();
         if (layer.enabled && layer.has_density_map) {
@@ -934,6 +947,92 @@ static void copy_cloud_theme_to_keyframe(MPSkyCloudKeyframe& key,
     }
 }
 
+static void weather_fill_precip(float (&out)[4],
+                                const Gdb::WeatherTheme& weather)
+{
+    out[0] = weather.has_rain
+        ? std::clamp(weather.rain_density, 0.0f, 1.0f) : 0.0f;
+    out[1] = weather.has_rain
+        ? std::clamp(weather.rain_size, 0.0f, 4.0f) : 0.0f;
+    out[2] = weather.has_snow
+        ? std::max(weather.snow_fall_speed, 0.0f) : 0.0f;
+    out[3] = weather.has_snow
+        ? std::max(weather.snow_size, 0.0f) : 0.0f;
+}
+
+static void fog_fill_from_sky(float (&range)[4], float (&density)[2],
+                              bool& has_fog, const Gdb::SkyTheme& sky)
+{
+    has_fog = sky.has_any && (sky.has_near_fog || sky.has_far_fog);
+    range[0] = sky.has_fogging_start
+        ? std::max(sky.fogging_start, 0.0f) : 0.0f;
+    range[1] = std::max(sky.near_distance, 0.0f);
+    range[2] = std::max(sky.far_distance, 0.0f);
+    range[3] = std::max(sky.close_fog_max_distance, 0.0f);
+    density[0] = std::clamp(sky.near_density, 0.0f, 1.0f);
+    density[1] = std::clamp(sky.far_density, 0.0f, 1.0f);
+}
+
+static void apply_weather_theme_to_preview(ModelPreview& mp,
+                                           const Gdb::WeatherTheme& weather,
+                                           const Gdb::SkyTheme& sky)
+{
+    mp.has_weather_theme = weather.has_any;
+    weather_fill_precip(mp.weather_precip, weather);
+    mp.weather_mist_strength = weather.has_ground_mist
+        ? std::clamp(weather.ground_mist_strength, 0.0f, 4.0f) : 0.0f;
+
+    if (weather.has_wind) {
+        const float az_mid = 0.5f * (weather.wind_xy_rotation_min +
+                                     weather.wind_xy_rotation_max);
+        const float str_mid = 0.5f * (weather.wind_strength_min +
+                                      weather.wind_strength_max);
+        const float el_mid = 0.5f * (weather.wind_elevation_min +
+                                     weather.wind_elevation_max);
+        mp.weather_wind[0] = std::isfinite(az_mid) ? az_mid : 0.0f;
+        mp.weather_wind[1] = std::isfinite(str_mid)
+            ? std::clamp(str_mid, 0.0f, 40.0f) : 0.0f;
+        mp.weather_wind[2] = std::isfinite(el_mid) ? el_mid : 0.0f;
+        mp.weather_wind[3] = std::isfinite(weather.wind_direction_variation)
+            ? weather.wind_direction_variation : 0.0f;
+    } else {
+        mp.weather_wind[0] = 0.0f;
+        mp.weather_wind[1] = 2.0f;
+        mp.weather_wind[2] = 0.0f;
+        mp.weather_wind[3] = 0.0f;
+    }
+
+    fog_fill_from_sky(mp.fog_range, mp.fog_density, mp.has_fog_theme, sky);
+
+    if (weather.has_any) {
+        std::ostringstream ss;
+        ss << "weather preview: rain=" << std::fixed << std::setprecision(2)
+           << mp.weather_precip[0]
+           << " snow=" << (mp.weather_precip[2] > 0.0f &&
+                           mp.weather_precip[3] > 0.0f ? "yes" : "no")
+           << " wind=" << mp.weather_wind[1]
+           << " mist=" << mp.weather_mist_strength
+           << (mp.has_fog_theme ? " fog=theme" : "");
+        OutputLog::info(ss.str());
+    }
+}
+
+static void copy_weather_theme_to_keyframe(MPSkyCloudKeyframe& key,
+                                           const Gdb::WeatherTheme& weather,
+                                           const Gdb::SkyTheme& sky)
+{
+    if (weather.has_any) {
+        key.has_weather_theme = true;
+        weather_fill_precip(key.weather_precip, weather);
+        key.weather_mist_strength = weather.has_ground_mist
+            ? std::clamp(weather.ground_mist_strength, 0.0f, 4.0f) : 0.0f;
+    }
+    if (sky.has_any && (sky.has_near_fog || sky.has_far_fog)) {
+        fog_fill_from_sky(key.fog_range, key.fog_density,
+                          key.has_fog_theme, sky);
+    }
+}
+
 static void apply_environment_timeline_to_preview(
     ModelPreview& mp,
     const Gdb::EnvironmentThemeTimeline& timeline)
@@ -961,8 +1060,21 @@ static void apply_environment_timeline_to_preview(
         std::copy(std::begin(mp.sky_params),
                   std::end(mp.sky_params),
                   std::begin(key.sky_params));
+        key.has_weather_theme = mp.has_weather_theme;
+        std::copy(std::begin(mp.weather_precip),
+                  std::end(mp.weather_precip),
+                  std::begin(key.weather_precip));
+        key.weather_mist_strength = mp.weather_mist_strength;
+        key.has_fog_theme = mp.has_fog_theme;
+        std::copy(std::begin(mp.fog_range),
+                  std::end(mp.fog_range),
+                  std::begin(key.fog_range));
+        std::copy(std::begin(mp.fog_density),
+                  std::end(mp.fog_density),
+                  std::begin(key.fog_density));
         copy_sky_theme_to_keyframe(key, src.sky);
         copy_cloud_theme_to_keyframe(key, src.clouds);
+        copy_weather_theme_to_keyframe(key, src.weather, src.sky);
 #ifdef _WIN32
         if (mp.sky_overlay_tex_name.empty() &&
             src.sky.has_sky_overlay_texture) {
@@ -1015,6 +1127,7 @@ struct LevelPropStreamState {
     std::string                    model_body_bnk;
     Gdb::SkyTheme                  sky_theme;
     Gdb::CloudTheme                cloud_theme;
+    Gdb::WeatherTheme              weather_theme;
     Gdb::EnvironmentThemeTimeline  environment_timeline;
     float                          terrain_tile_size = 1.0f;
     int                            terrain_width  = 0;
@@ -1179,6 +1292,7 @@ static bool start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
     g_level_prop_stream.model_body_bnk  = g_pending_level_model_body_bnk;
     g_level_prop_stream.sky_theme       = g_pending_level_sky_theme;
     g_level_prop_stream.cloud_theme     = g_pending_level_cloud_theme;
+    g_level_prop_stream.weather_theme   = g_pending_level_weather_theme;
     g_level_prop_stream.environment_timeline =
         g_pending_level_environment_timeline;
     g_level_prop_stream.terrain_tile_size = g_pending_terrain_ghf_tile_size;
@@ -1290,6 +1404,9 @@ static bool stream_level_prop_batch(ID3D11Device* device)
             apply_sky_theme_to_preview(g_mp, g_level_prop_stream.sky_theme);
             apply_cloud_theme_to_preview(g_mp,
                                          g_level_prop_stream.cloud_theme);
+            apply_weather_theme_to_preview(g_mp,
+                                           g_level_prop_stream.weather_theme,
+                                           g_level_prop_stream.sky_theme);
             apply_environment_timeline_to_preview(
                 g_mp, g_level_prop_stream.environment_timeline);
         } catch (const std::exception& e) {
@@ -1898,6 +2015,7 @@ void process_pending_loads() {
             g_pending_level_water_theme = Gdb::WaterTheme{};
             g_pending_level_sky_theme = Gdb::SkyTheme{};
             g_pending_level_cloud_theme = Gdb::CloudTheme{};
+            g_pending_level_weather_theme = Gdb::WeatherTheme{};
             g_pending_level_environment_timeline =
                 Gdb::EnvironmentThemeTimeline{};
             progress_done();
@@ -2308,6 +2426,9 @@ void process_pending_loads() {
             apply_sky_theme_to_preview(g_mp, g_pending_level_sky_theme);
             apply_cloud_theme_to_preview(g_mp,
                                          g_pending_level_cloud_theme);
+            apply_weather_theme_to_preview(g_mp,
+                                           g_pending_level_weather_theme,
+                                           g_pending_level_sky_theme);
             apply_environment_timeline_to_preview(
                 g_mp, g_pending_level_environment_timeline);
 
@@ -2808,6 +2929,7 @@ void process_pending_loads() {
         g_pending_level_water_theme = Gdb::WaterTheme{};
         g_pending_level_sky_theme = Gdb::SkyTheme{};
         g_pending_level_cloud_theme = Gdb::CloudTheme{};
+        g_pending_level_weather_theme = Gdb::WeatherTheme{};
         g_pending_level_environment_timeline =
             Gdb::EnvironmentThemeTimeline{};
     }
@@ -2951,6 +3073,9 @@ void process_pending_loads() {
                 apply_sky_theme_to_preview(g_mp, g_pending_level_sky_theme);
                 apply_cloud_theme_to_preview(g_mp,
                                              g_pending_level_cloud_theme);
+                apply_weather_theme_to_preview(
+                    g_mp, g_pending_level_weather_theme,
+                    g_pending_level_sky_theme);
                 apply_environment_timeline_to_preview(
                     g_mp, g_pending_level_environment_timeline);
                 S.terrain_mode = true;

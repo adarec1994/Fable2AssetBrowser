@@ -106,6 +106,12 @@ struct MPSkyCloudKeyframe {
     float cloud_shape[4][4] = {};
     float cloud_motion[4][4] = {};
     float cloud_light[4][4] = {};
+    bool has_weather_theme = false;
+    float weather_precip[4] = {};
+    float weather_mist_strength = 0.0f;
+    bool has_fog_theme = false;
+    float fog_range[4] = {};
+    float fog_density[2] = {};
 };
 
 struct ModelPreview {
@@ -132,6 +138,7 @@ struct ModelPreview {
         nullptr, nullptr, nullptr, nullptr
     };
     bool cloud_density_tried[4] = {false, false, false, false};
+    bool cloud_density_has_alpha[4] = {false, false, false, false};
     ID3D11ShaderResourceView* sky_overlay_srv = nullptr;
     ID3D11ShaderResourceView* sky_sun_disc_srv = nullptr;
     ID3D11ShaderResourceView* sky_moon_srv = nullptr;
@@ -143,6 +150,10 @@ struct ModelPreview {
     ID3D11VertexShader* vs_water = nullptr;
     ID3D11PixelShader*  ps_water = nullptr;
     ID3D11Buffer*       cbuffer_water = nullptr;
+    ID3D11VertexShader* vs_weather = nullptr;
+    ID3D11PixelShader*  ps_weather = nullptr;
+    ID3D11Buffer*       cbuffer_weather = nullptr;
+    ID3D11Buffer*       cbuffer_fog = nullptr;
     ID3D11SamplerState* sampler_point = nullptr;
     ID3D11RasterizerState* rs = nullptr;
     ID3D11RasterizerState* rs_wire = nullptr;
@@ -211,12 +222,31 @@ struct ModelPreview {
     std::string sky_sun_disc_tex_name;
     std::string sky_moon_tex_name;
     std::string sky_moon_glare_tex_name;
+    float sky_moon_tiles[2] = {1.0f, 1.0f};
     bool has_day_night_cycle = false;
     float day_night_cycle_seconds = 180.0f;
     std::vector<MPSkyCloudKeyframe> day_night_keyframes;
     bool time_of_day_override = false;
     float time_of_day_override_value = 0.5f;
     float current_time_of_day = 0.5f;
+
+    bool show_sky = true;
+    bool show_weather = true;
+    bool show_mist = true;
+
+    bool has_weather_theme = false;
+    float weather_precip[4] = {};
+    float weather_wind[4] = {};
+    float weather_mist_strength = 0.0f;
+    float rain_intensity_mult = 1.0f;
+    float snow_intensity_mult = 1.0f;
+
+    bool has_fog_theme = false;
+    float fog_range[4] = {};
+    float fog_density[2] = {};
+
+    bool has_sun_axis = false;
+    float sun_axis[4] = {26.0f, 0.0f, 0.0f, 1.0f};
 
     bool wireframe = false;
 

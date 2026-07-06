@@ -1294,6 +1294,68 @@ void draw_model_in_panel(ID3D11Device* device) {
                         std::clamp(hour / 24.0f, 0.0f, 1.0f);
                 }
             }
+            if (g_mp.has_sky_theme || g_mp.has_weather_theme ||
+                g_mp.has_fog_theme) {
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                                   "Environment");
+                if (g_mp.has_sky_theme) {
+                    ImGui::Checkbox("Sky", &g_mp.show_sky);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(
+                            "Procedural sky, sun/moon and cloud layers "
+                            "from the level's environment theme.");
+                }
+                if (g_mp.has_weather_theme) {
+                    const bool theme_has_rain =
+                        g_mp.weather_precip[0] > 0.0001f &&
+                        g_mp.weather_precip[1] > 0.0001f;
+                    const bool theme_has_snow =
+                        g_mp.weather_precip[2] > 0.0001f &&
+                        g_mp.weather_precip[3] > 0.0001f;
+                    ImGui::Checkbox("Weather", &g_mp.show_weather);
+                    if (ImGui::IsItemHovered()) {
+                        if (theme_has_rain || theme_has_snow) {
+                            char buf[160];
+                            std::snprintf(
+                                buf, sizeof(buf),
+                                "Theme precipitation:%s%s\n"
+                                "rain density %.2f size %.2f\n"
+                                "snow fallspeed %.2f size %.2f",
+                                theme_has_rain ? " rain" : "",
+                                theme_has_snow ? " snow" : "",
+                                g_mp.weather_precip[0],
+                                g_mp.weather_precip[1],
+                                g_mp.weather_precip[2],
+                                g_mp.weather_precip[3]);
+                            ImGui::SetTooltip("%s", buf);
+                        } else {
+                            ImGui::SetTooltip(
+                                "This level's theme has no rain or "
+                                "snow at the current time of day.");
+                        }
+                    }
+                }
+                if (g_mp.has_weather_theme || g_mp.has_fog_theme) {
+                    ImGui::Checkbox("Mist / fog", &g_mp.show_mist);
+                    if (ImGui::IsItemHovered()) {
+                        if (g_mp.weather_mist_strength > 0.0001f ||
+                            g_mp.has_fog_theme) {
+                            char buf[120];
+                            std::snprintf(
+                                buf, sizeof(buf),
+                                "Theme fogging + ground mist "
+                                "(GroundMist strength %.2f).",
+                                g_mp.weather_mist_strength);
+                            ImGui::SetTooltip("%s", buf);
+                        } else {
+                            ImGui::SetTooltip(
+                                "This level's theme has no fogging or "
+                                "ground mist parameters.");
+                        }
+                    }
+                }
+            }
 
             ImVec2 wp = ImGui::GetWindowPos();
             ImVec2 ws = ImGui::GetWindowSize();

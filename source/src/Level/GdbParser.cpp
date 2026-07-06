@@ -104,6 +104,28 @@ constexpr uint32_t kHashNormalStrength = 0xB5B0AE93;
 constexpr uint32_t kHashTranslucencyStrength = 0x114E67B1;
 constexpr uint32_t kHashBrightness = 0xC452018C;
 constexpr uint32_t kHashAmbientLight = 0x15DD1091;
+constexpr uint32_t kHashWind = 0xBE284853;
+constexpr uint32_t kHashGroundMist = 0x65AA790F;
+constexpr uint32_t kHashStrength = 0x6CC36A2E;
+constexpr uint32_t kHashRainDensity = 0x0043FE91;
+constexpr uint32_t kHashRainSize = 0xF2494D2C;
+constexpr uint32_t kHashSnowFallSpeed = 0x1C33AED8;
+constexpr uint32_t kHashSnowSize = 0xC5487977;
+constexpr uint32_t kHashWindStrengthMin = 0x467F5320;
+constexpr uint32_t kHashWindStrengthMax = 0x3E7F46CE;
+constexpr uint32_t kHashWindStrengthVariation = 0xEC5CF413;
+constexpr uint32_t kHashWindXYRotationMin = 0x8724E1D8;
+constexpr uint32_t kHashWindXYRotationMax = 0x8F24EE36;
+constexpr uint32_t kHashWindElevationMin = 0xD6C55ADC;
+constexpr uint32_t kHashWindElevationMax = 0xDEC56732;
+constexpr uint32_t kHashWindChangeFrequency = 0xA1C12827;
+constexpr uint32_t kHashWindChangeDuration = 0x5B45F873;
+constexpr uint32_t kHashWindDirectionVariation = 0x5B71ED9D;
+constexpr uint32_t kHashFoggingStart = 0x754D898A;
+constexpr uint32_t kHashSunAxisElevation = 0x2682515B;
+constexpr uint32_t kHashSunAxisZOffset = 0x2EF474B9;
+constexpr uint32_t kHashSunAxisXYRotationOffset = 0x2E4D729C;
+constexpr uint32_t kHashTimeFactor = 0x703AEFF3;
 constexpr uint32_t kHashNearDistance = 0xDA3F7AAA;
 constexpr uint32_t kHashNearDensity = 0x91F00AC5;
 constexpr uint32_t kHashFarDistance = 0xFF154645;
@@ -1565,6 +1587,69 @@ public:
         return applied;
     }
 
+    bool extractWeather(WeatherTheme& out_theme) const
+    {
+        out_theme = WeatherTheme{};
+        if (views_.empty()) return false;
+
+        bool applied = false;
+
+        WaterThemeRecordRef day_set = findDaySet(true);
+        if (day_set.valid) {
+            WaterThemeRecordRef day_theme;
+            float day_time = -1.0f;
+            if (selectThemeFromDaySet(day_set, day_theme, day_time)) {
+                out_theme.source_time_of_day = day_time;
+                applied |= applyWeatherThemeRecord(day_theme, out_theme);
+            }
+        }
+
+        if (!applied) {
+            for (const WaterThemeRecordRef& level :
+                 lookupAllInDb(kHashLevelData, 0)) {
+                applied |= applyWeatherThemeField(level, kHashEnvThemeGlobal,
+                                                  out_theme);
+            }
+        }
+
+        if (!applied) {
+            WaterThemeRecordRef owner =
+                firstRecordWithFieldInDb(kHashEnvThemeGlobal, 0);
+            if (owner.valid) {
+                applied |= applyWeatherThemeField(owner, kHashEnvThemeGlobal,
+                                                  out_theme);
+            }
+        }
+
+        if (!applied) {
+            for (const WaterThemeRecordRef& global :
+                 lookupAllInDb(kHashEnvThemeGlobal, 0)) {
+                applied |= applyWeatherThemeRecord(global, out_theme);
+            }
+        }
+
+        if (!applied) {
+            day_set = findDaySet(false);
+            WaterThemeRecordRef day_theme;
+            float day_time = -1.0f;
+            if (day_set.valid &&
+                selectThemeFromDaySet(day_set, day_theme, day_time)) {
+                out_theme.source_time_of_day = day_time;
+                applied |= applyWeatherThemeRecord(day_theme, out_theme);
+            }
+        }
+
+        if (!applied) {
+            for (const WaterThemeRecordRef& global :
+                 lookupAll(kHashEnvThemeGlobal)) {
+                applied |= applyWeatherThemeRecord(global, out_theme);
+            }
+        }
+
+        out_theme.has_any = applied;
+        return applied;
+    }
+
     bool extractClouds(CloudTheme& out_theme) const
     {
         out_theme = CloudTheme{};
@@ -1700,7 +1785,13 @@ public:
                 cloud_applied && key.clouds.layer_count > 0;
             key.clouds.source_time_of_day = time;
 
-            if (key.water.has_any || key.sky.has_any || key.clouds.has_any) {
+            const bool weather_applied =
+                applyWeatherThemeRecord(theme, key.weather);
+            key.weather.has_any = weather_applied;
+            key.weather.source_time_of_day = time;
+
+            if (key.water.has_any || key.sky.has_any ||
+                key.clouds.has_any || key.weather.has_any) {
                 out_timeline.keyframes.push_back(key);
             }
         }
@@ -2080,6 +2171,19 @@ private:
         read_param(kHashSkyComplementaryColourBias,
                    theme.has_complementary_bias,
                    theme.complementary_bias);
+        read_param(kHashSunAxisElevation, theme.has_sun_axis,
+                   theme.sun_axis_elevation);
+        read_param(kHashSunAxisZOffset, theme.has_sun_axis,
+                   theme.sun_axis_z_offset);
+        read_param(kHashSunAxisXYRotationOffset, theme.has_sun_axis,
+                   theme.sun_axis_xy_rotation);
+        {
+            float tf = 1.0f;
+            if (readFloat(sky, kHashTimeFactor, tf) &&
+                std::isfinite(tf) && tf > 0.0f) {
+                theme.main_light_time_factor = tf;
+            }
+        }
 
         auto read_texture = [&](uint32_t hash, bool& flag, uint32_t& dst) {
             WaterThemeFieldRef field;
@@ -2145,6 +2249,11 @@ private:
             theme.close_fog_max_distance = v;
             any = true;
         }
+        if (readFloat(fog, kHashFoggingStart, v)) {
+            theme.fogging_start = v;
+            theme.has_fogging_start = true;
+            any = true;
+        }
 
         return any;
     }
@@ -2179,6 +2288,109 @@ private:
     {
         WaterThemeRecordRef target = resolveRecordField(owner, field_hash);
         return target.valid && applySkyThemeRecord(target, theme);
+    }
+
+    bool applyWeatherSkyRecord(WaterThemeRecordRef sky,
+                               WeatherTheme& theme) const
+    {
+        if (!sky.valid) return false;
+
+        bool any = false;
+        auto read_param = [&](uint32_t hash, bool& flag, float& dst) {
+            float v = 0.0f;
+            if (readFloat(sky, hash, v)) {
+                flag = true;
+                dst = v;
+                any = true;
+            }
+        };
+        read_param(kHashRainDensity, theme.has_rain, theme.rain_density);
+        read_param(kHashRainSize, theme.has_rain, theme.rain_size);
+        read_param(kHashSnowFallSpeed, theme.has_snow,
+                   theme.snow_fall_speed);
+        read_param(kHashSnowSize, theme.has_snow, theme.snow_size);
+        return any;
+    }
+
+    bool applyWeatherWindRecord(WaterThemeRecordRef wind,
+                                WeatherTheme& theme) const
+    {
+        if (!wind.valid) return false;
+
+        bool any = false;
+        auto read_param = [&](uint32_t hash, float& dst) {
+            float v = 0.0f;
+            if (readFloat(wind, hash, v)) {
+                theme.has_wind = true;
+                dst = v;
+                any = true;
+            }
+        };
+        read_param(kHashWindStrengthMin, theme.wind_strength_min);
+        read_param(kHashWindStrengthMax, theme.wind_strength_max);
+        read_param(kHashWindStrengthVariation,
+                   theme.wind_strength_variation);
+        read_param(kHashWindXYRotationMin, theme.wind_xy_rotation_min);
+        read_param(kHashWindXYRotationMax, theme.wind_xy_rotation_max);
+        read_param(kHashWindElevationMin, theme.wind_elevation_min);
+        read_param(kHashWindElevationMax, theme.wind_elevation_max);
+        read_param(kHashWindChangeFrequency, theme.wind_change_frequency);
+        read_param(kHashWindChangeDuration, theme.wind_change_duration);
+        read_param(kHashWindDirectionVariation,
+                   theme.wind_direction_variation);
+        return any;
+    }
+
+    bool applyWeatherMistRecord(WaterThemeRecordRef mist,
+                                WeatherTheme& theme) const
+    {
+        if (!mist.valid) return false;
+
+        float v = 0.0f;
+        if (readFloat(mist, kHashStrength, v)) {
+            theme.has_ground_mist = true;
+            theme.ground_mist_strength = v;
+            return true;
+        }
+        return false;
+    }
+
+    bool applyWeatherThemeRecord(WaterThemeRecordRef theme_record,
+                                 WeatherTheme& theme) const
+    {
+        if (!theme_record.valid) return false;
+
+        bool any = false;
+        WaterThemeRecordRef sky =
+            resolveRecordField(theme_record, kHashSky);
+        if (sky.valid) {
+            any |= applyWeatherSkyRecord(sky, theme);
+        } else {
+            any |= applyWeatherSkyRecord(theme_record, theme);
+        }
+
+        WaterThemeRecordRef wind =
+            resolveRecordField(theme_record, kHashWind);
+        if (wind.valid) {
+            any |= applyWeatherWindRecord(wind, theme);
+        } else {
+            any |= applyWeatherWindRecord(theme_record, theme);
+        }
+
+        WaterThemeRecordRef mist =
+            resolveRecordField(theme_record, kHashGroundMist);
+        if (mist.valid) {
+            any |= applyWeatherMistRecord(mist, theme);
+        }
+        return any;
+    }
+
+    bool applyWeatherThemeField(WaterThemeRecordRef owner,
+                                uint32_t field_hash,
+                                WeatherTheme& theme) const
+    {
+        WaterThemeRecordRef target = resolveRecordField(owner, field_hash);
+        return target.valid && applyWeatherThemeRecord(target, theme);
     }
 
     int readCloudLayerRecord(WaterThemeRecordRef layer,
@@ -2480,6 +2692,14 @@ bool ExtractCloudTheme(
 {
     WaterThemeExtractor extractor(gdbs);
     return extractor.extractClouds(out_theme);
+}
+
+bool ExtractWeatherTheme(
+    const std::vector<const std::vector<uint8_t>*>& gdbs,
+    WeatherTheme& out_theme)
+{
+    WaterThemeExtractor extractor(gdbs);
+    return extractor.extractWeather(out_theme);
 }
 
 bool ExtractEnvironmentThemeTimeline(

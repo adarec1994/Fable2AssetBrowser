@@ -180,6 +180,7 @@ extern bool              g_pending_level_water_present;
 extern Gdb::WaterTheme   g_pending_level_water_theme;
 extern Gdb::SkyTheme     g_pending_level_sky_theme;
 extern Gdb::CloudTheme   g_pending_level_cloud_theme;
+extern Gdb::WeatherTheme g_pending_level_weather_theme;
 extern Gdb::EnvironmentThemeTimeline g_pending_level_environment_timeline;
 
 extern std::vector<std::string> g_level_vfs_texture_body_bnks;

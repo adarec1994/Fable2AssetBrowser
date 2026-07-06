@@ -90,6 +90,13 @@ struct SkyTheme {
     float far_distance = 0.0f;
     float far_density = 0.0f;
     float close_fog_max_distance = 0.0f;
+    float fogging_start = 0.0f;
+    bool has_fogging_start = false;
+    bool has_sun_axis = false;
+    float sun_axis_elevation = 26.0f;
+    float sun_axis_z_offset = 0.0f;
+    float sun_axis_xy_rotation = 0.0f;
+    float main_light_time_factor = 1.0f;
     float source_time_of_day = -1.0f;
     uint32_t sky_overlay_texture_hash = 0;
     uint32_t moon_texture_hash = 0;
@@ -135,11 +142,39 @@ struct CloudTheme {
     float source_time_of_day = -1.0f;
 };
 
+struct WeatherTheme {
+    bool has_any = false;
+    bool has_rain = false;
+    bool has_snow = false;
+    bool has_wind = false;
+    bool has_ground_mist = false;
+
+    float rain_density = 0.0f;
+    float rain_size = 0.0f;
+    float snow_fall_speed = 0.0f;
+    float snow_size = 0.0f;
+
+    float wind_strength_min = 0.0f;
+    float wind_strength_max = 0.0f;
+    float wind_strength_variation = 0.0f;
+    float wind_xy_rotation_min = 0.0f;
+    float wind_xy_rotation_max = 0.0f;
+    float wind_elevation_min = 0.0f;
+    float wind_elevation_max = 0.0f;
+    float wind_change_frequency = 0.0f;
+    float wind_change_duration = 0.0f;
+    float wind_direction_variation = 0.0f;
+
+    float ground_mist_strength = 0.0f;
+    float source_time_of_day = -1.0f;
+};
+
 struct EnvironmentThemeKeyframe {
     float time_of_day = 0.0f;
     WaterTheme water;
     SkyTheme sky;
     CloudTheme clouds;
+    WeatherTheme weather;
 };
 
 struct EnvironmentThemeTimeline {
@@ -177,6 +212,10 @@ bool ExtractSkyTheme(
 bool ExtractCloudTheme(
     const std::vector<const std::vector<uint8_t>*>& gdbs,
     CloudTheme& out_theme);
+
+bool ExtractWeatherTheme(
+    const std::vector<const std::vector<uint8_t>*>& gdbs,
+    WeatherTheme& out_theme);
 
 bool ExtractEnvironmentThemeTimeline(
     const std::vector<const std::vector<uint8_t>*>& gdbs,

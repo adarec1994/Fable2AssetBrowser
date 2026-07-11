@@ -195,12 +195,14 @@ static bool g_sparkles_initialized = false;
 
 static void handle_flycam_input(float dt) {
     ImGuiIO& io = ImGui::GetIO();
-    bool w_pressed = ImGui::IsKeyDown(S.key_forward);
-    bool s_pressed = ImGui::IsKeyDown(S.key_back);
-    bool a_pressed = ImGui::IsKeyDown(S.key_left);
-    bool d_pressed = ImGui::IsKeyDown(S.key_right);
-    bool q_pressed = ImGui::IsKeyDown(S.key_down);
-    bool e_pressed = ImGui::IsKeyDown(S.key_up);
+    const bool keys_ok =
+        !LevelEdit::Enabled() || g_flycam.is_looking;
+    bool w_pressed = keys_ok && ImGui::IsKeyDown(S.key_forward);
+    bool s_pressed = keys_ok && ImGui::IsKeyDown(S.key_back);
+    bool a_pressed = keys_ok && ImGui::IsKeyDown(S.key_left);
+    bool d_pressed = keys_ok && ImGui::IsKeyDown(S.key_right);
+    bool q_pressed = keys_ok && ImGui::IsKeyDown(S.key_down);
+    bool e_pressed = keys_ok && ImGui::IsKeyDown(S.key_up);
     float mouse_dx = 0.0f;
     float mouse_dy = 0.0f;
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {

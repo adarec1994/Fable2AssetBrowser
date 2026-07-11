@@ -5679,6 +5679,9 @@ bool Open(const FlatAssetEntry& entry)
                     pi.gdb_pos_off[0] = p.pos_value_off[0];
                     pi.gdb_pos_off[1] = p.pos_value_off[1];
                     pi.gdb_pos_off[2] = p.pos_value_off[2];
+                    pi.gdb_rot_off[0] = p.rot_value_off[0];
+                    pi.gdb_rot_off[1] = p.rot_value_off[1];
+                    pi.gdb_rot_off[2] = p.rot_value_off[2];
                     const float scale =
                         (std::isfinite(p.scale) && p.scale > 0.01f &&
                          p.scale < 100.0f)
@@ -6735,6 +6738,9 @@ bool Open(const FlatAssetEntry& entry)
                 pi.gdb_pos_off[0] = p.pos_value_off[0];
                 pi.gdb_pos_off[1] = p.pos_value_off[1];
                 pi.gdb_pos_off[2] = p.pos_value_off[2];
+                pi.gdb_rot_off[0] = p.rot_value_off[0];
+                pi.gdb_rot_off[1] = p.rot_value_off[1];
+                pi.gdb_rot_off[2] = p.rot_value_off[2];
                 const float scale =
                     (std::isfinite(p.scale) && p.scale > 0.01f && p.scale < 100.0f)
                         ? p.scale : 1.0f;
@@ -8730,6 +8736,39 @@ bool Open(const FlatAssetEntry& entry)
                                 g_pending_level_prop_blocks.end(),
                                 std::make_move_iterator(hkx_blocks.begin()),
                                 std::make_move_iterator(hkx_blocks.end()));
+                        }
+
+                        {
+                            std::vector<LevelEdit::Addition> adds;
+                            LevelEdit::GetAdditions(adds);
+                            for (size_t ai = 0; ai < adds.size(); ++ai) {
+                                const auto& a = adds[ai];
+                                Level::PropBlock pb;
+                                pb.type = 0xB3;
+                                pb.model_path = a.model_path;
+                                Level::PropInstance pi;
+                                pi.hash = 0xADD0000000000000ull + ai;
+                                pi.values[0] = a.pos[0];
+                                pi.values[1] = a.pos[1];
+                                pi.values[2] = a.pos[2];
+                                const float yaw =
+                                    a.yaw_deg * 0.01745329252f;
+                                pi.values[6] = std::sin(yaw);
+                                pi.values[7] = std::cos(yaw);
+                                pi.values[9] = pi.values[10] =
+                                    pi.values[11] = 1.0f;
+                                pi.lev_rec_kind = 5;
+                                pi.pos_file_offset = (uint32_t)ai + 1;
+                                pb.instances.push_back(pi);
+                                g_pending_level_prop_blocks.push_back(
+                                    std::move(pb));
+                            }
+                            if (!adds.empty()) {
+                                OutputLog::success(
+                                    "level edit: injected " +
+                                    std::to_string(adds.size()) +
+                                    " placed model(s)");
+                            }
                         }
 
                         if (!g_pending_terrain_ghf_heights.empty() &&

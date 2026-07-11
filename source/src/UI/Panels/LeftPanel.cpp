@@ -358,7 +358,8 @@ void draw_left_panel() {
                                   const char* child_id,
                                   int kind,
                                   float footer_h = 0.0f,
-                                  bool dedup_by_name_size = true) {
+                                  bool dedup_by_name_size = true,
+                                  const char* drag_type = nullptr) {
         ImGui::SetNextItemWidth(-1);
         ImGui::InputTextWithHint(("##" + std::string(child_id) + "_filter").c_str(),
                                  "Filter", &filter);
@@ -442,6 +443,16 @@ void draw_left_panel() {
                 if (ImGui::Selectable(e.name.c_str(), selected,
                                       ImGuiSelectableFlags_SpanAllColumns)) {
                     load_flat_asset_entry(e, kind);
+                }
+
+                if (drag_type && !e.full_path.empty() &&
+                    ImGui::BeginDragDropSource(
+                        ImGuiDragDropFlags_SourceAllowNullID)) {
+                    ImGui::SetDragDropPayload(drag_type,
+                                              e.full_path.c_str(),
+                                              e.full_path.size());
+                    ImGui::TextUnformatted(e.name.c_str());
+                    ImGui::EndDragDropSource();
                 }
 
                 file_hex_context_menu(e.bnk_path, e.file_index,
@@ -1053,7 +1064,7 @@ void draw_left_panel() {
             const float footer_h = ImGui::GetFrameHeightWithSpacing();
             draw_flat_asset_tab("Models", S.all_mdl_files, S.mdl_filter,
                                 "models_list", 0, footer_h,
-                                true);
+                                true, "F2_MODEL");
 
             const bool has_any = !S.all_mdl_files.empty();
             if (!has_any) ImGui::BeginDisabled();

@@ -17,6 +17,7 @@ struct Placement {
     float    scale;
     bool     has_rotation;
     uint32_t pos_value_off[3] = {0, 0, 0};
+    uint32_t rot_value_off[3] = {0, 0, 0};
     uint32_t marker;
     uint32_t hash_a;
     uint32_t parent_hash;

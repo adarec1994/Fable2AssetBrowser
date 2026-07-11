@@ -276,10 +276,13 @@ struct GdbView {
     bool readRotationVec3Ref(uint32_t hash,
                              float& x,
                              float& y,
-                             float& z) const
+                             float& z,
+                             size_t* out_slots = nullptr) const
     {
         size_t rec = 0;
-        return lookup(hash, rec) && readVec3Record(rec, x, y, z);
+        return lookup(hash, rec) &&
+               readVec3Record(rec, x, y, z, nullptr, nullptr, nullptr,
+                              out_slots);
     }
 
     bool payloadRange(size_t record,

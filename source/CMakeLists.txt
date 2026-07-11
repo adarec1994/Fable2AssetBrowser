@@ -85,6 +85,8 @@ set(APP_SOURCES
         src/Level/TerrainEdit.h
         src/Level/LevelEdit.cpp
         src/Level/LevelEdit.h
+        src/Level/BnkWriter.cpp
+        src/Level/BnkWriter.h
         src/UI/LevelGizmo.cpp
         src/UI/LevelGizmo.h
         src/Level/VfsConfig.cpp

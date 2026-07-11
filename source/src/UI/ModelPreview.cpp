@@ -2823,20 +2823,22 @@ static void mp_step_cloth(ClothSim& c, const XMFLOAT4X4* bmats, uint32_t nbones)
     }
 }
 
-bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp){
-    for(auto& m : mp.meshes){
-        if(m.vb){m.vb->Release();}
-        if(m.ib){m.ib->Release();}
-        if(m.srv_diffuse && m.srv_diffuse != mp.default_srv){m.srv_diffuse->Release();}
-        if(m.srv_normal && m.srv_normal != mp.default_srv){m.srv_normal->Release();}
-        if(m.srv_specular && m.srv_specular != mp.default_srv){m.srv_specular->Release();}
-        if(m.srv_metallic && m.srv_metallic != mp.default_srv){m.srv_metallic->Release();}
-        if(m.srv_extra && m.srv_extra != mp.default_srv){m.srv_extra->Release();}
+bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp, bool append){
+    if (!append) {
+        for(auto& m : mp.meshes){
+            if(m.vb){m.vb->Release();}
+            if(m.ib){m.ib->Release();}
+            if(m.srv_diffuse && m.srv_diffuse != mp.default_srv){m.srv_diffuse->Release();}
+            if(m.srv_normal && m.srv_normal != mp.default_srv){m.srv_normal->Release();}
+            if(m.srv_specular && m.srv_specular != mp.default_srv){m.srv_specular->Release();}
+            if(m.srv_metallic && m.srv_metallic != mp.default_srv){m.srv_metallic->Release();}
+            if(m.srv_extra && m.srv_extra != mp.default_srv){m.srv_extra->Release();}
+        }
+        mp.meshes.clear();
+        mp.lod_count    = 1;
+        mp.selected_lod = -1;
+        Skybox::ResetForBuild(mp);
     }
-    mp.meshes.clear();
-    mp.lod_count    = 1;
-    mp.selected_lod = -1;
-    Skybox::ResetForBuild(mp);
 
     auto extract_lod = [](std::string& name) -> uint32_t {
         size_t pos = name.rfind("|lod");
@@ -2854,18 +2856,20 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         return v;
     };
 
-    float minx=1e9f,miny=1e9f,minz=1e9f,maxx=-1e9f,maxy=-1e9f,maxz=-1e9f;
-    for(const auto& g: geoms){
-        for(size_t i=0;i+2<g.positions.size();i+=3){
-            float x=g.positions[i],y=g.positions[i+1],z=g.positions[i+2];
-            if(x<minx)minx=x; if(y<miny)miny=y; if(z<minz)minz=z;
-            if(x>maxx)maxx=x; if(y>maxy)maxy=y; if(z>maxz)maxz=z;
+    if (!append) {
+        float minx=1e9f,miny=1e9f,minz=1e9f,maxx=-1e9f,maxy=-1e9f,maxz=-1e9f;
+        for(const auto& g: geoms){
+            for(size_t i=0;i+2<g.positions.size();i+=3){
+                float x=g.positions[i],y=g.positions[i+1],z=g.positions[i+2];
+                if(x<minx)minx=x; if(y<miny)miny=y; if(z<minz)minz=z;
+                if(x>maxx)maxx=x; if(y>maxy)maxy=y; if(z>maxz)maxz=z;
+            }
         }
+        if(!(minx<maxx)){ minx=-1;maxx=1;miny=-1;maxy=1;minz=-1;maxz=1; }
+        mp.center[0]=(minx+maxx)*0.5f; mp.center[1]=(miny+maxy)*0.5f; mp.center[2]=(minz+maxz)*0.5f;
+        mp.radius = std::max(std::max(maxx-minx,maxy-miny),maxz-minz)*0.5f; if(mp.radius<0.0001f) mp.radius=1.0f;
+        FlyCam_Reset(g_flycam, mp.center[0], mp.center[1], mp.center[2], mp.radius);
     }
-    if(!(minx<maxx)){ minx=-1;maxx=1;miny=-1;maxy=1;minz=-1;maxz=1; }
-    mp.center[0]=(minx+maxx)*0.5f; mp.center[1]=(miny+maxy)*0.5f; mp.center[2]=(minz+maxz)*0.5f;
-    mp.radius = std::max(std::max(maxx-minx,maxy-miny),maxz-minz)*0.5f; if(mp.radius<0.0001f) mp.radius=1.0f;
-    FlyCam_Reset(g_flycam, mp.center[0], mp.center[1], mp.center[2], mp.radius);
     for(size_t i=0;i<geoms.size();++i){
         const auto& g = geoms[i];
         size_t vcount = g.positions.size()/3;
@@ -3039,7 +3043,9 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             mr.gdb_pos_off[0] = pr.gdb_pos_off[0];
             mr.gdb_pos_off[1] = pr.gdb_pos_off[1];
             mr.gdb_pos_off[2] = pr.gdb_pos_off[2];
-            mr.inst_scale = pr.inst_scale;
+            mr.gdb_rot_off[0] = pr.gdb_rot_off[0];
+            mr.gdb_rot_off[1] = pr.gdb_rot_off[1];
+            mr.gdb_rot_off[2] = pr.gdb_rot_off[2];
             mr.lev_rec_kind = pr.lev_rec_kind;
             m.pick_ranges.push_back(mr);
         }
@@ -3145,6 +3151,8 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         }
         mp.meshes.push_back(m);
     }
+
+    if (append) return true;
 
     if (mp.lod_count > 1) {
         mp.selected_lod = 0;

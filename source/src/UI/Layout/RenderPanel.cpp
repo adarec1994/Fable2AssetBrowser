@@ -52,6 +52,11 @@ extern bool g_mp_initialized;
 extern FlyCam g_flycam;
 
 void render_panel_handle_flycam(float dt);
+#ifdef _WIN32
+bool spawn_level_model_at(ID3D11Device* device,
+                          const std::string& model_path,
+                          const float engine_pos[3]);
+#endif
 
 bool g_skel_overlay_show = false;
 
@@ -914,19 +919,32 @@ int pick_level_mesh_at(const ImVec2& mouse,
                 if (pr.selection_id == 0 || pr.radius <= 0.0f) continue;
 
                 float ro[3] = { ox, oy, oz };
-                float ctr[3] = { pr.center[0], pr.center[1], pr.center[2] };
-                auto eo = g_mp.range_edit_offsets.find(pr.selection_id);
-                if (eo != g_mp.range_edit_offsets.end()) {
-                    ctr[0] += eo->second[0];
-                    ctr[1] += eo->second[1];
-                    ctr[2] += eo->second[2];
-                    ro[0] -= eo->second[0];
-                    ro[1] -= eo->second[1];
-                    ro[2] -= eo->second[2];
+                float rd[3] = { dx, dy, dz };
+                float tscale = 1.0f;
+                auto eo = g_mp.range_edit_xforms.find(pr.selection_id);
+                if (eo != g_mp.range_edit_xforms.end()) {
+                    const LevelEdit::EditXform& x = eo->second;
+                    const float rel[3] = {
+                        ox - x.pivot[0] - x.off[0],
+                        oy - x.pivot[1] - x.off[1],
+                        oz - x.pivot[2] - x.off[2],
+                    };
+                    float rrel[3];
+                    rp_quat_rot_inv(x.quat, rel, rrel);
+                    const float inv_s =
+                        x.scale > 1e-6f ? 1.0f / x.scale : 1.0f;
+                    ro[0] = rrel[0] * inv_s + x.pivot[0];
+                    ro[1] = rrel[1] * inv_s + x.pivot[1];
+                    ro[2] = rrel[2] * inv_s + x.pivot[2];
+                    const float dv[3] = { dx, dy, dz };
+                    rp_quat_rot_inv(x.quat, dv, rd);
+                    tscale = x.scale;
                 }
 
                 float sphere_t = 0.0f;
-                if (!hit_sphere(ctr, pr.radius, sphere_t)) continue;
+                if (!hit_sphere(pr.center, pr.radius, ro, rd, sphere_t)) {
+                    continue;
+                }
 
                 bool tri_hit = false;
                 float tri_t = std::numeric_limits<float>::infinity();
@@ -949,7 +967,8 @@ int pick_level_mesh_at(const ImVec2& mouse,
                         float t = 0.0f;
                         if (!hit_triangle(&m.pick_positions[pa],
                                           &m.pick_positions[pb],
-                                          &m.pick_positions[pc], ro, t)) {
+                                          &m.pick_positions[pc],
+                                          ro, rd, t)) {
                             continue;
                         }
                         if (t < tri_t) {
@@ -959,9 +978,8 @@ int pick_level_mesh_at(const ImVec2& mouse,
                     }
                 }
 
-                const float t = tri_hit ? tri_t : sphere_t;
-                if (tri_hit && t < best_t) {
-                    best_t = t;
+                if (tri_hit && tri_t * tscale < best_t) {
+                    best_t = tri_t * tscale;
                     best = (int)i;
                     best_id = pr.selection_id;
                     best_hash = pr.inst_hash;
@@ -972,10 +990,25 @@ int pick_level_mesh_at(const ImVec2& mouse,
         if (m.name.rfind("engine_level:", 0) == 0) continue;
 
         float t = 0.0f;
-        const float ctr[3] = { m.center[0] + m.edit_offset[0],
-                               m.center[1] + m.edit_offset[1],
-                               m.center[2] + m.edit_offset[2] };
-        if (!hit_sphere(ctr, m.radius, t)) continue;
+        float ctr[3] = { m.center[0], m.center[1], m.center[2] };
+        float rr = m.radius;
+        if (m.edit_xform.active()) {
+            const LevelEdit::EditXform& x = m.edit_xform;
+            const float rel[3] = {
+                (m.center[0] - x.pivot[0]) * x.scale,
+                (m.center[1] - x.pivot[1]) * x.scale,
+                (m.center[2] - x.pivot[2]) * x.scale,
+            };
+            float rrel[3];
+            rp_quat_rot(x.quat, rel, rrel);
+            ctr[0] = rrel[0] + x.pivot[0] + x.off[0];
+            ctr[1] = rrel[1] + x.pivot[1] + x.off[1];
+            ctr[2] = rrel[2] + x.pivot[2] + x.off[2];
+            rr = m.radius * x.scale;
+        }
+        const float o0[3] = { ox, oy, oz };
+        const float d0[3] = { dx, dy, dz };
+        if (!hit_sphere(ctr, rr, o0, d0, t)) continue;
         if (t < sph_t) {
             sph_t = t;
             sph_best = (int)i;
@@ -1013,18 +1046,14 @@ void draw_model_in_panel(ID3D11Device* device) {
     }
 
     {
-        LevelEdit::CollectPreviewOffsets(g_mp.range_edit_offsets);
+        LevelEdit::CollectPreviewXforms(g_mp.range_edit_xforms);
         for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
             auto& mm = g_mp.meshes[i];
-            mm.edit_offset[0] = 0.0f;
-            mm.edit_offset[1] = 0.0f;
-            mm.edit_offset[2] = 0.0f;
-            auto it = g_mp.range_edit_offsets.find(
+            mm.edit_xform = LevelEdit::EditXform{};
+            auto it = g_mp.range_edit_xforms.find(
                 0x80000000u | (uint32_t)i);
-            if (it != g_mp.range_edit_offsets.end()) {
-                mm.edit_offset[0] = it->second[0];
-                mm.edit_offset[1] = it->second[1];
-                mm.edit_offset[2] = it->second[2];
+            if (it != g_mp.range_edit_xforms.end()) {
+                mm.edit_xform = it->second;
             }
         }
     }
@@ -1038,6 +1067,64 @@ void draw_model_in_panel(ID3D11Device* device) {
     ImGui::InvisibleButton("##model_render", region);
     bool hovered = ImGui::IsItemHovered();
     bool active  = ImGui::IsItemActive();
+
+#ifdef _WIN32
+    if (g_mp.no_tilt && LevelEdit::Enabled() &&
+        ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* pay =
+                ImGui::AcceptDragDropPayload("F2_MODEL")) {
+            const std::string drop_model(
+                (const char*)pay->Data, (size_t)pay->DataSize);
+            const ImVec2 mouse = ImGui::GetIO().MousePos;
+            const float fw = std::max(1.0f, region.x);
+            const float fh = std::max(1.0f, region.y);
+            const float fovd = 60.0f * 3.14159265f / 180.0f;
+            const float aspect = fw / fh;
+            const float tan_half = std::tan(0.5f * fovd);
+            const float mxp = mouse.x - origin.x;
+            const float myp = mouse.y - origin.y;
+            const float u_view =
+                (2.0f * mxp / fw - 1.0f) * aspect * tan_half;
+            const float v_view = (1.0f - 2.0f * myp / fh) * tan_half;
+            const float cy = std::cos(g_flycam.yaw);
+            const float sy = std::sin(g_flycam.yaw);
+            const float cp = std::cos(g_flycam.pitch);
+            const float sp = std::sin(g_flycam.pitch);
+            float ddx = cy * u_view + (-sp * sy) * v_view + sy * cp;
+            float ddy = cp * v_view + sp;
+            float ddz = (-sy) * u_view + (-sp * cy) * v_view + cy * cp;
+            const float dlen =
+                std::sqrt(ddx*ddx + ddy*ddy + ddz*ddz);
+            if (dlen > 1e-6f) {
+                ddx /= dlen; ddy /= dlen; ddz /= dlen;
+                float hx = 0.0f, hy = 0.0f, hz = 0.0f;
+                bool hit = TerrainEdit::Raycast(
+                    g_flycam.pos[0], g_flycam.pos[1], g_flycam.pos[2],
+                    ddx, ddy, ddz, hx, hy, hz);
+                if (!hit && std::fabs(ddy) > 1e-4f) {
+                    const float plane_y = g_mp.center[1];
+                    const float t =
+                        (plane_y - g_flycam.pos[1]) / ddy;
+                    if (t > 0.0f) {
+                        hx = g_flycam.pos[0] + ddx * t;
+                        hy = plane_y;
+                        hz = g_flycam.pos[2] + ddz * t;
+                        hit = true;
+                    }
+                }
+                if (hit) {
+                    const float engine_pos[3] = { hx, hz, hy };
+                    DebugTrace::log(
+                        "drop: '%s' at (%.2f, %.2f, %.2f)",
+                        drop_model.c_str(), engine_pos[0],
+                        engine_pos[1], engine_pos[2]);
+                    spawn_level_model_at(device, drop_model, engine_pos);
+                }
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+#endif
 
     bool skel_visible = ::g_skel_overlay_show && (g_mp.bone_count > 0);
 
@@ -1245,10 +1332,16 @@ void draw_model_in_panel(ID3D11Device* device) {
         const uint32_t edit_key = whole_mesh_sel
             ? (0x80000000u | (uint32_t)::g_selected_level_mesh_idx)
             : ::g_selected_level_pick_id;
-        if (const float* d = LevelEdit::DeltaFor(edit_key)) {
-            sel_pos[0] += d[0];
-            sel_pos[1] += d[1];
-            sel_pos[2] += d[2];
+        {
+            float d_pos[3], d_rot[3];
+            if (LevelEdit::EditFor(edit_key, d_pos, d_rot)) {
+                sel_pos[0] += d_pos[0];
+                sel_pos[1] += d_pos[1];
+                sel_pos[2] += d_pos[2];
+                sel_rot[0] += d_rot[0];
+                sel_rot[1] += d_rot[1];
+                sel_rot[2] += d_rot[2];
+            }
         }
 
         auto range_in_group = [](const MPPerMesh::PickRange& pr) {
@@ -1273,22 +1366,40 @@ void draw_model_in_panel(ID3D11Device* device) {
             }
             return ids;
         };
-        auto apply_group_step = [&](const float step[3]) {
+        enum { kEditMove, kEditRotate };
+        auto apply_group_edit = [&](int what, const float v[3]) {
             if (whole_mesh_sel) {
                 const float orig[3] = { sel_mesh.center[0],
                                         sel_mesh.center[2],
                                         sel_mesh.center[1] };
-                LevelEdit::AddDelta(edit_key, step, orig, 0, nullptr);
+                LevelEdit::InstInfo info;
+                info.orig_pos = orig;
+                if (what == kEditMove) {
+                    LevelEdit::AddMove(edit_key, v, info);
+                } else {
+                    LevelEdit::AddRotate(edit_key, v, info);
+                }
                 return;
             }
-            std::unordered_set<uint32_t> moved_ids;
+            std::unordered_set<uint32_t> done;
             for (const auto& m2 : g_mp.meshes) {
                 for (const auto& pr : m2.pick_ranges) {
                     if (!range_in_group(pr)) continue;
-                    if (!moved_ids.insert(pr.selection_id).second) continue;
-                    LevelEdit::AddDelta(pr.selection_id, step, pr.inst_pos,
-                                        pr.pos_file_offset,
-                                        pr.gdb_pos_off);
+                    if (!done.insert(pr.selection_id).second) continue;
+                    LevelEdit::InstInfo info;
+                    info.orig_pos = pr.inst_pos;
+                    info.orig_rot_deg[0] = pr.inst_rot_deg[0];
+                    info.orig_rot_deg[1] = pr.inst_rot_deg[1];
+                    info.orig_rot_deg[2] = pr.inst_rot_deg[2];
+                    info.lev_off = pr.pos_file_offset;
+                    info.lev_kind = pr.lev_rec_kind;
+                    info.gdb_off = pr.gdb_pos_off;
+                    info.gdb_rot_off = pr.gdb_rot_off;
+                    if (what == kEditMove) {
+                        LevelEdit::AddMove(pr.selection_id, v, info);
+                    } else {
+                        LevelEdit::AddRotate(pr.selection_id, v, info);
+                    }
                 }
             }
         };
@@ -1331,6 +1442,13 @@ void draw_model_in_panel(ID3D11Device* device) {
                              | ImGuiWindowFlags_NoFocusOnAppearing;
         if (ImGui::Begin("##sel_transform_overlay", nullptr, ofl)) {
             if (dbg_sel_changed) DebugTrace::log("ov: begin");
+            if (edit_active) {
+                const char* mode_name =
+                    LevelGizmo::GetMode() == LevelGizmo::Mode::Rotate
+                        ? "Rotate (E)"
+                        : "Move (W)";
+                ImGui::TextDisabled("%s", mode_name);
+            }
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Position:");
             if (edit_active) {
                 static const char* kAxis[3] = { "X##selpos", "Y##selpos",
@@ -1342,7 +1460,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                     ImGui::InputFloat(kAxis[a], &edit_pos[a], 0.0f, 0.0f,
                                       "%.3f");
                     if (ImGui::IsItemDeactivatedAfterEdit()) commit = true;
-                    if (dbg_sel_changed) DebugTrace::log("ov: input %d", a);
                 }
                 if (commit) {
                     const float step[3] = { edit_pos[0] - sel_pos[0],
@@ -1350,10 +1467,8 @@ void draw_model_in_panel(ID3D11Device* device) {
                                             edit_pos[2] - sel_pos[2] };
                     if (step[0] != 0.0f || step[1] != 0.0f ||
                         step[2] != 0.0f) {
-                        DebugTrace::log("ov: commit step=(%.3f,%.3f,%.3f)",
-                                        step[0], step[1], step[2]);
                         LevelEdit::PushUndoSnapshot(collect_group_ids());
-                        apply_group_step(step);
+                        apply_group_edit(kEditMove, step);
                     }
                 }
                 if (dbg_sel_changed) DebugTrace::log("ov: pos done");
@@ -1364,7 +1479,28 @@ void draw_model_in_panel(ID3D11Device* device) {
             }
             ImGui::Spacing();
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Rotation:");
-            if (sel_has_rot) {
+            if (edit_active) {
+                static const char* kRAxis[3] = { "X##selrot", "Y##selrot",
+                                                 "Z##selrot" };
+                float edit_rot[3] = { sel_rot[0], sel_rot[1], sel_rot[2] };
+                bool commit = false;
+                for (int a = 0; a < 3; ++a) {
+                    ImGui::SetNextItemWidth(120.0f);
+                    ImGui::InputFloat(kRAxis[a], &edit_rot[a], 0.0f, 0.0f,
+                                      "%.1f");
+                    if (ImGui::IsItemDeactivatedAfterEdit()) commit = true;
+                }
+                if (commit) {
+                    const float step[3] = { edit_rot[0] - sel_rot[0],
+                                            edit_rot[1] - sel_rot[1],
+                                            edit_rot[2] - sel_rot[2] };
+                    if (step[0] != 0.0f || step[1] != 0.0f ||
+                        step[2] != 0.0f) {
+                        LevelEdit::PushUndoSnapshot(collect_group_ids());
+                        apply_group_edit(kEditRotate, step);
+                    }
+                }
+            } else if (sel_has_rot) {
                 ImGui::Text("X: %.1f", sel_rot[0]);
                 ImGui::Text("Y: %.1f", sel_rot[1]);
                 ImGui::Text("Z: %.1f", sel_rot[2]);
@@ -1385,11 +1521,31 @@ void draw_model_in_panel(ID3D11Device* device) {
                 DebugTrace::log("gizmo: drag begin");
             }
             s_was_dragging = gz.dragging;
-            if (gz.moved) apply_group_step(gz.step);
+            if (gz.moved) {
+                if (gz.step[0] != 0.0f || gz.step[1] != 0.0f ||
+                    gz.step[2] != 0.0f) {
+                    apply_group_edit(kEditMove, gz.step);
+                }
+                if (gz.rot_step_deg[0] != 0.0f ||
+                    gz.rot_step_deg[1] != 0.0f ||
+                    gz.rot_step_deg[2] != 0.0f) {
+                    apply_group_edit(kEditRotate, gz.rot_step_deg);
+                }
+            }
         } else {
             LevelGizmo::CancelDrag();
         }
         if (dbg_sel_changed) DebugTrace::log("sel: gizmo done");
+    }
+
+    if (g_mp.no_tilt && LevelEdit::Enabled() && hovered &&
+        !g_flycam.is_looking && !ImGui::GetIO().WantTextInput) {
+        if (ImGui::IsKeyPressed(ImGuiKey_W, false)) {
+            LevelGizmo::SetMode(LevelGizmo::Mode::Translate);
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_E, false)) {
+            LevelGizmo::SetMode(LevelGizmo::Mode::Rotate);
+        }
     }
 
     if (LevelEdit::Enabled() && !ImGui::GetIO().WantTextInput &&

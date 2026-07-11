@@ -36,8 +36,6 @@ struct DragState {
     Mode mode = Mode::Translate;
     float t_prev = 0.0f;
     float angle_prev = 0.0f;
-    float scale_applied = 1.0f;
-    float t_start = 0.0f;
     float axis_origin[3] = {0, 0, 0};
 };
 
@@ -293,8 +291,6 @@ Result DrawAndHandle(const FlyCam& cam,
                 d.axis = hover;
                 d.mode = mode;
                 d.t_prev = t;
-                d.t_start = t;
-                d.scale_applied = 1.0f;
                 d.axis_origin[0] = wp[0];
                 d.axis_origin[1] = wp[1];
                 d.axis_origin[2] = wp[2];
@@ -317,20 +313,6 @@ Result DrawAndHandle(const FlyCam& cam,
                         d.angle_prev = ang;
                         res.rot_step_deg[d.axis] =
                             delta * 57.29577951f;
-                        res.moved = true;
-                    }
-                }
-            } else if (mode == Mode::Scale) {
-                float t = 0.0f;
-                if (closest_axis_param(d.axis_origin,
-                                       kAxisPreview[d.axis],
-                                       cam.pos, dir, t)) {
-                    float target = 1.0f + (t - d.t_start) / axis_len;
-                    target = std::clamp(target, 0.05f, 40.0f);
-                    if (target != d.scale_applied &&
-                        d.scale_applied > 1e-6f) {
-                        res.scale_step = target / d.scale_applied;
-                        d.scale_applied = target;
                         res.moved = true;
                     }
                 }
@@ -382,22 +364,15 @@ Result DrawAndHandle(const FlyCam& cam,
             if (len > 1e-3f) {
                 dir2.x /= len; dir2.y /= len;
                 const ImVec2 n(-dir2.y, dir2.x);
-                if (mode == Mode::Scale) {
-                    const float hs = hot ? 7.0f : 5.5f;
-                    const ImVec2& t2 = tip_px[i];
-                    dl->AddRectFilled(ImVec2(t2.x - hs, t2.y - hs),
-                                      ImVec2(t2.x + hs, t2.y + hs), col);
-                } else {
-                    const float ah = hot ? 13.0f : 10.0f;
-                    const float aw = hot ? 6.5f : 5.0f;
-                    const ImVec2 t2(tip_px[i].x + dir2.x * ah,
-                                    tip_px[i].y + dir2.y * ah);
-                    const ImVec2 wl(tip_px[i].x + n.x * aw,
-                                    tip_px[i].y + n.y * aw);
-                    const ImVec2 wr(tip_px[i].x - n.x * aw,
-                                    tip_px[i].y - n.y * aw);
-                    dl->AddTriangleFilled(t2, wl, wr, col);
-                }
+                const float ah = hot ? 13.0f : 10.0f;
+                const float aw = hot ? 6.5f : 5.0f;
+                const ImVec2 t2(tip_px[i].x + dir2.x * ah,
+                                tip_px[i].y + dir2.y * ah);
+                const ImVec2 wl(tip_px[i].x + n.x * aw,
+                                tip_px[i].y + n.y * aw);
+                const ImVec2 wr(tip_px[i].x - n.x * aw,
+                                tip_px[i].y - n.y * aw);
+                dl->AddTriangleFilled(t2, wl, wr, col);
             }
         }
     }

@@ -24,11 +24,17 @@ struct EditXform {
 
 struct InstInfo {
     const float* orig_pos = nullptr;
-    float orig_rot_z_deg = 0.0f;
-    float orig_scale = 1.0f;
+    float orig_rot_deg[3] = {0, 0, 0};
     uint32_t lev_off = 0;
     uint8_t lev_kind = 0;
     const uint32_t* gdb_off = nullptr;
+    const uint32_t* gdb_rot_off = nullptr;
+};
+
+struct Addition {
+    std::string model_path;
+    float pos[3] = {0, 0, 0};
+    float yaw_deg = 0.0f;
 };
 
 void OnLevelLoaded(const FlatAssetEntry& entry);
@@ -45,15 +51,15 @@ bool SetEnabled(bool on, std::string& msg);
 
 bool EditFor(uint32_t selection_id,
              float out_pos_delta[3],
-             float out_rot_delta_deg[3],
-             float* out_scale);
+             float out_rot_delta_deg[3]);
 
 void AddMove(uint32_t selection_id, const float step[3],
              const InstInfo& info);
 void AddRotate(uint32_t selection_id, const float step_deg[3],
                const InstInfo& info);
-void AddScale(uint32_t selection_id, float factor,
-              const InstInfo& info);
+
+int AddPlacement(const std::string& model_path, const float pos[3]);
+void GetAdditions(std::vector<Addition>& out);
 
 bool   Dirty();
 size_t EditedCount();

@@ -6,7 +6,7 @@ struct FlyCam;
 
 namespace LevelGizmo {
 
-enum class Mode { Translate, Rotate, Scale };
+enum class Mode { Translate, Rotate };
 
 struct Result {
     bool hovered  = false;
@@ -14,7 +14,6 @@ struct Result {
     bool moved    = false;
     float step[3] = {0, 0, 0};
     float rot_step_deg[3] = {0, 0, 0};
-    float scale_step = 1.0f;
 };
 
 Mode GetMode();

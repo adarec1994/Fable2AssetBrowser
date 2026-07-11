@@ -14,6 +14,7 @@
 #include "../../Level/EhfChunkParser.h"
 #include "../../Level/TerrainSplat.h"
 #include "../../Level/TerrainEdit.h"
+#include "../../Level/LevelEdit.h"
 #include "../../Level/Skybox/SkyboxPreviewBinding.h"
 #include "../../Utilities/Files.h"
 #include "../../Utilities/Utils.h"
@@ -621,16 +622,10 @@ static void merge_transformed_instance_into(MDLMeshGeom& dst,
         pr.gdb_pos_off[0] = inst.gdb_pos_off[0];
         pr.gdb_pos_off[1] = inst.gdb_pos_off[1];
         pr.gdb_pos_off[2] = inst.gdb_pos_off[2];
+        pr.gdb_rot_off[0] = inst.gdb_rot_off[0];
+        pr.gdb_rot_off[1] = inst.gdb_rot_off[1];
+        pr.gdb_rot_off[2] = inst.gdb_rot_off[2];
         pr.lev_rec_kind = inst.lev_rec_kind;
-        if (inst.has_full_transform) {
-            pr.inst_scale =
-                (std::isfinite(inst.values[12]) && inst.values[12] != 0.0f)
-                    ? inst.values[12] : 1.0f;
-        } else {
-            pr.inst_scale =
-                (std::isfinite(inst.values[9]) && inst.values[9] != 0.0f)
-                    ? inst.values[9] : 1.0f;
-        }
         dst.pick_ranges.push_back(pr);
     }
 }
@@ -1222,6 +1217,89 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
 }
 
 }
+
+#ifdef _WIN32
+bool spawn_level_model_at(ID3D11Device* device,
+                          const std::string& model_path,
+                          const float engine_pos[3])
+{
+    extern int g_selected_level_mesh_idx;
+    extern uint32_t g_selected_level_pick_id;
+    extern uint64_t g_selected_level_hash;
+
+    if (!device || !g_mp.has_model || !g_mp.no_tilt) return false;
+
+    CachedPropModel cached;
+    if (!load_cached_prop_model(model_path,
+                                g_pending_level_model_body_bnk, cached) ||
+        cached.geoms.empty()) {
+        OutputLog::error("level edit: could not load model '" +
+                         model_path + "' for placement");
+        return false;
+    }
+
+    const int add_idx = LevelEdit::AddPlacement(model_path, engine_pos);
+    if (add_idx < 0) {
+        OutputLog::error("level edit: placement rejected (no level?)");
+        return false;
+    }
+
+    Level::PropInstance inst;
+    inst.hash = 0xADD0000000000000ull + (uint64_t)add_idx;
+    inst.values[0] = engine_pos[0];
+    inst.values[1] = engine_pos[1];
+    inst.values[2] = engine_pos[2];
+    inst.values[7] = 1.0f;
+    inst.values[9] = inst.values[10] = inst.values[11] = 1.0f;
+    inst.lev_rec_kind = 5;
+    inst.pos_file_offset = (uint32_t)add_idx + 1;
+
+    static uint32_t s_added_sel_seed = 0x40000000u;
+    const uint32_t selection_id = ++s_added_sel_seed;
+
+    std::vector<MDLMeshGeom> out;
+    for (const auto& src : cached.geoms) {
+        if (src.positions.empty() || src.indices.empty()) continue;
+        MDLMeshGeom cg;
+        init_combined_prop_geom(cg, src, model_path, 1, 0xB3, 0);
+        merge_transformed_instance_into(cg, src, inst, selection_id);
+        if (!cg.positions.empty() && !cg.indices.empty()) {
+            out.push_back(std::move(cg));
+        }
+    }
+    if (out.empty()) {
+        OutputLog::error("level edit: model '" + model_path +
+                         "' produced no geometry");
+        return false;
+    }
+
+    MDLInfo dummy_info;
+    MP_Build(device, out, dummy_info, g_mp, true);
+
+    g_selected_level_pick_id = selection_id;
+    g_selected_level_hash = inst.hash;
+    g_selected_level_mesh_idx = -1;
+    for (size_t i = g_mp.meshes.size(); i-- > 0;) {
+        for (const auto& pr : g_mp.meshes[i].pick_ranges) {
+            if (pr.selection_id == selection_id) {
+                g_selected_level_mesh_idx = (int)i;
+                break;
+            }
+        }
+        if (g_selected_level_mesh_idx >= 0) break;
+    }
+    if (g_selected_level_mesh_idx < 0) {
+        g_selected_level_pick_id = 0;
+        g_selected_level_hash = 0;
+    }
+
+    OutputLog::success("level edit: placed '" + model_path +
+                       "' at (" + std::to_string(engine_pos[0]) + ", " +
+                       std::to_string(engine_pos[1]) + ", " +
+                       std::to_string(engine_pos[2]) + ")");
+    return true;
+}
+#endif
 
 #ifdef _WIN32
 void process_pending_loads(ID3D11Device* device) {

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -14,6 +15,7 @@
 #include "../ISO/IsoMount.h"
 #include "../UI/OutputLog.h"
 #include "../Utilities/State.h"
+#include "BnkWriter.h"
 #include "LevelLoader.h"
 
 namespace LevelEdit {
@@ -22,13 +24,12 @@ namespace {
 struct EditEntry {
     float delta[3] = {0, 0, 0};
     float rot_deg[3] = {0, 0, 0};
-    float scale = 1.0f;
     float orig[3] = {0, 0, 0};
-    float orig_rot_z = 0.0f;
-    float orig_scale = 1.0f;
+    float orig_rot[3] = {0, 0, 0};
     uint32_t lev_off = 0;
     uint8_t lev_kind = 0;
     uint32_t gdb_off[3] = {0, 0, 0};
+    uint32_t gdb_rot_off[3] = {0, 0, 0};
     bool registered = false;
 
     bool moved() const {
@@ -38,8 +39,7 @@ struct EditEntry {
         return rot_deg[0] != 0.0f || rot_deg[1] != 0.0f ||
                rot_deg[2] != 0.0f;
     }
-    bool scaled() const { return scale != 1.0f; }
-    bool changed() const { return moved() || rotated() || scaled(); }
+    bool changed() const { return moved() || rotated(); }
 };
 
 struct FileTarget {
@@ -56,7 +56,6 @@ struct FileTarget {
 struct UndoState {
     float delta[3];
     float rot_deg[3];
-    float scale;
 };
 
 struct UndoStep {
@@ -75,6 +74,7 @@ struct ModuleState {
 
     std::unordered_map<uint32_t, EditEntry> edits;
     std::vector<UndoStep> undo_stack;
+    std::vector<Addition> additions;
 };
 
 ModuleState& st() {
@@ -288,6 +288,69 @@ bool target_patchable_in_place(const FileTarget& t) {
     return t.valid && !t.compressed;
 }
 
+void put_u64_be(std::vector<uint8_t>& v, uint64_t x) {
+    for (int i = 7; i >= 0; --i) v.push_back(uint8_t(x >> (i * 8)));
+}
+
+void put_u32_be(std::vector<uint8_t>& v, uint32_t x) {
+    for (int i = 3; i >= 0; --i) v.push_back(uint8_t(x >> (i * 8)));
+}
+
+void put_f32_be_v(std::vector<uint8_t>& v, float f) {
+    uint32_t bits;
+    std::memcpy(&bits, &f, 4);
+    put_u32_be(v, bits);
+}
+
+bool append_additions_to_level(std::vector<uint8_t>& bytes,
+                               const std::vector<Addition>& adds,
+                               std::string& err) {
+    static const char kMagic[] = "LevelGraphicsFile";
+    const size_t magic_len = sizeof(kMagic) - 1;
+    if (bytes.size() < magic_len + 8 ||
+        std::memcmp(bytes.data(), kMagic, magic_len) != 0) {
+        err = "level payload magic mismatch";
+        return false;
+    }
+    const size_t count_off = magic_len + 4;
+    uint32_t entry_count =
+        (uint32_t(bytes[count_off]) << 24) |
+        (uint32_t(bytes[count_off + 1]) << 16) |
+        (uint32_t(bytes[count_off + 2]) << 8) |
+        uint32_t(bytes[count_off + 3]);
+    entry_count += (uint32_t)adds.size();
+    bytes[count_off]     = uint8_t(entry_count >> 24);
+    bytes[count_off + 1] = uint8_t(entry_count >> 16);
+    bytes[count_off + 2] = uint8_t(entry_count >> 8);
+    bytes[count_off + 3] = uint8_t(entry_count);
+
+    std::vector<uint8_t> tail;
+    for (size_t ai = 0; ai < adds.size(); ++ai) {
+        const Addition& a = adds[ai];
+        put_u32_be(tail, 2);
+        tail.insert(tail.end(), a.model_path.begin(), a.model_path.end());
+        tail.push_back(0);
+        tail.push_back(0);
+        tail.push_back(0);
+        tail.push_back(0);
+        put_u32_be(tail, 1);
+        tail.push_back(0);
+        tail.push_back(0);
+        tail.push_back(0);
+        put_u64_be(tail, 0xF2ED170000000000ull + ai);
+        float vals[20] = {};
+        vals[0] = a.pos[0];
+        vals[1] = a.pos[1];
+        vals[2] = a.pos[2];
+        const float yaw = a.yaw_deg * kDegToRad;
+        vals[6] = std::sin(yaw);
+        vals[7] = std::cos(yaw);
+        for (int k = 0; k < 20; ++k) put_f32_be_v(tail, vals[k]);
+    }
+    bytes.insert(bytes.end(), tail.begin(), tail.end());
+    return true;
+}
+
 void register_entry(EditEntry& e, const InstInfo& info) {
     if (e.registered) return;
     e.registered = true;
@@ -298,13 +361,71 @@ void register_entry(EditEntry& e, const InstInfo& info) {
         e.gdb_off[1] = info.gdb_off[1];
         e.gdb_off[2] = info.gdb_off[2];
     }
+    if (info.gdb_rot_off) {
+        e.gdb_rot_off[0] = info.gdb_rot_off[0];
+        e.gdb_rot_off[1] = info.gdb_rot_off[1];
+        e.gdb_rot_off[2] = info.gdb_rot_off[2];
+    }
     if (info.orig_pos) {
         e.orig[0] = info.orig_pos[0];
         e.orig[1] = info.orig_pos[1];
         e.orig[2] = info.orig_pos[2];
     }
-    e.orig_rot_z = info.orig_rot_z_deg;
-    e.orig_scale = info.orig_scale;
+    e.orig_rot[0] = info.orig_rot_deg[0];
+    e.orig_rot[1] = info.orig_rot_deg[1];
+    e.orig_rot[2] = info.orig_rot_deg[2];
+}
+
+std::filesystem::path additions_path() {
+    std::string leaf = std::filesystem::path(st().entry.full_path)
+        .filename().string();
+    if (leaf.empty()) leaf = "level";
+    return edited_levels_dir() / (leaf + ".additions.txt");
+}
+
+void load_additions(ModuleState& s) {
+    s.additions.clear();
+    std::ifstream f(additions_path());
+    if (!f) return;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty()) continue;
+        Addition a;
+        size_t p0 = line.find('\t');
+        if (p0 == std::string::npos) continue;
+        a.model_path = line.substr(0, p0);
+        if (a.model_path.empty()) continue;
+        if (std::sscanf(line.c_str() + p0 + 1, "%f\t%f\t%f\t%f",
+                        &a.pos[0], &a.pos[1], &a.pos[2],
+                        &a.yaw_deg) < 3) continue;
+        s.additions.push_back(std::move(a));
+    }
+    if (!s.additions.empty()) {
+        OutputLog::info("level edit: loaded " +
+                        std::to_string(s.additions.size()) +
+                        " placed model(s) from " +
+                        additions_path().string());
+    }
+}
+
+bool write_additions(const ModuleState& s, std::string& msg) {
+    const auto path = additions_path();
+    std::error_code ec;
+    if (s.additions.empty()) {
+        std::filesystem::remove(path, ec);
+        return true;
+    }
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        msg = "could not write " + path.string();
+        return false;
+    }
+    for (const auto& a : s.additions) {
+        f << a.model_path << '\t' << a.pos[0] << '\t' << a.pos[1] << '\t'
+          << a.pos[2] << '\t' << a.yaw_deg << '\n';
+    }
+    return true;
 }
 
 void quat_mul(const float a[4], const float b[4], float out[4]) {
@@ -352,6 +473,7 @@ void OnLevelLoaded(const FlatAssetEntry& entry) {
     s.lev.bnk_path = entry.bnk_path;
     s.lev.file_index = entry.file_index;
     fill_bnk_target(s.lev);
+    load_additions(s);
     OutputLog::info(
         "level edit: tracking '" + entry.name + "' (" +
         (s.lev.compressed ? "chunked" : "raw") + " entry, slot " +
@@ -434,8 +556,7 @@ bool SetEnabled(bool on, std::string& msg) {
 
 bool EditFor(uint32_t selection_id,
              float out_pos_delta[3],
-             float out_rot_delta_deg[3],
-             float* out_scale) {
+             float out_rot_delta_deg[3]) {
     std::lock_guard<std::mutex> lk(mtx());
     auto it = st().edits.find(selection_id);
     if (it == st().edits.end() || !it->second.changed()) return false;
@@ -450,7 +571,6 @@ bool EditFor(uint32_t selection_id,
         out_rot_delta_deg[1] = e.rot_deg[1];
         out_rot_delta_deg[2] = e.rot_deg[2];
     }
-    if (out_scale) *out_scale = e.scale;
     return true;
 }
 
@@ -482,18 +602,24 @@ void AddRotate(uint32_t selection_id, const float step_deg[3],
     ++s.revision;
 }
 
-void AddScale(uint32_t selection_id, float factor,
-              const InstInfo& info) {
-    if (!(factor > 0.0f) || !std::isfinite(factor)) return;
+int AddPlacement(const std::string& model_path, const float pos[3]) {
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
-    auto& e = s.edits[selection_id];
-    register_entry(e, info);
-    e.scale *= factor;
-    if (e.scale < 0.01f) e.scale = 0.01f;
-    if (e.scale > 100.0f) e.scale = 100.0f;
+    if (!s.available || model_path.empty()) return -1;
+    Addition a;
+    a.model_path = model_path;
+    a.pos[0] = pos[0];
+    a.pos[1] = pos[1];
+    a.pos[2] = pos[2];
+    s.additions.push_back(std::move(a));
     s.dirty = true;
     ++s.revision;
+    return (int)s.additions.size() - 1;
+}
+
+void GetAdditions(std::vector<Addition>& out) {
+    std::lock_guard<std::mutex> lk(mtx());
+    out = st().additions;
 }
 
 void CollectPreviewXforms(
@@ -510,11 +636,10 @@ void CollectPreviewXforms(
         x.pivot[0] = e.orig[0];
         x.pivot[1] = e.orig[2];
         x.pivot[2] = e.orig[1];
-        x.scale = e.scale;
         if (e.rotated()) {
             euler_engine_to_preview_quat(e.rot_deg, x.quat);
         }
-        x.has_rs = e.rotated() || e.scaled();
+        x.has_rs = e.rotated();
         out[kv.first] = x;
     }
 }
@@ -526,7 +651,7 @@ void PushUndoSnapshot(const std::vector<uint32_t>& ids) {
     step.before.reserve(ids.size());
     for (uint32_t id : ids) {
         auto it = s.edits.find(id);
-        UndoState u{{0, 0, 0}, {0, 0, 0}, 1.0f};
+        UndoState u{{0, 0, 0}, {0, 0, 0}};
         if (it != s.edits.end()) {
             const EditEntry& e = it->second;
             u.delta[0] = e.delta[0];
@@ -535,7 +660,6 @@ void PushUndoSnapshot(const std::vector<uint32_t>& ids) {
             u.rot_deg[0] = e.rot_deg[0];
             u.rot_deg[1] = e.rot_deg[1];
             u.rot_deg[2] = e.rot_deg[2];
-            u.scale = e.scale;
         }
         step.before.emplace_back(id, u);
     }
@@ -562,7 +686,6 @@ bool Undo() {
         e.rot_deg[0] = u.rot_deg[0];
         e.rot_deg[1] = u.rot_deg[1];
         e.rot_deg[2] = u.rot_deg[2];
-        e.scale = u.scale;
     }
     s.dirty = true;
     ++s.revision;
@@ -570,6 +693,9 @@ bool Undo() {
 }
 
 bool Save(std::string& msg) {
+    bool reload_needed = false;
+    FlatAssetEntry reload_entry;
+    {
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
     if (!s.available) { msg = "no level loaded"; return false; }
@@ -581,9 +707,21 @@ bool Save(std::string& msg) {
     struct GdbPatch { uint32_t off; float v; };
     std::vector<GdbPatch> gdb_patches;
 
+    size_t adds_updated = 0;
     for (const auto& kv : s.edits) {
         const EditEntry& e = kv.second;
         if (!e.changed()) continue;
+        if (e.lev_kind == 5) {
+            if (e.lev_off >= 1 && e.lev_off <= s.additions.size()) {
+                Addition& a = s.additions[e.lev_off - 1];
+                a.pos[0] = e.orig[0] + e.delta[0];
+                a.pos[1] = e.orig[1] + e.delta[1];
+                a.pos[2] = e.orig[2] + e.delta[2];
+                a.yaw_deg = e.orig_rot[2] + e.rot_deg[2];
+                ++adds_updated;
+            }
+            continue;
+        }
         if (e.moved()) {
             const float np[3] = { e.orig[0] + e.delta[0],
                                   e.orig[1] + e.delta[1],
@@ -604,7 +742,7 @@ bool Save(std::string& msg) {
         if (e.rotated()) {
             if (e.lev_kind == 1 && e.lev_off != 0) {
                 const float yaw =
-                    (e.orig_rot_z + e.rot_deg[2]) * kDegToRad;
+                    (e.orig_rot[2] + e.rot_deg[2]) * kDegToRad;
                 lev_patches.push_back({ e.lev_off + 24,
                                         { std::sin(yaw), std::cos(yaw),
                                           0 }, 2 });
@@ -612,22 +750,22 @@ bool Save(std::string& msg) {
                 if (e.rot_deg[0] != 0.0f || e.rot_deg[1] != 0.0f) {
                     ++rs_visual;
                 }
-            } else {
-                ++rs_visual;
-            }
-        }
-        if (e.scaled()) {
-            if (e.lev_kind == 1 && e.lev_off != 0) {
-                const float ns = e.orig_scale * e.scale;
-                lev_patches.push_back({ e.lev_off + 36,
-                                        { ns, ns, ns }, 3 });
+            } else if (e.gdb_rot_off[0] && e.gdb_rot_off[1] &&
+                       e.gdb_rot_off[2]) {
+                gdb_patches.push_back({ e.gdb_rot_off[0],
+                    (e.orig_rot[2] + e.rot_deg[2]) * kDegToRad });
+                gdb_patches.push_back({ e.gdb_rot_off[1],
+                    (e.orig_rot[1] + e.rot_deg[1]) * kDegToRad });
+                gdb_patches.push_back({ e.gdb_rot_off[2],
+                    (e.orig_rot[0] + e.rot_deg[0]) * kDegToRad });
                 ++rs_written;
             } else {
                 ++rs_visual;
             }
         }
     }
-    if (lev_patches.empty() && gdb_patches.empty()) {
+    if (lev_patches.empty() && gdb_patches.empty() && adds_updated == 0 &&
+        s.additions.empty()) {
         msg = (skipped || rs_visual)
                   ? "no file-backed changes to save (visual-only edits "
                     "skipped)"
@@ -723,18 +861,69 @@ bool Save(std::string& msg) {
         }
     }
 
+    std::string bake_note;
+    if (!s.additions.empty()) {
+        if (s.lev.valid && !s.lev.compressed && !s.lev.in_iso &&
+            s.lev.file_path.empty()) {
+            std::vector<uint8_t> lev_bytes;
+            try {
+                lev_bytes = BnkCache::extract_bytes(s.lev.bnk_path,
+                                                    s.lev.file_index);
+            } catch (...) {
+                lev_bytes.clear();
+            }
+            std::string berr;
+            if (lev_bytes.empty()) {
+                bake_note = "; bake skipped: level re-extract failed";
+            } else if (!append_additions_to_level(lev_bytes, s.additions,
+                                                  berr)) {
+                bake_note = "; bake skipped: " + berr;
+            } else {
+                BnkCache::invalidate(s.lev.bnk_path);
+                if (BnkWriter::RebuildWithReplacedEntry(
+                        s.lev.bnk_path, s.lev.file_index, lev_bytes,
+                        berr)) {
+                    bake_note = "; baked " +
+                                std::to_string(s.additions.size()) +
+                                " model(s) into the level BNK; reloading";
+                    s.additions.clear();
+                    s.edits.clear();
+                    s.undo_stack.clear();
+                    BnkCache::invalidate(s.lev.bnk_path);
+                    fill_bnk_target(s.lev);
+                    if (!s.gdb.bnk_path.empty()) fill_bnk_target(s.gdb);
+                    reload_needed = true;
+                    reload_entry = s.entry;
+                } else {
+                    bake_note = "; BAKE FAILED: " + berr +
+                                " (placements kept app-side)";
+                }
+            }
+        } else {
+            bake_note = std::string("; placed model(s) kept app-side "
+                                    "(level BNK not rewritable: ") +
+                        (s.lev.in_iso ? "ISO-hosted"
+                         : s.lev.compressed ? "chunk-compressed"
+                                            : "no locator") + ")";
+        }
+    }
+
+    if (!write_additions(s, msg)) return false;
+
     s.dirty = false;
     msg = "saved " + std::to_string(lev_written) +
           " level-file patch(es), " + std::to_string(gdb_written) +
           " gdb component(s)";
     if (rs_written) {
-        msg += ", " + std::to_string(rs_written) +
-               " rotation/scale patch(es)";
+        msg += ", " + std::to_string(rs_written) + " rotation patch(es)";
     }
     if (skipped || rs_visual) {
         msg += " (" + std::to_string(skipped + rs_visual) +
                " visual-only edit(s) not saved)";
     }
+    msg += bake_note;
+    }
+    if (reload_needed) Level::OpenAsync(reload_entry);
     return true;
 }
 
@@ -753,6 +942,11 @@ bool RestoreDefaults(std::string& msg) {
         if (!s.gdb.bnk_path.empty()) BnkCache::invalidate(s.gdb.bnk_path);
         s.edits.clear();
         s.undo_stack.clear();
+        s.additions.clear();
+        {
+            std::error_code ec;
+            std::filesystem::remove(additions_path(), ec);
+        }
         s.dirty = false;
         ++s.revision;
         reload_entry = s.entry;

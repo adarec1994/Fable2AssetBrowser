@@ -141,7 +141,8 @@ bool TryTransformRecord(const GdbView& view,
                         float& rot_y,
                         float& rot_z,
                         bool& has_rotation,
-                        size_t* out_pos_slots = nullptr) {
+                        size_t* out_pos_slots = nullptr,
+                        size_t* out_rot_slots = nullptr) {
     size_t pos_slot = 0;
     size_t pos_owner = 0;
     if (!view.findFieldOwner(record, kHashPosition, 6,
@@ -157,12 +158,18 @@ bool TryTransformRecord(const GdbView& view,
     float rx = 0.0f, ry = 0.0f, rz = 0.0f;
     if (view.findLocal(pos_owner, kHashRotation, 6, rot_slot, nullptr)) {
         const uint32_t rot_hash = ReadBeU32(view.bytes.data() + rot_slot);
-        if (view.readRotationVec3Ref(rot_hash, rx, ry, rz)) {
+        size_t rslots[3] = {0, 0, 0};
+        if (view.readRotationVec3Ref(rot_hash, rx, ry, rz, rslots)) {
             if (Finite3(rx, ry, rz)) {
                 rot_x = rx;
                 rot_y = ry;
                 rot_z = rz;
                 has_rotation = true;
+                if (out_rot_slots) {
+                    out_rot_slots[0] = rslots[0];
+                    out_rot_slots[1] = rslots[1];
+                    out_rot_slots[2] = rslots[2];
+                }
             }
         }
     }
@@ -179,7 +186,8 @@ bool TryComponentTransformField(const GdbView& view,
                                 float& rot_y,
                                 float& rot_z,
                                 bool& has_rotation,
-                                size_t* out_pos_slots = nullptr) {
+                                size_t* out_pos_slots = nullptr,
+                                size_t* out_rot_slots = nullptr) {
     size_t transform_slot = 0;
     if (!view.findLocal(record, component_field_hash, 6,
                         transform_slot, nullptr)) {
@@ -192,7 +200,7 @@ bool TryComponentTransformField(const GdbView& view,
     if (!view.lookup(transform_hash, transform_record)) return false;
     return TryTransformRecord(view, transform_record, x, y, z,
                               rot_x, rot_y, rot_z, has_rotation,
-                              out_pos_slots);
+                              out_pos_slots, out_rot_slots);
 }
 
 bool TryComponentTransformRecord(const GdbView& view,
@@ -204,20 +212,24 @@ bool TryComponentTransformRecord(const GdbView& view,
                                  float& rot_y,
                                  float& rot_z,
                                  bool& has_rotation,
-                                 size_t* out_pos_slots = nullptr) {
+                                 size_t* out_pos_slots = nullptr,
+                                 size_t* out_rot_slots = nullptr) {
     if (TryComponentTransformField(view, record, kHashTransformComponent,
                                    x, y, z, rot_x, rot_y, rot_z,
-                                   has_rotation, out_pos_slots)) {
+                                   has_rotation, out_pos_slots,
+                                   out_rot_slots)) {
         return true;
     }
     if (TryComponentTransformField(
             view, record, kHashPhysicsSimulationKeyframedComponent,
-            x, y, z, rot_x, rot_y, rot_z, has_rotation, out_pos_slots)) {
+            x, y, z, rot_x, rot_y, rot_z, has_rotation, out_pos_slots,
+            out_rot_slots)) {
         return true;
     }
     return TryComponentTransformField(
         view, record, kHashPhysicsSimulationStaticComponent,
-        x, y, z, rot_x, rot_y, rot_z, has_rotation, out_pos_slots);
+        x, y, z, rot_x, rot_y, rot_z, has_rotation, out_pos_slots,
+        out_rot_slots);
     // NOTE: kHashSimpleTransformComponent (0x619F96CF) is deliberately NOT
     // tried here — routing it through the general placement parser makes
     // entities that already stream a model via another record produce a
@@ -1128,15 +1140,17 @@ bool LookupPlacement(
     float rot_x = 0.0f, rot_y = 0.0f, rot_z = 0.0f;
     bool has_rotation = false;
     size_t pos_slots[3] = {0, 0, 0};
+    size_t rot_slots[3] = {0, 0, 0};
     bool have_pos = TryComponentTransformRecord(view, record,
                                                 pos_x, pos_y, pos_z,
                                                 rot_x, rot_y, rot_z,
-                                                has_rotation, pos_slots);
+                                                has_rotation, pos_slots,
+                                                rot_slots);
     if (!have_pos) {
         have_pos = TryTransformRecord(view, record,
                                       pos_x, pos_y, pos_z,
                                       rot_x, rot_y, rot_z,
-                                      has_rotation, pos_slots);
+                                      has_rotation, pos_slots, rot_slots);
     }
     if (!have_pos) {
         have_pos = TryIndexedInlineTransform(view, record,
@@ -1153,6 +1167,9 @@ bool LookupPlacement(
     pl.pos_value_off[0] = (uint32_t)pos_slots[0];
     pl.pos_value_off[1] = (uint32_t)pos_slots[1];
     pl.pos_value_off[2] = (uint32_t)pos_slots[2];
+    pl.rot_value_off[0] = (uint32_t)rot_slots[0];
+    pl.rot_value_off[1] = (uint32_t)rot_slots[1];
+    pl.rot_value_off[2] = (uint32_t)rot_slots[2];
     pl.rot_x = rot_x;
     pl.rot_y = rot_y;
     pl.rot_z = rot_z;

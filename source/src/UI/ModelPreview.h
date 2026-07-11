@@ -101,7 +101,7 @@ struct MPPerMesh {
         uint64_t inst_hash = 0;
         uint32_t pos_file_offset = 0;
         uint32_t gdb_pos_off[3] = {0, 0, 0};
-        float inst_scale = 1.0f;
+        uint32_t gdb_rot_off[3] = {0, 0, 0};
         uint8_t lev_rec_kind = 0;
     };
     std::vector<PickRange> pick_ranges;
@@ -321,7 +321,7 @@ extern FlyCam g_flycam;
 #ifdef _WIN32
 bool MP_Init(ID3D11Device* dev, ModelPreview& mp, int w, int h);
 void MP_Release(ModelPreview& mp);
-bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp);
+bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp, bool append = false);
 void MP_BuildLevelFx(ID3D11Device* dev, ModelPreview& mp);
 void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam);
 void MP_Resize(ID3D11Device* dev, ModelPreview& mp, int w, int h);

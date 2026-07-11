@@ -14,6 +14,7 @@
 #include "../../Level/EhfChunkParser.h"
 #include "../../Level/TerrainSplat.h"
 #include "../../Level/TerrainEdit.h"
+#include "../../Level/Skybox/SkyboxPreviewBinding.h"
 #include "../../Utilities/Files.h"
 #include "../../Utilities/Utils.h"
 #include "../../Utilities/Progress.h"
@@ -685,432 +686,6 @@ static void normalize_grid_uvs(MDLMeshGeom& geom, uint32_t width, uint32_t heigh
     }
 }
 
-static uint32_t env_texture_hash(std::string s, bool lowercase)
-{
-        if (lowercase) {
-            std::transform(s.begin(), s.end(), s.begin(),
-                           [](unsigned char c) {
-                               return (char)std::tolower(c);
-                           });
-        }
-        std::replace(s.begin(), s.end(), '/', '\\');
-        uint32_t h = 0x811C9DC5u;
-        for (unsigned char c : s) {
-            h *= 0x01000193u;
-            h ^= uint32_t(c);
-        }
-        return h;
-}
-
-static std::string resolve_env_texture_hash(uint32_t hash)
-{
-    if (hash == 0 || hash == 0x811C9DC5u) return {};
-    for (const FlatAssetEntry& tex : S.all_tex_files) {
-        if (env_texture_hash(tex.full_path, true) == hash ||
-            env_texture_hash(tex.name, true) == hash ||
-            env_texture_hash(tex.full_path, false) == hash ||
-            env_texture_hash(tex.name, false) == hash) {
-            return tex.full_path;
-        }
-    }
-    return {};
-}
-
-static void apply_sky_texture_hashes_to_preview(ModelPreview& mp,
-                                                const Gdb::SkyTheme& sky)
-{
-#ifdef _WIN32
-    auto reset_overlay = [&]() {
-        if (mp.sky_overlay_srv) {
-            mp.sky_overlay_srv->Release();
-            mp.sky_overlay_srv = nullptr;
-        }
-        mp.sky_overlay_tried = false;
-        mp.sky_overlay_tex_name.clear();
-    };
-    auto reset_moon = [&]() {
-        if (mp.sky_moon_srv) {
-            mp.sky_moon_srv->Release();
-            mp.sky_moon_srv = nullptr;
-        }
-        mp.sky_moon_tried = false;
-        mp.sky_moon_tex_name.clear();
-        mp.sky_moon_tiles[0] = 1.0f;
-        mp.sky_moon_tiles[1] = 1.0f;
-    };
-    auto reset_sun_disc = [&]() {
-        if (mp.sky_sun_disc_srv) {
-            mp.sky_sun_disc_srv->Release();
-            mp.sky_sun_disc_srv = nullptr;
-        }
-        mp.sky_sun_disc_tried = false;
-        mp.sky_sun_disc_tex_name.clear();
-    };
-    auto reset_glare = [&]() {
-        if (mp.sky_moon_glare_srv) {
-            mp.sky_moon_glare_srv->Release();
-            mp.sky_moon_glare_srv = nullptr;
-        }
-        mp.sky_moon_glare_tried = false;
-        mp.sky_moon_glare_tex_name.clear();
-    };
-
-    reset_overlay();
-    reset_sun_disc();
-    reset_moon();
-    reset_glare();
-    if (sky.has_sky_overlay_texture) {
-        mp.sky_overlay_tex_name =
-            resolve_env_texture_hash(sky.sky_overlay_texture_hash);
-    }
-    if (sky.has_sun_disc_texture) {
-        mp.sky_sun_disc_tex_name =
-            resolve_env_texture_hash(sky.sun_disc_texture_hash);
-    }
-    if (sky.has_moon_texture) {
-        mp.sky_moon_tex_name =
-            resolve_env_texture_hash(sky.moon_texture_hash);
-    }
-    if (sky.has_moon_glare_texture) {
-        mp.sky_moon_glare_tex_name =
-            resolve_env_texture_hash(sky.moon_glare_texture_hash);
-    }
-#else
-    (void)mp;
-    (void)sky;
-#endif
-}
-
-static void apply_sky_theme_to_preview(ModelPreview& mp,
-                                       const Gdb::SkyTheme& sky)
-{
-    mp.has_sky_theme = sky.has_any;
-    if (!mp.has_sky_theme) return;
-
-    std::copy(std::begin(sky.sky_colour),
-              std::end(sky.sky_colour),
-              std::begin(mp.sky_top_colour));
-    if (sky.has_fog_colour) {
-        std::copy(std::begin(sky.fog_colour),
-                  std::end(sky.fog_colour),
-                  std::begin(mp.sky_bottom_colour));
-    } else {
-        std::copy(std::begin(sky.complementary_colour),
-                  std::end(sky.complementary_colour),
-                  std::begin(mp.sky_bottom_colour));
-    }
-    std::copy(std::begin(sky.sunset_colour),
-              std::end(sky.sunset_colour),
-              std::begin(mp.sky_sunset_colour));
-    mp.sky_params[0] = sky.sun_intensity;
-    mp.sky_params[1] = sky.complementary_bias;
-    mp.sky_params[2] = sky.rayleigh;
-    mp.sky_params[3] = sky.mie;
-    mp.sky_time_of_day = sky.source_time_of_day;
-    mp.has_sun_axis = sky.has_sun_axis;
-    mp.sun_axis[0] = std::isfinite(sky.sun_axis_elevation)
-        ? sky.sun_axis_elevation : 26.0f;
-    mp.sun_axis[1] = std::isfinite(sky.sun_axis_z_offset)
-        ? sky.sun_axis_z_offset : 0.0f;
-    mp.sun_axis[2] = std::isfinite(sky.sun_axis_xy_rotation)
-        ? sky.sun_axis_xy_rotation : 0.0f;
-    mp.sun_axis[3] = (std::isfinite(sky.main_light_time_factor) &&
-                      sky.main_light_time_factor > 0.0f)
-        ? sky.main_light_time_factor : 1.0f;
-    apply_sky_texture_hashes_to_preview(mp, sky);
-}
-
-static void apply_cloud_theme_to_preview(ModelPreview& mp,
-                                         const Gdb::CloudTheme& clouds)
-{
-    mp.has_cloud_theme = clouds.has_any;
-    mp.cloud_layer_count = clouds.layer_count;
-    int density_resolved = 0;
-    int density_missing = 0;
-    std::ostringstream layer_log;
-    layer_log << "cloud theme layers:";
-    for (int i = 0; i < 4; ++i) {
-        const Gdb::CloudLayerTheme& layer = clouds.layers[i];
-        const float opacity = std::clamp(layer.transparency, 0.0f, 1.0f);
-        mp.cloud_layer[i][0] = layer.enabled ? opacity : 0.0f;
-        mp.cloud_layer[i][1] = layer.height;
-        mp.cloud_layer[i][2] = layer.texture_scale_x;
-        mp.cloud_layer[i][3] = layer.texture_scale_y;
-
-        mp.cloud_shape[i][0] = layer.size_x;
-        mp.cloud_shape[i][1] = layer.size_y;
-        mp.cloud_shape[i][2] = 0.0f;
-        mp.cloud_shape[i][3] = 0.0f;
-
-        mp.cloud_motion[i][0] = layer.position_x;
-        mp.cloud_motion[i][1] = layer.position_y;
-        mp.cloud_motion[i][2] = layer.velocity_x;
-        mp.cloud_motion[i][3] = layer.velocity_y;
-
-        mp.cloud_light[i][0] = layer.brightness;
-        mp.cloud_light[i][1] = layer.ambient_light;
-        mp.cloud_light[i][2] = layer.normal_strength;
-        mp.cloud_light[i][3] = layer.translucency_strength;
-
-#ifdef _WIN32
-        if (mp.cloud_density_srv[i]) {
-            mp.cloud_density_srv[i]->Release();
-            mp.cloud_density_srv[i] = nullptr;
-        }
-        mp.cloud_density_tried[i] = false;
-        mp.cloud_density_has_alpha[i] = false;
-#endif
-        mp.cloud_density_tex_name[i].clear();
-        if (layer.enabled && layer.has_density_map) {
-            mp.cloud_density_tex_name[i] =
-                resolve_env_texture_hash(layer.density_map_hash);
-            if (!mp.cloud_density_tex_name[i].empty()) {
-                ++density_resolved;
-            } else {
-                ++density_missing;
-            }
-        }
-        if (layer.enabled) {
-            layer_log << " L" << (i + 1)
-                      << "(alpha=" << std::fixed << std::setprecision(2)
-                      << opacity
-                      << ", height=" << std::setprecision(1)
-                      << layer.height
-                      << ", size=" << layer.size_x << 'x'
-                      << layer.size_y
-                      << ", scale=" << std::setprecision(3)
-                      << layer.texture_scale_x << 'x'
-                      << layer.texture_scale_y << ')';
-        }
-    }
-    if (clouds.has_any) {
-        std::ostringstream ss;
-        ss << "cloud theme: density maps resolved=" << density_resolved
-           << " missing=" << density_missing;
-        OutputLog::info(ss.str());
-        OutputLog::info(layer_log.str());
-    }
-}
-
-static void copy_sky_theme_to_keyframe(MPSkyCloudKeyframe& key,
-                                       const Gdb::SkyTheme& sky)
-{
-    if (!sky.has_any) return;
-    std::copy(std::begin(sky.sky_colour),
-              std::end(sky.sky_colour),
-              std::begin(key.sky_top_colour));
-    if (sky.has_fog_colour) {
-        std::copy(std::begin(sky.fog_colour),
-                  std::end(sky.fog_colour),
-                  std::begin(key.sky_bottom_colour));
-    } else {
-        std::copy(std::begin(sky.complementary_colour),
-                  std::end(sky.complementary_colour),
-                  std::begin(key.sky_bottom_colour));
-    }
-    std::copy(std::begin(sky.sunset_colour),
-              std::end(sky.sunset_colour),
-              std::begin(key.sky_sunset_colour));
-    key.sky_params[0] = sky.sun_intensity;
-    key.sky_params[1] = sky.complementary_bias;
-    key.sky_params[2] = sky.rayleigh;
-    key.sky_params[3] = sky.mie;
-}
-
-static void copy_cloud_theme_to_keyframe(MPSkyCloudKeyframe& key,
-                                         const Gdb::CloudTheme& clouds)
-{
-    key.has_cloud_theme = clouds.has_any;
-    key.cloud_layer_count = clouds.layer_count;
-    for (int i = 0; i < 4; ++i) {
-        const Gdb::CloudLayerTheme& layer = clouds.layers[i];
-        const float opacity = std::clamp(layer.transparency, 0.0f, 1.0f);
-        key.cloud_layer[i][0] = layer.enabled ? opacity : 0.0f;
-        key.cloud_layer[i][1] = layer.height;
-        key.cloud_layer[i][2] = layer.texture_scale_x;
-        key.cloud_layer[i][3] = layer.texture_scale_y;
-
-        key.cloud_shape[i][0] = layer.size_x;
-        key.cloud_shape[i][1] = layer.size_y;
-        key.cloud_shape[i][2] = 0.0f;
-        key.cloud_shape[i][3] = 0.0f;
-
-        key.cloud_motion[i][0] = layer.position_x;
-        key.cloud_motion[i][1] = layer.position_y;
-        key.cloud_motion[i][2] = layer.velocity_x;
-        key.cloud_motion[i][3] = layer.velocity_y;
-
-        key.cloud_light[i][0] = layer.brightness;
-        key.cloud_light[i][1] = layer.ambient_light;
-        key.cloud_light[i][2] = layer.normal_strength;
-        key.cloud_light[i][3] = layer.translucency_strength;
-    }
-}
-
-static void weather_fill_precip(float (&out)[4],
-                                const Gdb::WeatherTheme& weather)
-{
-    out[0] = weather.has_rain
-        ? std::clamp(weather.rain_density, 0.0f, 1.0f) : 0.0f;
-    out[1] = weather.has_rain
-        ? std::clamp(weather.rain_size, 0.0f, 4.0f) : 0.0f;
-    out[2] = weather.has_snow
-        ? std::max(weather.snow_fall_speed, 0.0f) : 0.0f;
-    out[3] = weather.has_snow
-        ? std::max(weather.snow_size, 0.0f) : 0.0f;
-}
-
-static void fog_fill_from_sky(float (&range)[4], float (&density)[2],
-                              bool& has_fog, const Gdb::SkyTheme& sky)
-{
-    has_fog = sky.has_any && (sky.has_near_fog || sky.has_far_fog);
-    range[0] = sky.has_fogging_start
-        ? std::max(sky.fogging_start, 0.0f) : 0.0f;
-    range[1] = std::max(sky.near_distance, 0.0f);
-    range[2] = std::max(sky.far_distance, 0.0f);
-    range[3] = std::max(sky.close_fog_max_distance, 0.0f);
-    density[0] = std::clamp(sky.near_density, 0.0f, 1.0f);
-    density[1] = std::clamp(sky.far_density, 0.0f, 1.0f);
-}
-
-static void apply_weather_theme_to_preview(ModelPreview& mp,
-                                           const Gdb::WeatherTheme& weather,
-                                           const Gdb::SkyTheme& sky)
-{
-    mp.has_weather_theme = weather.has_any;
-    weather_fill_precip(mp.weather_precip, weather);
-    mp.weather_mist_strength = weather.has_ground_mist
-        ? std::clamp(weather.ground_mist_strength, 0.0f, 4.0f) : 0.0f;
-
-    if (weather.has_wind) {
-        const float az_mid = 0.5f * (weather.wind_xy_rotation_min +
-                                     weather.wind_xy_rotation_max);
-        const float str_mid = 0.5f * (weather.wind_strength_min +
-                                      weather.wind_strength_max);
-        const float el_mid = 0.5f * (weather.wind_elevation_min +
-                                     weather.wind_elevation_max);
-        mp.weather_wind[0] = std::isfinite(az_mid) ? az_mid : 0.0f;
-        mp.weather_wind[1] = std::isfinite(str_mid)
-            ? std::clamp(str_mid, 0.0f, 40.0f) : 0.0f;
-        mp.weather_wind[2] = std::isfinite(el_mid) ? el_mid : 0.0f;
-        mp.weather_wind[3] = std::isfinite(weather.wind_direction_variation)
-            ? weather.wind_direction_variation : 0.0f;
-    } else {
-        mp.weather_wind[0] = 0.0f;
-        mp.weather_wind[1] = 2.0f;
-        mp.weather_wind[2] = 0.0f;
-        mp.weather_wind[3] = 0.0f;
-    }
-
-    fog_fill_from_sky(mp.fog_range, mp.fog_density, mp.has_fog_theme, sky);
-
-    if (weather.has_any) {
-        std::ostringstream ss;
-        ss << "weather preview: rain=" << std::fixed << std::setprecision(2)
-           << mp.weather_precip[0]
-           << " snow=" << (mp.weather_precip[2] > 0.0f &&
-                           mp.weather_precip[3] > 0.0f ? "yes" : "no")
-           << " wind=" << mp.weather_wind[1]
-           << " mist=" << mp.weather_mist_strength
-           << (mp.has_fog_theme ? " fog=theme" : "");
-        OutputLog::info(ss.str());
-    }
-}
-
-static void copy_weather_theme_to_keyframe(MPSkyCloudKeyframe& key,
-                                           const Gdb::WeatherTheme& weather,
-                                           const Gdb::SkyTheme& sky)
-{
-    if (weather.has_any) {
-        key.has_weather_theme = true;
-        weather_fill_precip(key.weather_precip, weather);
-        key.weather_mist_strength = weather.has_ground_mist
-            ? std::clamp(weather.ground_mist_strength, 0.0f, 4.0f) : 0.0f;
-    }
-    if (sky.has_any && (sky.has_near_fog || sky.has_far_fog)) {
-        fog_fill_from_sky(key.fog_range, key.fog_density,
-                          key.has_fog_theme, sky);
-    }
-}
-
-static void apply_environment_timeline_to_preview(
-    ModelPreview& mp,
-    const Gdb::EnvironmentThemeTimeline& timeline)
-{
-    mp.has_day_night_cycle =
-        timeline.has_any && timeline.keyframes.size() >= 2;
-    mp.day_night_keyframes.clear();
-    if (!mp.has_day_night_cycle) return;
-
-    for (const Gdb::EnvironmentThemeKeyframe& src : timeline.keyframes) {
-        MPSkyCloudKeyframe key;
-        key.time_of_day = std::isfinite(src.time_of_day)
-            ? src.time_of_day - std::floor(src.time_of_day)
-            : 0.0f;
-        if (key.time_of_day < 0.0f) key.time_of_day += 1.0f;
-        std::copy(std::begin(mp.sky_top_colour),
-                  std::end(mp.sky_top_colour),
-                  std::begin(key.sky_top_colour));
-        std::copy(std::begin(mp.sky_bottom_colour),
-                  std::end(mp.sky_bottom_colour),
-                  std::begin(key.sky_bottom_colour));
-        std::copy(std::begin(mp.sky_sunset_colour),
-                  std::end(mp.sky_sunset_colour),
-                  std::begin(key.sky_sunset_colour));
-        std::copy(std::begin(mp.sky_params),
-                  std::end(mp.sky_params),
-                  std::begin(key.sky_params));
-        key.has_weather_theme = mp.has_weather_theme;
-        std::copy(std::begin(mp.weather_precip),
-                  std::end(mp.weather_precip),
-                  std::begin(key.weather_precip));
-        key.weather_mist_strength = mp.weather_mist_strength;
-        key.has_fog_theme = mp.has_fog_theme;
-        std::copy(std::begin(mp.fog_range),
-                  std::end(mp.fog_range),
-                  std::begin(key.fog_range));
-        std::copy(std::begin(mp.fog_density),
-                  std::end(mp.fog_density),
-                  std::begin(key.fog_density));
-        copy_sky_theme_to_keyframe(key, src.sky);
-        copy_cloud_theme_to_keyframe(key, src.clouds);
-        copy_weather_theme_to_keyframe(key, src.weather, src.sky);
-#ifdef _WIN32
-        if (mp.sky_overlay_tex_name.empty() &&
-            src.sky.has_sky_overlay_texture) {
-            mp.sky_overlay_tex_name =
-                resolve_env_texture_hash(src.sky.sky_overlay_texture_hash);
-            mp.sky_overlay_tried = false;
-        }
-        if (mp.sky_sun_disc_tex_name.empty() &&
-            src.sky.has_sun_disc_texture) {
-            mp.sky_sun_disc_tex_name =
-                resolve_env_texture_hash(src.sky.sun_disc_texture_hash);
-            mp.sky_sun_disc_tried = false;
-        }
-        if (mp.sky_moon_tex_name.empty() && src.sky.has_moon_texture) {
-            mp.sky_moon_tex_name =
-                resolve_env_texture_hash(src.sky.moon_texture_hash);
-            mp.sky_moon_tried = false;
-        }
-        if (mp.sky_moon_glare_tex_name.empty() &&
-            src.sky.has_moon_glare_texture) {
-            mp.sky_moon_glare_tex_name =
-                resolve_env_texture_hash(src.sky.moon_glare_texture_hash);
-            mp.sky_moon_glare_tried = false;
-        }
-#endif
-        mp.day_night_keyframes.push_back(key);
-    }
-
-    mp.has_sky_theme = true;
-    std::ostringstream ss;
-    ss << "day/night cycle: preview timeline active keyframes="
-       << mp.day_night_keyframes.size()
-       << " cycle=" << std::fixed << std::setprecision(0)
-       << mp.day_night_cycle_seconds << "s";
-    OutputLog::info(ss.str());
-}
 
 #ifdef _WIN32
 struct LevelPropStreamState {
@@ -1401,13 +976,14 @@ static bool stream_level_prop_batch(ID3D11Device* device)
         try {
             MP_Build(device, g_level_prop_stream.geoms,
                      g_level_prop_stream.info, g_mp);
-            apply_sky_theme_to_preview(g_mp, g_level_prop_stream.sky_theme);
-            apply_cloud_theme_to_preview(g_mp,
-                                         g_level_prop_stream.cloud_theme);
-            apply_weather_theme_to_preview(g_mp,
-                                           g_level_prop_stream.weather_theme,
-                                           g_level_prop_stream.sky_theme);
-            apply_environment_timeline_to_preview(
+            Skybox::PreviewBinding::ApplySkyTheme(
+                g_mp, g_level_prop_stream.sky_theme);
+            Skybox::PreviewBinding::ApplyCloudTheme(
+                g_mp, g_level_prop_stream.cloud_theme);
+            Skybox::PreviewBinding::ApplyWeatherTheme(
+                g_mp, g_level_prop_stream.weather_theme,
+                g_level_prop_stream.sky_theme);
+            Skybox::PreviewBinding::ApplyEnvironmentTimeline(
                 g_mp, g_level_prop_stream.environment_timeline);
         } catch (const std::exception& e) {
             OutputLog::error(std::string("level props: MP_Build failed (") +
@@ -2219,14 +1795,19 @@ void process_pending_loads() {
             size_t themed_water_geom_count = 0;
             float water_theme_opacity = 1.0f;
             if (g_pending_level_water_present) {
+                // Grid construction mirrors the engine exactly
+                // (WaterGridRenderer_Ctor / WaterGrid_BuildMesh in the XEX):
+                // one flat quad per mask cell at the body's water height,
+                // patch rect = centre +/- extent/2, holes where mask==0.
+                // Deformation is purely shader-side (scrolled normal maps),
+                // the WATERPATCH vertex shader emits a flat plane.
                 for (size_t bi = 0; bi < g_pending_level_water_scene.bodies.size(); ++bi) {
                     const auto& body = g_pending_level_water_scene.bodies[bi];
                     for (size_t ti = 0; ti < body.tiles.size(); ++ti) {
                         const auto& t = body.tiles[ti];
 
-                        float y = body.base_height;
-                        if (!std::isfinite(y) || y == 0.0f) y = t.h_min;
-                        if (!std::isfinite(y) || y == 0.0f) y = t.h_max;
+                        const float y = std::isfinite(body.base_height)
+                            ? body.base_height : 0.0f;
 
                         const float half_x = std::abs(t.ex) * 0.5f;
                         const float half_z = std::abs(t.ez) * 0.5f;
@@ -2235,85 +1816,23 @@ void process_pending_loads() {
                         const float z0 = t.cz - half_z;
                         const float z1 = t.cz + half_z;
 
-                        const size_t mask_count = t.mask.size();
-                        int mask_w = 0;
-                        int mask_h = 0;
-                        auto accept_mask_dims = [&](uint32_t w,
-                                                    uint32_t h) -> bool {
-                            if (w == 0 || h == 0) return false;
-                            const uint64_t cells = uint64_t(w) * uint64_t(h);
-                            if (cells != mask_count ||
-                                cells > uint64_t(std::numeric_limits<int>::max())) {
-                                return false;
-                            }
-                            mask_w = int(w);
-                            mask_h = int(h);
-                            return true;
-                        };
-                        auto accept_vertex_dims = [&](uint32_t w,
-                                                      uint32_t h) -> bool {
-                            if (w <= 1 || h <= 1) return false;
-                            return accept_mask_dims(w - 1, h - 1);
-                        };
-                        if (t.dims.size() >= 2) {
-                            const uint32_t a = t.dims[0];
-                            const uint32_t b = t.dims[1];
-                            (void)(accept_mask_dims(a, b) ||
-                                   accept_mask_dims(b, a) ||
-                                   accept_vertex_dims(a, b) ||
-                                   accept_vertex_dims(b, a));
-                        }
-                        if (mask_w <= 0 || mask_h <= 0) {
-                            const int sq = int(std::lround(
-                                std::sqrt(double(mask_count))));
-                            if (sq > 0 && size_t(sq) * size_t(sq) == mask_count) {
-                                mask_w = sq;
-                                mask_h = sq;
-                            } else if (mask_count > 0) {
-                                mask_w = std::max(1, int(mask_count));
-                                mask_h = 1;
-                            } else {
-                                mask_w = 16;
-                                mask_h = 16;
-                            }
-                        }
-                        mask_w = std::max(mask_w, 1);
-                        mask_h = std::max(mask_h, 1);
-
-                        auto choose_subdiv = [](float extent,
-                                                int cells) -> int {
-                            if (cells <= 0 || !std::isfinite(extent))
-                                return 1;
-                            const float cell = std::abs(extent) / float(cells);
-                            if (cell <= 0.75f) return 1;
-                            return std::clamp(int(std::ceil(cell / 0.75f)),
-                                              1, 16);
-                        };
-                        int sub_x = choose_subdiv(x1 - x0, mask_w);
-                        int sub_z = choose_subdiv(z1 - z0, mask_h);
-                        int mesh_w = mask_w * sub_x;
-                        int mesh_h = mask_h * sub_z;
-                        while (uint64_t(mesh_w + 1) * uint64_t(mesh_h + 1) >
-                               120000ull && (sub_x > 1 || sub_z > 1)) {
-                            if (sub_x >= sub_z && sub_x > 1) --sub_x;
-                            else if (sub_z > 1) --sub_z;
-                            mesh_w = mask_w * sub_x;
-                            mesh_h = mask_h * sub_z;
-                        }
-
-                        MDLMeshGeom wg;
-                        const int vert_w = mesh_w + 1;
-                        const int vert_h = mesh_h + 1;
+                        const int cw = std::max(t.cells_x, 1);
+                        const int ch = std::max(t.cells_z, 1);
+                        const int vert_w = cw + 1;
+                        const int vert_h = ch + 1;
                         const size_t vert_count =
                             size_t(vert_w) * size_t(vert_h);
+                        if (vert_count > 1200000) continue;
+
+                        MDLMeshGeom wg;
                         wg.positions.reserve(vert_count * 3);
                         wg.normals.reserve(vert_count * 3);
                         wg.uvs.reserve(vert_count * 2);
-                        for (int mz = 0; mz <= mesh_h; ++mz) {
-                            const float vz = float(mz) / float(mesh_h);
+                        for (int mz = 0; mz <= ch; ++mz) {
+                            const float vz = float(mz) / float(ch);
                             const float pz = z0 + (z1 - z0) * vz;
-                            for (int mx = 0; mx <= mesh_w; ++mx) {
-                                const float vx = float(mx) / float(mesh_w);
+                            for (int mx = 0; mx <= cw; ++mx) {
+                                const float vx = float(mx) / float(cw);
                                 const float px = x0 + (x1 - x0) * vx;
                                 wg.positions.insert(wg.positions.end(),
                                                     { px, y, pz });
@@ -2325,16 +1844,12 @@ void process_pending_loads() {
 
                         auto active_cell = [&](int mx, int mz) -> bool {
                             if (t.mask.empty()) return true;
-                            const int mask_x =
-                                std::min(mask_w - 1, mx / sub_x);
-                            const int mask_z =
-                                std::min(mask_h - 1, mz / sub_z);
-                            const size_t mi = size_t(mask_z) * size_t(mask_w)
-                                            + size_t(mask_x);
+                            const size_t mi = size_t(mz) * size_t(cw)
+                                            + size_t(mx);
                             return mi < t.mask.size() && t.mask[mi] != 0;
                         };
-                        for (int mz = 0; mz < mesh_h; ++mz) {
-                            for (int mx = 0; mx < mesh_w; ++mx) {
+                        for (int mz = 0; mz < ch; ++mz) {
+                            for (int mx = 0; mx < cw; ++mx) {
                                 if (!active_cell(mx, mz)) continue;
                                 const uint32_t v00 =
                                     uint32_t(mz * vert_w + mx);
@@ -2359,37 +1874,70 @@ void process_pending_loads() {
                                   ":tile" + std::to_string(ti);
                         wg.diffuse_tex_name = body.normal_map_path;
                         wg.is_water = true;
-                        for (size_t pi = 0; pi < body.wave_params.size() &&
-                                            pi < 38; ++pi) {
-                            wg.water_params[pi] = body.wave_params[pi];
-                        }
+
+                        // water_params: [0] = plane height,
+                        // [1..37] = the 37 WaterParams floats (WaterParamIdx).
                         wg.water_params[0] = y;
-                        if (g_pending_level_water_theme.has_any) {
-                            const Gdb::WaterTheme& wt =
-                                g_pending_level_water_theme;
-                            wg.has_water_theme = true;
-                            wg.water_opacity = wt.opacity;
-                            water_theme_opacity = wt.opacity;
-                            std::copy(std::begin(wt.shallow_colour),
-                                      std::end(wt.shallow_colour),
-                                      std::begin(wg.water_shallow_colour));
+                        for (size_t pi = 0; pi < body.params.size() &&
+                                            pi + 1 < 38; ++pi) {
+                            wg.water_params[pi + 1] = body.params[pi];
+                        }
+
+                        // Colours: the .water body params i18-20/i21-23 ARE
+                        // m_SurfaceWaterColour/m_DeepWaterColour, verified
+                        // against the XEX g_WaterConstants packer
+                        // (sub_82B2A008). The GDB env theme carries the same
+                        // two colours (its extractor labels them swapped), so
+                        // the file values are used directly and the theme is
+                        // only a fallback when the file has none.
+                        wg.has_water_theme = true;
+                        auto fin = [](float v, float d) {
+                            return std::isfinite(v) ? v : d;
+                        };
+                        const float sr = fin(body.params[Level::WP_SURFACE_R], 0.0f);
+                        const float sg = fin(body.params[Level::WP_SURFACE_G], 0.0f);
+                        const float sb = fin(body.params[Level::WP_SURFACE_B], 0.0f);
+                        const float dr = fin(body.params[Level::WP_DEEP_R], 0.0f);
+                        const float dg = fin(body.params[Level::WP_DEEP_G], 0.0f);
+                        const float db = fin(body.params[Level::WP_DEEP_B], 0.0f);
+                        const bool file_colours =
+                            (sr + sg + sb + dr + dg + db) > 0.0005f;
+                        const Gdb::WaterTheme& wt = g_pending_level_water_theme;
+                        if (file_colours) {
+                            wg.water_shallow_colour[0] = sr;
+                            wg.water_shallow_colour[1] = sg;
+                            wg.water_shallow_colour[2] = sb;
+                            wg.water_deep_colour[0] = dr;
+                            wg.water_deep_colour[1] = dg;
+                            wg.water_deep_colour[2] = db;
+                        } else if (wt.has_shallow_colour || wt.has_deep_colour) {
+                            // GDB theme "deep" = engine surface colour,
+                            // "shallow" = engine deep colour (extractor labels
+                            // are swapped vs g_WaterConstants).
                             std::copy(std::begin(wt.deep_colour),
                                       std::end(wt.deep_colour),
+                                      std::begin(wg.water_shallow_colour));
+                            std::copy(std::begin(wt.shallow_colour),
+                                      std::end(wt.shallow_colour),
                                       std::begin(wg.water_deep_colour));
-                            wg.water_theme_params[0] = wt.edge_blend_min;
-                            wg.water_theme_params[1] = wt.edge_blend_max;
-                            wg.water_theme_params[2] = wt.edge_blend_bias;
-                            wg.water_theme_params[3] =
-                                wt.max_refraction_distance;
-                            wg.water_theme_params[4] = wt.fresnel_bias;
-                            wg.water_theme_params[5] =
-                                wt.reflection_strength;
-                            wg.water_theme_params[6] = wt.refraction_scale;
-                            wg.water_theme_params[7] = wt.reflection_scale;
-                            wg.water_theme_params[8] = wt.reflection_bias;
-                            wg.water_theme_params[9] = wt.normal_scale;
-                            ++themed_water_geom_count;
                         }
+                        if (wt.has_any) {
+                            wg.water_opacity = wt.opacity;
+                            water_theme_opacity = wt.opacity;
+                            ++themed_water_geom_count;
+                        } else {
+                            wg.water_opacity = 0.78f;
+                        }
+                        wg.water_theme_params[0] = wt.edge_blend_min;
+                        wg.water_theme_params[1] = wt.edge_blend_max;
+                        wg.water_theme_params[2] = wt.edge_blend_bias;
+                        wg.water_theme_params[3] = wt.max_refraction_distance;
+                        wg.water_theme_params[4] = wt.fresnel_bias;
+                        wg.water_theme_params[5] = wt.reflection_strength;
+                        wg.water_theme_params[6] = wt.refraction_scale;
+                        wg.water_theme_params[7] = wt.reflection_scale;
+                        wg.water_theme_params[8] = wt.reflection_bias;
+                        wg.water_theme_params[9] = wt.normal_scale;
                         geoms.push_back(std::move(wg));
                         ++water_geom_count;
                     }
@@ -2397,18 +1945,15 @@ void process_pending_loads() {
                 if (water_geom_count > 0) {
                     OutputLog::success("water: " +
                         std::to_string(water_geom_count) +
-                        " tessellated masked surface tile(s) emitted from .water");
+                        " exact patch grid(s) emitted from .water (engine layout)");
                     if (themed_water_geom_count > 0) {
                         std::ostringstream ss;
-                        ss << "water: GDB theme applied to "
+                        ss << "water: GDB theme opacity applied to "
                            << themed_water_geom_count
                            << " tile(s), opacity="
                            << std::fixed << std::setprecision(2)
                            << water_theme_opacity;
                         OutputLog::info(ss.str());
-                    } else {
-                        OutputLog::info(
-                            "water: no GDB theme on emitted tiles; opaque fallback");
                     }
                 }
             }
@@ -2423,13 +1968,15 @@ void process_pending_loads() {
             }
             MP_Build(device, geoms, info, g_mp);
             g_mp.no_tilt = true;
-            apply_sky_theme_to_preview(g_mp, g_pending_level_sky_theme);
-            apply_cloud_theme_to_preview(g_mp,
-                                         g_pending_level_cloud_theme);
-            apply_weather_theme_to_preview(g_mp,
-                                           g_pending_level_weather_theme,
-                                           g_pending_level_sky_theme);
-            apply_environment_timeline_to_preview(
+            MP_BuildLevelFx(device, g_mp);
+            Skybox::PreviewBinding::ApplySkyTheme(
+                g_mp, g_pending_level_sky_theme);
+            Skybox::PreviewBinding::ApplyCloudTheme(
+                g_mp, g_pending_level_cloud_theme);
+            Skybox::PreviewBinding::ApplyWeatherTheme(
+                g_mp, g_pending_level_weather_theme,
+                g_pending_level_sky_theme);
+            Skybox::PreviewBinding::ApplyEnvironmentTimeline(
                 g_mp, g_pending_level_environment_timeline);
 
             (void)water_geom_first;
@@ -3070,13 +2617,14 @@ void process_pending_loads() {
             if (g_mp_initialized) {
                 MP_Build(geoms, info, g_mp);
                 g_mp.no_tilt = true;
-                apply_sky_theme_to_preview(g_mp, g_pending_level_sky_theme);
-                apply_cloud_theme_to_preview(g_mp,
-                                             g_pending_level_cloud_theme);
-                apply_weather_theme_to_preview(
+                Skybox::PreviewBinding::ApplySkyTheme(
+                    g_mp, g_pending_level_sky_theme);
+                Skybox::PreviewBinding::ApplyCloudTheme(
+                    g_mp, g_pending_level_cloud_theme);
+                Skybox::PreviewBinding::ApplyWeatherTheme(
                     g_mp, g_pending_level_weather_theme,
                     g_pending_level_sky_theme);
-                apply_environment_timeline_to_preview(
+                Skybox::PreviewBinding::ApplyEnvironmentTimeline(
                     g_mp, g_pending_level_environment_timeline);
                 S.terrain_mode = true;
                 S.show_model_preview = false;

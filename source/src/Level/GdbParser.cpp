@@ -1,4 +1,5 @@
 #include "GdbParser.h"
+#include "Skybox/GdbReaderInternal.h"
 
 #include <algorithm>
 #include <cctype>
@@ -9,6 +10,7 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -18,19 +20,14 @@ namespace Gdb {
 
 namespace {
 
-inline uint32_t ReadBeU32(const uint8_t* p) {
-    return  (uint32_t(p[0]) << 24) |
-            (uint32_t(p[1]) << 16) |
-            (uint32_t(p[2]) <<  8) |
-             uint32_t(p[3]);
-}
-
-inline float ReadBeF32(const uint8_t* p) {
-    uint32_t v = ReadBeU32(p);
-    float f;
-    std::memcpy(&f, &v, 4);
-    return f;
-}
+using detail::GdbView;
+using detail::ReadBeF32;
+using detail::ReadBeU32;
+using detail::kHashParent;
+using detail::kHashVecX;
+using detail::kHashVecY;
+using detail::kHashVecZ;
+using detail::kHeaderSize;
 
 inline bool Finite3(float x, float y, float z) {
     return std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
@@ -38,10 +35,17 @@ inline bool Finite3(float x, float y, float z) {
 
 constexpr uint32_t kVarMarker    = 0x00004B80;
 constexpr uint32_t kInlineVec3SchemaRel = 0x00000568;
-constexpr uint32_t kHashParent   = 0x5F6317D5;
 constexpr uint32_t kHashPosition = 0xBD7C27D4;
 constexpr uint32_t kHashRotation = 0x21EBC83B;
 constexpr uint32_t kHashTransformComponent = 0xF73572C4;
+// Lightweight entity transform (markers, lights, FX entities such as
+// "fire_4" / "FX_Water_Fall_Main_Wider"): the record's 0x619F96CF field
+// references a transform record with the usual Position/Rotation refs.
+constexpr uint32_t kHashSimpleTransformComponent = 0x619F96CF;
+// CParticleSystemEntityType's effect reference: Fnv1Lower hash of the bank
+// effect name (0x811C9DC5 = empty string). Lives on a component record in
+// the entity's parent/type chain.
+constexpr uint32_t kHashParticleSystemNameHash = 0x4EDC9083;
 constexpr uint32_t kHashGraphicAppearanceComponent = 0xA7B6EF56;
 constexpr uint32_t kHashGraphicAppearanceAnimatedMeshComponent = 0x21D312CA;
 constexpr uint32_t kHashStaticMeshComponent = 0x29CF50D1;
@@ -63,346 +67,7 @@ constexpr uint32_t kHashAnimation = 0x8F32748D;
 constexpr uint32_t kHashAnimationList = 0x63565E85;
 constexpr uint32_t kHashAnimations = 0xF96D7984;
 constexpr uint32_t kHashAnimationSet = 0xE227399F;
-constexpr uint32_t kHashVecZ = 0x050C5D45;
-constexpr uint32_t kHashVecY = 0x050C5D46;
-constexpr uint32_t kHashVecX = 0x050C5D47;
-constexpr uint32_t kHashLevelData = 0x123F8AFD;
-constexpr uint32_t kHashEnvThemeGlobal = 0xAE17B958;
-constexpr uint32_t kHashEnvironmentThemeDaySet = 0x0843AB41;
-constexpr uint32_t kHashTheme = 0xB57E3290;
-constexpr uint32_t kHashTimeOfDay = 0x9723C2C9;
-constexpr uint32_t kHashWater = 0x1E6889DA;
-constexpr uint32_t kHashSky = 0x2420BFA4;
-constexpr uint32_t kHashFogging = 0xDDF56C9A;
-constexpr uint32_t kHashSunIntensity = 0xC868C0DC;
-constexpr uint32_t kHashSkyBetaRayleighMultiplier = 0x59837340;
-constexpr uint32_t kHashSkyBetaMieMultiplier = 0xD7FC122C;
-constexpr uint32_t kHashSkyColour = 0xD78A6E40;
-constexpr uint32_t kHashSkyComplementaryColour = 0x5CBE1462;
-constexpr uint32_t kHashSkyComplementaryColourBias = 0x2DA0C989;
-constexpr uint32_t kHashSunsetColour = 0x897262B7;
-constexpr uint32_t kHashSkyOverlayTexture = 0xF8C0DD95;
-constexpr uint32_t kHashMoonTexture = 0x20D88F43;
-constexpr uint32_t kHashMoonGlareTexture = 0xF2C7518C;
-constexpr uint32_t kHashDiscTexture = 0x6B29E8A3;
-constexpr uint32_t kHashCloudsLayer1 = 0xF2CF57DD;
-constexpr uint32_t kHashCloudsLayer2 = 0xF2CF57DE;
-constexpr uint32_t kHashCloudsLayer3 = 0xF2CF57DF;
-constexpr uint32_t kHashCloudsLayer4 = 0xF2CF57D8;
-constexpr uint32_t kHashDensityMap = 0x13821B7F;
-constexpr uint32_t kHashPositionX = 0x1E72B2E4;
-constexpr uint32_t kHashPositionY = 0x1E72B2E5;
-constexpr uint32_t kHashSizeX = 0x9C014CCE;
-constexpr uint32_t kHashSizeY = 0x9C014CCF;
-constexpr uint32_t kHashTextureScaleX = 0x0A8BA024;
-constexpr uint32_t kHashTextureScaleY = 0x0A8BA025;
-constexpr uint32_t kHashVelocityX = 0x5CE30740;
-constexpr uint32_t kHashVelocityY = 0x5CE30741;
-constexpr uint32_t kHashHeight = 0xF47DB020;
-constexpr uint32_t kHashTransparency = 0x383FDB33;
-constexpr uint32_t kHashNormalStrength = 0xB5B0AE93;
-constexpr uint32_t kHashTranslucencyStrength = 0x114E67B1;
-constexpr uint32_t kHashBrightness = 0xC452018C;
-constexpr uint32_t kHashAmbientLight = 0x15DD1091;
-constexpr uint32_t kHashWind = 0xBE284853;
-constexpr uint32_t kHashGroundMist = 0x65AA790F;
-constexpr uint32_t kHashStrength = 0x6CC36A2E;
-constexpr uint32_t kHashRainDensity = 0x0043FE91;
-constexpr uint32_t kHashRainSize = 0xF2494D2C;
-constexpr uint32_t kHashSnowFallSpeed = 0x1C33AED8;
-constexpr uint32_t kHashSnowSize = 0xC5487977;
-constexpr uint32_t kHashWindStrengthMin = 0x467F5320;
-constexpr uint32_t kHashWindStrengthMax = 0x3E7F46CE;
-constexpr uint32_t kHashWindStrengthVariation = 0xEC5CF413;
-constexpr uint32_t kHashWindXYRotationMin = 0x8724E1D8;
-constexpr uint32_t kHashWindXYRotationMax = 0x8F24EE36;
-constexpr uint32_t kHashWindElevationMin = 0xD6C55ADC;
-constexpr uint32_t kHashWindElevationMax = 0xDEC56732;
-constexpr uint32_t kHashWindChangeFrequency = 0xA1C12827;
-constexpr uint32_t kHashWindChangeDuration = 0x5B45F873;
-constexpr uint32_t kHashWindDirectionVariation = 0x5B71ED9D;
-constexpr uint32_t kHashFoggingStart = 0x754D898A;
-constexpr uint32_t kHashSunAxisElevation = 0x2682515B;
-constexpr uint32_t kHashSunAxisZOffset = 0x2EF474B9;
-constexpr uint32_t kHashSunAxisXYRotationOffset = 0x2E4D729C;
-constexpr uint32_t kHashTimeFactor = 0x703AEFF3;
-constexpr uint32_t kHashNearDistance = 0xDA3F7AAA;
-constexpr uint32_t kHashNearDensity = 0x91F00AC5;
-constexpr uint32_t kHashFarDistance = 0xFF154645;
-constexpr uint32_t kHashFarDensity = 0xE1DF20B4;
-constexpr uint32_t kHashCloseFogColour = 0x66353755;
-constexpr uint32_t kHashCloseFogMaxDistance = 0xCC4BDF70;
-constexpr uint32_t kHashRed = 0x3A232172;
-constexpr uint32_t kHashGreen = 0x608C9792;
-constexpr uint32_t kHashBlue = 0xB1911CC9;
-constexpr uint32_t kHashFactor = 0xBF21DA70;
-constexpr uint32_t kHashShallowWaterColourRed = 0xB2ECBF11;
-constexpr uint32_t kHashShallowWaterColourGreen = 0x25F0E705;
-constexpr uint32_t kHashShallowWaterColourBlue = 0x8BF17608;
-constexpr uint32_t kHashDeepWaterColourRed = 0x1750476D;
-constexpr uint32_t kHashDeepWaterColourGreen = 0x61671F01;
-constexpr uint32_t kHashDeepWaterColourBlue = 0x632A3D74;
-constexpr uint32_t kHashEdgeBlendBias = 0x79F85F10;
-constexpr uint32_t kHashEdgeBlendMin = 0x5A234079;
-constexpr uint32_t kHashEdgeBlendMax = 0x52233307;
-constexpr uint32_t kHashMaxRefractionDistance = 0x671D3125;
-constexpr uint32_t kHashFresnelBias = 0x73C59519;
-constexpr uint32_t kHashReflectionStrength = 0xAF315449;
-constexpr uint32_t kHashRefractionScale = 0x623C0662;
-constexpr uint32_t kHashReflectionScale = 0x9BA6BDE0;
-constexpr uint32_t kHashReflectionBias = 0x4838AA55;
-constexpr uint32_t kHashNormalScale = 0xA027B7EE;
 constexpr uint32_t kHashNull = 0x811C9DC5;
-constexpr size_t   kHeaderSize   = 0x18;
-
-struct GdbView {
-    const std::vector<uint8_t>& bytes;
-    uint32_t count = 0;
-    uint32_t size_a = 0;
-    uint32_t size_b = 0;
-    size_t body_start = kHeaderSize;
-    size_t body_end = 0;
-    size_t schema_base = 0;
-    size_t hash_base = 0;
-    size_t offset_base = 0;
-    bool ok = false;
-    
-    
-    std::vector<size_t> record_data_offsets;
-
-    explicit GdbView(const std::vector<uint8_t>& b) : bytes(b) {
-        if (bytes.size() < kHeaderSize) return;
-        if (bytes[0] != 'G' || bytes[1] != 'D' || bytes[2] != 'B' ||
-            bytes[3] != 0) {
-            return;
-        }
-        count = ReadBeU32(bytes.data() + 0x04);
-        size_a = ReadBeU32(bytes.data() + 0x08);
-        size_b = ReadBeU32(bytes.data() + 0x0C);
-        if (count == 0) return;
-        schema_base = kHeaderSize + size_t(size_a);
-        hash_base = schema_base + size_t(size_b);
-        offset_base = hash_base + size_t(count) * 4;
-        body_end = schema_base;
-        if (body_end > bytes.size() ||
-            offset_base + size_t(count) * 2 > bytes.size()) {
-            return;
-        }
-        if (!buildRecordDataOffsets()) return;
-        ok = true;
-    }
-
-    bool buildRecordDataOffsets() {
-        record_data_offsets.clear();
-        record_data_offsets.reserve(count);
-        size_t cur = body_start;
-        for (uint32_t i = 0; i < count; ++i) {
-            if (cur + 4 > body_end) return false;
-            record_data_offsets.push_back(cur);
-
-            size_t schema_off = 0;
-            uint32_t field_count = 0;
-            if (!schemaAtRecordData(cur, schema_off, field_count)) {
-                return false;
-            }
-            const size_t entry_size = 4 + size_t(field_count) * 4;
-            if (entry_size < 4 || cur + entry_size > body_end) {
-                return false;
-            }
-            cur += entry_size;
-        }
-        return true;
-    }
-
-    bool lookup(uint32_t hash, size_t& record) const {
-        if (!ok) return false;
-        size_t lo = 0;
-        size_t hi = count;
-        while (lo < hi) {
-            size_t mid = lo + (hi - lo) / 2;
-            uint32_t v = ReadBeU32(bytes.data() + hash_base + mid * 4);
-            if (v < hash) lo = mid + 1;
-            else          hi = mid;
-        }
-        if (lo >= count) return false;
-        uint32_t found = ReadBeU32(bytes.data() + hash_base + lo * 4);
-        if (found != hash) return false;
-        if (lo >= record_data_offsets.size()) return false;
-        record = record_data_offsets[lo];
-        return record + 4 <= body_end;
-    }
-
-    bool schemaAtRecordData(size_t record,
-                            size_t& schema_off,
-                            uint32_t& field_count) const {
-        if (record + 4 > body_end) return false;
-        uint32_t rel = ReadBeU32(bytes.data() + record);
-        schema_off = schema_base + size_t(rel);
-        if (schema_off + 4 > hash_base) return false;
-        uint32_t header = ReadBeU32(bytes.data() + schema_off);
-        field_count = header >> 8;
-        if (field_count > 256) {
-            const uint8_t* p = bytes.data() + schema_off;
-            const uint32_t count1_le =
-                uint32_t(p[0]) | (uint32_t(p[1]) << 8);
-            const uint32_t count2 = uint32_t(p[2]);
-            field_count = count1_le + count2;
-            if (field_count > 1024) return false;
-        }
-        return schema_off + 4 + size_t(field_count) * 8 <= hash_base;
-    }
-
-    bool schema(size_t record, size_t& schema_off, uint32_t& field_count) const {
-        if (!ok) return false;
-        return schemaAtRecordData(record, schema_off, field_count);
-    }
-
-    bool findLocal(size_t record,
-                   uint32_t field_hash,
-                   uint8_t expected_type,
-                   size_t& slot,
-                   uint8_t* found_type = nullptr) const {
-        size_t sch = 0;
-        uint32_t n = 0;
-        if (!schema(record, sch, n)) return false;
-        const size_t hashes = sch + 4;
-        const size_t descs = hashes + size_t(n) * 4;
-        for (uint32_t i = 0; i < n; ++i) {
-            if (ReadBeU32(bytes.data() + hashes + size_t(i) * 4) != field_hash) {
-                continue;
-            }
-            const uint32_t desc = ReadBeU32(bytes.data() + descs + size_t(i) * 4);
-            const uint8_t type = uint8_t(desc >> 24);
-            if (expected_type != 0xFF && type != expected_type) return false;
-            slot = record + 4 + size_t(i) * 4;
-            if (slot + 4 > body_end) return false;
-            if (found_type) *found_type = type;
-            return true;
-        }
-        return false;
-    }
-
-    bool findField(size_t record,
-                   uint32_t field_hash,
-                   uint8_t expected_type,
-                   size_t& slot,
-                   uint8_t* found_type = nullptr) const {
-        size_t owner = 0;
-        return findFieldOwner(record, field_hash, expected_type, slot, owner,
-                              found_type);
-    }
-
-    bool findFieldOwner(size_t record,
-                        uint32_t field_hash,
-                        uint8_t expected_type,
-                        size_t& slot,
-                        size_t& owner,
-                        uint8_t* found_type = nullptr) const {
-        size_t cur = record;
-        for (int depth = 0; depth < 64; ++depth) {
-            if (findLocal(cur, field_hash, expected_type, slot, found_type)) {
-                owner = cur;
-                return true;
-            }
-            size_t parent_slot = 0;
-            if (!findLocal(cur, kHashParent, 6, parent_slot, nullptr)) {
-                return false;
-            }
-            uint32_t parent_hash = ReadBeU32(bytes.data() + parent_slot);
-            if (parent_hash == 0) return false;
-            size_t parent_rec = 0;
-            if (!lookup(parent_hash, parent_rec)) return false;
-            if (parent_rec == cur) return false;
-            cur = parent_rec;
-        }
-        return false;
-    }
-
-    bool readLocalFloat(size_t record, uint32_t field_hash, float& value) const {
-        size_t slot = 0;
-        if (!findLocal(record, field_hash, 3, slot, nullptr)) return false;
-        if (slot + 4 > body_end) return false;
-        value = ReadBeF32(bytes.data() + slot);
-        return std::isfinite(value);
-    }
-
-    bool readVectorFields(size_t record,
-                          float& vx,
-                          float& vy,
-                          float& vz) const {
-        
-        
-        
-        return readLocalFloat(record, kHashVecX, vx) &&
-               readLocalFloat(record, kHashVecY, vy) &&
-               readLocalFloat(record, kHashVecZ, vz);
-    }
-
-    bool hasVectorSchema(size_t record) const {
-        float v = 0.0f;
-        return readLocalFloat(record, kHashVecZ, v) &&
-               readLocalFloat(record, kHashVecY, v) &&
-               readLocalFloat(record, kHashVecX, v);
-    }
-
-    bool readVec3Record(size_t record,
-                        float& x,
-                        float& y,
-                        float& z,
-                        float* raw_x = nullptr,
-                        float* raw_y = nullptr,
-                        float* raw_z = nullptr) const {
-        float vx = 0.0f, vy = 0.0f, vz = 0.0f;
-        if (!readVectorFields(record, vx, vy, vz)) return false;
-        if (!Finite3(vx, vy, vz)) return false;
-        x = vx;
-        y = vy;
-        z = vz;
-        if (raw_x) *raw_x = vx;
-        if (raw_y) *raw_y = vy;
-        if (raw_z) *raw_z = vz;
-        return true;
-    }
-
-    bool readVec3Ref(uint32_t hash,
-                     float& x,
-                     float& y,
-                     float& z,
-                     float* raw_x = nullptr,
-                     float* raw_y = nullptr,
-                     float* raw_z = nullptr) const {
-        size_t rec = 0;
-        return lookup(hash, rec) && readVec3Record(rec, x, y, z, raw_x, raw_y, raw_z);
-    }
-
-    bool readRotationVec3Ref(uint32_t hash,
-                             float& x,
-                             float& y,
-                             float& z) const {
-        size_t rec = 0;
-        return lookup(hash, rec) && readVec3Record(rec, x, y, z);
-    }
-
-    bool payloadRange(size_t record, size_t& payload_start, size_t& payload_end) const {
-        size_t sch = 0;
-        uint32_t n = 0;
-        if (!schema(record, sch, n)) return false;
-        payload_start = record + 4 + size_t(n) * 4;
-        if (payload_start > body_end) return false;
-
-        payload_end = body_end;
-        if (ok) {
-            auto it = std::upper_bound(record_data_offsets.begin(),
-                                       record_data_offsets.end(),
-                                       record);
-            if (it != record_data_offsets.end()) {
-                payload_end = *it;
-            }
-        }
-        payload_end = std::min(payload_end, payload_start + size_t(0x200));
-        return payload_start + 4 <= payload_end;
-    }
-};
 
 inline bool PlausiblePosition(float x, float y, float z) {
     return Finite3(x, y, z) &&
@@ -547,6 +212,11 @@ bool TryComponentTransformRecord(const GdbView& view,
     return TryComponentTransformField(
         view, record, kHashPhysicsSimulationStaticComponent,
         x, y, z, rot_x, rot_y, rot_z, has_rotation);
+    // NOTE: kHashSimpleTransformComponent (0x619F96CF) is deliberately NOT
+    // tried here — routing it through the general placement parser makes
+    // entities that already stream a model via another record produce a
+    // second placement (duplicated models). It is used only by
+    // ExtractFxEntityPlacements below.
 }
 
 bool TryReadModelPathHashField(const GdbView& view,
@@ -1415,1299 +1085,11 @@ bool TryPrefixedPlacementRecord(const GdbView& view,
                               rot_x, rot_y, rot_z, has_rotation);
 }
 
-struct WaterThemeRecordRef {
-    size_t db = 0;
-    size_t record = 0;
-    bool valid = false;
-};
-
-struct WaterThemeFieldRef {
-    WaterThemeRecordRef owner;
-    size_t slot = 0;
-    uint8_t type = 0;
-    uint32_t raw = 0;
-    float f32 = 0.0f;
-};
-
-inline float Clamp01(float v)
-{
-    return std::clamp(v, 0.0f, 1.0f);
-}
-
-inline float EnvColourComponentToLinearInput(float v)
-{
-    
-    
-    return Clamp01(v * (1.0f / 255.0f));
-}
-
-class WaterThemeExtractor {
-public:
-    explicit WaterThemeExtractor(
-        const std::vector<const std::vector<uint8_t>*>& gdbs)
-    {
-        views_.reserve(gdbs.size());
-        for (const auto* bytes : gdbs) {
-            if (!bytes) continue;
-            views_.emplace_back(*bytes);
-        }
-    }
-
-    bool extract(WaterTheme& out_theme) const
-    {
-        out_theme = WaterTheme{};
-        if (views_.empty()) return false;
-
-        bool applied = false;
-
-        WaterThemeRecordRef day_set = findDaySet(true);
-        if (day_set.valid) {
-            WaterThemeRecordRef day_theme;
-            float day_time = -1.0f;
-            if (selectThemeFromDaySet(day_set, day_theme, day_time)) {
-                out_theme.source_time_of_day = day_time;
-                applied |= applyThemeRecord(day_theme, out_theme);
-            }
-        }
-
-        if (!applied) {
-            for (const WaterThemeRecordRef& level :
-                 lookupAllInDb(kHashLevelData, 0)) {
-                applied |= applyThemeField(level, kHashEnvThemeGlobal,
-                                           out_theme);
-            }
-        }
-
-        if (!applied) {
-            WaterThemeRecordRef owner =
-                firstRecordWithFieldInDb(kHashEnvThemeGlobal, 0);
-            if (owner.valid) {
-                applied |= applyThemeField(owner, kHashEnvThemeGlobal,
-                                           out_theme);
-            }
-        }
-
-        if (!applied) {
-            for (const WaterThemeRecordRef& global :
-                 lookupAllInDb(kHashEnvThemeGlobal, 0)) {
-                applied |= applyThemeRecord(global, out_theme);
-            }
-        }
-
-        if (!applied) {
-            day_set = findDaySet(false);
-            WaterThemeRecordRef day_theme;
-            float day_time = -1.0f;
-            if (day_set.valid &&
-                selectThemeFromDaySet(day_set, day_theme, day_time)) {
-                out_theme.source_time_of_day = day_time;
-                applied |= applyThemeRecord(day_theme, out_theme);
-            }
-        }
-
-        if (!applied) {
-            for (const WaterThemeRecordRef& global :
-                 lookupAll(kHashEnvThemeGlobal)) {
-                applied |= applyThemeRecord(global, out_theme);
-            }
-        }
-
-        if (!applied) {
-            applied = applyFirstWaterLikeRecord(out_theme);
-        }
-
-        out_theme.has_any = applied;
-        return applied;
-    }
-
-    bool extractSky(SkyTheme& out_theme) const
-    {
-        out_theme = SkyTheme{};
-        if (views_.empty()) return false;
-
-        bool applied = false;
-
-        WaterThemeRecordRef day_set = findDaySet(true);
-        if (day_set.valid) {
-            WaterThemeRecordRef day_theme;
-            float day_time = -1.0f;
-            if (selectThemeFromDaySet(day_set, day_theme, day_time)) {
-                out_theme.source_time_of_day = day_time;
-                applied |= applySkyThemeRecord(day_theme, out_theme);
-            }
-        }
-
-        if (!applied) {
-            for (const WaterThemeRecordRef& level :
-                 lookupAllInDb(kHashLevelData, 0)) {
-                applied |= applySkyThemeField(level, kHashEnvThemeGlobal,
-                                              out_theme);
-            }
-        }
-
-        if (!applied) {
-            WaterThemeRecordRef owner =
-                firstRecordWithFieldInDb(kHashEnvThemeGlobal, 0);
-            if (owner.valid) {
-                applied |= applySkyThemeField(owner, kHashEnvThemeGlobal,
-                                              out_theme);
-            }
-        }
-
-        if (!applied) {
-            for (const WaterThemeRecordRef& global :
-                 lookupAllInDb(kHashEnvThemeGlobal, 0)) {
-                applied |= applySkyThemeRecord(global, out_theme);
-            }
-        }
-
-        if (!applied) {
-            day_set = findDaySet(false);
-            WaterThemeRecordRef day_theme;
-            float day_time = -1.0f;
-            if (day_set.valid &&
-                selectThemeFromDaySet(day_set, day_theme, day_time)) {
-                out_theme.source_time_of_day = day_time;
-                applied |= applySkyThemeRecord(day_theme, out_theme);
-            }
-        }
-
-        if (!applied) {
-            for (const WaterThemeRecordRef& global :
-                 lookupAll(kHashEnvThemeGlobal)) {
-                applied |= applySkyThemeRecord(global, out_theme);
-            }
-        }
-
-        if (!applied) {
-            applied = applyFirstSkyLikeRecord(out_theme);
-        }
-
-        out_theme.has_any = applied;
-        return applied;
-    }
-
-    bool extractWeather(WeatherTheme& out_theme) const
-    {
-        out_theme = WeatherTheme{};
-        if (views_.empty()) return false;
-
-        bool applied = false;
-
-        WaterThemeRecordRef day_set = findDaySet(true);
-        if (day_set.valid) {
-            WaterThemeRecordRef day_theme;
-            float day_time = -1.0f;
-            if (selectThemeFromDaySet(day_set, day_theme, day_time)) {
-                out_theme.source_time_of_day = day_time;
-                applied |= applyWeatherThemeRecord(day_theme, out_theme);
-            }
-        }
-
-        if (!applied) {
-            for (const WaterThemeRecordRef& level :
-                 lookupAllInDb(kHashLevelData, 0)) {
-                applied |= applyWeatherThemeField(level, kHashEnvThemeGlobal,
-                                                  out_theme);
-            }
-        }
-
-        if (!applied) {
-            WaterThemeRecordRef owner =
-                firstRecordWithFieldInDb(kHashEnvThemeGlobal, 0);
-            if (owner.valid) {
-                applied |= applyWeatherThemeField(owner, kHashEnvThemeGlobal,
-                                                  out_theme);
-            }
-        }
-
-        if (!applied) {
-            for (const WaterThemeRecordRef& global :
-                 lookupAllInDb(kHashEnvThemeGlobal, 0)) {
-                applied |= applyWeatherThemeRecord(global, out_theme);
-            }
-        }
-
-        if (!applied) {
-            day_set = findDaySet(false);
-            WaterThemeRecordRef day_theme;
-            float day_time = -1.0f;
-            if (day_set.valid &&
-                selectThemeFromDaySet(day_set, day_theme, day_time)) {
-                out_theme.source_time_of_day = day_time;
-                applied |= applyWeatherThemeRecord(day_theme, out_theme);
-            }
-        }
-
-        if (!applied) {
-            for (const WaterThemeRecordRef& global :
-                 lookupAll(kHashEnvThemeGlobal)) {
-                applied |= applyWeatherThemeRecord(global, out_theme);
-            }
-        }
-
-        out_theme.has_any = applied;
-        return applied;
-    }
-
-    bool extractClouds(CloudTheme& out_theme) const
-    {
-        out_theme = CloudTheme{};
-        if (views_.empty()) return false;
-
-        bool applied = false;
-
-        WaterThemeRecordRef day_set = findDaySet(true);
-        if (day_set.valid) {
-            WaterThemeRecordRef day_theme;
-            float day_time = -1.0f;
-            if (selectThemeFromDaySet(day_set, day_theme, day_time)) {
-                out_theme.source_time_of_day = day_time;
-                applied |= applyCloudThemeRecord(day_theme, out_theme);
-            }
-        }
-
-        if (!applied) {
-            for (const WaterThemeRecordRef& level :
-                 lookupAllInDb(kHashLevelData, 0)) {
-                applied |= applyCloudThemeField(level, kHashEnvThemeGlobal,
-                                                out_theme);
-            }
-        }
-
-        if (!applied) {
-            WaterThemeRecordRef owner =
-                firstRecordWithFieldInDb(kHashEnvThemeGlobal, 0);
-            if (owner.valid) {
-                applied |= applyCloudThemeField(owner, kHashEnvThemeGlobal,
-                                                out_theme);
-            }
-        }
-
-        if (!applied) {
-            for (const WaterThemeRecordRef& global :
-                 lookupAllInDb(kHashEnvThemeGlobal, 0)) {
-                applied |= applyCloudThemeRecord(global, out_theme);
-            }
-        }
-
-        if (!applied) {
-            day_set = findDaySet(false);
-            WaterThemeRecordRef day_theme;
-            float day_time = -1.0f;
-            if (day_set.valid &&
-                selectThemeFromDaySet(day_set, day_theme, day_time)) {
-                out_theme.source_time_of_day = day_time;
-                applied |= applyCloudThemeRecord(day_theme, out_theme);
-            }
-        }
-
-        if (!applied) {
-            for (const WaterThemeRecordRef& global :
-                 lookupAll(kHashEnvThemeGlobal)) {
-                applied |= applyCloudThemeRecord(global, out_theme);
-            }
-        }
-
-        if (!applied) {
-            applied = applyFirstCloudLikeRecords(out_theme);
-        }
-
-        finaliseCloudTheme(out_theme);
-        out_theme.has_any = applied && out_theme.layer_count > 0;
-        return out_theme.has_any;
-    }
-
-    bool extractEnvironmentTimeline(EnvironmentThemeTimeline& out_timeline)
-        const
-    {
-        out_timeline = EnvironmentThemeTimeline{};
-        if (views_.empty()) return false;
-
-        WaterThemeRecordRef day_set = findDaySet(true);
-        if (!day_set.valid) {
-            day_set = findDaySet(false);
-        }
-        if (!day_set.valid) return false;
-
-        const GdbView& v = view(day_set);
-        size_t sch = 0;
-        uint32_t n = 0;
-        if (!v.schema(day_set.record, sch, n)) return false;
-
-        const size_t descs = sch + 4 + size_t(n) * 4;
-        if (descs + size_t(n) * 4 > v.body_end) return false;
-
-        for (uint32_t i = 0; i < n; ++i) {
-            const uint32_t desc =
-                ReadBeU32(v.bytes.data() + descs + size_t(i) * 4);
-            const uint8_t type = uint8_t(desc >> 24);
-            if (type != 4 && type != 6 && type != 7) continue;
-
-            const size_t slot = day_set.record + 4 + size_t(i) * 4;
-            if (slot + 4 > v.body_end) continue;
-
-            WaterThemeFieldRef item_field;
-            item_field.owner = day_set;
-            item_field.slot = slot;
-            item_field.type = type;
-            item_field.raw = ReadBeU32(v.bytes.data() + slot);
-            item_field.f32 = ReadBeF32(v.bytes.data() + slot);
-
-            WaterThemeRecordRef entry = fieldToRecord(item_field);
-            if (!entry.valid) continue;
-
-            WaterThemeRecordRef theme =
-                resolveRecordField(entry, kHashTheme);
-            if (!theme.valid) continue;
-
-            float time = 0.5f;
-            float read_time = 0.0f;
-            if (readFloat(entry, kHashTimeOfDay, read_time)) {
-                time = normalizeTimeOfDay(read_time);
-            }
-
-            EnvironmentThemeKeyframe key;
-            key.time_of_day = time;
-
-            const bool water_applied = applyThemeRecord(theme, key.water);
-            key.water.has_any = water_applied;
-            key.water.source_time_of_day = time;
-
-            const bool sky_applied = applySkyThemeRecord(theme, key.sky);
-            key.sky.has_any = sky_applied;
-            key.sky.source_time_of_day = time;
-
-            const bool cloud_applied =
-                applyCloudThemeRecord(theme, key.clouds);
-            finaliseCloudTheme(key.clouds);
-            key.clouds.has_any =
-                cloud_applied && key.clouds.layer_count > 0;
-            key.clouds.source_time_of_day = time;
-
-            const bool weather_applied =
-                applyWeatherThemeRecord(theme, key.weather);
-            key.weather.has_any = weather_applied;
-            key.weather.source_time_of_day = time;
-
-            if (key.water.has_any || key.sky.has_any ||
-                key.clouds.has_any || key.weather.has_any) {
-                out_timeline.keyframes.push_back(key);
-            }
-        }
-
-        std::sort(out_timeline.keyframes.begin(),
-                  out_timeline.keyframes.end(),
-                  [](const EnvironmentThemeKeyframe& a,
-                     const EnvironmentThemeKeyframe& b) {
-                      return a.time_of_day < b.time_of_day;
-                  });
-        out_timeline.keyframes.erase(
-            std::unique(out_timeline.keyframes.begin(),
-                        out_timeline.keyframes.end(),
-                        [](const EnvironmentThemeKeyframe& a,
-                           const EnvironmentThemeKeyframe& b) {
-                            return std::fabs(a.time_of_day -
-                                             b.time_of_day) < 0.0005f;
-                        }),
-            out_timeline.keyframes.end());
-
-        out_timeline.has_any = out_timeline.keyframes.size() >= 2;
-        return out_timeline.has_any;
-    }
-
-private:
-    std::vector<GdbView> views_;
-
-    static float normalizeTimeOfDay(float time)
-    {
-        if (!std::isfinite(time)) return 0.5f;
-        if (time > 1.0f && time <= 24.0f) {
-            time *= (1.0f / 24.0f);
-        }
-        time -= std::floor(time);
-        if (time < 0.0f) time += 1.0f;
-        return time;
-    }
-
-    const GdbView& view(const WaterThemeRecordRef& ref) const
-    {
-        return views_[ref.db];
-    }
-
-    std::vector<WaterThemeRecordRef> lookupAll(uint32_t hash) const
-    {
-        std::vector<WaterThemeRecordRef> out;
-        if (hash == 0 || hash == kHashNull) return out;
-        for (size_t db = 0; db < views_.size(); ++db) {
-            const GdbView& v = views_[db];
-            if (!v.ok) continue;
-            size_t record = 0;
-            if (v.lookup(hash, record)) {
-                out.push_back(WaterThemeRecordRef{db, record, true});
-            }
-        }
-        return out;
-    }
-
-    std::vector<WaterThemeRecordRef> lookupAllInDb(uint32_t hash,
-                                                   size_t db) const
-    {
-        std::vector<WaterThemeRecordRef> out;
-        if (hash == 0 || hash == kHashNull || db >= views_.size()) {
-            return out;
-        }
-        const GdbView& v = views_[db];
-        if (!v.ok) return out;
-        size_t record = 0;
-        if (v.lookup(hash, record)) {
-            out.push_back(WaterThemeRecordRef{db, record, true});
-        }
-        return out;
-    }
-
-    WaterThemeRecordRef lookupFirst(uint32_t hash) const
-    {
-        const std::vector<WaterThemeRecordRef> all = lookupAll(hash);
-        if (all.empty()) return {};
-        return all.front();
-    }
-
-    WaterThemeRecordRef firstRecordWithField(uint32_t field_hash) const
-    {
-        for (size_t db = 0; db < views_.size(); ++db) {
-            const GdbView& v = views_[db];
-            if (!v.ok) continue;
-            for (size_t record : v.record_data_offsets) {
-                size_t slot = 0;
-                if (v.findLocal(record, field_hash, 0xFF,
-                                slot, nullptr)) {
-                    return WaterThemeRecordRef{db, record, true};
-                }
-            }
-        }
-        return {};
-    }
-
-    WaterThemeRecordRef firstRecordWithFieldInDb(uint32_t field_hash,
-                                                 size_t db) const
-    {
-        if (db >= views_.size()) return {};
-        const GdbView& v = views_[db];
-        if (!v.ok) return {};
-        for (size_t record : v.record_data_offsets) {
-            size_t slot = 0;
-            if (v.findLocal(record, field_hash, 0xFF, slot, nullptr)) {
-                return WaterThemeRecordRef{db, record, true};
-            }
-        }
-        return {};
-    }
-
-    WaterThemeRecordRef findDaySet(bool level_only) const
-    {
-        const size_t db_count = level_only
-            ? std::min<size_t>(views_.size(), 1)
-            : views_.size();
-        for (size_t db = 0; db < db_count; ++db) {
-            for (const WaterThemeRecordRef& level :
-                 lookupAllInDb(kHashLevelData, db)) {
-                WaterThemeRecordRef day_set =
-                    resolveRecordField(level, kHashEnvironmentThemeDaySet);
-                if (day_set.valid) return day_set;
-            }
-        }
-
-        for (size_t db = 0; db < db_count; ++db) {
-            WaterThemeRecordRef owner =
-                firstRecordWithFieldInDb(kHashEnvironmentThemeDaySet, db);
-            if (!owner.valid) continue;
-            WaterThemeRecordRef day_set =
-                resolveRecordField(owner, kHashEnvironmentThemeDaySet);
-            if (day_set.valid) return day_set;
-        }
-
-        return {};
-    }
-
-    bool findLocalField(WaterThemeRecordRef record,
-                        uint32_t field_hash,
-                        uint8_t expected_type,
-                        WaterThemeFieldRef& out) const
-    {
-        if (!record.valid || record.db >= views_.size()) return false;
-        const GdbView& v = view(record);
-        size_t slot = 0;
-        uint8_t type = 0;
-        if (!v.findLocal(record.record, field_hash, expected_type,
-                         slot, &type)) {
-            return false;
-        }
-        out.owner = record;
-        out.slot = slot;
-        out.type = type;
-        out.raw = ReadBeU32(v.bytes.data() + slot);
-        out.f32 = ReadBeF32(v.bytes.data() + slot);
-        return true;
-    }
-
-    bool findField(WaterThemeRecordRef record,
-                   uint32_t field_hash,
-                   uint8_t expected_type,
-                   WaterThemeFieldRef& out) const
-    {
-        if (!record.valid || record.db >= views_.size()) return false;
-
-        WaterThemeRecordRef cur = record;
-        std::unordered_set<uint64_t> seen;
-        for (int depth = 0; depth < 64; ++depth) {
-            const uint64_t key =
-                (uint64_t(cur.db) << 48) ^ uint64_t(cur.record);
-            if (!seen.insert(key).second) return false;
-
-            if (findLocalField(cur, field_hash, expected_type, out)) {
-                return true;
-            }
-
-            WaterThemeFieldRef parent_field;
-            if (!findLocalField(cur, kHashParent, 0xFF, parent_field)) {
-                return false;
-            }
-            cur = fieldToRecord(parent_field);
-            if (!cur.valid) return false;
-        }
-        return false;
-    }
-
-    WaterThemeRecordRef fieldToRecord(const WaterThemeFieldRef& field) const
-    {
-        if (field.raw == 0 || field.raw == kHashNull) return {};
-        if (field.type != 4 && field.type != 6 && field.type != 7) return {};
-        return lookupFirst(field.raw);
-    }
-
-    WaterThemeRecordRef resolveRecordField(WaterThemeRecordRef record,
-                                           uint32_t field_hash) const
-    {
-        WaterThemeFieldRef field;
-        if (!findField(record, field_hash, 0xFF, field)) return {};
-        return fieldToRecord(field);
-    }
-
-    bool readFloat(WaterThemeRecordRef record,
-                   uint32_t field_hash,
-                   float& out) const
-    {
-        WaterThemeFieldRef field;
-        if (!findField(record, field_hash, 3, field)) return false;
-        if (!std::isfinite(field.f32)) return false;
-        out = field.f32;
-        return true;
-    }
-
-    bool readColour(WaterThemeRecordRef record,
-                    uint32_t red_hash,
-                    uint32_t green_hash,
-                    uint32_t blue_hash,
-                    float (&out)[3]) const
-    {
-        float r = 0.0f;
-        float g = 0.0f;
-        float b = 0.0f;
-        if (!readFloat(record, red_hash, r) ||
-            !readFloat(record, green_hash, g) ||
-            !readFloat(record, blue_hash, b)) {
-            return false;
-        }
-        out[0] = EnvColourComponentToLinearInput(r);
-        out[1] = EnvColourComponentToLinearInput(g);
-        out[2] = EnvColourComponentToLinearInput(b);
-        return true;
-    }
-
-    bool readColourRecordField(WaterThemeRecordRef record,
-                               uint32_t field_hash,
-                               float (&out)[3]) const
-    {
-        WaterThemeRecordRef colour = resolveRecordField(record, field_hash);
-        if (!colour.valid) return false;
-        if (!readColour(colour, kHashRed, kHashGreen, kHashBlue, out)) {
-            return false;
-        }
-        float factor = 1.0f;
-        if (readFloat(colour, kHashFactor, factor) &&
-            std::isfinite(factor) && factor > 0.0f) {
-            out[0] *= factor;
-            out[1] *= factor;
-            out[2] *= factor;
-        }
-        return true;
-    }
-
-    bool applyWaterRecord(WaterThemeRecordRef water,
-                          WaterTheme& theme) const
-    {
-        if (!water.valid) return false;
-
-        bool any = false;
-        float colour[3] = {};
-        if (readColour(water,
-                       kHashShallowWaterColourRed,
-                       kHashShallowWaterColourGreen,
-                       kHashShallowWaterColourBlue,
-                       colour)) {
-            std::copy(std::begin(colour), std::end(colour),
-                      std::begin(theme.shallow_colour));
-            theme.has_shallow_colour = true;
-            any = true;
-        }
-        if (readColour(water,
-                       kHashDeepWaterColourRed,
-                       kHashDeepWaterColourGreen,
-                       kHashDeepWaterColourBlue,
-                       colour)) {
-            std::copy(std::begin(colour), std::end(colour),
-                      std::begin(theme.deep_colour));
-            theme.has_deep_colour = true;
-            any = true;
-        }
-
-        auto read_param = [&](uint32_t hash, bool& flag, float& dst) {
-            float v = 0.0f;
-            if (readFloat(water, hash, v)) {
-                flag = true;
-                dst = v;
-                any = true;
-            }
-        };
-
-        read_param(kHashEdgeBlendMin, theme.has_edge_blend_min,
-                   theme.edge_blend_min);
-        read_param(kHashEdgeBlendMax, theme.has_edge_blend_max,
-                   theme.edge_blend_max);
-        read_param(kHashEdgeBlendBias, theme.has_edge_blend_bias,
-                   theme.edge_blend_bias);
-        read_param(kHashMaxRefractionDistance,
-                   theme.has_max_refraction_distance,
-                   theme.max_refraction_distance);
-        read_param(kHashFresnelBias, theme.has_fresnel_bias,
-                   theme.fresnel_bias);
-        read_param(kHashReflectionStrength,
-                   theme.has_reflection_strength,
-                   theme.reflection_strength);
-        read_param(kHashRefractionScale, theme.has_refraction_scale,
-                   theme.refraction_scale);
-        read_param(kHashReflectionScale, theme.has_reflection_scale,
-                   theme.reflection_scale);
-        read_param(kHashReflectionBias, theme.has_reflection_bias,
-                   theme.reflection_bias);
-        read_param(kHashNormalScale, theme.has_normal_scale,
-                   theme.normal_scale);
-
-        return any;
-    }
-
-    bool applyThemeRecord(WaterThemeRecordRef theme_record,
-                          WaterTheme& theme) const
-    {
-        if (!theme_record.valid) return false;
-        WaterThemeRecordRef water =
-            resolveRecordField(theme_record, kHashWater);
-        if (water.valid && applyWaterRecord(water, theme)) {
-            return true;
-        }
-        return applyWaterRecord(theme_record, theme);
-    }
-
-    bool applyThemeField(WaterThemeRecordRef owner,
-                         uint32_t field_hash,
-                         WaterTheme& theme) const
-    {
-        WaterThemeRecordRef target = resolveRecordField(owner, field_hash);
-        return target.valid && applyThemeRecord(target, theme);
-    }
-
-    bool applySkyRecord(WaterThemeRecordRef sky,
-                        SkyTheme& theme) const
-    {
-        if (!sky.valid) return false;
-
-        bool any = false;
-        float colour[3] = {};
-        if (readColourRecordField(sky, kHashSkyColour, colour)) {
-            std::copy(std::begin(colour), std::end(colour),
-                      std::begin(theme.sky_colour));
-            theme.has_sky_colour = true;
-            any = true;
-        }
-        if (readColourRecordField(sky, kHashSkyComplementaryColour, colour)) {
-            std::copy(std::begin(colour), std::end(colour),
-                      std::begin(theme.complementary_colour));
-            theme.has_complementary_colour = true;
-            any = true;
-        }
-        if (readColourRecordField(sky, kHashSunsetColour, colour)) {
-            std::copy(std::begin(colour), std::end(colour),
-                      std::begin(theme.sunset_colour));
-            theme.has_sunset_colour = true;
-            any = true;
-        }
-
-        auto read_param = [&](uint32_t hash, bool& flag, float& dst) {
-            float v = 0.0f;
-            if (readFloat(sky, hash, v)) {
-                flag = true;
-                dst = v;
-                any = true;
-            }
-        };
-
-        read_param(kHashSunIntensity, theme.has_sun_intensity,
-                   theme.sun_intensity);
-        read_param(kHashSkyBetaRayleighMultiplier, theme.has_rayleigh,
-                   theme.rayleigh);
-        read_param(kHashSkyBetaMieMultiplier, theme.has_mie,
-                   theme.mie);
-        read_param(kHashSkyComplementaryColourBias,
-                   theme.has_complementary_bias,
-                   theme.complementary_bias);
-        read_param(kHashSunAxisElevation, theme.has_sun_axis,
-                   theme.sun_axis_elevation);
-        read_param(kHashSunAxisZOffset, theme.has_sun_axis,
-                   theme.sun_axis_z_offset);
-        read_param(kHashSunAxisXYRotationOffset, theme.has_sun_axis,
-                   theme.sun_axis_xy_rotation);
-        {
-            float tf = 1.0f;
-            if (readFloat(sky, kHashTimeFactor, tf) &&
-                std::isfinite(tf) && tf > 0.0f) {
-                theme.main_light_time_factor = tf;
-            }
-        }
-
-        auto read_texture = [&](uint32_t hash, bool& flag, uint32_t& dst) {
-            WaterThemeFieldRef field;
-            if (findField(sky, hash, 0xFF, field) &&
-                field.raw != 0 && field.raw != kHashNull) {
-                flag = true;
-                dst = field.raw;
-                any = true;
-            }
-        };
-        read_texture(kHashSkyOverlayTexture,
-                     theme.has_sky_overlay_texture,
-                     theme.sky_overlay_texture_hash);
-        read_texture(kHashMoonTexture,
-                     theme.has_moon_texture,
-                     theme.moon_texture_hash);
-        read_texture(kHashMoonGlareTexture,
-                     theme.has_moon_glare_texture,
-                     theme.moon_glare_texture_hash);
-        read_texture(kHashDiscTexture,
-                     theme.has_sun_disc_texture,
-                     theme.sun_disc_texture_hash);
-
-        return any;
-    }
-
-    bool applyFogRecord(WaterThemeRecordRef fog,
-                        SkyTheme& theme) const
-    {
-        if (!fog.valid) return false;
-
-        bool any = false;
-        float colour[3] = {};
-        if (readColourRecordField(fog, kHashCloseFogColour, colour)) {
-            std::copy(std::begin(colour), std::end(colour),
-                      std::begin(theme.fog_colour));
-            theme.has_fog_colour = true;
-            any = true;
-        }
-
-        float v = 0.0f;
-        if (readFloat(fog, kHashNearDistance, v)) {
-            theme.near_distance = v;
-            theme.has_near_fog = true;
-            any = true;
-        }
-        if (readFloat(fog, kHashNearDensity, v)) {
-            theme.near_density = v;
-            theme.has_near_fog = true;
-            any = true;
-        }
-        if (readFloat(fog, kHashFarDistance, v)) {
-            theme.far_distance = v;
-            theme.has_far_fog = true;
-            any = true;
-        }
-        if (readFloat(fog, kHashFarDensity, v)) {
-            theme.far_density = v;
-            theme.has_far_fog = true;
-            any = true;
-        }
-        if (readFloat(fog, kHashCloseFogMaxDistance, v)) {
-            theme.close_fog_max_distance = v;
-            any = true;
-        }
-        if (readFloat(fog, kHashFoggingStart, v)) {
-            theme.fogging_start = v;
-            theme.has_fogging_start = true;
-            any = true;
-        }
-
-        return any;
-    }
-
-    bool applySkyThemeRecord(WaterThemeRecordRef theme_record,
-                             SkyTheme& theme) const
-    {
-        if (!theme_record.valid) return false;
-
-        bool any = false;
-        WaterThemeRecordRef sky =
-            resolveRecordField(theme_record, kHashSky);
-        if (sky.valid) {
-            any |= applySkyRecord(sky, theme);
-        } else {
-            any |= applySkyRecord(theme_record, theme);
-        }
-
-        WaterThemeRecordRef fog =
-            resolveRecordField(theme_record, kHashFogging);
-        if (fog.valid) {
-            any |= applyFogRecord(fog, theme);
-        } else {
-            any |= applyFogRecord(theme_record, theme);
-        }
-        return any;
-    }
-
-    bool applySkyThemeField(WaterThemeRecordRef owner,
-                            uint32_t field_hash,
-                            SkyTheme& theme) const
-    {
-        WaterThemeRecordRef target = resolveRecordField(owner, field_hash);
-        return target.valid && applySkyThemeRecord(target, theme);
-    }
-
-    bool applyWeatherSkyRecord(WaterThemeRecordRef sky,
-                               WeatherTheme& theme) const
-    {
-        if (!sky.valid) return false;
-
-        bool any = false;
-        auto read_param = [&](uint32_t hash, bool& flag, float& dst) {
-            float v = 0.0f;
-            if (readFloat(sky, hash, v)) {
-                flag = true;
-                dst = v;
-                any = true;
-            }
-        };
-        read_param(kHashRainDensity, theme.has_rain, theme.rain_density);
-        read_param(kHashRainSize, theme.has_rain, theme.rain_size);
-        read_param(kHashSnowFallSpeed, theme.has_snow,
-                   theme.snow_fall_speed);
-        read_param(kHashSnowSize, theme.has_snow, theme.snow_size);
-        return any;
-    }
-
-    bool applyWeatherWindRecord(WaterThemeRecordRef wind,
-                                WeatherTheme& theme) const
-    {
-        if (!wind.valid) return false;
-
-        bool any = false;
-        auto read_param = [&](uint32_t hash, float& dst) {
-            float v = 0.0f;
-            if (readFloat(wind, hash, v)) {
-                theme.has_wind = true;
-                dst = v;
-                any = true;
-            }
-        };
-        read_param(kHashWindStrengthMin, theme.wind_strength_min);
-        read_param(kHashWindStrengthMax, theme.wind_strength_max);
-        read_param(kHashWindStrengthVariation,
-                   theme.wind_strength_variation);
-        read_param(kHashWindXYRotationMin, theme.wind_xy_rotation_min);
-        read_param(kHashWindXYRotationMax, theme.wind_xy_rotation_max);
-        read_param(kHashWindElevationMin, theme.wind_elevation_min);
-        read_param(kHashWindElevationMax, theme.wind_elevation_max);
-        read_param(kHashWindChangeFrequency, theme.wind_change_frequency);
-        read_param(kHashWindChangeDuration, theme.wind_change_duration);
-        read_param(kHashWindDirectionVariation,
-                   theme.wind_direction_variation);
-        return any;
-    }
-
-    bool applyWeatherMistRecord(WaterThemeRecordRef mist,
-                                WeatherTheme& theme) const
-    {
-        if (!mist.valid) return false;
-
-        float v = 0.0f;
-        if (readFloat(mist, kHashStrength, v)) {
-            theme.has_ground_mist = true;
-            theme.ground_mist_strength = v;
-            return true;
-        }
-        return false;
-    }
-
-    bool applyWeatherThemeRecord(WaterThemeRecordRef theme_record,
-                                 WeatherTheme& theme) const
-    {
-        if (!theme_record.valid) return false;
-
-        bool any = false;
-        WaterThemeRecordRef sky =
-            resolveRecordField(theme_record, kHashSky);
-        if (sky.valid) {
-            any |= applyWeatherSkyRecord(sky, theme);
-        } else {
-            any |= applyWeatherSkyRecord(theme_record, theme);
-        }
-
-        WaterThemeRecordRef wind =
-            resolveRecordField(theme_record, kHashWind);
-        if (wind.valid) {
-            any |= applyWeatherWindRecord(wind, theme);
-        } else {
-            any |= applyWeatherWindRecord(theme_record, theme);
-        }
-
-        WaterThemeRecordRef mist =
-            resolveRecordField(theme_record, kHashGroundMist);
-        if (mist.valid) {
-            any |= applyWeatherMistRecord(mist, theme);
-        }
-        return any;
-    }
-
-    bool applyWeatherThemeField(WaterThemeRecordRef owner,
-                                uint32_t field_hash,
-                                WeatherTheme& theme) const
-    {
-        WaterThemeRecordRef target = resolveRecordField(owner, field_hash);
-        return target.valid && applyWeatherThemeRecord(target, theme);
-    }
-
-    int readCloudLayerRecord(WaterThemeRecordRef layer,
-                             CloudLayerTheme& out) const
-    {
-        if (!layer.valid) return 0;
-
-        int fields = 0;
-        auto read_param = [&](uint32_t hash, bool& flag, float& dst) {
-            float v = 0.0f;
-            if (readFloat(layer, hash, v)) {
-                flag = true;
-                dst = v;
-                ++fields;
-            }
-        };
-
-        WaterThemeFieldRef density;
-        if (findField(layer, kHashDensityMap, 0xFF, density) &&
-            density.raw != 0 && density.raw != kHashNull) {
-            out.has_density_map = true;
-            out.density_map_hash = density.raw;
-            ++fields;
-        }
-
-        read_param(kHashPositionX, out.has_position, out.position_x);
-        read_param(kHashPositionY, out.has_position, out.position_y);
-        read_param(kHashSizeX, out.has_size, out.size_x);
-        read_param(kHashSizeY, out.has_size, out.size_y);
-        read_param(kHashTextureScaleX, out.has_texture_scale,
-                   out.texture_scale_x);
-        read_param(kHashTextureScaleY, out.has_texture_scale,
-                   out.texture_scale_y);
-        read_param(kHashVelocityX, out.has_velocity, out.velocity_x);
-        read_param(kHashVelocityY, out.has_velocity, out.velocity_y);
-        read_param(kHashHeight, out.has_height, out.height);
-        read_param(kHashTransparency, out.has_transparency,
-                   out.transparency);
-        read_param(kHashBrightness, out.has_brightness, out.brightness);
-        read_param(kHashAmbientLight, out.has_ambient,
-                   out.ambient_light);
-        read_param(kHashNormalStrength, out.has_normal_strength,
-                   out.normal_strength);
-        read_param(kHashTranslucencyStrength,
-                   out.has_translucency_strength,
-                   out.translucency_strength);
-
-        if (fields > 0) {
-            out.enabled = true;
-        }
-        return fields;
-    }
-
-    bool applyCloudLayerField(WaterThemeRecordRef theme_record,
-                              uint32_t field_hash,
-                              CloudLayerTheme& layer) const
-    {
-        WaterThemeRecordRef target = resolveRecordField(theme_record,
-                                                        field_hash);
-        return target.valid && readCloudLayerRecord(target, layer) > 0;
-    }
-
-    bool applyCloudThemeRecord(WaterThemeRecordRef theme_record,
-                               CloudTheme& theme) const
-    {
-        if (!theme_record.valid) return false;
-
-        bool any = false;
-        constexpr uint32_t kLayerFields[4] = {
-            kHashCloudsLayer1, kHashCloudsLayer2,
-            kHashCloudsLayer3, kHashCloudsLayer4
-        };
-        for (int i = 0; i < 4; ++i) {
-            CloudLayerTheme layer = theme.layers[i];
-            if (applyCloudLayerField(theme_record, kLayerFields[i], layer)) {
-                theme.layers[i] = layer;
-                any = true;
-            }
-        }
-
-        if (!any) {
-            CloudLayerTheme layer = theme.layers[0];
-            const int field_count = readCloudLayerRecord(theme_record, layer);
-            if (field_count >= 2 || layer.has_density_map) {
-                theme.layers[0] = layer;
-                any = true;
-            }
-        }
-
-        return any;
-    }
-
-    bool applyCloudThemeField(WaterThemeRecordRef owner,
-                              uint32_t field_hash,
-                              CloudTheme& theme) const
-    {
-        WaterThemeRecordRef target = resolveRecordField(owner, field_hash);
-        return target.valid && applyCloudThemeRecord(target, theme);
-    }
-
-    bool selectThemeFromDaySet(WaterThemeRecordRef day_set,
-                               WaterThemeRecordRef& out_theme,
-                               float& out_time) const
-    {
-        if (!day_set.valid) return false;
-        const GdbView& v = view(day_set);
-        size_t sch = 0;
-        uint32_t n = 0;
-        if (!v.schema(day_set.record, sch, n)) return false;
-        const size_t descs = sch + 4 + size_t(n) * 4;
-
-        bool found = false;
-        float best_dist = std::numeric_limits<float>::max();
-        for (uint32_t i = 0; i < n; ++i) {
-            const uint32_t desc =
-                ReadBeU32(v.bytes.data() + descs + size_t(i) * 4);
-            const uint8_t type = uint8_t(desc >> 24);
-            if (type != 4 && type != 6 && type != 7) continue;
-
-            const size_t slot = day_set.record + 4 + size_t(i) * 4;
-            if (slot + 4 > v.body_end) continue;
-
-            WaterThemeFieldRef item_field;
-            item_field.owner = day_set;
-            item_field.slot = slot;
-            item_field.type = type;
-            item_field.raw = ReadBeU32(v.bytes.data() + slot);
-            item_field.f32 = ReadBeF32(v.bytes.data() + slot);
-
-            WaterThemeRecordRef entry = fieldToRecord(item_field);
-            if (!entry.valid) continue;
-
-            WaterThemeRecordRef theme =
-                resolveRecordField(entry, kHashTheme);
-            if (!theme.valid) continue;
-
-            float time = 0.5f;
-            float read_time = 0.0f;
-            if (readFloat(entry, kHashTimeOfDay, read_time)) {
-                time = read_time;
-            }
-
-            const float dist = std::fabs(time - 0.5f);
-            if (!found || dist < best_dist) {
-                best_dist = dist;
-                out_theme = theme;
-                out_time = time;
-                found = true;
-            }
-        }
-        return found;
-    }
-
-    bool applyFirstWaterLikeRecord(WaterTheme& out_theme) const
-    {
-        for (size_t db = 0; db < views_.size(); ++db) {
-            const GdbView& v = views_[db];
-            if (!v.ok) continue;
-            for (size_t record : v.record_data_offsets) {
-                WaterTheme scratch = out_theme;
-                WaterThemeRecordRef ref{db, record, true};
-                if (applyThemeRecord(ref, scratch)) {
-                    out_theme = scratch;
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    bool applyFirstSkyLikeRecord(SkyTheme& out_theme) const
-    {
-        for (size_t db = 0; db < views_.size(); ++db) {
-            const GdbView& v = views_[db];
-            if (!v.ok) continue;
-            for (size_t record : v.record_data_offsets) {
-                SkyTheme scratch = out_theme;
-                WaterThemeRecordRef ref{db, record, true};
-                if (applySkyThemeRecord(ref, scratch)) {
-                    out_theme = scratch;
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    bool applyFirstCloudLikeRecords(CloudTheme& out_theme) const
-    {
-        int layer_index = 0;
-        for (size_t db = 0; db < views_.size() && layer_index < 4; ++db) {
-            const GdbView& v = views_[db];
-            if (!v.ok) continue;
-            for (size_t record : v.record_data_offsets) {
-                CloudLayerTheme layer = out_theme.layers[layer_index];
-                WaterThemeRecordRef ref{db, record, true};
-                const int field_count = readCloudLayerRecord(ref, layer);
-                if (field_count < 2 && !layer.has_density_map) continue;
-                out_theme.layers[layer_index] = layer;
-                ++layer_index;
-                if (layer_index >= 4) break;
-            }
-        }
-        out_theme.layer_count = layer_index;
-        return layer_index > 0;
-    }
-
-    void finaliseCloudTheme(CloudTheme& theme) const
-    {
-        static constexpr float kDefaultVelocity[4][2] = {
-            {0.010f,  0.004f},
-            {-0.006f, 0.008f},
-            {0.004f, -0.005f},
-            {-0.012f, 0.003f}
-        };
-
-        CloudLayerTheme compact[4];
-        int count = 0;
-        for (int i = 0; i < 4; ++i) {
-            CloudLayerTheme& layer = theme.layers[i];
-            if (!layer.enabled) continue;
-
-            layer.texture_scale_x =
-                std::clamp(std::fabs(layer.texture_scale_x), 0.08f, 24.0f);
-            layer.texture_scale_y =
-                std::clamp(std::fabs(layer.texture_scale_y), 0.08f, 24.0f);
-            layer.size_x = std::clamp(std::fabs(layer.size_x), 0.05f, 128.0f);
-            layer.size_y = std::clamp(std::fabs(layer.size_y), 0.05f, 128.0f);
-            layer.height = std::clamp(layer.height, 50.0f, 2500.0f);
-            layer.transparency =
-                std::clamp(layer.transparency, 0.0f, 1.0f);
-            layer.brightness = std::clamp(layer.brightness, 0.0f, 4.0f);
-            layer.ambient_light =
-                std::clamp(layer.ambient_light, 0.0f, 4.0f);
-            layer.normal_strength =
-                std::clamp(layer.normal_strength, 0.0f, 4.0f);
-            layer.translucency_strength =
-                std::clamp(layer.translucency_strength, 0.0f, 4.0f);
-
-            if (!layer.has_velocity) {
-                layer.velocity_x = kDefaultVelocity[count][0];
-                layer.velocity_y = kDefaultVelocity[count][1];
-            } else {
-                layer.velocity_x = std::clamp(layer.velocity_x * 0.0001f,
-                                              -0.08f, 0.08f);
-                layer.velocity_y = std::clamp(layer.velocity_y * 0.0001f,
-                                              -0.08f, 0.08f);
-                if (std::fabs(layer.velocity_x) +
-                        std::fabs(layer.velocity_y) < 0.002f) {
-                    layer.velocity_x = kDefaultVelocity[count][0];
-                    layer.velocity_y = kDefaultVelocity[count][1];
-                }
-            }
-
-            if (!layer.has_transparency) {
-                layer.transparency = 0.18f + 0.10f * float(count);
-            }
-            if (!layer.has_brightness) {
-                layer.brightness = 0.62f + 0.08f * float(count);
-            }
-            if (!layer.has_ambient) {
-                layer.ambient_light = 0.45f;
-            }
-            compact[count] = layer;
-            ++count;
-        }
-        for (int i = 0; i < 4; ++i) {
-            theme.layers[i] = i < count ? compact[i] : CloudLayerTheme{};
-        }
-        theme.layer_count = count;
-    }
-};
 
 }
 
 GdbInfo Parse(const std::vector<uint8_t>& bytes) {
     return ParseWithSaveMap(bytes, {});
-}
-
-bool ExtractWaterTheme(
-    const std::vector<const std::vector<uint8_t>*>& gdbs,
-    WaterTheme& out_theme)
-{
-    WaterThemeExtractor extractor(gdbs);
-    return extractor.extract(out_theme);
-}
-
-bool ExtractSkyTheme(
-    const std::vector<const std::vector<uint8_t>*>& gdbs,
-    SkyTheme& out_theme)
-{
-    WaterThemeExtractor extractor(gdbs);
-    return extractor.extractSky(out_theme);
-}
-
-bool ExtractCloudTheme(
-    const std::vector<const std::vector<uint8_t>*>& gdbs,
-    CloudTheme& out_theme)
-{
-    WaterThemeExtractor extractor(gdbs);
-    return extractor.extractClouds(out_theme);
-}
-
-bool ExtractWeatherTheme(
-    const std::vector<const std::vector<uint8_t>*>& gdbs,
-    WeatherTheme& out_theme)
-{
-    WaterThemeExtractor extractor(gdbs);
-    return extractor.extractWeather(out_theme);
-}
-
-bool ExtractEnvironmentThemeTimeline(
-    const std::vector<const std::vector<uint8_t>*>& gdbs,
-    EnvironmentThemeTimeline& out_timeline)
-{
-    WaterThemeExtractor extractor(gdbs);
-    return extractor.extractEnvironmentTimeline(out_timeline);
 }
 
 bool LookupPlacement(
@@ -2968,6 +1350,531 @@ std::vector<RecordRow> Build010RecordRows(
     }
 
     return rows;
+}
+
+
+namespace {
+
+constexpr uint32_t kHashParticleEffect = 0x5B009F68;  // ParticleEffect field
+constexpr uint32_t kHashParticleEmitter = 0x4EDC9083; // ParticleAttacher field
+constexpr uint32_t kHashDummyObject = 0xF4DF0382;
+constexpr uint32_t kHashOffsetFromDummy = 0xE867B8A0;
+constexpr uint32_t kHashMaxVisibilityDistance = 0x59029324;
+constexpr uint32_t kHashOverrideMaxVisibilityDistance = 0xC835A9F4;
+constexpr uint32_t kHashDisableWhenParentIsInvisible = 0xD27705D0;
+constexpr uint32_t kHashOrientParticleToAttachmentPoint = 0xF825B96A;
+
+inline uint32_t Fnv1LowerStr(const uint8_t* p, size_t n) {
+    uint32_t h = 0x811C9DC5u;
+    for (size_t i = 0; i < n; ++i) {
+        h = uint32_t(h * 0x01000193u);
+        h ^= uint8_t(std::tolower(p[i]));
+    }
+    return h;
+}
+
+// Build FNV1(lowercased) -> name from the gdb's self-describing string table
+// ([u32 BE hash][printable cstr\0], hash = FNV1 of the exact-case string).
+void CollectFxNameStrings(const std::vector<uint8_t>& bytes,
+                          std::unordered_map<uint32_t, std::string>& out) {
+    const uint8_t* p = bytes.data();
+    const size_t n = bytes.size();
+    size_t i = 4;
+    while (i + 1 < n) {
+        // find start of a printable run
+        if (p[i] < 0x20 || p[i] >= 0x7f) { ++i; continue; }
+        size_t j = i;
+        while (j < n && p[j] >= 0x20 && p[j] < 0x7f) ++j;
+        const size_t len = j - i;
+        if (len >= 4 && j < n && p[j] == 0 && i >= 4) {
+            const uint32_t stored = ReadBeU32(p + i - 4);
+            uint32_t exact = 0x811C9DC5u;
+            for (size_t k = i; k < j; ++k) { exact = uint32_t(exact * 0x01000193u); exact ^= p[k]; }
+            if (exact == stored) {
+                const uint32_t lower = Fnv1LowerStr(p + i, len);
+                out.emplace(lower, std::string(reinterpret_cast<const char*>(p + i), len));
+            }
+        }
+        i = j + 1;
+    }
+}
+
+void CollectGdbNameStrings(
+    const std::vector<uint8_t>& bytes,
+    std::unordered_map<uint32_t, std::string>& exact,
+    std::unordered_map<uint32_t, std::string>& lower) {
+    const uint8_t* p = bytes.data();
+    const size_t n = bytes.size();
+    size_t i = 4;
+    while (i + 1 < n) {
+        if (p[i] < 0x20 || p[i] >= 0x7f) { ++i; continue; }
+        size_t j = i;
+        while (j < n && p[j] >= 0x20 && p[j] < 0x7f) ++j;
+        const size_t len = j - i;
+        if (len >= 1 && j < n && p[j] == 0 && i >= 4) {
+            const uint32_t stored = ReadBeU32(p + i - 4);
+            uint32_t h = 0x811C9DC5u;
+            for (size_t k = i; k < j; ++k) {
+                h = uint32_t(h * 0x01000193u);
+                h ^= p[k];
+            }
+            if (h == stored) {
+                std::string s(reinterpret_cast<const char*>(p + i), len);
+                exact.emplace(stored, s);
+                lower.emplace(Fnv1LowerStr(p + i, len), std::move(s));
+            }
+        }
+        i = j + 1;
+    }
+}
+
+}  // namespace
+
+std::unordered_map<uint32_t, std::vector<ParticleFxBinding>>
+ExtractParticleFxBindings(
+    const std::vector<const std::vector<uint8_t>*>& gdbs)
+{
+    std::unordered_map<uint32_t, std::vector<ParticleFxBinding>> out;
+
+    // Names for display (union across gdbs).
+    std::unordered_map<uint32_t, std::string> name_by_lower;
+    for (const auto* g : gdbs) {
+        if (g && !g->empty()) CollectFxNameStrings(*g, name_by_lower);
+    }
+
+    // Combined parent graph across all gdbs: child hash -> parent hash.
+    std::unordered_map<uint32_t, uint32_t> parent_of;
+
+    // Per-gdb pass: record graph edges and resolve definition records.
+    for (const auto* gp : gdbs) {
+        if (!gp || gp->empty()) continue;
+        const std::vector<uint8_t>& bytes = *gp;
+        GdbView view(bytes);
+        if (!view.ok) continue;
+
+        // iterate every field of a record
+        auto for_each_field = [&](size_t record, auto&& fn) {
+            size_t sch = 0; uint32_t fc = 0;
+            if (!view.schema(record, sch, fc)) return;
+            const size_t hashes = sch + 4;
+            const size_t descs = hashes + size_t(fc) * 4;
+            for (uint32_t i = 0; i < fc; ++i) {
+                const uint32_t fh = ReadBeU32(bytes.data() + hashes + size_t(i) * 4);
+                const uint32_t desc = ReadBeU32(bytes.data() + descs + size_t(i) * 4);
+                const uint8_t type = uint8_t(desc >> 24);
+                const size_t slot = record + 4 + size_t(i) * 4;
+                if (slot + 4 > view.body_end) break;
+                const uint32_t val = ReadBeU32(bytes.data() + slot);
+                fn(fh, type, val);
+            }
+        };
+
+        // record edges
+        for (uint32_t i = 0; i < view.count; ++i) {
+            if (i >= view.record_data_offsets.size()) break;
+            const uint32_t rh = ReadBeU32(bytes.data() + view.hash_base + size_t(i) * 4);
+            const size_t rec = view.record_data_offsets[i];
+            for_each_field(rec, [&](uint32_t fh, uint8_t type, uint32_t val) {
+                if (fh == kHashParent && (type == 6 || type == 7) && val != 0)
+                    parent_of[rh] = val;
+            });
+        }
+
+        // definition records: those carrying a ParticleEffect chain
+        for (uint32_t i = 0; i < view.count; ++i) {
+            if (i >= view.record_data_offsets.size()) break;
+            const uint32_t rh = ReadBeU32(bytes.data() + view.hash_base + size_t(i) * 4);
+            const size_t rec = view.record_data_offsets[i];
+
+            uint32_t chain_root = 0;
+            for_each_field(rec, [&](uint32_t fh, uint8_t type, uint32_t val) {
+                if (fh == kHashParticleEffect && (type == 6 || type == 7) && val != 0)
+                    chain_root = val;
+            });
+            if (chain_root == 0) continue;
+
+            // Walk the nested chain, collecting every type-4 value (the FX name
+            // hash, FNV1-lowercase) that isn't the null-string basis.
+            std::vector<uint32_t> hashes_found;
+            std::unordered_set<uint32_t> seen;
+            std::vector<uint32_t> stack{ chain_root };
+            int budget = 4096;
+            while (!stack.empty() && budget-- > 0) {
+                uint32_t rref = stack.back(); stack.pop_back();
+                if (rref == 0 || seen.count(rref)) continue;
+                seen.insert(rref);
+                size_t rr = 0;
+                if (!view.lookup(rref, rr)) continue;
+                for_each_field(rr, [&](uint32_t fh, uint8_t type, uint32_t val) {
+                    if (type == 4 && val != kHashNull) {
+                        hashes_found.push_back(val);
+                    } else if ((type == 6 || type == 7) && val != 0) {
+                        stack.push_back(val);
+                    }
+                });
+            }
+            if (hashes_found.empty()) continue;
+
+            std::vector<ParticleFxBinding>& binds = out[rh];
+            for (uint32_t h : hashes_found) {
+                bool dup = false;
+                for (const auto& b : binds) if (b.fx_hash_lower == h) { dup = true; break; }
+                if (dup) continue;
+                ParticleFxBinding b;
+                b.fx_hash_lower = h;
+                auto it = name_by_lower.find(h);
+                if (it != name_by_lower.end()) b.fx_name = it->second;
+                binds.push_back(std::move(b));
+            }
+        }
+    }
+
+    // Propagate bindings down the parent graph so any descendant template/
+    // instance that inherits from a definition record resolves too.
+    if (!out.empty() && !parent_of.empty()) {
+        std::unordered_map<uint32_t, std::vector<ParticleFxBinding>> resolved = out;
+        for (const auto& kv : parent_of) {
+            const uint32_t start = kv.first;
+            if (resolved.count(start)) continue;
+            uint32_t cur = start;
+            int guard = 64;
+            const std::vector<ParticleFxBinding>* hit = nullptr;
+            std::unordered_set<uint32_t> path;
+            while (guard-- > 0 && cur != 0 && !path.count(cur)) {
+                path.insert(cur);
+                auto pit = parent_of.find(cur);
+                if (pit == parent_of.end()) break;
+                cur = pit->second;
+                auto rit = out.find(cur);
+                if (rit != out.end()) { hit = &rit->second; break; }
+            }
+            if (hit) resolved[start] = *hit;
+        }
+        out.swap(resolved);
+    }
+
+    return out;
+}
+
+std::unordered_map<uint32_t, std::vector<ParticleAttachmentBinding>>
+ExtractParticleAttachmentBindings(
+    const std::vector<const std::vector<uint8_t>*>& gdbs)
+{
+    std::unordered_map<uint32_t, std::vector<ParticleAttachmentBinding>> out;
+    const std::unordered_map<uint32_t, std::vector<ParticleFxBinding>>
+        effects_by_record = ExtractParticleFxBindings(gdbs);
+
+    std::unordered_map<uint32_t, std::string> name_by_hash;
+    std::unordered_map<uint32_t, std::string> name_by_lower;
+    for (const auto* g : gdbs) {
+        if (g && !g->empty())
+            CollectGdbNameStrings(*g, name_by_hash, name_by_lower);
+    }
+
+    std::unordered_map<uint32_t, uint32_t> parent_of;
+    std::unordered_map<uint32_t, std::vector<uint32_t>> referrers;
+
+    auto add_unique = [](std::vector<ParticleAttachmentBinding>& dst,
+                         const ParticleAttachmentBinding& b) {
+        for (const auto& e : dst) {
+            if (e.fx_hash_lower == b.fx_hash_lower &&
+                e.component_hash == b.component_hash &&
+                e.dummy_hash == b.dummy_hash &&
+                std::fabs(e.offset[0] - b.offset[0]) < 1e-6f &&
+                std::fabs(e.offset[1] - b.offset[1]) < 1e-6f &&
+                std::fabs(e.offset[2] - b.offset[2]) < 1e-6f) {
+                return;
+            }
+        }
+        dst.push_back(b);
+    };
+
+    for (const auto* gp : gdbs) {
+        if (!gp || gp->empty()) continue;
+        const std::vector<uint8_t>& bytes = *gp;
+        GdbView view(bytes);
+        if (!view.ok) continue;
+
+        auto for_each_field = [&](size_t record, auto&& fn) {
+            size_t sch = 0;
+            uint32_t fc = 0;
+            if (!view.schema(record, sch, fc)) return;
+            const size_t hashes = sch + 4;
+            const size_t descs = hashes + size_t(fc) * 4;
+            for (uint32_t i = 0; i < fc; ++i) {
+                const uint32_t fh =
+                    ReadBeU32(bytes.data() + hashes + size_t(i) * 4);
+                const uint32_t desc =
+                    ReadBeU32(bytes.data() + descs + size_t(i) * 4);
+                const uint8_t type = uint8_t(desc >> 24);
+                const size_t slot = record + 4 + size_t(i) * 4;
+                if (slot + 4 > view.body_end) break;
+                const uint32_t val = ReadBeU32(bytes.data() + slot);
+                fn(fh, type, val);
+            }
+        };
+
+        for (uint32_t i = 0; i < view.count; ++i) {
+            if (i >= view.record_data_offsets.size()) break;
+            const uint32_t rh =
+                ReadBeU32(bytes.data() + view.hash_base + size_t(i) * 4);
+            const size_t rec = view.record_data_offsets[i];
+            for_each_field(rec, [&](uint32_t fh, uint8_t type, uint32_t val) {
+                if ((type == 6 || type == 7) && val != 0) {
+                    referrers[val].push_back(rh);
+                    if (fh == kHashParent) parent_of[rh] = val;
+                }
+            });
+        }
+    }
+
+    for (const auto* gp : gdbs) {
+        if (!gp || gp->empty()) continue;
+        const std::vector<uint8_t>& bytes = *gp;
+        GdbView view(bytes);
+        if (!view.ok) continue;
+
+        auto read_bool = [&](size_t record, uint32_t hash, bool& out_bool) {
+            size_t slot = 0;
+            if (!view.findField(record, hash, 0, slot, nullptr)) return false;
+            out_bool = ReadBeU32(bytes.data() + slot) != 0;
+            return true;
+        };
+        auto read_float = [&](size_t record, uint32_t hash, float& out_float) {
+            size_t slot = 0;
+            if (!view.findField(record, hash, 3, slot, nullptr)) return false;
+            out_float = ReadBeF32(bytes.data() + slot);
+            return std::isfinite(out_float);
+        };
+
+        auto resolve_effects = [&](uint32_t emitter_hash) {
+            std::vector<ParticleFxBinding> found;
+            auto eit = effects_by_record.find(emitter_hash);
+            if (eit != effects_by_record.end()) {
+                found = eit->second;
+            }
+            return found;
+        };
+
+        for (uint32_t i = 0; i < view.count; ++i) {
+            if (i >= view.record_data_offsets.size()) break;
+            const uint32_t component_hash =
+                ReadBeU32(bytes.data() + view.hash_base + size_t(i) * 4);
+            const size_t rec = view.record_data_offsets[i];
+
+            size_t emitter_slot = 0;
+            uint8_t emitter_type = 0;
+            if (!view.findField(rec, kHashParticleEmitter, 0xFF,
+                                emitter_slot, &emitter_type) ||
+                (emitter_type != 6 && emitter_type != 7)) {
+                continue;
+            }
+
+            size_t dummy_slot = 0;
+            uint8_t dummy_type = 0;
+            const bool has_dummy =
+                view.findField(rec, kHashDummyObject, 4, dummy_slot,
+                               &dummy_type);
+            size_t offset_slot = 0;
+            uint8_t offset_type = 0;
+            const bool has_offset =
+                view.findField(rec, kHashOffsetFromDummy, 0xFF,
+                               offset_slot, &offset_type) &&
+                (offset_type == 6 || offset_type == 7);
+            size_t orient_slot = 0;
+            const bool has_orient =
+                view.findField(rec, kHashOrientParticleToAttachmentPoint, 0,
+                               orient_slot, nullptr);
+            if (!has_dummy && !has_offset && !has_orient) {
+                continue;
+            }
+
+            const uint32_t emitter_hash = ReadBeU32(bytes.data() + emitter_slot);
+            std::vector<ParticleFxBinding> effects = resolve_effects(emitter_hash);
+            if (effects.empty()) continue;
+
+            ParticleAttachmentBinding base;
+            base.component_hash = component_hash;
+            base.emitter_record_hash = emitter_hash;
+
+            if (has_dummy) {
+                base.dummy_hash = ReadBeU32(bytes.data() + dummy_slot);
+                auto it = name_by_hash.find(base.dummy_hash);
+                if (it != name_by_hash.end()) base.dummy_name = it->second;
+            }
+            if (has_offset) {
+                const uint32_t off_hash = ReadBeU32(bytes.data() + offset_slot);
+                float x = 0.0f, y = 0.0f, z = 0.0f;
+                if (view.readVec3Ref(off_hash, x, y, z)) {
+                    base.offset[0] = x;
+                    base.offset[1] = y;
+                    base.offset[2] = z;
+                }
+            }
+            read_float(rec, kHashMaxVisibilityDistance,
+                       base.max_visibility_distance);
+            read_bool(rec, kHashOverrideMaxVisibilityDistance,
+                      base.override_max_visibility_distance);
+            read_bool(rec, kHashDisableWhenParentIsInvisible,
+                      base.disable_when_parent_invisible);
+            read_bool(rec, kHashOrientParticleToAttachmentPoint,
+                      base.orient_to_attachment_point);
+
+            std::vector<uint32_t> owners;
+            owners.push_back(component_hash);
+            std::vector<uint32_t> queue;
+            if (auto it = referrers.find(component_hash);
+                it != referrers.end()) {
+                queue = it->second;
+            }
+            std::unordered_set<uint32_t> seen_owners;
+            seen_owners.insert(component_hash);
+            for (size_t qi = 0; qi < queue.size() && qi < 4096; ++qi) {
+                const uint32_t owner = queue[qi];
+                if (!seen_owners.insert(owner).second) continue;
+                owners.push_back(owner);
+                if (auto it = referrers.find(owner);
+                    it != referrers.end() && qi < 1024) {
+                    for (uint32_t p : it->second) queue.push_back(p);
+                }
+            }
+
+            for (const ParticleFxBinding& fx : effects) {
+                ParticleAttachmentBinding b = base;
+                b.fx_hash_lower = fx.fx_hash_lower;
+                b.fx_name = fx.fx_name;
+                for (uint32_t owner : owners) {
+                    add_unique(out[owner], b);
+                }
+            }
+        }
+    }
+
+    if (!out.empty() && !parent_of.empty()) {
+        std::unordered_map<uint32_t, std::vector<ParticleAttachmentBinding>>
+            resolved = out;
+        for (const auto& kv : parent_of) {
+            const uint32_t start = kv.first;
+            if (resolved.count(start)) continue;
+            uint32_t cur = start;
+            int guard = 64;
+            const std::vector<ParticleAttachmentBinding>* hit = nullptr;
+            std::unordered_set<uint32_t> path;
+            while (guard-- > 0 && cur != 0 && !path.count(cur)) {
+                path.insert(cur);
+                auto pit = parent_of.find(cur);
+                if (pit == parent_of.end()) break;
+                cur = pit->second;
+                auto rit = out.find(cur);
+                if (rit != out.end()) {
+                    hit = &rit->second;
+                    break;
+                }
+            }
+            if (hit) resolved[start] = *hit;
+        }
+        out.swap(resolved);
+    }
+
+    return out;
+}
+
+std::vector<FxEntityPlacement> ExtractFxEntityPlacements(
+    const std::vector<uint8_t>& level_bytes,
+    const std::vector<const std::vector<uint8_t>*>& gdbs,
+    const std::vector<std::pair<uint32_t, std::string>>& hash_to_name)
+{
+    std::vector<FxEntityPlacement> out;
+    if (level_bytes.empty()) return out;
+    GdbView level(level_bytes);
+    if (!level.ok) return out;
+
+    // Views over every gdb (level + globals + supplemental) for the
+    // parent/type-chain hunt.
+    std::vector<std::unique_ptr<GdbView>> views;
+    for (const auto* g : gdbs) {
+        if (!g || g->empty()) continue;
+        auto v = std::make_unique<GdbView>(*g);
+        if (v->ok) views.push_back(std::move(v));
+    }
+
+    auto for_each_field = [](const GdbView& view, size_t record, auto&& fn) {
+        size_t sch = 0; uint32_t fc = 0;
+        if (!view.schema(record, sch, fc)) return;
+        const size_t hashes = sch + 4;
+        const size_t descs = hashes + size_t(fc) * 4;
+        for (uint32_t i = 0; i < fc; ++i) {
+            const uint32_t fh =
+                ReadBeU32(view.bytes.data() + hashes + size_t(i) * 4);
+            const uint32_t desc =
+                ReadBeU32(view.bytes.data() + descs + size_t(i) * 4);
+            const uint8_t type = uint8_t(desc >> 24);
+            const size_t slot = record + 4 + size_t(i) * 4;
+            if (slot + 4 > view.body_end) break;
+            fn(fh, type, ReadBeU32(view.bytes.data() + slot));
+        }
+    };
+
+    // Depth-limited hunt for the CParticleSystemEntityType effect hash
+    // (0x4EDC9083) through the entity's record graph (components + parents),
+    // across all gdbs. 0x811C9DC5 = FNV1 of "" = no effect. Depth 4 reaches
+    // the FX entity layout (entity -> type -> component -> value) without
+    // bleeding into the common entity base classes, which carry an unrelated
+    // 0x4EDC9083 default; callers must still bank-validate the hash.
+    auto hunt_fx_hash = [&](uint32_t root) -> uint32_t {
+        uint32_t found = 0;
+        std::unordered_set<uint32_t> seen;
+        std::vector<std::pair<uint32_t, int>> stack{ { root, 0 } };
+        int budget = 2048;
+        while (!stack.empty() && budget-- > 0 && !found) {
+            auto [h, depth] = stack.back();
+            stack.pop_back();
+            if (!h || depth > 4 || seen.count(h)) continue;
+            seen.insert(h);
+            for (const auto& v : views) {
+                size_t rec = 0;
+                if (!v->lookup(h, rec)) continue;
+                for_each_field(*v, rec,
+                               [&](uint32_t fh, uint8_t type, uint32_t val) {
+                    if (fh == kHashParticleSystemNameHash && val != 0 &&
+                        val != kHashNull) {
+                        found = val;
+                    } else if ((type == 6 || type == 7) && val != 0) {
+                        stack.emplace_back(val, depth + 1);
+                    }
+                });
+                break;
+            }
+        }
+        return found;
+    };
+
+    for (const auto& [rec_hash, name] : hash_to_name) {
+        size_t rec = 0;
+        if (!level.lookup(rec_hash, rec)) continue;
+        FxEntityPlacement p;
+        // FX/marker entities use the lightweight 0x619F96CF transform; fall
+        // back to the regular component transforms. This lookup is local to
+        // FX extraction so the general placement parser (and its model
+        // streaming) is not affected.
+        if (!TryComponentTransformField(level, rec,
+                                        kHashSimpleTransformComponent,
+                                        p.x, p.y, p.z,
+                                        p.rot_x, p.rot_y, p.rot_z,
+                                        p.has_rotation) &&
+            !TryComponentTransformRecord(level, rec, p.x, p.y, p.z,
+                                         p.rot_x, p.rot_y, p.rot_z,
+                                         p.has_rotation)) {
+            continue;
+        }
+        // fx_hash == 0 entries are still returned: the caller decides what
+        // non-particle entities (fire markers etc.) map to.
+        p.fx_hash = hunt_fx_hash(rec_hash);
+        p.record_hash = rec_hash;
+        p.name = name;
+        out.push_back(std::move(p));
+    }
+    return out;
 }
 
 }

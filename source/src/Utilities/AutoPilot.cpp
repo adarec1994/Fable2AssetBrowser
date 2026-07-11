@@ -10,7 +10,9 @@
 #include "../textures/export/TextureExport.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -31,11 +33,15 @@ enum class Stage {
 };
 
 Stage       g_stage = Stage::Idle;
+std::string g_root_path;
 std::string g_level_query;
 std::string g_shot_path;
 bool        g_auto_exit = false;
 bool        g_vista_only = false;
+bool        g_sky_shot = false;
+bool        g_terrain_shot = false;
 float       g_time_of_day = -1.0f;   // hours 0..24; <0 = leave untouched
+float       g_pitch_offset = 0.0f;   // radians added after camera preset
 int         g_settle_frames = 150;
 int         g_countdown = 0;
 int         g_timeout_frames = 0;
@@ -67,14 +73,19 @@ void AutoPilot_Init() {
             }
             return nullptr;
         };
-        if (const char* v = value("--autoload")) g_level_query = lower(v);
+        if (const char* v = value("--autoroot")) g_root_path = v;
+        else if (const char* v = value("--autoload")) g_level_query = lower(v);
         else if (const char* v = value("--autoshot")) g_shot_path = v;
         else if (const char* v = value("--autowait"))
             g_settle_frames = std::max(1, std::atoi(v));
         else if (const char* v = value("--autotime"))
             g_time_of_day = float(std::atof(v));
+        else if (const char* v = value("--autopitch"))
+            g_pitch_offset = float(std::atof(v));
         else if (arg == "--autoexit") g_auto_exit = true;
         else if (arg == "--vistaonly") g_vista_only = true;
+        else if (arg == "--skyshot") g_sky_shot = true;
+        else if (arg == "--terrainshot") g_terrain_shot = true;
     }
     if (!g_level_query.empty()) {
         g_stage = Stage::OpenRoot;
@@ -100,14 +111,15 @@ void AutoPilot_Tick() {
             g_stage = Stage::WaitIndex;
             break;
         }
-        if (S.last_dir.empty() ||
-            !std::filesystem::is_directory(S.last_dir)) {
+        const std::string& root =
+            g_root_path.empty() ? S.last_dir : g_root_path;
+        if (root.empty() || !std::filesystem::is_directory(root)) {
             finish("no saved root directory to open", false);
             break;
         }
-        open_folder_logic(S.last_dir);
+        open_folder_logic(root);
         if (S.root_dir.empty()) {
-            finish("failed to open root " + S.last_dir, false);
+            finish("failed to open root " + root, false);
             break;
         }
         g_stage = Stage::WaitIndex;
@@ -157,6 +169,103 @@ void AutoPilot_Tick() {
             S.cam_yaw   = 0.7f;
             S.cam_pitch = 0.65f;
             S.cam_dist  = 1.6f;
+        }
+        if (g_sky_shot) {
+            // Level loading frames the terrain from above and points down.
+            // Put the free camera near the level centre and look into the
+            // cloud planes instead, while remaining below their authored
+            // 200..700-unit heights.
+            g_mp_vista_only = false;
+            g_flycam.pos[0] = g_mp.center[0];
+            g_flycam.pos[1] = g_mp.center[1] +
+                std::max(2.0f, g_mp.radius * 0.01f);
+            g_flycam.pos[2] = g_mp.center[2];
+            g_flycam.yaw = 0.0f;
+            g_flycam.pitch = 0.55f;
+            g_flycam.is_looking = false;
+        }
+        if (g_terrain_shot) {
+            // Keep the camera below the authored cloud planes.  A high orbit
+            // looks down through those depth-writing layers and makes clear
+            // terrain resemble a solid bank of fog.
+            g_mp_vista_only = false;
+            S.show_adjacent_terrain = false;
+            g_mp.show_mist = false;
+            g_mp.show_weather = false;
+            g_mp.fx_show = false;
+            g_mp.weather_mist_strength = 0.0f;
+            g_mp.has_fog_theme = false;
+            std::fill(std::begin(g_mp.fog_range),
+                      std::end(g_mp.fog_range), 0.0f);
+            std::fill(std::begin(g_mp.fog_density),
+                      std::end(g_mp.fog_density), 0.0f);
+            for (auto& key : g_mp.day_night_keyframes) {
+                key.weather_mist_strength = 0.0f;
+                key.has_fog_theme = false;
+                std::fill(std::begin(key.fog_range),
+                          std::end(key.fog_range), 0.0f);
+                std::fill(std::begin(key.fog_density),
+                          std::end(key.fog_density), 0.0f);
+            }
+
+            const MPPerMesh* primary_terrain = nullptr;
+            for (const auto& mesh : g_mp.meshes) {
+                if (!mesh.is_terrain ||
+                    mesh.name.rfind("adjacent terrain", 0) == 0) {
+                    continue;
+                }
+                primary_terrain = &mesh;
+                break;
+            }
+
+            if (primary_terrain) {
+                const float cx = primary_terrain->center[0];
+                const float cy = primary_terrain->center[1];
+                const float cz = primary_terrain->center[2];
+                const float r = std::max(primary_terrain->radius, 1.0f);
+                float camera_y = cy +
+                    std::clamp(r * 0.15f, 8.0f, 80.0f);
+                float min_cloud_y = std::numeric_limits<float>::max();
+                auto consider_clouds = [&min_cloud_y](
+                    int count, const float layers[4][4]) {
+                    for (int i = 0; i < std::min(count, 4); ++i) {
+                        if (layers[i][0] > 0.0f) {
+                            min_cloud_y = std::min(min_cloud_y,
+                                                   layers[i][1]);
+                        }
+                    }
+                };
+                consider_clouds(g_mp.cloud_layer_count, g_mp.cloud_layer);
+                for (const auto& key : g_mp.day_night_keyframes) {
+                    consider_clouds(key.cloud_layer_count, key.cloud_layer);
+                }
+                if (min_cloud_y < std::numeric_limits<float>::max()) {
+                    camera_y = std::min(camera_y, min_cloud_y - 8.0f);
+                    camera_y = std::max(camera_y, cy + 2.0f);
+                }
+
+                g_flycam.pos[0] = cx;
+                g_flycam.pos[1] = camera_y;
+                g_flycam.pos[2] = cz - r * 0.60f;
+                const float dx = cx - g_flycam.pos[0];
+                const float dy = cy - g_flycam.pos[1];
+                const float dz = cz - g_flycam.pos[2];
+                g_flycam.yaw = std::atan2(dx, dz);
+                g_flycam.pitch = std::atan2(
+                    dy, std::sqrt(dx * dx + dz * dz));
+            } else {
+                const float r = std::max(1.0f, g_mp.radius);
+                g_flycam.pos[0] = g_mp.center[0];
+                g_flycam.pos[1] = g_mp.center[1] + r * 0.01f;
+                g_flycam.pos[2] = g_mp.center[2] - r * 0.35f;
+                g_flycam.yaw = 0.0f;
+                g_flycam.pitch = -0.12f;
+            }
+            g_flycam.is_looking = false;
+        }
+        if (g_pitch_offset != 0.0f) {
+            g_flycam.pitch = std::clamp(g_flycam.pitch + g_pitch_offset,
+                                        -1.4f, 1.4f);
         }
         if (g_time_of_day >= 0.0f) {
             g_mp.time_of_day_override = true;

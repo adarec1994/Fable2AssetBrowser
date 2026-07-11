@@ -3,7 +3,11 @@
 #include <string>
 #include <cstdint>
 #include <memory>
+#include <unordered_map>
 #include "../MDL/ModelParser.h"
+#include "../Level/Skybox/CloudRuntime.h"
+#include "../Level/Skybox/SkyboxTypes.h"
+#include "../Level/ParticleFX.h"
 #ifdef _WIN32
 #include <d3d11.h>
 #endif
@@ -94,26 +98,6 @@ struct MPPerMesh {
     std::vector<uint32_t> pick_indices;
 };
 
-struct MPSkyCloudKeyframe {
-    float time_of_day = 0.0f;
-    float sky_top_colour[3] = {0.42f, 0.56f, 0.76f};
-    float sky_bottom_colour[3] = {0.55f, 0.60f, 0.65f};
-    float sky_sunset_colour[3] = {1.0f, 0.47f, 0.22f};
-    float sky_params[4] = {1.0f, 0.35f, 1.0f, 1.0f};
-    bool has_cloud_theme = false;
-    int cloud_layer_count = 0;
-    float cloud_layer[4][4] = {};
-    float cloud_shape[4][4] = {};
-    float cloud_motion[4][4] = {};
-    float cloud_light[4][4] = {};
-    bool has_weather_theme = false;
-    float weather_precip[4] = {};
-    float weather_mist_strength = 0.0f;
-    bool has_fog_theme = false;
-    float fog_range[4] = {};
-    float fog_density[2] = {};
-};
-
 struct ModelPreview {
 #ifdef _WIN32
     ID3D11Texture2D* color = nullptr;
@@ -134,19 +118,45 @@ struct ModelPreview {
     ID3D11VertexShader* vs_sky = nullptr;
     ID3D11PixelShader*  ps_sky = nullptr;
     ID3D11Buffer*       cbuffer_sky = nullptr;
+    // Byte-derived retail dome path (SkyDomeXex, sbk entries 132/133).
+    ID3D11VertexShader* vs_sky_dome = nullptr;
+    ID3D11PixelShader*  ps_sky_dome = nullptr;
+    ID3D11Buffer*       cbuffer_sky_dome = nullptr;
+    ID3D11Texture2D*    sky_lut_tex = nullptr;
+    ID3D11ShaderResourceView* sky_lut_srv = nullptr;
+    ID3D11SamplerState* sampler_sky_clamp = nullptr;
+    ID3D11VertexShader* vs_cloud = nullptr;
+    ID3D11PixelShader*  ps_cloud = nullptr;
+    ID3D11InputLayout*  layout_cloud = nullptr;
+    ID3D11Buffer*       cbuffer_cloud = nullptr;
+    ID3D11Buffer*       cloud_vb = nullptr;
+    ID3D11Buffer*       cloud_ib = nullptr;
+    ID3D11SamplerState* sampler_cloud = nullptr;
     ID3D11ShaderResourceView* cloud_density_srv[4] = {
         nullptr, nullptr, nullptr, nullptr
     };
     bool cloud_density_tried[4] = {false, false, false, false};
-    bool cloud_density_has_alpha[4] = {false, false, false, false};
     ID3D11ShaderResourceView* sky_overlay_srv = nullptr;
     ID3D11ShaderResourceView* sky_sun_disc_srv = nullptr;
     ID3D11ShaderResourceView* sky_moon_srv = nullptr;
     ID3D11ShaderResourceView* sky_moon_glare_srv = nullptr;
+    ID3D11ShaderResourceView* sky_sun_beams_srv = nullptr;
+    ID3D11ShaderResourceView* sky_sun_glare_srv = nullptr;
     bool sky_overlay_tried = false;
     bool sky_sun_disc_tried = false;
     bool sky_moon_tried = false;
     bool sky_moon_glare_tried = false;
+    bool sky_sun_beams_tried = false;
+    bool sky_sun_glare_tried = false;
+    // Celestial element billboard pipeline (screen-space quads).
+    ID3D11VertexShader* vs_sky_element = nullptr;
+    ID3D11PixelShader*  ps_sky_element = nullptr;
+    // Byte-derived starfield (sbk entries 150/151).
+    ID3D11VertexShader* vs_sky_stars = nullptr;
+    ID3D11PixelShader*  ps_sky_stars = nullptr;
+    ID3D11InputLayout*  layout_sky_element = nullptr;
+    ID3D11Buffer*       cbuffer_sky_element = nullptr;
+    ID3D11Buffer*       sky_element_vb = nullptr;
     ID3D11VertexShader* vs_water = nullptr;
     ID3D11PixelShader*  ps_water = nullptr;
     ID3D11Buffer*       cbuffer_water = nullptr;
@@ -159,10 +169,35 @@ struct ModelPreview {
     ID3D11RasterizerState* rs_wire = nullptr;
     ID3D11BlendState* bs = nullptr;
     ID3D11BlendState* bsAlpha = nullptr;
+    // Water refraction composite: SRC=ONE, DEST=SRC_ALPHA. The retail water
+    // PS samples an explicit refraction copy of the scene; the preview emits
+    // the microcode's refraction coefficient as alpha so the framebuffer
+    // behind the surface supplies that term.
+    ID3D11BlendState* bs_water = nullptr;
     ID3D11DepthStencilState* dssWrite = nullptr;
     ID3D11DepthStencilState* dssNoWrite = nullptr;
     ID3D11DepthStencilState* dssNoWriteLEqual = nullptr;
+    // Depth write + stencil gate so overlapping coplanar water surfaces
+    // (one .water per heightfield) composite once per pixel.
+    ID3D11DepthStencilState* dssWaterOnce = nullptr;
     ID3D11ShaderResourceView* default_srv = nullptr;
+    // Particle FX rendering
+    ID3D11VertexShader* vs_fx = nullptr;
+    ID3D11PixelShader*  ps_fx = nullptr;
+    ID3D11InputLayout*  layout_fx = nullptr;
+    ID3D11Buffer*       cbuffer_fx = nullptr;
+    ID3D11Buffer*       fx_vb = nullptr;
+    size_t              fx_vb_capacity = 0;
+    ID3D11BlendState*   bs_fx_alpha = nullptr;
+    ID3D11BlendState*   bs_fx_add = nullptr;
+    // Per-(src,dst) fixed-function blend states for FX batches — the retail
+    // particle pipeline uses the material's Src/DestBlendMode factors
+    // directly (default SrcAlpha/InvSrcAlpha). Keyed src*100+dst.
+    std::unordered_map<int, ID3D11BlendState*> fx_blend_states;
+    std::unordered_map<std::string, ID3D11ShaderResourceView*> fx_tex_srv;
+    Fx::System          fx_system;
+    float               fx_last_time = 0.0f;
+    bool                fx_show = true;
 #else
     unsigned int fbo = 0;
     unsigned int color_tex = 0;
@@ -190,39 +225,42 @@ struct ModelPreview {
     float sky_bottom_colour[3] = {0.55f, 0.60f, 0.65f};
     float sky_sunset_colour[3] = {1.0f, 0.47f, 0.22f};
     float sky_params[4] = {1.0f, 0.35f, 1.0f, 1.0f};
+    float main_light_colour[3] = {1.0f, 1.0f, 1.0f};
     float sky_time_of_day = -1.0f;
     bool has_cloud_theme = false;
     int cloud_layer_count = 0;
     float cloud_layer[4][4] = {
-        {0.35f, 350.0f, 2.5f, 2.0f},
-        {0.22f, 420.0f, 4.5f, 3.0f},
-        {0.12f, 520.0f, 7.0f, 4.0f},
-        {0.08f, 650.0f, 10.0f, 6.0f}
+        {0.0f, 0.0f, 0.001f, 0.001f},
+        {0.0f, 0.0f, 0.001f, 0.001f},
+        {0.0f, 0.0f, 0.001f, 0.001f},
+        {0.0f, 0.0f, 0.001f, 0.001f}
     };
-    float cloud_shape[4][4] = {
-        {1024.0f, 1024.0f, 0.0f, 0.0f},
-        {1536.0f, 1536.0f, 0.0f, 0.0f},
-        {2048.0f, 2048.0f, 0.0f, 0.0f},
-        {3072.0f, 3072.0f, 0.0f, 0.0f}
-    };
-    float cloud_motion[4][4] = {
-        {0.0f, 0.0f,  0.010f,  0.004f},
-        {0.2f, 0.4f, -0.006f,  0.008f},
-        {0.6f, 0.1f,  0.004f, -0.005f},
-        {0.8f, 0.7f, -0.012f,  0.003f}
-    };
-    float cloud_light[4][4] = {
-        {0.70f, 0.45f, 0.45f, 0.35f},
-        {0.62f, 0.42f, 0.40f, 0.30f},
-        {0.55f, 0.38f, 0.35f, 0.25f},
-        {0.48f, 0.34f, 0.30f, 0.22f}
-    };
+    float cloud_shape[4][4] = {};
+    float cloud_motion[4][4] = {};
+    float cloud_light[4][4] = {};
+    std::uint32_t cloud_density_token[4] = {};
+    std::array<CloudRuntime::LayerRuntimeXex,
+               CloudRuntime::kLayerCount> cloud_runtime{};
+    std::array<CloudRuntime::DensityResourceBinding,
+               CloudRuntime::kLayerCount> cloud_density_binding{};
+    bool cloud_runtime_initialised = false;
     std::string cloud_density_tex_name[4];
     std::string sky_overlay_tex_name;
     std::string sky_sun_disc_tex_name;
     std::string sky_moon_tex_name;
     std::string sky_moon_glare_tex_name;
+    std::string sky_sun_beams_tex_name;
+    std::string sky_sun_glare_tex_name;
     float sky_moon_tiles[2] = {1.0f, 1.0f};
+    // Base (non-keyframed) celestial element records; layout matches
+    // Skybox::Keyframe::element_params.
+    float sky_element_params[16] = {1.0f, 1.0f, 0.0f, 1.0f,
+                                    1.0f, 0.0f, 1.0f, 1.0f,
+                                    1.0f, 1.0f, 1.0f, 1.0f,
+                                    1.0f, 0.0f, 0.0f, 1.0f};
+    bool has_moon_axis = false;
+    float moon_axis[3] = {26.0f, 0.0f, 0.0f};
+    int moon_phase = 4;  // 0..7 strip index; engine runtime state
     bool has_day_night_cycle = false;
     float day_night_cycle_seconds = 180.0f;
     std::vector<MPSkyCloudKeyframe> day_night_keyframes;
@@ -271,6 +309,7 @@ extern FlyCam g_flycam;
 bool MP_Init(ID3D11Device* dev, ModelPreview& mp, int w, int h);
 void MP_Release(ModelPreview& mp);
 bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp);
+void MP_BuildLevelFx(ID3D11Device* dev, ModelPreview& mp);
 void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam);
 void MP_Resize(ID3D11Device* dev, ModelPreview& mp, int w, int h);
 #else

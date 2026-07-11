@@ -1,6 +1,8 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <cstdio>
+#include <cstdarg>
 #include <filesystem>
 #include <optional>
 #include <cstdint>
@@ -17,6 +19,32 @@
 #include <chrono>
 #include "ModelPreview.h"
 #include "../Level/TerrainSplat.h"
+#include "../Level/Skybox/SkyboxRenderer.h"
+// Temporary water-flashing diagnosis log -> water_debug.txt (app CWD).
+// Truncated at app start, capped so it cannot grow unbounded.
+static void water_debug_line(const char* fmt, ...) {
+    static FILE* f = nullptr;
+    static int lines = -1;
+    if (lines < 0) {
+        f = std::fopen("water_debug.txt", "w");
+        lines = 0;
+    }
+    if (!f || lines >= 900) return;
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(f, fmt, ap);
+    va_end(ap);
+    std::fflush(f);
+    if (++lines >= 900) {
+        std::fclose(f);
+        f = nullptr;
+    }
+}
+
+// Level FX produced by the level loader (particle placements + parsed bank).
+extern std::vector<Fx::Placement> g_pending_level_fx;
+extern Fx::Bank                   g_particle_bank;
+extern bool                       g_particle_bank_loaded;
 #include "../Utilities/Files.h"
 #include "../Utilities/Utils.h"
 #include "../Utilities/State.h"
@@ -377,8 +405,12 @@ static void untile_xbox360_imageheat(const uint8_t* tiled,
                                      uint32_t        block_pixel_size,
                                      uint32_t        texel_byte_pitch)
 {
-    const uint32_t width_in_blocks  = (uint32_t)width_pixels  / block_pixel_size;
-    const uint32_t height_in_blocks = (uint32_t)height_pixels / block_pixel_size;
+    const uint32_t width = (uint32_t)width_pixels;
+    const uint32_t height = (uint32_t)height_pixels;
+    const uint32_t width_in_blocks = width / block_pixel_size +
+                                     (width % block_pixel_size != 0u);
+    const uint32_t height_in_blocks = height / block_pixel_size +
+                                      (height % block_pixel_size != 0u);
     const uint32_t padded_w = (width_in_blocks  + 31u) & ~31u;
     const uint32_t padded_h = (height_in_blocks + 31u) & ~31u;
     const uint32_t total    = padded_w * padded_h;
@@ -690,7 +722,9 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                 : false;
 
             if (ok_x) {
-                const size_t n_blocks = (size_t)(w / 4) * (size_t)(h / 4);
+                const size_t n_blocks =
+                    ((size_t)w / 4u + ((size_t)w % 4u != 0u)) *
+                    ((size_t)h / 4u + ((size_t)h % 4u != 0u));
                 std::vector<uint8_t> bc5_blocks(n_blocks * 16);
                 for (size_t i = 0; i < n_blocks; ++i) {
 
@@ -1006,47 +1040,10 @@ static void mp_release_mesh(MPPerMesh& m){
     if(m.srv_extra){ m.srv_extra->Release(); m.srv_extra=nullptr; }
     m.index_count = 0;
 }
-static void mp_release_cloud_density(ModelPreview& mp){
-    for (int i = 0; i < 4; ++i) {
-        if (mp.cloud_density_srv[i]) {
-            mp.cloud_density_srv[i]->Release();
-            mp.cloud_density_srv[i] = nullptr;
-        }
-        mp.cloud_density_tried[i] = false;
-        mp.cloud_density_tex_name[i].clear();
-    }
-}
-static void mp_release_sky_textures(ModelPreview& mp){
-    if (mp.sky_overlay_srv) {
-        mp.sky_overlay_srv->Release();
-        mp.sky_overlay_srv = nullptr;
-    }
-    if (mp.sky_sun_disc_srv) {
-        mp.sky_sun_disc_srv->Release();
-        mp.sky_sun_disc_srv = nullptr;
-    }
-    if (mp.sky_moon_srv) {
-        mp.sky_moon_srv->Release();
-        mp.sky_moon_srv = nullptr;
-    }
-    if (mp.sky_moon_glare_srv) {
-        mp.sky_moon_glare_srv->Release();
-        mp.sky_moon_glare_srv = nullptr;
-    }
-    mp.sky_overlay_tried = false;
-    mp.sky_sun_disc_tried = false;
-    mp.sky_moon_tried = false;
-    mp.sky_moon_glare_tried = false;
-    mp.sky_overlay_tex_name.clear();
-    mp.sky_sun_disc_tex_name.clear();
-    mp.sky_moon_tex_name.clear();
-    mp.sky_moon_glare_tex_name.clear();
-}
 static void mp_release(ModelPreview& mp){
     for(auto& m: mp.meshes) mp_release_mesh(m);
     mp.meshes.clear();
-    mp_release_cloud_density(mp);
-    mp_release_sky_textures(mp);
+    Skybox::ReleaseD3D11Resources(mp);
     if(mp.vs){ mp.vs->Release(); mp.vs=nullptr; }
     if(mp.ps){ mp.ps->Release(); mp.ps=nullptr; }
     if(mp.vs_terrain){ mp.vs_terrain->Release(); mp.vs_terrain=nullptr; }
@@ -1054,9 +1051,6 @@ static void mp_release(ModelPreview& mp){
     if(mp.ps_terrain_direct){ mp.ps_terrain_direct->Release(); mp.ps_terrain_direct=nullptr; }
     if(mp.ps_terrain_landscape){ mp.ps_terrain_landscape->Release(); mp.ps_terrain_landscape=nullptr; }
     if(mp.cbuffer_terrain){ mp.cbuffer_terrain->Release(); mp.cbuffer_terrain=nullptr; }
-    if(mp.vs_sky){ mp.vs_sky->Release(); mp.vs_sky=nullptr; }
-    if(mp.ps_sky){ mp.ps_sky->Release(); mp.ps_sky=nullptr; }
-    if(mp.cbuffer_sky){ mp.cbuffer_sky->Release(); mp.cbuffer_sky=nullptr; }
     if(mp.vs_water){ mp.vs_water->Release(); mp.vs_water=nullptr; }
     if(mp.ps_water){ mp.ps_water->Release(); mp.ps_water=nullptr; }
     if(mp.cbuffer_water){ mp.cbuffer_water->Release(); mp.cbuffer_water=nullptr; }
@@ -1082,6 +1076,22 @@ static void mp_release(ModelPreview& mp){
     if(mp.dssWrite){ mp.dssWrite->Release(); mp.dssWrite=nullptr; }
     if(mp.dssNoWrite){ mp.dssNoWrite->Release(); mp.dssNoWrite=nullptr; }
     if(mp.dssNoWriteLEqual){ mp.dssNoWriteLEqual->Release(); mp.dssNoWriteLEqual=nullptr; }
+    if(mp.dssWaterOnce){ mp.dssWaterOnce->Release(); mp.dssWaterOnce=nullptr; }
+    for(auto& kv : mp.fx_tex_srv){ if(kv.second) kv.second->Release(); }
+    mp.fx_tex_srv.clear();
+    if(mp.vs_fx){ mp.vs_fx->Release(); mp.vs_fx=nullptr; }
+    if(mp.ps_fx){ mp.ps_fx->Release(); mp.ps_fx=nullptr; }
+    if(mp.layout_fx){ mp.layout_fx->Release(); mp.layout_fx=nullptr; }
+    if(mp.cbuffer_fx){ mp.cbuffer_fx->Release(); mp.cbuffer_fx=nullptr; }
+    if(mp.fx_vb){ mp.fx_vb->Release(); mp.fx_vb=nullptr; }
+    mp.fx_vb_capacity = 0;
+    if(mp.bs_fx_alpha){ mp.bs_fx_alpha->Release(); mp.bs_fx_alpha=nullptr; }
+    if(mp.bs_fx_add){ mp.bs_fx_add->Release(); mp.bs_fx_add=nullptr; }
+    for (auto& kv : mp.fx_blend_states)
+        if (kv.second) kv.second->Release();
+    mp.fx_blend_states.clear();
+    if(mp.bs_water){ mp.bs_water->Release(); mp.bs_water=nullptr; }
+    mp.fx_system.clear();
     mp.has_model = false;
 }
 static bool compile_shader(const char* src, const char* entry, const char* profile, ID3DBlob** blob){
@@ -1588,100 +1598,127 @@ float4 PS(VSOUT i) : SV_Target {
 }
 )";
 
-static const char* g_sky_vs = R"(
-struct VSOUT{
-    float4 p  : SV_Position;
-    float2 uv : TEXCOORD0;
+static const char* g_water_vs = R"(
+cbuffer CB : register(b0){
+    float4x4 mvp;
+    float4   lightDir;
+    float4x4 mv;
+    float4   params;
+}
+struct VSIN{
+    float3 p   : POSITION;
+    float3 n   : NORMAL;
+    float2 t   : TEXCOORD0;
+    uint4  bid : BONEIDS;
+    float4 bw  : BONEWEIGHTS;
 };
-
-VSOUT VS(uint id : SV_VertexID) {
-    float2 p;
-    if (id == 0) {
-        p = float2(-1.0, -1.0);
-    } else if (id == 1) {
-        p = float2(-1.0,  3.0);
-    } else {
-        p = float2( 3.0, -1.0);
-    }
-
+struct VSOUT{
+    float4 p   : SV_Position;
+    float3 n   : NORMAL;
+    float2 t   : TEXCOORD0;
+    float3 wp  : TEXCOORD1;
+};
+// Retail water VS = ShadersRelease.sbk program 56 (entries 63/64): flat
+// plane through the viewproj, world pos + two scrolled bump UV pairs +
+// detail UVs + a per-vertex fresnel out. The UVs are linear in world XY so
+// the preview computes them per-pixel (identical result); the detail UVs
+// and vertex fresnel are never read by pixel program 57, and the cell-mask
+// vertex fetch is moot because preview water meshes are pre-cut per cell.
+VSOUT VS(VSIN i){
     VSOUT o;
-    o.p = float4(p, 0.999, 1.0);
-    o.uv = float2((p.x + 1.0) * 0.5, 1.0 - (p.y + 1.0) * 0.5);
+    o.p  = mul(float4(i.p, 1.0), mvp);
+    o.n  = float3(0.0, 1.0, 0.0);
+    o.t  = i.t;
+    o.wp = i.p;
     return o;
 }
 )";
 
-static const char* g_sky_ps = R"(
-Texture2D cloud_density0 : register(t8);
-Texture2D cloud_density1 : register(t9);
-Texture2D cloud_density2 : register(t10);
-Texture2D cloud_density3 : register(t11);
-Texture2D sky_moon_tex : register(t12);
-Texture2D sky_moon_glare_tex : register(t13);
-Texture2D sky_sun_disc_tex : register(t14);
-SamplerState smp_cloud : register(s0);
-
+static const char* g_water_ps = R"(
+cbuffer CB : register(b0){
+    float4x4 mvp;
+    float4   lightDir;
+    float4x4 mv;
+    float4   params;
+}
+cbuffer WaterCB : register(b3){
+    float4 w_bias;    // x FresnelBias  y ReflectionBias  z NormalScale
+                      // w theme opacity (unused by the 1:1 PS)
+    float4 w_ph01;    // xy m_BumpmapPhases[0]  zw m_BumpmapPhases[1]
+    float4 w_sc01;    // xy m_BumpmapScales[0]  zw m_BumpmapScales[1]
+    float4 w_surface; // rgb m_SurfaceWaterColour  w m_DiffuseAbsorption
+    float4 w_deep;    // rgb m_DeepWaterColour     w m_ReflectionStrength
+    float4 w_reflp;   // x m_ReflectionScale  y m_RefractionScale
+                      // z m_GlitteringNormalBendFactor  w m_GlitteringStrength
+    float4 w_glit;    // x m_GlitteringPower  y highlight  z sky_ok
+                      // w exact-dome-reflection available
+    float4 w_eye;     // xyz eye world pos  w time
+    float4 w_sun;     // rgb light colour (retail c143: theme
+                      // MainLightColour)  w sun elevation
+    float4 w_light;   // xyz light direction, direction the light travels
+                      // (retail c142: sun by day, moon by night)
+}
 cbuffer SkyCB : register(b4){
     float4 sky_top;
     float4 sky_bottom;
     float4 sky_sunset;
-    float4 sky_params; 
-    float4 cloud_layer[4];  
-    float4 cloud_shape[4];  
-    float4 cloud_motion[4]; 
-    float4 cloud_light[4];  
-    float4 cloud_global;    
+    float4 sky_params;
+    float4 cloud_layer[4];
+    float4 cloud_shape[4];
+    float4 cloud_motion[4];
+    float4 cloud_light[4];
+    float4 cloud_global;
     float4 cloud_density_flags;
-    float4 sky_right;       
-    float4 sky_up;          
-    float4 sky_forward;     
-    float4 sky_sun;         
-    float4 sky_texture_flags; 
+    float4 sky_right;
+    float4 sky_up;
+    float4 sky_forward;
+    float4 sky_sun;
+    float4 sky_texture_flags;
+    float4 sky_celestial;
+}
+Texture2D    tex_normal : register(t0);
+SamplerState smp        : register(s0);
+// Exact dome reflection inputs: the sky pass's in-scatter LUT and constant
+// block, bound at the water draw so the reflection is computed from the very
+// data the visible sky is drawn with.
+Texture2D    water_sky_lut : register(t4);
+SamplerState smp_clamp     : register(s2);
+cbuffer SkyDomeXexCB : register(b6){
+    row_major float4x4 dome_view_projection;
+    float4 dome_camera_position;
+    float4 dome_camera_position_engine;
+    float4 dome_beta_rayleigh;   // c64
+    float4 dome_beta_mie;        // c65
+    float4 dome_sun_direction;   // c66 (engine space, z-up)
+    float4 dome_scattering_misc; // c67 (y = 1900 horizon distance)
+    float4 dome_overlay_blend;
+    float4 dome_misc;            // x=150 y=100 z=exposure(c20.w)
+    float4 dome_bgmap_c72;
+    float4 dome_bgmap_c73;
+    float4 dome_bgmap_c74;
+    float4 dome_bgmap_c75;
+    float4 dome_bgmap_c76;
+    float4 dome_bgmap_c28;
+    float4 dome_camera_right;
+    float4 dome_camera_up;
+    float4 dome_camera_forward;
 }
 
 struct PSIN{
-    float4 p  : SV_Position;
-    float2 uv : TEXCOORD0;
+    float4 p   : SV_Position;
+    float3 n   : NORMAL;
+    float2 t   : TEXCOORD0;
+    float3 wp  : TEXCOORD1;
 };
 
-float sample_cloud_density(int layer, float2 uv) {
-    // engine PSHADER_CLOUDS reads the ALPHA channel of the density map
-    // (tfetch ...w); flag 2 = texture has alpha, 1 = greyscale in rgb.
-    float density = 0.0;
-    if (layer == 0 && cloud_density_flags.x > 0.5) {
-        float4 s = cloud_density0.Sample(smp_cloud, uv);
-        density = cloud_density_flags.x > 1.5 ? s.a : s.r;
+// Reflection colour along a ray: same Hoffman-Preetham single-scattering model
+// as the sky pass (the engine's ReflectionTile is the scene+sky rendered
+// offscreen; sky dominates on water).
+float3 water_sky(float3 ray){
+    if (w_glit.z < 0.5) {
+        return float3(0.58, 0.62, 0.57);
     }
-    if (layer == 1 && cloud_density_flags.y > 0.5) {
-        float4 s = cloud_density1.Sample(smp_cloud, uv);
-        density = cloud_density_flags.y > 1.5 ? s.a : s.r;
-    }
-    if (layer == 2 && cloud_density_flags.z > 0.5) {
-        float4 s = cloud_density2.Sample(smp_cloud, uv);
-        density = cloud_density_flags.z > 1.5 ? s.a : s.r;
-    }
-    if (layer == 3 && cloud_density_flags.w > 0.5) {
-        float4 s = cloud_density3.Sample(smp_cloud, uv);
-        density = cloud_density_flags.w > 1.5 ? s.a : s.r;
-    }
-    return density;
-}
-
-float4 PS(PSIN i) : SV_Target {
-    float2 screen = float2(i.uv.x * 2.0 - 1.0,
-                           (1.0 - i.uv.y) * 2.0 - 1.0);
-    float3 ray = normalize(
-        sky_forward.xyz +
-        sky_right.xyz * screen.x * sky_right.w +
-        sky_up.xyz * screen.y * sky_up.w);
     float3 sun_dir = normalize(sky_sun.xyz);
-    float h = saturate(ray.y * 0.5 + 0.5);
-
-    // Engine sky model (XEX sky constant builder sub_82263530 +
-    // in-scatter LUT sub_821F71F0): Hoffman-Preetham single scattering.
-    // Rayleigh/Mie RGB extinction ratios and phase normalisation
-    // constants (3/16pi, 1/4pi) taken from the XEX; theme multipliers
-    // SKY_BETA_RAYLEIGH/MIE in sky_params.zw, sun intensity in .x.
     float rayleigh = max(sky_params.z, 0.05);
     float mie = max(sky_params.w, 0.05);
     float3 betaR = float3(0.007337, 0.009459, 0.0257276) * rayleigh;
@@ -1699,298 +1736,154 @@ float4 PS(PSIN i) : SV_Target {
     float3 beta_sum = max(betaR + betaM, 0.00001);
     float3 inscatter =
         (betaR * phaseR + betaM * phaseM) / beta_sum * (1.0 - extinct);
-
-    // theme colour ramp: SKY_COLOUR tints the scattered light,
-    // complementary/fog colour dominates the horizon.
     float sun_h = saturate(sun_dir.y * 2.2 + 0.12);
     float3 col = inscatter * (7.2 * sun_h) * sky_top.rgb;
     float horizon = 1.0 - saturate(elev * 3.2);
     float bias = saturate(sky_params.y);
     col = lerp(col, sky_bottom.rgb * (0.35 + 0.65 * sun_h),
                horizon * (0.55 + 0.30 * bias));
-
-    // sunset tint: Mie forward lobe near a low sun.
     float sunset_w = saturate(1.0 - abs(sun_dir.y) * 5.0) *
                      saturate(cosT * 0.5 + 0.5);
-    col = lerp(col, sky_sunset.rgb * (0.4 + 0.8 * phaseM),
-               sunset_w * 0.45);
-
+    col = lerp(col, sky_sunset.rgb * (0.4 + 0.8 * phaseM), sunset_w * 0.45);
     float night = saturate((-sun_dir.y + 0.05) / 0.45);
     col = lerp(col, col * 0.22 + float3(0.010, 0.018, 0.050), night);
-
-    float sun_align = saturate(cosT);
-    if (sky_texture_flags.z > 0.5 && night < 0.95) {
-        float3 sun_right = cross(float3(0.0, 1.0, 0.0), sun_dir);
-        float right_len = dot(sun_right, sun_right);
-        sun_right = normalize(lerp(float3(1.0, 0.0, 0.0), sun_right,
-                                   step(0.0001, right_len)));
-        float3 sun_up = normalize(cross(sun_dir, sun_right));
-        float2 sun_xy = float2(dot(ray, sun_right), dot(ray, sun_up));
-        float sun_radius = 0.055;
-        float2 sun_uv = sun_xy / sun_radius * 0.5 + 0.5;
-        float in_rect =
-            step(0.0, sun_uv.x) * step(sun_uv.x, 1.0) *
-            step(0.0, sun_uv.y) * step(sun_uv.y, 1.0);
-        if (in_rect > 0.5) {
-            float4 sun_sample = sky_sun_disc_tex.SampleLevel(
-                smp_cloud, sun_uv, 0.0);
-            float sun_alpha = max(max(sun_sample.a, sun_sample.r),
-                                  max(sun_sample.g, sun_sample.b));
-            col = lerp(col, sun_sample.rgb * saturate(sky_params.x),
-                       saturate(sun_alpha * (1.0 - night)));
-        }
-    }
-    col += sky_top.rgb * (1.0 - h) * 0.05;
-
-    float3 moon_dir = normalize(-sun_dir);
-    float moon_visible = saturate((moon_dir.y + 0.02) / 0.28) * night;
-    if (moon_visible > 0.001) {
-        float3 moon_right = cross(float3(0.0, 1.0, 0.0), moon_dir);
-        float right_len = dot(moon_right, moon_right);
-        moon_right = normalize(lerp(float3(1.0, 0.0, 0.0), moon_right,
-                                    step(0.0001, right_len)));
-        float3 moon_up = normalize(cross(moon_dir, moon_right));
-        float2 moon_xy = float2(dot(ray, moon_right), dot(ray, moon_up));
-        float moon_align = saturate(dot(ray, moon_dir));
-        float moon_radius = 0.045;
-        float2 moon_uv = moon_xy / moon_radius * 0.5 + 0.5;
-        float in_rect =
-            step(0.0, moon_uv.x) * step(moon_uv.x, 1.0) *
-            step(0.0, moon_uv.y) * step(moon_uv.y, 1.0);
-        float moon_edge = 1.0 - smoothstep(moon_radius * 0.45,
-                                           moon_radius,
-                                           length(moon_xy));
-        float3 moon_col = float3(0.78, 0.82, 0.92);
-        float moon_alpha = moon_edge;
-        if (sky_texture_flags.x > 0.5 && in_rect > 0.5) {
-            float2 moon_tiles = float2(max(cloud_global.w, 1.0),
-                                       max(sky_texture_flags.w, 1.0));
-            float4 moon_sample = sky_moon_tex.SampleLevel(
-                smp_cloud, moon_uv / moon_tiles, 0.0);
-            moon_col = max(moon_sample.rgb, moon_col * moon_sample.r);
-            moon_alpha *= max(max(moon_sample.a, moon_sample.r),
-                              max(moon_sample.g, moon_sample.b));
-        } else {
-            moon_alpha = 0.0;
-        }
-        float glare = pow(moon_align, 220.0) * 0.45;
-        if (sky_texture_flags.y > 0.5 && in_rect > 0.5) {
-            float4 glare_sample = sky_moon_glare_tex.SampleLevel(
-                smp_cloud, moon_uv, 0.0);
-            glare += max(max(glare_sample.r, glare_sample.g),
-                         glare_sample.b) * 0.35;
-        }
-        col = lerp(col, moon_col, saturate(moon_alpha * moon_visible));
-        col += float3(0.34, 0.40, 0.58) * glare * moon_visible;
-    }
-
-    if (cloud_global.x > 0.5) {
-        // Engine cloud model (PSHADER_CLOUDS, blob_029): per-layer dome
-        // plane; uv = plane * scale + accumulated offset; alpha =
-        // density_sample * transparency * distance fade — no density
-        // remapping. Lighting is per-vertex in the engine (theme
-        // brightness/ambient), approximated per-pixel here.
-        float3 cloud_col_acc = col;
-        int count = min((int)cloud_global.y, 4);
-        [loop]
-        for (int layer = 0; layer < 4; ++layer) {
-            if (layer >= count) break;
-            float alpha = saturate(cloud_layer[layer].x);
-            if (alpha <= 0.001) continue;
-
-            float layer_height = max(abs(cloud_layer[layer].y), 1.0);
-            float plane_denom = max(ray.y, 0.02);
-            float2 plane = ray.xz * (layer_height / plane_denom);
-            float2 size = max(abs(cloud_shape[layer].xy),
-                              float2(1.0, 1.0));
-            float2 scale = max(abs(cloud_layer[layer].zw),
-                               float2(0.001, 0.001));
-            float2 offset = cloud_motion[layer].xy +
-                            cloud_motion[layer].zw * cloud_global.z;
-            float2 p = plane * (scale / size) + offset;
-
-            // distance fade: engine fades by horizontal distance from
-            // the viewer on the cloud plane.
-            float plane_dist = length(plane);
-            float fade = saturate(1.0 - plane_dist /
-                                  (layer_height * 14.0));
-            float top_fade = 1.0 - smoothstep(0.98, 1.0, h);
-
-            float n = sample_cloud_density(layer, p);
-            float density = saturate(n * alpha * fade * top_fade);
-
-            float brightness = max(cloud_light[layer].x, 0.05);
-            float ambient = max(cloud_light[layer].y, 0.05);
-            float sun_h2 = saturate(sun_dir.y * 2.2 + 0.12);
-            float rim = pow(sun_align, 3.0) *
-                        0.25 * cloud_light[layer].w;
-            float3 lit = float3(1.0, 0.97, 0.92) *
-                         (brightness * (0.45 + 0.55 * sun_h2)) +
-                         sky_top.rgb * ambient * 0.5;
-            float3 cloud_col = lit + sky_sunset.rgb * rim;
-            cloud_col = lerp(cloud_col * 0.18, cloud_col,
-                             saturate(sun_h2 + 0.12));
-
-            cloud_col_acc = lerp(cloud_col_acc, cloud_col, density);
-        }
-        col = cloud_col_acc;
-    }
-
-    return float4(saturate(col), 1.0);
-}
-)";
-
-static const char* g_water_vs = R"(
-cbuffer CB : register(b0){
-    float4x4 mvp;
-    float4   lightDir;
-    float4x4 mv;
-    float4   params;       
-}
-cbuffer WaterCB : register(b3){
-    
-    float4 wave0;
-    float4 wave1;
-    float4 wave2;
-    float4 wave3;
-    
-
-    float4 wparams;
-    float4 wtheme0;
-    float4 wtheme1;
-    float4 wtheme2;
-    float4 wtheme3;
-}
-struct VSIN{
-    float3 p   : POSITION;
-    float3 n   : NORMAL;
-    float2 t   : TEXCOORD0;
-    uint4  bid : BONEIDS;
-    float4 bw  : BONEWEIGHTS;
-};
-struct VSOUT{
-    float4 p   : SV_Position;
-    float3 n   : NORMAL;
-    float2 t   : TEXCOORD0;
-    float3 wp  : TEXCOORD1;
-};
-
-float wave_disp(float4 w, float2 xz, float t, float speed){
-    if (w.z <= 0.0001) return 0.0;
-    float k = 6.28318 / w.z;                  
-    float phase = dot(w.xy, xz) * k + t * speed;
-    return sin(phase) * w.w;
+    return col;
 }
 
-VSOUT VS(VSIN i){
-    VSOUT o;
-    float3 p = i.p;
-    float2 xz = float2(p.x, p.z);
-    float t = params.w;
-    float dy = wave_disp(wave0, xz, t, wparams.x * 6.0) +
-               wave_disp(wave1, xz, t, wparams.y * 6.0) +
-               wave_disp(wave2, xz, t, wparams.x * 3.3) +
-               wave_disp(wave3, xz, t, wparams.y * 2.6);
-    p.y += dy;
-    o.p  = mul(float4(p, 1.0), mvp);
-    o.n  = float3(0.0, 1.0, 0.0);
-    o.t  = i.t;
-    o.wp = p;
-    return o;
-}
-)";
-
-static const char* g_water_ps = R"(
-cbuffer CB : register(b0){
-    float4x4 mvp;
-    float4   lightDir;
-    float4x4 mv;
-    float4   params;       
-}
-cbuffer WaterCB : register(b3){
-    float4 wave0;
-    float4 wave1;
-    float4 wave2;
-    float4 wave3;
-    float4 wparams;        
-    float4 wtheme0;        
-    float4 wtheme1;        
-    float4 wtheme2;        
-    float4 wtheme3;        
-}
-Texture2D    tex_normal : register(t0);
-SamplerState smp        : register(s0);
-
-struct PSIN{
-    float4 p   : SV_Position;
-    float3 n   : NORMAL;
-    float2 t   : TEXCOORD0;
-    float3 wp  : TEXCOORD1;
-};
-
-float2 wave_grad(float4 w, float2 xz, float t, float speed){
-    if (w.z <= 0.0001) return float2(0.0, 0.0);
-    float k = 6.28318 / w.z;
-    float phase = dot(w.xy, xz) * k + t * speed;
-    return w.xy * (cos(phase) * w.w * k);
+// Retail reflection tile = the sky dome rendered offscreen. Evaluate the
+// exact dome core (packed program 111 packets 10-56: in-scatter LUT x
+// (1 - transmittance)) along the reflected ray, then the same exposure and
+// tone bound the sky pass applies, so the reflected sky matches the drawn
+// sky. Cloud overlays and the bgmap/mist branch are omitted (deviation).
+float3 dome_reflect(float3 ray_pv){
+    float3 n = normalize(float3(ray_pv.x, ray_pv.z, ray_pv.y)); // y-up -> z-up
+    float lut_u = saturate(dot(dome_sun_direction.xyz, n));     // p14-15
+    float3 lut = water_sky_lut.Sample(smp_clamp,
+                                      float2(lut_u, 0.5)).xyz;  // p40
+    float nz_pow = pow(max(abs(n.z), 1e-5), 0.2);               // p20-22
+    float depth_base = dome_scattering_misc.y * (1.05 + nz_pow);   // p24,28
+    float od_r = (dome_misc.x + depth_base) * nz_pow + depth_base; // p31,48
+    float od_m = (dome_misc.y + depth_base) * nz_pow + depth_base; // p33,48
+    float3 od = od_m * dome_beta_mie.xyz +
+                od_r * dome_beta_rayleigh.xyz;                  // p49-50
+    float3 T = exp2(-od * 1.4427);                              // p51-54
+    float3 hdr = (1.0 - T) * lut * dome_misc.z;                 // p55-56,100
+    return hdr / (1.0 + hdr);   // same host tone bound as the sky pass
 }
 
+// 1:1 port of the retail default main-view water surface pixel shader:
+// ShadersRelease.sbk program 57 (shader-table entry 65), the pair of vertex
+// program 56 (entries 63/64). The entry table at 0x83317880/0x833178A0 is
+// written by WaterBody_CreatePatchGrids; entries 66/68 are the same shader
+// plus the bgmap-probe reflection fallback, 71-74 are depth-only passes.
+// g_WaterConstants occupies PS c116..c141, ONE member per row, in packer
+// order (sub_82B2A008): c116 FresnelBias, c117 ReflectionBias, c118/119
+// BumpmapPhases, c120/121 BumpmapScales, c122..125 detail phases/scales
+// (NOT sampled by this program), c126 SurfaceWaterColour, c127
+// DeepWaterColour, c128 NormalScale, c129 ReflectionScale, c130
+// RefractionScale, c131 ReflectionStrength, c132-135 diffuse/specular
+// params (unused here), c136 GlitteringNormalBendFactor, c137
+// GlitteringStrength, c138 GlitteringPower, c139 ShadowScaleBias
+// {0.95,0.05}, c140 MaxRefractDistanceFactor (packer hardcodes 1/75),
+// c141 EdgeBlendParameters. c142/c143 = light direction/colour.
+// Packet numbers below reference the decoded Xenos microcode.
+//
+// HOST STAND-INS (everything else is the exact microcode math):
+//  - f13 reflection tile: retail renders sky+landscape offscreen and samples
+//    it at screen UV + Nsum.yx*ReflectionScale*0.5 (packets 21,26,28,30).
+//    The preview evaluates its sky model along the equivalent perturbed
+//    reflection ray instead (no offscreen scene pass).
+//  - f14 refraction tile: a copy of the scene. The microcode's exact
+//    coefficient on that sample, (1-distf)*ReflectionStrength*(1-frefl),
+//    is emitted as alpha with a ONE/SRC_ALPHA blend so the framebuffer
+//    behind the surface supplies the term (screen offset dropped).
+//  - f1 cell-mask kill (packets 10,15-16): preview water meshes are already
+//    cut per cell, so the kill is a no-op here.
+//  - f8 screen-space shadow buffer (packets 49-50): no shadow pass in the
+//    preview -> sample = 1; the c139 {0.95,0.05} scale-bias is kept.
+//  - c141 depth edge blend (packets 11-13): needs the scene depth buffer;
+//    edge factor = 1.
+//  - fog (packets 76-87): retail runs the shared atmosphere-LUT fog
+//    (f4/f5, c66-68) — the same model the preview applies scene-wide as
+//    apply_env_fog, which is used here so water matches the terrain.
 float4 PS(PSIN i) : SV_Target {
-    float t = params.w;
-    float2 xz = i.wp.xz;
-    float2 grad = wave_grad(wave0, xz, t, wparams.x * 6.0)
-                + wave_grad(wave1, xz + 17.0, t, wparams.y * 6.0)
-                + wave_grad(wave2, xz - 31.0, t, wparams.x * 3.3)
-                + wave_grad(wave3, xz + 43.0, t, wparams.y * 2.6);
-    float3 wave_n = normalize(float3(-grad.x, 1.0, -grad.y));
+    // packets 19-20,24-25,33-39: dual normal-map fetch. Both samples are
+    // unpacked n*2-1 and SUMMED (xy in [-2,2]); z = sqrt(1-x^2-y^2) per
+    // sample, then added. Preview axes: game XY plane = wp.xz, game Z = y.
+    float2 uv0 = i.wp.xz * w_sc01.xy + w_ph01.xy;
+    float2 uv1 = i.wp.xz * w_sc01.zw + w_ph01.zw;
+    float2 n0 = tex_normal.Sample(smp, uv0).xy * 2.0 - 1.0;
+    float2 n1 = tex_normal.Sample(smp, uv1).xy * 2.0 - 1.0;
+    float z0 = sqrt(saturate(1.0 - dot(n0, n0)));
+    float z1 = sqrt(saturate(1.0 - dot(n1, n1)));
+    float2 nxy = n0 + n1;
+    float  nz  = z0 + z1;
 
-    float2 uv0 = i.wp.xz * 0.055 + float2( 0.12,  0.85) * t * wparams.x;
-    float2 uv1 = i.wp.xz * 0.031 + float2( 0.72, -0.28) * t * wparams.y;
-    float2 r0 = tex_normal.Sample(smp, uv0).xy * 2.0 - 1.0;
-    float2 r1 = tex_normal.Sample(smp, uv1).xy * 2.0 - 1.0;
-    float2 ripple = r0 * 0.65 + r1 * 0.35;
-    float normal_scale = max(wtheme3.w, 0.05);
-    float3 N = normalize(wave_n + float3(ripple.x, 0.0, ripple.y)
-                                  * (0.16 * wparams.z * normal_scale));
+    // packets 37-38,41-42: view vector camera-pos, length, normalize.
+    float3 view = w_eye.xyz - i.wp;
+    float dist = length(view);
+    float3 V = view / max(dist, 1e-5);
 
-    float3 L = normalize(-lightDir.xyz);
-    float ndotl = saturate(dot(N, L));
-    float facing = saturate(N.y);
+    // packets 27,35-36,40-46: the fresnel normal scales the UP component by
+    // m_NormalScale before normalizing (direction (nx, ny, NormalScale*nz)),
+    // then fres = saturate(1 - dot(V,Nf) + FresnelBias). NormalScale=0.05
+    // makes the fresnel normal nearly horizontal — that is retail behaviour.
+    float3 Nf = normalize(float3(nxy.x, w_bias.z * nz, nxy.y));
+    float fres = saturate((1.0 - dot(V, Nf)) + w_bias.x);
 
-    
-    
-    float3 deep    = wtheme1.rgb;
-    float3 shallow = wtheme0.rgb;
-    float3 sky     = float3(0.58, 0.62, 0.57);
-    
-    
-    
-    
-    float fresnel = pow(saturate(1.0 - facing + wtheme1.w), 2.2);
-    float3 base = lerp(deep, shallow, facing * 0.85 + 0.10);
-    base *= 0.42 + ndotl * 0.42;
-    float reflection_strength = max(wtheme3.x, 0.0);
-    float reflection_scale = max(wtheme3.z, 0.0);
-    base += sky * (fresnel * (0.18 + reflection_strength * 0.32)
-                 * reflection_scale);
+    // packets 39-47: watercol = DeepColour + (SurfaceColour-Deep)*fres.
+    float3 watercol = lerp(w_deep.rgb, w_surface.rgb, fres);
 
-    
-    float3 H = normalize(L + float3(0.0, 1.0, 0.0));
-    float spec = pow(saturate(dot(N, H)), 96.0);
-    float sparkle = pow(saturate(dot(normalize(float3(ripple.x, 0.25, ripple.y)), H)), 48.0);
-    base += float3(1.0, 0.96, 0.82) * (spec * 1.2 + sparkle * 0.12);
+    // packets 49-50: shadow*0.95+0.05 with shadow=1 (stand-in).
+    float shadow_f = 1.0 * 0.95 + 0.05;
+    // packet 51: reflection fresnel = saturate(fres + ReflectionBias).
+    float frefl = saturate(fres + w_bias.y);
+    // packet 14: ReflectionStrength saturated.
+    float refl_str = saturate(w_deep.w);
 
-    if (params.z > 0.5) {
+    // f13 stand-in: sky along the reflected ray about the normal whose xy
+    // perturbation matches the retail screen-UV offset Nsum*ReflScale*0.5.
+    float3 Nr = normalize(float3(nxy.x * w_reflp.x * 0.5, 1.0,
+                                 nxy.y * w_reflp.x * 0.5));
+    float3 R = reflect(-V, Nr);
+    R.y = abs(R.y);
+    float3 sky_refl = (w_glit.w > 0.5) ? dome_reflect(R) : water_sky(R);
+    float3 refl = sky_refl * shadow_f;
+
+    // packets 52-59, exact combine with `refr` = refraction sample:
+    //   reflMix = watercol + (refl - watercol)*refl_str
+    //   refrMix = watercol + ((refr-watercol) + (refl-refr)*frefl)*refl_str
+    //   out     = refrMix + (reflMix - refrMix)*distf
+    //   distf   = saturate(dist * MaxRefractDistanceFactor)   [1/75]
+    // Grouping by refr: coefficient (1-distf)*refl_str*(1-frefl) -> alpha;
+    // everything else below.
+    float distf = saturate(dist * (1.0 / 75.0));
+    float refr_k = (1.0 - distf) * refl_str * (1.0 - frefl);
+    float3 col = watercol * (1.0 - refl_str)
+               + refl * (refl_str * lerp(frefl, 1.0, distf));
+
+    // packets 60-75: glitter. g = normalize(Nf.x, Nf.y, -GlitterBend*Nf.z)
+    // (game z = preview y); spec = saturate(dot(V, reflect(L, g)));
+    // col += LightColour * GlitterStrength * spec^GlitterPower.
+    float3 g = normalize(float3(Nf.x, -max(w_reflp.z, 0.0) * Nf.y, Nf.z));
+    float3 L = normalize(w_light.xyz);   // c142 (sun by day, moon by night)
+    float3 Rl = L - 2.0 * dot(L, g) * g;
+    float spec = saturate(dot(V, Rl));
+    float glint = pow(max(spec, 1e-6), max(w_glit.x, 1.0));
+    col += w_sun.rgb * (glint * max(w_reflp.w, 0.0));
+
+    if (w_glit.y > 0.5) {
         float3 hi = float3(0.20, 0.55, 0.85);
-        base = lerp(base, hi, 0.55);
+        col = lerp(col, hi, 0.55);
     }
 
-    float alpha = saturate(wtheme0.w);
-    float edge_span = max(wtheme2.y - wtheme2.x, 0.001);
-    float edge_term = saturate((facing + wtheme2.z - wtheme2.x) / edge_span);
-    alpha = saturate(lerp(alpha * 0.82, alpha, edge_term));
-    base = apply_env_fog(base, i.p.w, i.wp.y);
-    return float4(base, alpha);
+    // packets 76-87 fog (shared scene fog stands in, see header comment);
+    // packet 88 exposure is applied by the preview's common path.
+    col = apply_env_fog(col, i.p.w, i.wp.y);
+
+    // packet 89 export; alpha = refraction coefficient for the
+    // ONE/SRC_ALPHA composite (retail alpha is the depth edge factor).
+    return float4(col, refr_k);
 }
 )";
 
@@ -2066,7 +1959,13 @@ VSOUT VS(uint id : SV_VertexID){
         center.y = cam_time.y - H * 0.5 + yfrac * H;
         center.x += sin(t * 0.9 + h4 * 6.2831) * 0.45 * snow_p.w;
         center.z += cos(t * 0.7 + h4 * 12.566) * 0.35 * snow_p.w;
-        float s = 0.05 * max(snow_p.y, 0.15);
+        // Retail flake size (XEX VS 148, packets 83/609/611): point sprite
+        // pixels = frac(hash) * viewportWidth * min(SNOW_SIZE,1) * 0.109375
+        // / depth, i.e. a constant world-space diameter of
+        // rand[0,1) * min(SNOW_SIZE,1) * 0.109375 * 2 * tan(fov_x/2).
+        // cam_right.w carries tan(fov_x/2).
+        float s = wx_hash(seed + 5.3) * saturate(snow_p.y) * 0.109375
+                * 2.0 * cam_right.w;
         off = cam_right.xyz * (uv.x - 0.5) * s +
               cam_up.xyz * (uv.y - 0.5) * s;
         float3 to_cam = center - cam_time.xyz;
@@ -2251,6 +2150,7 @@ ID3D11ShaderResourceView* create_srv_from_rgba_mipped(
     t->Release();
     return v;
 }
+
 static bool srv_from_tex_blob_auto(ID3D11Device* dev, const std::vector<unsigned char>& blob, ID3D11ShaderResourceView** out_srv, bool* out_has_alpha,
                                    int* out_w = nullptr, int* out_h = nullptr){
     *out_srv = nullptr;
@@ -2262,6 +2162,38 @@ static bool srv_from_tex_blob_auto(ID3D11Device* dev, const std::vector<unsigned
     if (out_h) *out_h = h;
     return (*out_srv != nullptr);
 }
+// Particle FX billboard shader. Vertices are pre-transformed to world space by
+// the CPU sim (camera-facing quads); the VS only applies view-projection.
+static const char* g_fx_vs = R"(
+cbuffer FxCB : register(b0){ float4x4 vp; }
+struct VSIN { float3 p:POSITION; float2 t:TEXCOORD0; float4 c:COLOR0; };
+struct VSOUT{ float4 p:SV_Position; float2 t:TEXCOORD0; float4 c:COLOR0; };
+VSOUT VS(VSIN i){ VSOUT o; o.p=mul(float4(i.p,1.0),vp); o.t=i.t; o.c=i.c; return o; }
+)";
+// 1:1 port of the retail particle pixel shader (ShadersRelease.sbk entry 244,
+// program 210 — the base variant of the 16-entry particle PS table registered
+// at 0x8335F648). Exact microcode:
+//   o0.rgb = vertexAlpha * c20.w * vertexColour.rgb * tex.rgb * tex.rgb
+//   o0.a   = tex.a * vertexAlpha
+// The texture is SQUARED (pfx textures are sqrt-encoded); vertex alpha is
+// premultiplied into rgb while o0.a carries tex.a for the fixed-function
+// destination factor. HOST STAND-INS: c20.w exposure = 1 (the preview scene
+// has no exposure pass); the multi-texture cross-fade variants (entries
+// 248-259) are approximated with complementary quads CPU-side; the soft-depth
+// variants (f13 depth fetch) are not run (no scene-depth SRV bound here).
+static const char* g_fx_ps = R"(
+Texture2D tex0 : register(t0);
+SamplerState smp : register(s0);
+struct VSOUT{ float4 p:SV_Position; float2 t:TEXCOORD0; float4 c:COLOR0; };
+float4 PS(VSOUT i) : SV_Target {
+    float4 s = tex0.Sample(smp, i.t);
+    float exposure = 1.0;              // c20.w host stand-in
+    float3 rgb = i.c.a * exposure * i.c.rgb * s.rgb * s.rgb;
+    float  a   = s.a * i.c.a;
+    return float4(rgb, a);
+}
+)";
+
 static bool create_target(ID3D11Device* dev, ModelPreview& mp, int w, int h){
     if(mp.rtv){ mp.rtv->Release(); mp.rtv=nullptr; }
     if(mp.srv){ mp.srv->Release(); mp.srv=nullptr; }
@@ -2305,6 +2237,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     };
     if(FAILED(dev->CreateInputLayout(il,5,vsb->GetBufferPointer(),vsb->GetBufferSize(),&mp.layout))){ vsb->Release(); psb->Release(); return false; }
     vsb->Release(); psb->Release();
+
     struct CB { XMFLOAT4X4 mvp; XMFLOAT4 lightDir; XMFLOAT4X4 mv; XMFLOAT4 params; };
     D3D11_BUFFER_DESC cbd{};
     cbd.BindFlags=D3D11_BIND_CONSTANT_BUFFER; cbd.ByteWidth=sizeof(CB); cbd.Usage=D3D11_USAGE_DYNAMIC; cbd.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
@@ -2362,29 +2295,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
         dev->CreateBuffer(&tcb, nullptr, &mp.cbuffer_terrain);
     }
 
-    {
-        ID3DBlob* svsb = nullptr; ID3DBlob* spsb = nullptr;
-        if (compile_shader(g_sky_vs, "VS", "vs_5_0", &svsb) &&
-            compile_shader(g_sky_ps, "PS", "ps_5_0", &spsb))
-        {
-            dev->CreateVertexShader(svsb->GetBufferPointer(),
-                                    svsb->GetBufferSize(),
-                                    nullptr, &mp.vs_sky);
-            dev->CreatePixelShader(spsb->GetBufferPointer(),
-                                   spsb->GetBufferSize(),
-                                   nullptr, &mp.ps_sky);
-        }
-        if (svsb) svsb->Release();
-        if (spsb) spsb->Release();
-    }
-    {
-        D3D11_BUFFER_DESC scb{};
-        scb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        scb.ByteWidth = 27 * 16;
-        scb.Usage = D3D11_USAGE_DYNAMIC;
-        scb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        dev->CreateBuffer(&scb, nullptr, &mp.cbuffer_sky);
-    }
+    Skybox::CreateD3D11Resources(dev, mp);
 
     {
         ID3DBlob* wvsb = nullptr; ID3DBlob* wpsb = nullptr;
@@ -2406,7 +2317,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
         D3D11_BUFFER_DESC wcb{};
         wcb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
-        wcb.ByteWidth = 9 * 16;
+        wcb.ByteWidth = 10 * 16;
         wcb.Usage = D3D11_USAGE_DYNAMIC;
         wcb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         dev->CreateBuffer(&wcb, nullptr, &mp.cbuffer_water);
@@ -2473,6 +2384,16 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     bda.RenderTarget[0].BlendOpAlpha          = D3D11_BLEND_OP_ADD;
     bda.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     if(FAILED(dev->CreateBlendState(&bda,&mp.bsAlpha))) return false;
+    // Water: SRC=ONE, DEST=SRC_ALPHA. The retail water PS reads an explicit
+    // refraction copy of the scene (sampler f14); the preview PS emits the
+    // microcode's exact refraction coefficient as alpha so the framebuffer
+    // already behind the surface supplies that term.
+    D3D11_BLEND_DESC bdw = bda;
+    bdw.RenderTarget[0].SrcBlend       = D3D11_BLEND_ONE;
+    bdw.RenderTarget[0].DestBlend      = D3D11_BLEND_SRC_ALPHA;
+    bdw.RenderTarget[0].SrcBlendAlpha  = D3D11_BLEND_ONE;
+    bdw.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+    if(FAILED(dev->CreateBlendState(&bdw,&mp.bs_water))) return false;
     D3D11_DEPTH_STENCIL_DESC dssw{};
     dssw.DepthEnable = TRUE;
     dssw.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
@@ -2486,7 +2407,67 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     D3D11_DEPTH_STENCIL_DESC dssle = dssn;
     dssle.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
     if(FAILED(dev->CreateDepthStencilState(&dssle, &mp.dssNoWriteLEqual))) return false;
+    // Water: levels load one .water per heightfield (main + every
+    // vista/adjacent), so the same surface is often present several times at
+    // the same height. Retail can draw the copies on top of each other
+    // (identical output, z-fight invisible), but the preview's framebuffer
+    // refraction composite is dst-dependent, so a second coplanar copy would
+    // re-composite and z-fighting would flash. Stencil-gate the pass: a
+    // pixel takes the water composite once (stencil EQUAL 0, INCR on pass).
+    D3D11_DEPTH_STENCIL_DESC dsswat = dssw;
+    dsswat.StencilEnable = TRUE;
+    dsswat.StencilReadMask = 0xFF;
+    dsswat.StencilWriteMask = 0xFF;
+    dsswat.FrontFace.StencilFunc = D3D11_COMPARISON_EQUAL;
+    dsswat.FrontFace.StencilPassOp = D3D11_STENCIL_OP_INCR_SAT;
+    dsswat.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+    dsswat.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
+    dsswat.BackFace = dsswat.FrontFace;
+    if(FAILED(dev->CreateDepthStencilState(&dsswat, &mp.dssWaterOnce))) return false;
     if(!create_white_srv(dev, &mp.default_srv)) return false;
+
+    // ---- particle FX pipeline ----
+    {
+        ID3DBlob* fvs = nullptr; ID3DBlob* fps = nullptr;
+        if (compile_shader(g_fx_vs, "VS", "vs_5_0", &fvs) &&
+            compile_shader(g_fx_ps, "PS", "ps_5_0", &fps)) {
+            dev->CreateVertexShader(fvs->GetBufferPointer(), fvs->GetBufferSize(),
+                                    nullptr, &mp.vs_fx);
+            dev->CreatePixelShader(fps->GetBufferPointer(), fps->GetBufferSize(),
+                                   nullptr, &mp.ps_fx);
+            D3D11_INPUT_ELEMENT_DESC el[] = {
+                {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,  D3D11_INPUT_PER_VERTEX_DATA,0},
+                {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,   0,12, D3D11_INPUT_PER_VERTEX_DATA,0},
+                {"COLOR",   0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,20,D3D11_INPUT_PER_VERTEX_DATA,0},
+            };
+            dev->CreateInputLayout(el, 3, fvs->GetBufferPointer(),
+                                   fvs->GetBufferSize(), &mp.layout_fx);
+        }
+        if (fvs) fvs->Release();
+        if (fps) fps->Release();
+
+        D3D11_BUFFER_DESC cb{};
+        cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        cb.ByteWidth = 4 * 16;          // one float4x4
+        cb.Usage = D3D11_USAGE_DYNAMIC;
+        cb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        dev->CreateBuffer(&cb, nullptr, &mp.cbuffer_fx);
+
+        // Premultiplied-alpha output => SrcBlend = ONE for both modes.
+        D3D11_BLEND_DESC ba{};
+        ba.RenderTarget[0].BlendEnable = TRUE;
+        ba.RenderTarget[0].SrcBlend  = D3D11_BLEND_ONE;
+        ba.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        ba.RenderTarget[0].BlendOp   = D3D11_BLEND_OP_ADD;
+        ba.RenderTarget[0].SrcBlendAlpha  = D3D11_BLEND_ONE;
+        ba.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+        ba.RenderTarget[0].BlendOpAlpha   = D3D11_BLEND_OP_ADD;
+        ba.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        dev->CreateBlendState(&ba, &mp.bs_fx_alpha);
+        D3D11_BLEND_DESC badd = ba;
+        badd.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+        dev->CreateBlendState(&badd, &mp.bs_fx_add);
+    }
     return true;
 }
 bool MP_Init(ID3D11Device* dev, ModelPreview& mp, int w, int h){
@@ -2500,6 +2481,71 @@ void MP_Resize(ID3D11Device* dev, ModelPreview& mp, int w, int h){
 }
 void MP_Release(ModelPreview& mp){
     mp_release(mp);
+}
+
+void MP_BuildLevelFx(ID3D11Device* dev, ModelPreview& mp){
+    mp.fx_system.clear();
+    for (auto& kv : mp.fx_tex_srv) { if (kv.second) kv.second->Release(); }
+    mp.fx_tex_srv.clear();
+    {
+        std::ofstream f("C:\\Users\\pwd12\\OneDrive\\Documents\\GitHub\\"
+                        "Fable2AssetBrowser\\fx_debug.log", std::ios::app);
+        if (f) f << "MP_BuildLevelFx called: pending_fx="
+                 << g_pending_level_fx.size() << " bank_loaded="
+                 << g_particle_bank_loaded << "\n";
+    }
+    if (g_pending_level_fx.empty() || !g_particle_bank_loaded) return;
+
+    mp.fx_system.build(g_particle_bank, g_pending_level_fx);
+
+    const std::string preferred =
+        (S.selected_nested_index != -1 && !S.selected_nested_temp_path.empty())
+            ? S.selected_nested_temp_path : S.selected_bnk;
+    for (const auto& t : mp.fx_system.textures()) {
+        if (t.empty() || mp.fx_tex_srv.count(t)) continue;
+        std::vector<unsigned char> buf;
+        if (!build_any_tex_buffer_for_name(t, buf, preferred)) {
+            mp.fx_tex_srv[t] = nullptr; continue;
+        }
+        bool ha = false; ID3D11ShaderResourceView* srv = nullptr;
+        srv_from_tex_blob_auto(dev, buf, &srv, &ha);
+        mp.fx_tex_srv[t] = srv;
+    }
+    mp.fx_last_time = 0.0;   // first render frame clamps the initial dt
+
+    // Diagnostics: which effects actually resolved to real bank data, and
+    // which fell back to the name heuristic (so missing/wrong FX are visible).
+    {
+        std::map<std::string, int> resolved, unresolved;
+        for (const auto& p : g_pending_level_fx)
+            (p.resolved ? resolved : unresolved)[p.effect_name]++;
+        auto join = [](const std::map<std::string, int>& m) {
+            std::string s; int shown = 0;
+            for (const auto& kv : m) {
+                if (shown++) s += ", ";
+                s += kv.first;
+                if (kv.second > 1) s += " x" + std::to_string(kv.second);
+                if (shown >= 40) { s += ", ..."; break; }
+            }
+            return s;
+        };
+        OutputLog::success("fx: built " +
+            std::to_string(mp.fx_system.instance_count()) +
+            " instance(s); " + std::to_string(mp.fx_system.resolved_count()) +
+            " resolved to bank effects, " +
+            std::to_string(unresolved.size()) + " distinct unresolved");
+        if (!resolved.empty())
+            OutputLog::info("fx resolved: " + join(resolved));
+        if (!unresolved.empty())
+            OutputLog::warn("fx UNRESOLVED (name heuristic only): " +
+                            join(unresolved));
+        std::ofstream f("C:\\Users\\pwd12\\OneDrive\\Documents\\GitHub\\"
+                        "Fable2AssetBrowser\\fx_debug.log", std::ios::app);
+        if (f) f << "MP_BuildLevelFx built: instances="
+                 << mp.fx_system.instance_count() << " resolved="
+                 << mp.fx_system.resolved_count() << " textures="
+                 << mp.fx_tex_srv.size() << " fx_show=" << mp.fx_show << "\n";
+    }
 }
 
 namespace {
@@ -2776,17 +2822,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     mp.meshes.clear();
     mp.lod_count    = 1;
     mp.selected_lod = -1;
-    mp.has_sky_theme = false;
-    mp.has_cloud_theme = false;
-    mp.cloud_layer_count = 0;
-    mp.sky_time_of_day = -1.0f;
-    mp.has_day_night_cycle = false;
-    mp.day_night_keyframes.clear();
-    mp.time_of_day_override = false;
-    mp.time_of_day_override_value = 0.5f;
-    mp.current_time_of_day = 0.5f;
-    mp_release_cloud_density(mp);
-    mp_release_sky_textures(mp);
+    Skybox::ResetForBuild(mp);
 
     auto extract_lod = [](std::string& name) -> uint32_t {
         size_t pos = name.rfind("|lod");
@@ -3055,6 +3091,30 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         if (!m.srv_metallic     && mp.default_srv) { m.srv_metallic     = mp.default_srv; m.srv_metallic->AddRef(); }
         if (!m.srv_extra    && mp.default_srv) { m.srv_extra    = mp.default_srv; m.srv_extra->AddRef(); }
         m.has_alpha = m.is_water ? m.has_water_theme : hasA;
+        // Water normal maps: the retail water pixel program fetches them
+        // with a full mip chain and 16x anisotropic filtering (tfetch
+        // mag/min/mip=3/3/3 aniso=7). The shared texture cache uploads mip 0
+        // only, which minifies into per-frame static at a distance — and the
+        // retail fresnel normal normalize(nx, ny, NormalScale*nz) amplifies
+        // that into reflection flashing. Rebuild the water normal SRV with a
+        // CPU-built mip chain (same approach as the vista pages).
+        if (m.is_water && !g.diffuse_tex_name.empty()) {
+            std::vector<unsigned char> wtex;
+            if (build_any_tex_buffer_for_name(g.diffuse_tex_name, wtex,
+                                              preferred_for_tex)) {
+                std::vector<uint8_t> wrgba;
+                int ww = 0, wh = 0;
+                bool wha = false;
+                if (decode_tex_to_rgba(wtex, wrgba, ww, wh, &wha)) {
+                    ID3D11ShaderResourceView* mip_srv =
+                        create_srv_from_rgba_mipped(dev, ww, wh, wrgba);
+                    if (mip_srv) {
+                        if (m.srv_diffuse) m.srv_diffuse->Release();
+                        m.srv_diffuse = mip_srv;
+                    }
+                }
+            }
+        }
         mp.meshes.push_back(m);
     }
 
@@ -3120,458 +3180,36 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     ID3D11DeviceContext* ctx=nullptr; dev->GetImmediateContext(&ctx); if(!ctx) return;
     D3D11_VIEWPORT vp{}; vp.TopLeftX=0; vp.TopLeftY=0; vp.Width=(FLOAT)mp.width; vp.Height=(FLOAT)mp.height; vp.MinDepth=0; vp.MaxDepth=1;
     ctx->RSSetViewports(1,&vp);
-    float cy = cosf(cam.yaw);
-    float sy = sinf(cam.yaw);
-    float cp = cosf(cam.pitch);
-    float sp = sinf(cam.pitch);
-    float forward[3] = { sy * cp, sp, cy * cp };
-    XMVECTOR sky_forward_v = XMVector3Normalize(
-        XMVectorSet(forward[0], forward[1], forward[2], 0.0f));
-    XMVECTOR sky_world_up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-    XMVECTOR sky_right_v = XMVector3Normalize(
-        XMVector3Cross(sky_world_up, sky_forward_v));
-    XMVECTOR sky_up_v = XMVector3Normalize(
-        XMVector3Cross(sky_forward_v, sky_right_v));
-    XMFLOAT3 sky_right_f{};
-    XMFLOAT3 sky_up_f{};
-    XMFLOAT3 sky_forward_f{};
-    XMStoreFloat3(&sky_right_f, sky_right_v);
-    XMStoreFloat3(&sky_up_f, sky_up_v);
-    XMStoreFloat3(&sky_forward_f, sky_forward_v);
-    float fov = XMConvertToRadians(60.0f);
-    float aspect = (float)mp.width / (float)mp.height;
-    const float tan_half_y = tanf(fov * 0.5f);
-    const float tan_half_x = tan_half_y * aspect;
+    const Skybox::CameraFrame sky_camera =
+        Skybox::BuildCameraFrame(cam, mp.width, mp.height);
+    const float* forward = sky_camera.view_forward;
+    const XMFLOAT3 sky_right_f{
+        sky_camera.right[0], sky_camera.right[1], sky_camera.right[2]};
+    const XMFLOAT3 sky_up_f{
+        sky_camera.up[0], sky_camera.up[1], sky_camera.up[2]};
+    const float fov = sky_camera.fov_radians;
+    const float aspect = sky_camera.aspect;
 
-    static const auto sky_start_time =
-        std::chrono::steady_clock::now();
-    const float sky_time =
-        std::chrono::duration<float>(
-            std::chrono::steady_clock::now() - sky_start_time).count();
-    float render_sky_top[3] = {};
-    float render_sky_bottom[3] = {};
-    float render_sky_sunset[3] = {};
-    float render_sky_params[4] = {};
-    float render_cloud_layer[4][4] = {};
-    float render_cloud_shape[4][4] = {};
-    float render_cloud_motion[4][4] = {};
-    float render_cloud_light[4][4] = {};
-    std::copy(std::begin(mp.sky_top_colour),
-              std::end(mp.sky_top_colour),
-              std::begin(render_sky_top));
-    std::copy(std::begin(mp.sky_bottom_colour),
-              std::end(mp.sky_bottom_colour),
-              std::begin(render_sky_bottom));
-    std::copy(std::begin(mp.sky_sunset_colour),
-              std::end(mp.sky_sunset_colour),
-              std::begin(render_sky_sunset));
-    std::copy(std::begin(mp.sky_params),
-              std::end(mp.sky_params),
-              std::begin(render_sky_params));
-    for (int ci = 0; ci < 4; ++ci) {
-        for (int cj = 0; cj < 4; ++cj) {
-            render_cloud_layer[ci][cj] = mp.cloud_layer[ci][cj];
-            render_cloud_shape[ci][cj] = mp.cloud_shape[ci][cj];
-            render_cloud_motion[ci][cj] = mp.cloud_motion[ci][cj];
-            render_cloud_light[ci][cj] = mp.cloud_light[ci][cj];
-        }
-    }
-    bool render_has_cloud_theme = mp.has_cloud_theme;
-    int render_cloud_count =
-        mp.has_cloud_theme ? std::clamp(mp.cloud_layer_count, 0, 4) : 0;
-    float render_weather[4] = {};
-    float render_mist = mp.weather_mist_strength;
-    float render_fog_range[4] = {};
-    float render_fog_density[2] = {};
-    bool render_has_fog = mp.has_fog_theme;
-    std::copy(std::begin(mp.weather_precip),
-              std::end(mp.weather_precip),
-              std::begin(render_weather));
-    std::copy(std::begin(mp.fog_range),
-              std::end(mp.fog_range),
-              std::begin(render_fog_range));
-    std::copy(std::begin(mp.fog_density),
-              std::end(mp.fog_density),
-              std::begin(render_fog_density));
-    float render_sky_tod = std::isfinite(mp.sky_time_of_day)
-        ? mp.sky_time_of_day : 0.5f;
-    render_sky_tod = render_sky_tod - std::floor(render_sky_tod);
-    const bool has_time_override =
-        mp.time_of_day_override &&
-        std::isfinite(mp.time_of_day_override_value);
-    if (has_time_override) {
-        render_sky_tod = mp.time_of_day_override_value;
-        render_sky_tod -= std::floor(render_sky_tod);
-        if (render_sky_tod < 0.0f) render_sky_tod += 1.0f;
-    }
+    const Skybox::FrameState sky_frame = Skybox::EvaluateFrame(mp);
+    const float sky_time = static_cast<float>(sky_frame.elapsed_time);
+    const auto& render_sky_bottom = sky_frame.sky_bottom;
+    const auto& render_weather = sky_frame.weather;
+    const float render_mist = sky_frame.mist;
+    const auto& render_fog_range = sky_frame.fog_range;
+    const auto& render_fog_density = sky_frame.fog_density;
+    const bool render_has_fog = sky_frame.has_fog;
+    const XMFLOAT3 sun_dir_f{
+        sky_frame.sun_direction[0],
+        sky_frame.sun_direction[1],
+        sky_frame.sun_direction[2]};
 
-    if (mp.has_day_night_cycle && mp.day_night_keyframes.size() >= 2) {
-        const float cycle_seconds =
-            std::max(mp.day_night_cycle_seconds, 1.0f);
-        if (!has_time_override) {
-            render_sky_tod = sky_time / cycle_seconds;
-            render_sky_tod -= std::floor(render_sky_tod);
-        }
-
-        const auto& keys = mp.day_night_keyframes;
-        size_t a = keys.size() - 1;
-        size_t b = 0;
-        for (size_t i = 0; i < keys.size(); ++i) {
-            if (render_sky_tod < keys[i].time_of_day) {
-                b = i;
-                a = (i == 0) ? keys.size() - 1 : i - 1;
-                break;
-            }
-        }
-
-        float span = keys[b].time_of_day - keys[a].time_of_day;
-        if (span <= 0.0f) span += 1.0f;
-        float pos = render_sky_tod - keys[a].time_of_day;
-        if (pos < 0.0f) pos += 1.0f;
-        const float kt = span > 0.0001f
-            ? std::clamp(pos / span, 0.0f, 1.0f)
-            : 0.0f;
-        auto lerp = [kt](float va, float vb) {
-            return va + (vb - va) * kt;
-        };
-
-        for (int i = 0; i < 3; ++i) {
-            render_sky_top[i] =
-                lerp(keys[a].sky_top_colour[i],
-                     keys[b].sky_top_colour[i]);
-            render_sky_bottom[i] =
-                lerp(keys[a].sky_bottom_colour[i],
-                     keys[b].sky_bottom_colour[i]);
-            render_sky_sunset[i] =
-                lerp(keys[a].sky_sunset_colour[i],
-                     keys[b].sky_sunset_colour[i]);
-        }
-        for (int i = 0; i < 4; ++i) {
-            render_sky_params[i] =
-                lerp(keys[a].sky_params[i], keys[b].sky_params[i]);
-        }
-        render_has_cloud_theme =
-            keys[a].has_cloud_theme || keys[b].has_cloud_theme;
-        render_cloud_count = std::max(keys[a].cloud_layer_count,
-                                      keys[b].cloud_layer_count);
-        render_cloud_count = std::clamp(render_cloud_count, 0, 4);
-        for (int i = 0; i < 4; ++i) {
-            render_weather[i] =
-                lerp(keys[a].weather_precip[i], keys[b].weather_precip[i]);
-            render_fog_range[i] =
-                lerp(keys[a].fog_range[i], keys[b].fog_range[i]);
-        }
-        render_mist = lerp(keys[a].weather_mist_strength,
-                           keys[b].weather_mist_strength);
-        render_fog_density[0] =
-            lerp(keys[a].fog_density[0], keys[b].fog_density[0]);
-        render_fog_density[1] =
-            lerp(keys[a].fog_density[1], keys[b].fog_density[1]);
-        render_has_fog = keys[a].has_fog_theme || keys[b].has_fog_theme;
-        for (int ci = 0; ci < 4; ++ci) {
-            for (int cj = 0; cj < 4; ++cj) {
-                render_cloud_layer[ci][cj] =
-                    lerp(keys[a].cloud_layer[ci][cj],
-                         keys[b].cloud_layer[ci][cj]);
-                render_cloud_shape[ci][cj] =
-                    lerp(keys[a].cloud_shape[ci][cj],
-                         keys[b].cloud_shape[ci][cj]);
-                render_cloud_motion[ci][cj] =
-                    lerp(keys[a].cloud_motion[ci][cj],
-                         keys[b].cloud_motion[ci][cj]);
-                render_cloud_light[ci][cj] =
-                    lerp(keys[a].cloud_light[ci][cj],
-                         keys[b].cloud_light[ci][cj]);
-            }
-        }
-    }
-    mp.current_time_of_day = render_sky_tod;
-
-    // Engine sun path (XEX Sky_SubmitCelestial @0x821DF230): daily circle
-    // tilted by SUN_AXIS_ELEVATION then rotated about up by
-    // SUN_AXIS_Z_OFFSET + SUN_AXIS_XY_ROTATION (all in degrees); time is
-    // scaled by MAIN_LIGHT_TIME_FACTOR. Noon = highest point.
-    XMFLOAT3 sun_dir_f{};
-    {
-        const float d2r = XM_PI / 180.0f;
-        const float tf = (mp.has_sun_axis &&
-                          std::isfinite(mp.sun_axis[3]) &&
-                          mp.sun_axis[3] > 0.0f)
-            ? mp.sun_axis[3] : 1.0f;
-        const float theta =
-            (render_sky_tod * tf - 0.5f) * XM_2PI;
-        const float elev = (mp.has_sun_axis
-            ? mp.sun_axis[0] : 26.0f) * d2r;
-        const float phi = (mp.has_sun_axis
-            ? (mp.sun_axis[1] + mp.sun_axis[2]) : 0.0f) * d2r;
-        const float ct = std::cos(theta);
-        const float st = std::sin(theta);
-        const float gx = ct * std::cos(elev);
-        const float up = ct * std::sin(elev);
-        const float gz = st;
-        const float cph = std::cos(phi);
-        const float sph = std::sin(phi);
-        XMVECTOR v = XMVector3Normalize(XMVectorSet(
-            gx * cph - gz * sph, up, gx * sph + gz * cph, 0.0f));
-        XMStoreFloat3(&sun_dir_f, v);
-    }
-
-    float clear[4] = {0.22f,0.22f,0.22f,1.0f};
-    if (mp.has_sky_theme && mp.show_sky) {
-        clear[0] = std::clamp(render_sky_bottom[0], 0.0f, 1.0f);
-        clear[1] = std::clamp(render_sky_bottom[1], 0.0f, 1.0f);
-        clear[2] = std::clamp(render_sky_bottom[2], 0.0f, 1.0f);
-    }
+    float clear[4]{};
+    Skybox::GetClearColour(mp, sky_frame, clear);
     ctx->OMSetRenderTargets(1,&mp.rtv, mp.dsv);
     ctx->ClearRenderTargetView(mp.rtv, clear);
     ctx->ClearDepthStencilView(mp.dsv, D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL, 1.0f, 0);
-    if (mp.has_sky_theme && mp.show_sky &&
-        mp.vs_sky && mp.ps_sky && mp.cbuffer_sky) {
-        auto load_cloud_density_srv = [&](int idx) {
-            if (idx < 0 || idx >= 4) return;
-            if (mp.cloud_density_srv[idx] || mp.cloud_density_tried[idx]) {
-                return;
-            }
-            mp.cloud_density_tried[idx] = true;
-            const std::string& tex_name = mp.cloud_density_tex_name[idx];
-            if (tex_name.empty()) return;
 
-            std::string preferred_for_tex =
-                (S.selected_nested_index != -1 &&
-                 !S.selected_nested_temp_path.empty())
-                    ? S.selected_nested_temp_path
-                    : S.selected_bnk;
-            std::vector<unsigned char> tex_buf;
-            if (!build_any_tex_buffer_for_name(tex_name, tex_buf,
-                                               preferred_for_tex)) {
-                OutputLog::warn("cloud density texture not found: " +
-                                tex_name);
-                return;
-            }
-            bool has_alpha = false;
-            ID3D11ShaderResourceView* srv = nullptr;
-            srv_from_tex_blob_auto(dev, tex_buf, &srv, &has_alpha);
-            if (!srv) {
-                OutputLog::error("cloud density texture failed to decode: " +
-                                 tex_name);
-                return;
-            }
-            mp.cloud_density_srv[idx] = srv;
-            mp.cloud_density_has_alpha[idx] = has_alpha;
-            OutputLog::info("cloud density texture bound: " + tex_name);
-        };
-        auto load_sky_texture_srv =
-            [&](const std::string& tex_name,
-                bool& tried,
-                ID3D11ShaderResourceView*& target,
-                const char* label,
-                int* out_w = nullptr,
-                int* out_h = nullptr) {
-                if (target || tried) return;
-                tried = true;
-                if (tex_name.empty()) return;
-
-                std::string preferred_for_tex =
-                    (S.selected_nested_index != -1 &&
-                     !S.selected_nested_temp_path.empty())
-                        ? S.selected_nested_temp_path
-                        : S.selected_bnk;
-                std::vector<unsigned char> tex_buf;
-                if (!build_any_tex_buffer_for_name(tex_name, tex_buf,
-                                                   preferred_for_tex)) {
-                    OutputLog::warn(std::string(label) +
-                                    " texture not found: " + tex_name);
-                    return;
-                }
-                bool has_alpha = false;
-                ID3D11ShaderResourceView* srv = nullptr;
-                srv_from_tex_blob_auto(dev, tex_buf, &srv, &has_alpha,
-                                       out_w, out_h);
-                if (!srv) {
-                    OutputLog::error(std::string(label) +
-                                     " texture failed to decode: " +
-                                     tex_name);
-                    return;
-                }
-                target = srv;
-                OutputLog::info(std::string(label) +
-                                " texture bound: " + tex_name);
-            };
-        for (int ci = 0; ci < 4; ++ci) {
-            load_cloud_density_srv(ci);
-        }
-        {
-            int moon_w = 0;
-            int moon_h = 0;
-            const bool was_loaded = mp.sky_moon_srv != nullptr;
-            load_sky_texture_srv(mp.sky_moon_tex_name,
-                                 mp.sky_moon_tried,
-                                 mp.sky_moon_srv,
-                                 "sky moon",
-                                 &moon_w, &moon_h);
-            if (!was_loaded && mp.sky_moon_srv &&
-                moon_w > 0 && moon_h > 0) {
-                // moonphases.tex is a phase sheet (engine picks the tile
-                // by moon phase 0-7); infer the grid from the aspect.
-                const float aspect = (float)moon_w / (float)moon_h;
-                float tx = 1.0f;
-                float ty = 1.0f;
-                if (aspect >= 7.0f)      { tx = 8.0f; ty = 1.0f; }
-                else if (aspect >= 3.5f) { tx = 4.0f; ty = 1.0f; }
-                else if (aspect >= 1.8f) { tx = 4.0f; ty = 2.0f; }
-                else if (aspect <= 0.15f){ tx = 1.0f; ty = 8.0f; }
-                else if (aspect <= 0.6f) { tx = 2.0f; ty = 4.0f; }
-                mp.sky_moon_tiles[0] = tx;
-                mp.sky_moon_tiles[1] = ty;
-            }
-        }
-        load_sky_texture_srv(mp.sky_moon_glare_tex_name,
-                             mp.sky_moon_glare_tried,
-                             mp.sky_moon_glare_srv,
-                             "sky moon glare");
-        load_sky_texture_srv(mp.sky_sun_disc_tex_name,
-                             mp.sky_sun_disc_tried,
-                             mp.sky_sun_disc_srv,
-                             "sky sun disc");
-        struct SkyCB {
-            XMFLOAT4 top;
-            XMFLOAT4 bottom;
-            XMFLOAT4 sunset;
-            XMFLOAT4 params;
-            XMFLOAT4 cloud_layer[4];
-            XMFLOAT4 cloud_shape[4];
-            XMFLOAT4 cloud_motion[4];
-            XMFLOAT4 cloud_light[4];
-            XMFLOAT4 cloud_global;
-            XMFLOAT4 cloud_density_flags;
-            XMFLOAT4 sky_right;
-            XMFLOAT4 sky_up;
-            XMFLOAT4 sky_forward;
-            XMFLOAT4 sky_sun;
-            XMFLOAT4 sky_texture_flags;
-        } sky_cb{};
-        auto finite_clamped = [](float v, float fallback) {
-            return std::isfinite(v) ? std::clamp(v, 0.0f, 4.0f)
-                                    : fallback;
-        };
-        sky_cb.top = XMFLOAT4(
-            finite_clamped(render_sky_top[0], 0.42f),
-            finite_clamped(render_sky_top[1], 0.56f),
-            finite_clamped(render_sky_top[2], 0.76f),
-            1.0f);
-        sky_cb.bottom = XMFLOAT4(
-            finite_clamped(render_sky_bottom[0], 0.55f),
-            finite_clamped(render_sky_bottom[1], 0.60f),
-            finite_clamped(render_sky_bottom[2], 0.65f),
-            1.0f);
-        sky_cb.sunset = XMFLOAT4(
-            finite_clamped(render_sky_sunset[0], 1.0f),
-            finite_clamped(render_sky_sunset[1], 0.47f),
-            finite_clamped(render_sky_sunset[2], 0.22f),
-            1.0f);
-        sky_cb.params = XMFLOAT4(
-            std::max(render_sky_params[0], 0.0f),
-            std::clamp(render_sky_params[1], 0.0f, 1.0f),
-            std::max(render_sky_params[2], 0.05f),
-            std::max(render_sky_params[3], 0.05f));
-
-        auto finite_raw = [](float v, float fallback) {
-            return std::isfinite(v) ? v : fallback;
-        };
-        for (int ci = 0; ci < 4; ++ci) {
-            sky_cb.cloud_layer[ci] = XMFLOAT4(
-                std::clamp(finite_raw(render_cloud_layer[ci][0], 0.0f),
-                           0.0f, 1.0f),
-                finite_raw(render_cloud_layer[ci][1], 350.0f),
-                finite_raw(render_cloud_layer[ci][2], 1.0f),
-                finite_raw(render_cloud_layer[ci][3], 1.0f));
-            sky_cb.cloud_shape[ci] = XMFLOAT4(
-                std::max(finite_raw(render_cloud_shape[ci][0], 1024.0f), 1.0f),
-                std::max(finite_raw(render_cloud_shape[ci][1], 1024.0f), 1.0f),
-                finite_raw(render_cloud_shape[ci][2], 0.0f),
-                finite_raw(render_cloud_shape[ci][3], 0.0f));
-            sky_cb.cloud_motion[ci] = XMFLOAT4(
-                finite_raw(render_cloud_motion[ci][0], 0.0f),
-                finite_raw(render_cloud_motion[ci][1], 0.0f),
-                finite_raw(render_cloud_motion[ci][2], 0.0f),
-                finite_raw(render_cloud_motion[ci][3], 0.0f));
-            sky_cb.cloud_light[ci] = XMFLOAT4(
-                std::max(finite_raw(render_cloud_light[ci][0], 1.0f), 0.0f),
-                std::max(finite_raw(render_cloud_light[ci][1], 1.0f), 0.0f),
-                std::max(finite_raw(render_cloud_light[ci][2], 0.25f), 0.0f),
-                std::max(finite_raw(render_cloud_light[ci][3], 0.0f), 0.0f));
-        }
-        const int cloud_count =
-            render_has_cloud_theme ? render_cloud_count : 0;
-        sky_cb.cloud_global = XMFLOAT4(
-            cloud_count > 0 ? 1.0f : 0.0f,
-            static_cast<float>(cloud_count),
-            sky_time * 0.25f,
-            std::max(mp.sky_moon_tiles[0], 1.0f));
-        auto cloud_flag = [&](int idx) {
-            if (!mp.cloud_density_srv[idx]) return 0.0f;
-            return mp.cloud_density_has_alpha[idx] ? 2.0f : 1.0f;
-        };
-        sky_cb.cloud_density_flags = XMFLOAT4(
-            cloud_flag(0), cloud_flag(1), cloud_flag(2), cloud_flag(3));
-        sky_cb.sky_right = XMFLOAT4(
-            sky_right_f.x, sky_right_f.y, sky_right_f.z, tan_half_x);
-        sky_cb.sky_up = XMFLOAT4(
-            sky_up_f.x, sky_up_f.y, sky_up_f.z, tan_half_y);
-        sky_cb.sky_forward = XMFLOAT4(
-            sky_forward_f.x, sky_forward_f.y, sky_forward_f.z, 0.0f);
-        sky_cb.sky_sun = XMFLOAT4(
-            sun_dir_f.x, sun_dir_f.y, sun_dir_f.z, 0.0f);
-        sky_cb.sky_texture_flags = XMFLOAT4(
-            mp.sky_moon_srv ? 1.0f : 0.0f,
-            mp.sky_moon_glare_srv ? 1.0f : 0.0f,
-            mp.sky_sun_disc_srv ? 1.0f : 0.0f,
-            std::max(mp.sky_moon_tiles[1], 1.0f));
-
-        D3D11_MAPPED_SUBRESOURCE sms{};
-        if (SUCCEEDED(ctx->Map(mp.cbuffer_sky, 0,
-                               D3D11_MAP_WRITE_DISCARD, 0, &sms))) {
-            std::memcpy(sms.pData, &sky_cb, sizeof(sky_cb));
-            ctx->Unmap(mp.cbuffer_sky, 0);
-        }
-        float sky_blend[4] = {0, 0, 0, 0};
-        ctx->RSSetState(mp.rs);
-        ctx->OMSetDepthStencilState(mp.dssNoWrite, 0);
-        ctx->OMSetBlendState(mp.bs, sky_blend, 0xFFFFFFFF);
-        ctx->IASetInputLayout(nullptr);
-        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ctx->VSSetShader(mp.vs_sky, nullptr, 0);
-        ctx->PSSetShader(mp.ps_sky, nullptr, 0);
-        ctx->VSSetConstantBuffers(4, 1, &mp.cbuffer_sky);
-        ctx->PSSetConstantBuffers(4, 1, &mp.cbuffer_sky);
-        ID3D11ShaderResourceView* cloud_srvs[4] = {
-            mp.cloud_density_srv[0],
-            mp.cloud_density_srv[1],
-            mp.cloud_density_srv[2],
-            mp.cloud_density_srv[3]
-        };
-        ctx->PSSetShaderResources(8, 4, cloud_srvs);
-        ID3D11ShaderResourceView* sky_texture_srvs[3] = {
-            mp.sky_moon_srv,
-            mp.sky_moon_glare_srv,
-            mp.sky_sun_disc_srv
-        };
-        ctx->PSSetShaderResources(12, 3, sky_texture_srvs);
-        ID3D11SamplerState* sky_sampler = mp.sampler;
-        ctx->PSSetSamplers(0, 1, &sky_sampler);
-        ctx->Draw(3, 0);
-        ID3D11Buffer* null_sky_cb = nullptr;
-        ctx->VSSetConstantBuffers(4, 1, &null_sky_cb);
-        ctx->PSSetConstantBuffers(4, 1, &null_sky_cb);
-        ID3D11ShaderResourceView* null_cloud_srvs[4] = {
-            nullptr, nullptr, nullptr, nullptr
-        };
-        ctx->PSSetShaderResources(8, 4, null_cloud_srvs);
-        ID3D11ShaderResourceView* null_sky_texture_srvs[3] = {
-            nullptr, nullptr, nullptr
-        };
-        ctx->PSSetShaderResources(12, 3, null_sky_texture_srvs);
-    }
+    Skybox::DrawSky(dev, ctx, mp, sky_camera, sky_frame);
     ctx->IASetInputLayout(mp.layout);
     ctx->VSSetShader(mp.vs,nullptr,0);
     ctx->PSSetShader(mp.ps,nullptr,0);
@@ -3583,7 +3221,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     XMVECTOR at = XMVectorSet(cam.pos[0] + forward[0], cam.pos[1] + forward[1], cam.pos[2] + forward[2], 1);
     XMVECTOR up = XMVectorSet(0, 1, 0, 0);
     XMMATRIX V = XMMatrixLookAtLH(eye, at, up);
-    float far_plane = mp.radius * 100.0f;
+    const float far_plane = mp.radius * 100.0f;
     XMMATRIX P = XMMatrixPerspectiveFovLH(fov, aspect, 0.05f, far_plane);
     XMMATRIX W = XMMatrixIdentity();
     if (!mp.no_tilt) {
@@ -3595,6 +3233,10 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         XMMATRIX FlipX = XMMatrixScaling(-1.0f, 1.0f, 1.0f);
         W = W * FlipX;
     }
+
+    Skybox::DrawClouds(
+        ctx, mp, cam, sky_camera, sky_frame, V, P);
+
     XMMATRIX MVP = XMMatrixTranspose(W * V * P);
     XMMATRIX MV  = XMMatrixTranspose(W * V);
     XMVECTOR lightDirV = XMVector3Normalize(
@@ -3939,99 +3581,165 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             if (SUCCEEDED(ctx->Map(mp.cbuffer_water, 0,
                                    D3D11_MAP_WRITE_DISCARD, 0, &wms))) {
                 struct WCB {
-                    float wave0[4];
-                    float wave1[4];
-                    float wave2[4];
-                    float wave3[4];
-                    float wparams[4];
-                    float wtheme0[4];
-                    float wtheme1[4];
-                    float wtheme2[4];
-                    float wtheme3[4];
+                    float w_bias[4];
+                    float w_ph01[4];
+                    float w_sc01[4];
+                    float w_surface[4];
+                    float w_deep[4];
+                    float w_reflp[4];
+                    float w_glit[4];
+                    float w_eye[4];
+                    float w_sun[4];
+                    float w_light[4];
                 } w{};
 
-                auto finite_or = [&](int idx, float fallback) {
-                    const float v = (idx >= 0 && idx < 38)
-                        ? m.water_params[idx] : fallback;
+                auto p = [&](int idx, float fallback) {
+                    const float v = (idx >= 0 && idx + 1 < 38)
+                        ? m.water_params[idx + 1] : fallback;
                     return std::isfinite(v) ? v : fallback;
                 };
-                auto set_wave = [](float out[4],
-                                   float dx, float dz,
-                                   float wavelength,
-                                   float amp)
-                {
-                    const float len = std::sqrt(dx * dx + dz * dz);
-                    if (len > 1e-5f) {
-                        out[0] = dx / len;
-                        out[1] = dz / len;
-                    } else {
-                        out[0] = 1.0f;
-                        out[1] = 0.0f;
-                    }
-                    out[2] = std::clamp(wavelength, 1.2f, 18.0f);
-                    out[3] = std::clamp(amp, 0.004f, 0.09f);
+                auto phase = [&](float speed) {
+                    const double ph = double(water_time) * double(speed);
+                    return float(ph - std::floor(ph));
                 };
 
-                const float sx0 = finite_or(3,  0.052f);
-                const float sz0 = finite_or(4,  0.011f);
-                const float sx1 = finite_or(5, -0.019f);
-                const float sz1 = finite_or(6,  0.019f);
-                const float sc0 = std::max(std::abs(finite_or(7, 0.188f)),
-                                           0.06f);
-                const float sc1 = std::max(std::abs(finite_or(9, 0.220f)),
-                                           0.06f);
-                set_wave(w.wave0, sx0, sz0, 1.0f / sc0,
-                         std::sqrt(sx0 * sx0 + sz0 * sz0));
-                set_wave(w.wave1, sx1, sz1, 1.0f / sc1,
-                         std::sqrt(sx1 * sx1 + sz1 * sz1));
-                set_wave(w.wave2, -sz0, sx0, 1.0f / (sc0 * 1.7f),
-                         0.45f * std::sqrt(sx0 * sx0 + sz0 * sz0));
-                set_wave(w.wave3, -sz1, sx1, 1.0f / (sc1 * 2.3f),
-                         0.35f * std::sqrt(sx1 * sx1 + sz1 * sz1));
-                w.wparams[0] = std::max(std::sqrt(sx0 * sx0 + sz0 * sz0),
-                                        0.015f);
-                w.wparams[1] = std::max(std::sqrt(sx1 * sx1 + sz1 * sz1),
-                                        0.012f);
-                w.wparams[2] = std::clamp(finite_or(1, 0.2f) * 3.0f,
-                                          0.3f, 1.2f);
-                w.wparams[3] = finite_or(0, 0.0f);
+                // indices per the XEX g_WaterConstants packer sub_82B2A008
+                w.w_bias[0] = p(0, 0.2f);        // m_FresnelBias
+                w.w_bias[1] = p(1, 0.0f);        // m_ReflectionBias
+                w.w_bias[2] = p(24, 0.05f);      // m_NormalScale
+                w.w_bias[3] = std::clamp(m.has_water_theme
+                    ? m.water_opacity : 0.78f, 0.05f, 1.0f);
 
-                auto theme_param = [&](int idx, float fallback) {
-                    const float v = (m.has_water_theme && idx >= 0 && idx < 10)
-                        ? m.water_theme_params[idx] : fallback;
-                    return std::isfinite(v) ? v : fallback;
-                };
-                w.wtheme0[0] = m.has_water_theme
-                    ? m.water_shallow_colour[0] : 0.155f;
-                w.wtheme0[1] = m.has_water_theme
-                    ? m.water_shallow_colour[1] : 0.285f;
-                w.wtheme0[2] = m.has_water_theme
-                    ? m.water_shallow_colour[2] : 0.235f;
-                w.wtheme0[3] = m.has_water_theme
-                    ? std::clamp(m.water_opacity, 0.05f, 1.0f) : 1.0f;
-                w.wtheme1[0] = m.has_water_theme
-                    ? m.water_deep_colour[0] : 0.010f;
-                w.wtheme1[1] = m.has_water_theme
-                    ? m.water_deep_colour[1] : 0.075f;
-                w.wtheme1[2] = m.has_water_theme
-                    ? m.water_deep_colour[2] : 0.085f;
-                w.wtheme1[3] = theme_param(4, 0.0f);
-                w.wtheme2[0] = theme_param(0, 0.0f);
-                w.wtheme2[1] = theme_param(1, 1.0f);
-                w.wtheme2[2] = theme_param(2, 0.0f);
-                w.wtheme2[3] = theme_param(3, 25.0f);
-                w.wtheme3[0] = theme_param(5, 0.34f);
-                w.wtheme3[1] = theme_param(6, 1.0f);
-                w.wtheme3[2] = theme_param(7, 1.0f);
-                w.wtheme3[3] = theme_param(9, 1.0f);
+                w.w_ph01[0] = phase(p(2,  0.052f));
+                w.w_ph01[1] = phase(p(3,  0.011f));
+                w.w_ph01[2] = phase(p(4, -0.019f));
+                w.w_ph01[3] = phase(p(5,  0.019f));
+                w.w_sc01[0] = p(6, 0.188f);
+                w.w_sc01[1] = p(7, 0.188f);
+                w.w_sc01[2] = p(8, 0.220f);
+                w.w_sc01[3] = p(9, 0.220f);
+
+                w.w_surface[0] = m.water_shallow_colour[0];
+                w.w_surface[1] = m.water_shallow_colour[1];
+                w.w_surface[2] = m.water_shallow_colour[2];
+                w.w_surface[3] = p(30, 0.1f);    // m_DiffuseAbsorption
+                w.w_deep[0] = m.water_deep_colour[0];
+                w.w_deep[1] = m.water_deep_colour[1];
+                w.w_deep[2] = m.water_deep_colour[2];
+                w.w_deep[3] = p(29, 0.75f);      // m_ReflectionStrength
+
+                w.w_reflp[0] = p(25, 2.0f);      // m_ReflectionScale.x
+                w.w_reflp[1] = p(27, 2.0f);      // m_RefractionScale.x
+                w.w_reflp[2] = p(34, 0.3f);      // m_GlitteringNormalBendFactor
+                w.w_reflp[3] = p(35, 5.0f);      // m_GlitteringStrength
+
+                const bool sky_ok = mp.has_sky_theme && mp.show_sky &&
+                                    mp.cbuffer_sky;
+                // Exact dome reflection needs the sky pass's constant block
+                // and in-scatter LUT (refreshed by DrawSky each frame).
+                const bool dome_ok = sky_ok && mp.cbuffer_sky_dome &&
+                                     mp.sky_lut_srv && mp.sampler_sky_clamp;
+                w.w_glit[0] = p(36, 128.0f);     // m_GlitteringPower
+                w.w_glit[1] = 0.0f;              // highlight flag
+                w.w_glit[2] = sky_ok ? 1.0f : 0.0f;
+                w.w_glit[3] = dome_ok ? 1.0f : 0.0f;
+
+                w.w_eye[0] = cam.pos[0];
+                w.w_eye[1] = cam.pos[1];
+                w.w_eye[2] = cam.pos[2];
+                w.w_eye[3] = water_time;
+
+                // c143 light colour: the theme's evaluated MainLightColour
+                // (time-of-day keyframed); the old sun ramp remains as the
+                // no-theme fallback.
+                if (mp.has_sky_theme) {
+                    w.w_sun[0] = sky_frame.main_light_colour[0];
+                    w.w_sun[1] = sky_frame.main_light_colour[1];
+                    w.w_sun[2] = sky_frame.main_light_colour[2];
+                } else {
+                    const float sun_up =
+                        std::clamp(sun_dir_f.y * 3.0f, 0.0f, 1.0f);
+                    w.w_sun[0] = 1.0f;
+                    w.w_sun[1] = 0.55f + 0.42f * sun_up;
+                    w.w_sun[2] = 0.30f + 0.60f * sun_up;
+                }
+                w.w_sun[3] = sun_dir_f.y;
+
+                // c142 light direction (direction the light travels): sun by
+                // day; when the sun is below the horizon the engine's main
+                // light is the moon. The mesh path's lightDir clamps the sun
+                // above the horizon, which is wrong for glints.
+                if (sun_dir_f.y < 0.0f && mp.has_moon_axis) {
+                    w.w_light[0] = -sky_frame.moon_direction[0];
+                    w.w_light[1] = -sky_frame.moon_direction[1];
+                    w.w_light[2] = -sky_frame.moon_direction[2];
+                } else {
+                    w.w_light[0] = sun_dir_f.x;
+                    w.w_light[1] = sun_dir_f.y;
+                    w.w_light[2] = sun_dir_f.z;
+                }
+                w.w_light[3] = 0.0f;
+
                 std::memcpy(wms.pData, &w, sizeof(w));
                 ctx->Unmap(mp.cbuffer_water, 0);
+
+                // Water flashing diagnosis: log every global input the water
+                // shader sees. If a value alternates frame-to-frame the
+                // culprit is visible immediately.
+                UINT tex_mips = 0, tex_w = 0;
+                if (m.srv_diffuse) {
+                    ID3D11Resource* res = nullptr;
+                    m.srv_diffuse->GetResource(&res);
+                    ID3D11Texture2D* t2 = nullptr;
+                    if (res && SUCCEEDED(res->QueryInterface(
+                            __uuidof(ID3D11Texture2D), (void**)&t2))) {
+                        D3D11_TEXTURE2D_DESC tdd{};
+                        t2->GetDesc(&tdd);
+                        tex_mips = tdd.MipLevels;
+                        tex_w = tdd.Width;
+                        t2->Release();
+                    }
+                    if (res) res->Release();
+                }
+                water_debug_line(
+                    "W t=%.4f tex='%s' mips=%u w=%u "
+                    "eye=(%.2f,%.2f,%.2f) sun=(%.5f,%.5f,%.5f) "
+                    "L=(%.5f,%.5f,%.5f) suncol=(%.3f,%.3f,%.3f) "
+                    "ph=(%.5f,%.5f,%.5f,%.5f) sc=(%.4f,%.4f,%.4f,%.4f) "
+                    "bias=(%.3f,%.3f) ns=%.4f "
+                    "reflstr=%.3f glit(bend=%.3f str=%.3f pow=%.1f)\n",
+                    water_time, m.diffuse_tex_name.c_str(),
+                    tex_mips, tex_w,
+                    cam.pos[0], cam.pos[1], cam.pos[2],
+                    sun_dir_f.x, sun_dir_f.y, sun_dir_f.z,
+                    w.w_light[0], w.w_light[1], w.w_light[2],
+                    w.w_sun[0], w.w_sun[1], w.w_sun[2],
+                    w.w_ph01[0], w.w_ph01[1], w.w_ph01[2], w.w_ph01[3],
+                    w.w_sc01[0], w.w_sc01[1], w.w_sc01[2], w.w_sc01[3],
+                    w.w_bias[0], w.w_bias[1], w.w_bias[2],
+                    w.w_deep[3], w.w_reflp[2], w.w_reflp[3],
+                    w.w_glit[0]);
             }
 
             ctx->VSSetShader(mp.vs_water, nullptr, 0);
             ctx->PSSetShader(mp.ps_water, nullptr, 0);
             ctx->VSSetConstantBuffers(3, 1, &mp.cbuffer_water);
             ctx->PSSetConstantBuffers(3, 1, &mp.cbuffer_water);
+            if (mp.cbuffer_sky) {
+                ctx->PSSetConstantBuffers(4, 1, &mp.cbuffer_sky);
+            }
+            // Exact dome reflection inputs (see dome_reflect in the PS):
+            // the sky pass's constant block, in-scatter LUT and clamp
+            // sampler, refreshed by DrawSky earlier this frame.
+            if (mp.cbuffer_sky_dome) {
+                ctx->PSSetConstantBuffers(6, 1, &mp.cbuffer_sky_dome);
+            }
+            if (mp.sky_lut_srv) {
+                ctx->PSSetShaderResources(4, 1, &mp.sky_lut_srv);
+            }
+            if (mp.sampler_sky_clamp) {
+                ctx->PSSetSamplers(2, 1, &mp.sampler_sky_clamp);
+            }
 
             ID3D11ShaderResourceView* nrm_srv =
                 m.srv_diffuse ? m.srv_diffuse : mp.default_srv;
@@ -4111,6 +3819,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     for(const auto& m : mp.meshes){
         if (mp_should_hide_mesh(m)) continue;
         if(!m.vb || !m.ib || m.index_count==0 || (m.has_alpha && m.alpha_test)) continue;
+        if (m.is_water) continue; // drawn after everything it refracts
         if (any_isolated && !m.isolated) continue;
         if (mp.selected_lod >= 0 &&
             m.lod_index != (uint32_t)mp.selected_lod) continue;
@@ -4127,6 +3836,25 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test, m.cloth_sim);
         draw_one(m, mp.bsAlpha);
     }
+    // Water last: the ONE/SRC_ALPHA composite reads the scene behind the
+    // surface out of the framebuffer as the retail refraction tile, so
+    // everything it refracts must already be drawn. Depth writes stay on
+    // (retail water z-writes); the stencil gate keeps overlapping coplanar
+    // water copies (one .water per heightfield) from re-compositing.
+    ctx->OMSetDepthStencilState(
+        mp.dssWaterOnce ? mp.dssWaterOnce : mp.dssWrite, 0);
+    for(const auto& m : mp.meshes){
+        if (mp_should_hide_mesh(m)) continue;
+        if(!m.vb || !m.ib || m.index_count==0 || !m.is_water) continue;
+        if (any_isolated && !m.isolated) continue;
+        if (mp.selected_lod >= 0 &&
+            m.lod_index != (uint32_t)mp.selected_lod) continue;
+        upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test, m.cloth_sim);
+        const bool water_ok =
+            mp.vs_water && mp.ps_water && mp.cbuffer_water && mp.bs_water;
+        draw_one(m, water_ok ? mp.bs_water : mp.bs);
+    }
+    ctx->OMSetDepthStencilState(mp.dssNoWrite, 0);
 
     if (mp.show_weather && mp.no_tilt && mp.has_weather_theme &&
         mp.vs_weather && mp.ps_weather && mp.cbuffer_weather) {
@@ -4140,8 +3868,10 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         int rain_count = (int)(rain_density * 15000.0f);
         rain_count = std::clamp(rain_count, 0, 20000);
         if (rain_size <= 0.001f) rain_count = 0;
+        // Retail draws 4096 snow point sprites (WeatherPrim_RenderSnowFlakes
+        // @ 0x821BE068, Draw_PointList(0, 4096)).
         int snow_count = has_snow
-            ? (int)(2400.0f * std::max(mp.snow_intensity_mult, 0.0f))
+            ? (int)(4096.0f * std::max(mp.snow_intensity_mult, 0.0f))
             : 0;
         snow_count = std::clamp(snow_count, 0, 8000);
 
@@ -4177,15 +3907,23 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                                  1.0f);
             wx.area = XMFLOAT4(30.0f, 24.0f, 22.0f, 18.0f);
             wx.cam_right = XMFLOAT4(sky_right_f.x, sky_right_f.y,
-                                    sky_right_f.z, 0.0f);
+                                    sky_right_f.z,
+                                    sky_camera.tan_half_x);
             wx.cam_up = XMFLOAT4(sky_up_f.x, sky_up_f.y,
-                                 sky_up_f.z, 0.0f);
+                                 sky_up_f.z, sky_camera.tan_half_y);
             D3D11_MAPPED_SUBRESOURCE xms{};
             if (SUCCEEDED(ctx->Map(mp.cbuffer_weather, 0,
                                    D3D11_MAP_WRITE_DISCARD, 0, &xms))) {
                 std::memcpy(xms.pData, &wx, sizeof(wx));
                 ctx->Unmap(mp.cbuffer_weather, 0);
             }
+
+            water_debug_line(
+                "X t=%.4f rain=%d snow=%d rain_size=%.3f snow_size=%.3f "
+                "wind=(%.2f,%.2f)\n",
+                sky_time, (int)rain_count, (int)snow_count,
+                rain_size, snow_size,
+                mp.weather_wind[0], mp.weather_wind[1]);
 
             ctx->IASetInputLayout(nullptr);
             ctx->IASetPrimitiveTopology(
@@ -4209,7 +3947,110 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         }
     }
 
+    // ---- particle FX (chimney smoke, waterfalls, ...) ----
+    if (mp.fx_show && mp.vs_fx && mp.ps_fx && mp.layout_fx && mp.cbuffer_fx &&
+        !mp.fx_system.empty()) {
+        double now = ImGui::GetTime();
+        float dt = (float)(now - mp.fx_last_time);
+        mp.fx_last_time = now;
+        if (dt < 0.0f || dt > 0.25f) dt = 1.0f / 60.0f;
+        mp.fx_system.update(dt);
+
+        const float cr[3] = { sky_right_f.x, sky_right_f.y, sky_right_f.z };
+        const float cu[3] = { sky_up_f.x, sky_up_f.y, sky_up_f.z };
+        const float ce[3] = { cam.pos[0], cam.pos[1], cam.pos[2] };
+        std::vector<Fx::FxBatch> batches;
+        mp.fx_system.build_batches(cr, cu, ce, batches);
+
+        XMMATRIX VP = XMMatrixTranspose(V * P);
+        D3D11_MAPPED_SUBRESOURCE fms{};
+        if (SUCCEEDED(ctx->Map(mp.cbuffer_fx, 0,
+                               D3D11_MAP_WRITE_DISCARD, 0, &fms))) {
+            XMFLOAT4X4 m; XMStoreFloat4x4(&m, VP);
+            std::memcpy(fms.pData, &m, sizeof(m));
+            ctx->Unmap(mp.cbuffer_fx, 0);
+        }
+        ctx->IASetInputLayout(mp.layout_fx);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->RSSetState(mp.rs);
+        ctx->OMSetDepthStencilState(mp.dssNoWrite, 0);
+        ctx->VSSetShader(mp.vs_fx, nullptr, 0);
+        ctx->PSSetShader(mp.ps_fx, nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, &mp.cbuffer_fx);
+        ID3D11SamplerState* fx_smp = mp.sampler;
+        ctx->PSSetSamplers(0, 1, &fx_smp);
+        const UINT fstride = sizeof(Fx::FxVertex), foff = 0;
+        for (auto& b : batches) {
+            if (b.verts.empty()) continue;
+            if (mp.fx_vb_capacity < b.verts.size()) {
+                if (mp.fx_vb) { mp.fx_vb->Release(); mp.fx_vb = nullptr; }
+                size_t cap = b.verts.size() + b.verts.size() / 2 + 2048;
+                D3D11_BUFFER_DESC vd{};
+                vd.ByteWidth = (UINT)(cap * sizeof(Fx::FxVertex));
+                vd.Usage = D3D11_USAGE_DYNAMIC;
+                vd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+                vd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+                if (FAILED(dev->CreateBuffer(&vd, nullptr, &mp.fx_vb))) {
+                    mp.fx_vb_capacity = 0; continue;
+                }
+                mp.fx_vb_capacity = cap;
+            }
+            D3D11_MAPPED_SUBRESOURCE vms{};
+            if (FAILED(ctx->Map(mp.fx_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &vms)))
+                continue;
+            std::memcpy(vms.pData, b.verts.data(),
+                        b.verts.size() * sizeof(Fx::FxVertex));
+            ctx->Unmap(mp.fx_vb, 0);
+            ctx->IASetVertexBuffers(0, 1, &mp.fx_vb, &fstride, &foff);
+            auto it = mp.fx_tex_srv.find(b.texture);
+            ID3D11ShaderResourceView* srv =
+                (it != mp.fx_tex_srv.end() && it->second) ? it->second
+                                                          : mp.default_srv;
+            ctx->PSSetShaderResources(0, 1, &srv);
+            // Retail fixed-function factors from the material's
+            // Src/DestBlendMode (batch carries D3D11_BLEND values; default
+            // SrcAlpha/InvSrcAlpha). States are created on demand and cached.
+            ID3D11BlendState* fx_bs = nullptr;
+            {
+                const int key = b.src_blend * 100 + b.dst_blend;
+                auto bit = mp.fx_blend_states.find(key);
+                if (bit != mp.fx_blend_states.end()) {
+                    fx_bs = bit->second;
+                } else {
+                    D3D11_BLEND_DESC bdx{};
+                    bdx.RenderTarget[0].BlendEnable = TRUE;
+                    bdx.RenderTarget[0].SrcBlend =
+                        (D3D11_BLEND)std::clamp(b.src_blend, 1, 19);
+                    bdx.RenderTarget[0].DestBlend =
+                        (D3D11_BLEND)std::clamp(b.dst_blend, 1, 19);
+                    bdx.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+                    bdx.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+                    bdx.RenderTarget[0].DestBlendAlpha =
+                        D3D11_BLEND_INV_SRC_ALPHA;
+                    bdx.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+                    bdx.RenderTarget[0].RenderTargetWriteMask =
+                        D3D11_COLOR_WRITE_ENABLE_ALL;
+                    dev->CreateBlendState(&bdx, &fx_bs);
+                    mp.fx_blend_states.emplace(key, fx_bs);
+                }
+            }
+            ctx->OMSetBlendState(fx_bs ? fx_bs : mp.bs_fx_alpha,
+                                 blend_factor, 0xFFFFFFFF);
+            ctx->Draw((UINT)b.verts.size(), 0);
+        }
+        ID3D11Buffer* null_cb = nullptr;
+        ctx->VSSetConstantBuffers(0, 1, &null_cb);
+        ctx->IASetInputLayout(mp.layout);
+        ctx->VSSetShader(mp.vs, nullptr, 0);
+        ctx->PSSetShader(mp.ps, nullptr, 0);
+        ctx->RSSetState((mp.wireframe && mp.rs_wire) ? mp.rs_wire : mp.rs);
+    }
+
     if (mp.selected_pick_id != 0 && mp.dssNoWriteLEqual) {
+        // The FX pass above nulls VS constant-buffer slot 0 on exit; rebind
+        // the scene cbuffer or the highlight verts transform through garbage.
+        ctx->VSSetConstantBuffers(0, 1, &mp.cbuffer);
+        ctx->PSSetConstantBuffers(0, 1, &mp.cbuffer);
         ctx->OMSetDepthStencilState(mp.dssNoWriteLEqual, 0);
         upload_per_mesh_cb(true, false, false);
         for (const auto& m : mp.meshes) {

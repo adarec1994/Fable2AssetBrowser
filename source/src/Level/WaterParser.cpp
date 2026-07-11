@@ -8,172 +8,114 @@ namespace Level {
 
 namespace {
 
-constexpr uint32_t kTileMagic = 0x00000FECu;
-constexpr uint32_t kMaxBodyCount = 64;
-constexpr uint32_t kMaxDimCount = 8;
-constexpr uint32_t kMaxMaskBytes = 65536;
-constexpr size_t kBodyParamFloats = 38;
+// Straight port of the XEX stream reader used by WaterFile_DeserializeRecord
+// (@0x82B28398). No heuristics: any deviation from the on-disc layout is a
+// parse failure, exactly as in the engine (which then falls back to default
+// WaterParams).
+
+constexpr uint32_t kMarker       = 0x00000FECu;
+constexpr uint32_t kMaxBodyCount = 256;
 constexpr uint32_t kMaxTileCount = 4096;
+constexpr uint32_t kMaxAuxCount  = 64;
+constexpr uint32_t kMaxMaskBytes = 1u << 20;
+constexpr uint32_t kMaxCells     = 1024;
 
-uint32_t read_u32_be(const uint8_t* p) {
-    return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
-           (uint32_t(p[2]) <<  8) |  uint32_t(p[3]);
-}
+struct Reader {
+    const uint8_t* p;
+    size_t         n;
+    size_t         i = 0;
 
-float read_f32_be(const uint8_t* p) {
-    uint32_t u = read_u32_be(p);
-    float f;
-    std::memcpy(&f, &u, sizeof(f));
-    return f;
-}
+    bool need(size_t k) const { return i + k <= n; }
 
-bool finite_extent(float v) {
-    return std::isfinite(v) && v > 0.0f && v < 5000.0f;
-}
-
-bool parse_body(const std::vector<uint8_t>& bytes,
-                size_t off,
-                size_t end,
-                WaterBody& out)
-{
-    if (off + 8 + kBodyParamFloats * 4 > end) return false;
-
-    const uint8_t* p = bytes.data();
-
-    if (read_u32_be(p + off) != kTileMagic) return false;
-    off += 4;
-
-    off += 4;
-
-    for (size_t i = 0; i < kBodyParamFloats; ++i) {
-        out.wave_params[i] = read_f32_be(p + off + i * 4);
-    }
-    out.base_height = std::isfinite(out.wave_params[0])
-        ? out.wave_params[0]
-        : 0.0f;
-    off += kBodyParamFloats * 4;
-
-    auto read_cstring = [&](std::string& dst) -> bool {
-        const size_t str_start = off;
-        while (off < end && bytes[off] != 0) ++off;
-        if (off >= end) return false;
-        dst.assign(reinterpret_cast<const char*>(p + str_start),
-                   off - str_start);
-        ++off;
+    bool u32(uint32_t& v) {
+        if (!need(4)) return false;
+        v = (uint32_t(p[i]) << 24) | (uint32_t(p[i + 1]) << 16) |
+            (uint32_t(p[i + 2]) << 8) | uint32_t(p[i + 3]);
+        i += 4;
         return true;
-    };
+    }
+    bool f32(float& v) {
+        uint32_t u = 0;
+        if (!u32(u)) return false;
+        std::memcpy(&v, &u, sizeof(v));
+        return true;
+    }
+    bool strz(std::string& s) {
+        size_t j = i;
+        while (j < n && p[j] != 0) ++j;
+        if (j >= n) return false;
+        s.assign(reinterpret_cast<const char*>(p + i), j - i);
+        i = j + 1;
+        return true;
+    }
+};
 
-    if (!read_cstring(out.normal_map_path)) return false;
-    const size_t after_first_path = off;
+bool parse_body(Reader& r, WaterBody& out)
+{
+    uint32_t marker = 0;
+    if (!r.u32(marker) || marker != kMarker) return false;
 
-    
-    
-    
-    const bool next_is_count_then_tile =
-        off + 8 <= end &&
-        read_u32_be(p + off) <= kMaxTileCount &&
-        read_u32_be(p + off + 4) == kTileMagic;
-    if (!next_is_count_then_tile) {
-        if (!read_cstring(out.secondary_map_path)) {
-            out.secondary_map_path.clear();
-            off = after_first_path;
-        }
+    if (!r.f32(out.param_a))     return false;
+    if (!r.f32(out.base_height)) return false;
+    for (float& v : out.params) {
+        if (!r.f32(v)) return false;
     }
 
-    bool tile_loop_started = false;
-    if (off + 4 <= end) {
-        const uint32_t declared = read_u32_be(p + off);
-        if (declared <= kMaxTileCount) {
-            out.declared_tile_count = declared;
-            off += 4;
-            if (off + 4 <= end && read_u32_be(p + off) == kTileMagic) {
-                tile_loop_started = true;
-            }
+    if (!r.strz(out.normal_map_path))    return false;
+    if (!r.strz(out.secondary_map_path)) return false;
+
+    uint32_t patch_count = 0;
+    if (!r.u32(patch_count) || patch_count > kMaxTileCount) return false;
+    out.declared_tile_count = patch_count;
+
+    out.tiles.reserve(patch_count);
+    for (uint32_t pi = 0; pi < patch_count; ++pi) {
+        if (!r.u32(marker) || marker != kMarker) return false;
+
+        WaterTile t;
+        float cells_x = 0.0f;
+        float cells_z = 0.0f;
+        if (!r.f32(t.cx) || !r.f32(t.cz) ||
+            !r.f32(t.ex) || !r.f32(t.ez) ||
+            !r.f32(cells_x) || !r.f32(cells_z)) {
+            return false;
         }
+        if (!(cells_x >= 1.0f) || !(cells_z >= 1.0f) ||
+            cells_x > float(kMaxCells) || cells_z > float(kMaxCells)) {
+            return false;
+        }
+        t.cells_x = int(cells_x);
+        t.cells_z = int(cells_z);
+
+        uint32_t aux_count = 0;
+        if (!r.u32(aux_count) || aux_count > kMaxAuxCount) return false;
+        t.aux.resize(aux_count);
+        for (uint32_t k = 0; k < aux_count; ++k) {
+            if (!r.u32(t.aux[k])) return false;
+        }
+
+        uint32_t mask_count = 0;
+        if (!r.u32(mask_count) || mask_count > kMaxMaskBytes) return false;
+        if (!r.need(mask_count)) return false;
+        if (mask_count != uint32_t(t.cells_x) * uint32_t(t.cells_z)) {
+            // The engine reads exactly cells_x*cells_z bytes; anything else
+            // means we misparsed.
+            return false;
+        }
+        t.mask.assign(r.p + r.i, r.p + r.i + mask_count);
+        r.i += mask_count;
+
+        if (!r.u32(marker) || marker != kMarker) return false;
+
+        out.tiles.push_back(std::move(t));
     }
 
-    if (!tile_loop_started) {
-        for (size_t scan = off; scan < off + 32 && scan + 4 <= end; ++scan) {
-            if (read_u32_be(p + scan) == kTileMagic) {
-                if (scan >= 4) {
-                    const uint32_t declared = read_u32_be(p + scan - 4);
-                    if (declared <= kMaxTileCount) {
-                        out.declared_tile_count = declared;
-                    }
-                }
-                off = scan;
-                tile_loop_started = true;
-                break;
-            }
-        }
-    }
-    if (!tile_loop_started && after_first_path != off) {
-        off = after_first_path;
-        for (size_t scan = off; scan < off + 32 && scan + 4 <= end; ++scan) {
-            if (read_u32_be(p + scan) == kTileMagic) {
-                if (scan >= 4) {
-                    const uint32_t declared = read_u32_be(p + scan - 4);
-                    if (declared <= kMaxTileCount) {
-                        out.declared_tile_count = declared;
-                    }
-                }
-                off = scan;
-                tile_loop_started = true;
-                break;
-            }
-        }
-    }
-    if (!tile_loop_started) return true;
+    // trailing u32 after the patch loop (present in every record; the engine
+    // reads and discards it). Tolerate a truncated final record.
+    uint32_t trailing = 0;
+    (void)r.u32(trailing);
 
-    while (off + 0x24 <= end) {
-        if (out.declared_tile_count != 0 &&
-            out.tiles.size() >= out.declared_tile_count) {
-            break;
-        }
-
-        if (read_u32_be(p + off) != kTileMagic) break;
-
-        WaterTile tile;
-        tile.cx    = read_f32_be(p + off + 0x04);
-        tile.cz    = read_f32_be(p + off + 0x08);
-        tile.ex    = read_f32_be(p + off + 0x0C);
-        tile.ez    = read_f32_be(p + off + 0x10);
-        tile.h_min = read_f32_be(p + off + 0x14);
-        tile.h_max = read_f32_be(p + off + 0x18);
-
-        const bool bounds_sane =
-            std::isfinite(tile.cx) && std::isfinite(tile.cz) &&
-            finite_extent(tile.ex) && finite_extent(tile.ez) &&
-            std::isfinite(tile.h_min) && std::isfinite(tile.h_max);
-        if (!bounds_sane) break;
-
-        const uint32_t dim_count = read_u32_be(p + off + 0x1C);
-        if (dim_count > kMaxDimCount) break;
-
-        const size_t dims_off = off + 0x20;
-        const size_t mask_count_off = dims_off + size_t(dim_count) * 4;
-        if (mask_count_off + 4 > end) break;
-
-        tile.dims.reserve(dim_count);
-        for (uint32_t i = 0; i < dim_count; ++i) {
-            tile.dims.push_back(read_u32_be(p + dims_off + size_t(i) * 4));
-        }
-
-        const uint32_t mask_count = read_u32_be(p + mask_count_off);
-        if (mask_count > kMaxMaskBytes) break;
-
-        const size_t mask_off = mask_count_off + 4;
-        const size_t end_off = mask_off + mask_count;
-        if (end_off + 4 > end) break;
-
-        tile.mask.assign(p + mask_off, p + end_off);
-        if (read_u32_be(p + end_off) != kTileMagic) break;
-
-        out.tiles.push_back(std::move(tile));
-        off = end_off + 4;
-    }
-
-    return !out.normal_map_path.empty();
+    return true;
 }
 
 }
@@ -181,40 +123,36 @@ bool parse_body(const std::vector<uint8_t>& bytes,
 bool ParseWaterFile(const std::vector<uint8_t>& bytes, WaterScene& out)
 {
     out = WaterScene{};
-
     if (bytes.size() < 0x0C) return false;
 
-    const uint8_t* p = bytes.data();
-    out.version    = read_u32_be(p + 0x00);
-    out.body_count = read_u32_be(p + 0x04);
+    Reader r{ bytes.data(), bytes.size() };
 
-    if (out.body_count == 0 || out.body_count > kMaxBodyCount) return false;
+    if (!r.u32(out.version) || out.version != 2) return false;
+    if (!r.u32(out.body_count) || out.body_count == 0 ||
+        out.body_count > kMaxBodyCount) {
+        return false;
+    }
 
-    const size_t table_end = 0x08 + size_t(out.body_count) * 4;
+    const size_t table_end = 8 + size_t(out.body_count) * 4;
     if (table_end > bytes.size()) return false;
 
-    std::vector<size_t> body_offsets;
-    body_offsets.reserve(out.body_count);
-    for (uint32_t i = 0; i < out.body_count; ++i) {
-        const uint32_t v = read_u32_be(p + 0x08 + size_t(i) * 4);
-        if (v < table_end || v >= bytes.size()) return false;
-        if (!body_offsets.empty() && v <= body_offsets.back()) return false;
-        body_offsets.push_back(v);
+    std::vector<uint32_t> offsets(out.body_count);
+    for (uint32_t k = 0; k < out.body_count; ++k) {
+        if (!r.u32(offsets[k])) return false;
+        if (offsets[k] < table_end || offsets[k] >= bytes.size()) return false;
     }
 
     out.bodies.reserve(out.body_count);
-    for (uint32_t i = 0; i < out.body_count; ++i) {
-        const size_t start = body_offsets[i];
-        const size_t end   = (i + 1 < out.body_count) ? body_offsets[i + 1]
-                                                      : bytes.size();
+    for (uint32_t k = 0; k < out.body_count; ++k) {
+        Reader br{ bytes.data(), bytes.size(), offsets[k] };
         WaterBody body;
-        if (parse_body(bytes, start, end, body)) {
+        if (parse_body(br, body)) {
             out.tile_count += uint32_t(body.tiles.size());
             out.bodies.push_back(std::move(body));
         }
     }
 
-    return out.tile_count != 0;
+    return !out.bodies.empty();
 }
 
 }

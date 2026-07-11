@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <zlib.h>
 
@@ -128,8 +129,17 @@ void untile_xbox360_tile_major(const uint8_t* tiled,
                                uint32_t block_pixel_size,
                                uint32_t texel_byte_pitch)
 {
-    const uint32_t blocks_w = (uint32_t)width_pixels  / block_pixel_size;
-    const uint32_t blocks_h = (uint32_t)height_pixels / block_pixel_size;
+    if (!tiled || width_pixels <= 0 || height_pixels <= 0 ||
+        block_pixel_size == 0 || texel_byte_pitch == 0) {
+        linear_out.clear();
+        return;
+    }
+    const uint32_t width = (uint32_t)width_pixels;
+    const uint32_t height = (uint32_t)height_pixels;
+    const uint32_t blocks_w = width / block_pixel_size +
+                              (width % block_pixel_size != 0u);
+    const uint32_t blocks_h = height / block_pixel_size +
+                              (height % block_pixel_size != 0u);
     constexpr uint32_t TILE_BLOCKS = 32;
     const uint32_t tiles_w = (blocks_w + TILE_BLOCKS - 1) / TILE_BLOCKS;
     const uint32_t tiles_h = (blocks_h + TILE_BLOCKS - 1) / TILE_BLOCKS;
@@ -166,8 +176,20 @@ void untile_xbox360_imageheat(const uint8_t* tiled,
                               uint32_t block_pixel_size,
                               uint32_t texel_byte_pitch)
 {
-    const uint32_t width_in_blocks  = (uint32_t)width_pixels  / block_pixel_size;
-    const uint32_t height_in_blocks = (uint32_t)height_pixels / block_pixel_size;
+    if (!tiled || width_pixels <= 0 || height_pixels <= 0 ||
+        block_pixel_size == 0 || texel_byte_pitch == 0) {
+        linear_out.clear();
+        return;
+    }
+    // BC textures still contain a complete block for a partial 1-3 pixel
+    // edge.  Keep this grid identical to the one consumed by the BC blitters
+    // below; floor division made odd-sized atlases allocate too few blocks.
+    const uint32_t width = (uint32_t)width_pixels;
+    const uint32_t height = (uint32_t)height_pixels;
+    const uint32_t width_in_blocks = width / block_pixel_size +
+                                     (width % block_pixel_size != 0u);
+    const uint32_t height_in_blocks = height / block_pixel_size +
+                                      (height % block_pixel_size != 0u);
 
     // Xbox 360 "packed mip" layout: textures 16 texels or smaller along an
     // axis live inside a shared 32x32-block tile at a 16-texel offset on
@@ -209,14 +231,44 @@ void untile_xbox360_imageheat(const uint8_t* tiled,
     }
 }
 
+bool checked_mul_size(size_t a, size_t b, size_t& out) {
+    if (a != 0 && b > std::numeric_limits<size_t>::max() / a) return false;
+    out = a * b;
+    return true;
+}
+
+bool bc_layout_sizes(int w, int h, size_t bytes_per_block,
+                     size_t& blocks_w, size_t& blocks_h,
+                     size_t& encoded_size, size_t& rgba_size) {
+    if (w <= 0 || h <= 0 || w > 16384 || h > 16384 ||
+        bytes_per_block == 0) {
+        return false;
+    }
+    const size_t width = (size_t)w;
+    const size_t height = (size_t)h;
+    blocks_w = width / 4u + (width % 4u != 0u);
+    blocks_h = height / 4u + (height % 4u != 0u);
+
+    size_t block_count = 0;
+    size_t pixel_count = 0;
+    return checked_mul_size(blocks_w, blocks_h, block_count) &&
+           checked_mul_size(block_count, bytes_per_block, encoded_size) &&
+           checked_mul_size(width, height, pixel_count) &&
+           checked_mul_size(pixel_count, 4u, rgba_size);
+}
+
 template<int Bytes>
-void blit_bc_to_rgba(const uint8_t* src, int w, int h,
+bool blit_bc_to_rgba(const uint8_t* src, size_t src_size, int w, int h,
                      std::vector<uint8_t>& rgba,
                      void (*decode_block)(const uint8_t*, uint32_t*))
 {
-    const size_t bx = (size_t)((w + 3) / 4);
-    const size_t by = (size_t)((h + 3) / 4);
-    rgba.assign((size_t)w * (size_t)h * 4, 0xFF);
+    size_t bx = 0, by = 0, encoded_size = 0, rgba_size = 0;
+    if (!src || !decode_block ||
+        !bc_layout_sizes(w, h, Bytes, bx, by, encoded_size, rgba_size) ||
+        src_size < encoded_size) {
+        return false;
+    }
+    rgba.assign(rgba_size, 0xFF);
     size_t off = 0;
     for (size_t byy = 0; byy < by; ++byy) {
         for (size_t bxx = 0; bxx < bx; ++bxx) {
@@ -234,14 +286,19 @@ void blit_bc_to_rgba(const uint8_t* src, int w, int h,
             }
         }
     }
+    return true;
 }
 
-void blit_bc5_to_rgba(const uint8_t* src, int w, int h,
+bool blit_bc5_to_rgba(const uint8_t* src, size_t src_size, int w, int h,
                       std::vector<uint8_t>& rgba)
 {
-    const size_t bx = (size_t)((w + 3) / 4);
-    const size_t by = (size_t)((h + 3) / 4);
-    rgba.assign((size_t)w * (size_t)h * 4, 0xFF);
+    size_t bx = 0, by = 0, encoded_size = 0, rgba_size = 0;
+    if (!src ||
+        !bc_layout_sizes(w, h, 16u, bx, by, encoded_size, rgba_size) ||
+        src_size < encoded_size) {
+        return false;
+    }
+    rgba.assign(rgba_size, 0xFF);
     size_t off = 0;
     for (size_t byy = 0; byy < by; ++byy) {
         for (size_t bxx = 0; bxx < bx; ++bxx) {
@@ -274,11 +331,18 @@ void blit_bc5_to_rgba(const uint8_t* src, int w, int h,
             }
         }
     }
+    return true;
 }
 
 bool inflate_zlib(const uint8_t* in, size_t in_size,
                   std::vector<uint8_t>& out, size_t expected_raw)
 {
+    if (!in || in_size == 0 || expected_raw == 0 ||
+        in_size > std::numeric_limits<uInt>::max() ||
+        expected_raw > std::numeric_limits<uInt>::max()) {
+        out.clear();
+        return false;
+    }
     out.assign(expected_raw, 0);
     z_stream zs{};
     zs.next_in   = const_cast<Bytef*>(in);
@@ -426,14 +490,25 @@ DecodedAtlas DecodeAtlas(const std::vector<uint8_t>& blob)
         return r;
     }
     swap16_words(linear.data(), linear.size());
+    bool decoded = false;
     if (PF == 35u) {
-        blit_bc_to_rgba<8>(linear.data(), (int)W, (int)H, r.rgba,
-                           decode_bc1_block);
+        decoded = blit_bc_to_rgba<8>(linear.data(), linear.size(),
+                                     (int)W, (int)H, r.rgba,
+                                     decode_bc1_block);
     } else if (PF == 39u) {
-        blit_bc_to_rgba<16>(linear.data(), (int)W, (int)H, r.rgba,
-                            decode_bc3_block);
+        decoded = blit_bc_to_rgba<16>(linear.data(), linear.size(),
+                                      (int)W, (int)H, r.rgba,
+                                      decode_bc3_block);
     } else {
-        blit_bc5_to_rgba(linear.data(), (int)W, (int)H, r.rgba);
+        decoded = blit_bc5_to_rgba(linear.data(), linear.size(),
+                                   (int)W, (int)H, r.rgba);
+    }
+    if (!decoded) {
+        std::ostringstream os;
+        os << "atlas: linear BC payload too small for "
+           << W << "x" << H << " PF=" << PF;
+        r.error = os.str();
+        return r;
     }
     r.ok = true;
     return r;
@@ -453,10 +528,23 @@ bool decode_zlib_bc_page_generic(const uint8_t* zlib_stream,
         expected_raw == 0) return false;
     if (zlib_stream[0] != 0x78) return false;
 
+    const size_t block_bytes = (which == 1) ? 8u : 16u;
+    size_t blocks_w = 0, blocks_h = 0, logical_raw = 0, rgba_size = 0;
+    if (!bc_layout_sizes(width_pixels, height_pixels, block_bytes,
+                         blocks_w, blocks_h, logical_raw, rgba_size)) {
+        return false;
+    }
+    const size_t padded_w = (blocks_w + 31u) & ~size_t(31u);
+    const size_t padded_h = (blocks_h + 31u) & ~size_t(31u);
+    size_t padded_blocks = 0, padded_raw = 0;
+    if (!checked_mul_size(padded_w, padded_h, padded_blocks) ||
+        !checked_mul_size(padded_blocks, block_bytes, padded_raw) ||
+        expected_raw < logical_raw || expected_raw > padded_raw) {
+        return false;
+    }
+
     std::vector<uint8_t> raw;
     if (!inflate_zlib(zlib_stream, comp_size, raw, expected_raw)) return false;
-
-    const uint32_t block_bytes = (which == 1) ? 8u : 16u;
 
     std::vector<uint8_t> linear;
     untile_xbox360_imageheat(raw.data(), raw.size(), linear,
@@ -466,15 +554,17 @@ bool decode_zlib_bc_page_generic(const uint8_t* zlib_stream,
 
     swap16_words(linear.data(), linear.size());
     if (which == 1) {
-        blit_bc_to_rgba<8>(linear.data(), width_pixels, height_pixels,
-                           rgba, decode_bc1_block);
+        return blit_bc_to_rgba<8>(linear.data(), linear.size(),
+                                  width_pixels, height_pixels,
+                                  rgba, decode_bc1_block);
     } else if (which == 3) {
-        blit_bc_to_rgba<16>(linear.data(), width_pixels, height_pixels,
-                            rgba, decode_bc3_block);
+        return blit_bc_to_rgba<16>(linear.data(), linear.size(),
+                                   width_pixels, height_pixels,
+                                   rgba, decode_bc3_block);
     } else {
-        blit_bc5_to_rgba(linear.data(), width_pixels, height_pixels, rgba);
+        return blit_bc5_to_rgba(linear.data(), linear.size(),
+                                width_pixels, height_pixels, rgba);
     }
-    return true;
 }
 }
 
@@ -503,11 +593,8 @@ bool DecodeZlibBc5Page(const uint8_t* zlib_stream, size_t comp_size,
 bool DecodeRawBc1ToRgba(const uint8_t* bc1, size_t bc1_size,
                         int W, int H, std::vector<uint8_t>& rgba)
 {
-    if (!bc1 || W <= 0 || H <= 0) return false;
-    const size_t need = (size_t)((W + 3) / 4) * (size_t)((H + 3) / 4) * 8;
-    if (bc1_size < need) return false;
-    blit_bc_to_rgba<8>(bc1, W, H, rgba, decode_bc1_block);
-    return true;
+    return blit_bc_to_rgba<8>(bc1, bc1_size, W, H, rgba,
+                              decode_bc1_block);
 }
 
 bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,

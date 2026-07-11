@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 project(Fable_2_Asset_Browser CXX)
 
+option(FABLE_ENABLE_RECONSTRUCTED_CLOUD_PREVIEW
+       "Enable the non-authoritative handwritten D3D11 cloud preview"
+       ON)
+option(FABLE_ENABLE_RECONSTRUCTED_SKY_PREVIEW
+       "Enable the non-authoritative handwritten D3D11 sky preview"
+       OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -82,8 +89,41 @@ set(APP_SOURCES
         src/Level/GdbModelHashlist.h
         src/Level/GdbParser.cpp
         src/Level/GdbParser.h
+        src/Level/Skybox/CloudBackgroundGeneration.cpp
+        src/Level/Skybox/CloudBackgroundGeneration.h
+        src/Level/Skybox/CloudBackgroundMap.cpp
+        src/Level/Skybox/CloudBackgroundMap.h
+        src/Level/Skybox/CloudPpcRecipes.cpp
+        src/Level/Skybox/CloudPpcRecipes.h
+        src/Level/Skybox/CloudRuntime.cpp
+        src/Level/Skybox/CloudRuntime.h
+        src/Level/Skybox/CloudShaderBank.cpp
+        src/Level/Skybox/CloudShaderBank.h
+        src/Level/Skybox/CloudTextureBindings.cpp
+        src/Level/Skybox/CloudTextureBindings.h
+        src/Level/Skybox/CloudXenosSubmission.cpp
+        src/Level/Skybox/CloudXenosSubmission.h
+        src/Level/Skybox/EnvironmentTheme.h
+        src/Level/Skybox/EnvironmentThemeParser.cpp
+        src/Level/Skybox/EnvironmentThemeParser.h
+        src/Level/Skybox/GdbReaderInternal.h
+        src/Level/Skybox/SkyboxPreviewBinding.cpp
+        src/Level/Skybox/SkyboxPreviewBinding.h
+        src/Level/Skybox/SkyboxRenderer.cpp
+        src/Level/Skybox/SkyboxRenderer.h
+        src/Level/Skybox/SkyboxTypes.h
+        src/Level/Skybox/SkyDomeXex.cpp
+        src/Level/Skybox/SkyDomeXex.h
+        src/Level/Skybox/SkyXexDecomp.cpp
+        src/Level/Skybox/SkyXexDecomp.h
+        src/Level/Skybox/XenosShaderBinary.cpp
+        src/Level/Skybox/XenosShaderBinary.h
         src/Level/WaterParser.cpp
         src/Level/WaterParser.h
+        src/Level/ParticleBank.cpp
+        src/Level/ParticleBank.h
+        src/Level/ParticleFX.cpp
+        src/Level/ParticleFX.h
         src/Havok/HavokPackfileReader.cpp
         src/Havok/HavokPackfileReader.h
         src/BNKCore.cpp
@@ -124,7 +164,86 @@ endif()
 
 target_compile_definitions(Fable_2_Asset_Browser PRIVATE
         _CRT_SECURE_NO_WARNINGS
+        FABLE_ENABLE_RECONSTRUCTED_CLOUD_PREVIEW=$<BOOL:${FABLE_ENABLE_RECONSTRUCTED_CLOUD_PREVIEW}>
+        FABLE_ENABLE_RECONSTRUCTED_SKY_PREVIEW=$<BOOL:${FABLE_ENABLE_RECONSTRUCTED_SKY_PREVIEW}>
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(cloud_runtime_tests
+            tests/CloudRuntimeTests.cpp
+            src/Level/Skybox/CloudRuntime.cpp
+            src/Level/Skybox/CloudShaderBank.cpp
+            src/Level/Skybox/XenosShaderBinary.cpp
+    )
+    target_include_directories(cloud_runtime_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    add_test(NAME cloud_runtime_tests COMMAND cloud_runtime_tests)
+    add_executable(cloud_ppc_recipe_tests
+            tests/CloudPpcRecipesTests.cpp
+            src/Level/Skybox/CloudPpcRecipes.cpp
+    )
+    target_include_directories(cloud_ppc_recipe_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    add_test(NAME cloud_ppc_recipe_tests COMMAND cloud_ppc_recipe_tests)
+    add_executable(cloud_background_map_tests
+            tests/CloudBackgroundMapTests.cpp
+            src/Level/Skybox/CloudBackgroundMap.cpp
+    )
+    target_include_directories(cloud_background_map_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    add_test(NAME cloud_background_map_tests
+             COMMAND cloud_background_map_tests)
+    add_executable(cloud_background_generation_tests
+            tests/CloudBackgroundGenerationTests.cpp
+            src/Level/Skybox/CloudBackgroundGeneration.cpp
+    )
+    target_include_directories(cloud_background_generation_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    add_test(NAME cloud_background_generation_tests
+             COMMAND cloud_background_generation_tests)
+    add_executable(cloud_texture_binding_tests
+            tests/CloudTextureBindingsTests.cpp
+            src/Level/Skybox/CloudTextureBindings.cpp
+    )
+    target_include_directories(cloud_texture_binding_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    add_test(NAME cloud_texture_binding_tests
+             COMMAND cloud_texture_binding_tests)
+    add_executable(cloud_xenos_submission_tests
+            tests/CloudXenosSubmissionTests.cpp
+            src/Level/Skybox/CloudXenosSubmission.cpp
+    )
+    target_include_directories(cloud_xenos_submission_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    add_test(NAME cloud_xenos_submission_tests
+             COMMAND cloud_xenos_submission_tests)
+    add_executable(xenos_shader_binary_tests
+            tests/XenosShaderBinaryTests.cpp
+            src/Level/Skybox/XenosShaderBinary.cpp
+    )
+    target_include_directories(xenos_shader_binary_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    add_test(NAME xenos_shader_binary_tests
+             COMMAND xenos_shader_binary_tests)
+    if(WIN32 AND FABLE_ENABLE_RECONSTRUCTED_CLOUD_PREVIEW)
+        add_executable(reconstructed_cloud_shader_compile_tests
+                tests/CloudShaderCompileTests.cpp
+        )
+        target_link_libraries(reconstructed_cloud_shader_compile_tests PRIVATE
+                d3dcompiler
+        )
+        add_test(NAME reconstructed_cloud_shader_compile_tests
+                 COMMAND reconstructed_cloud_shader_compile_tests)
+    endif()
+endif()
 
 if(WIN32)
     target_compile_definitions(Fable_2_Asset_Browser PRIVATE
@@ -149,6 +268,40 @@ if(NOT ZLIB_FOUND)
     endif()
 endif()
 target_link_libraries(Fable_2_Asset_Browser PRIVATE ZLIB::ZLIB)
+
+if(BUILD_TESTING)
+    add_executable(texture_atlas_decoder_tests
+            tests/TextureAtlasDecoderTests.cpp
+            src/Level/TextureAtlasDecoder.cpp
+    )
+    target_include_directories(texture_atlas_decoder_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(texture_atlas_decoder_tests PRIVATE ZLIB::ZLIB)
+    add_test(NAME texture_atlas_decoder_tests
+             COMMAND texture_atlas_decoder_tests)
+
+    add_executable(shader_bank_tests
+            tests/ShaderBankTests.cpp
+            src/Level/ShaderBankFile.cpp
+    )
+    target_include_directories(shader_bank_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(shader_bank_tests PRIVATE ZLIB::ZLIB)
+    add_test(NAME shader_bank_tests COMMAND shader_bank_tests)
+endif()
+
+add_executable(shader_bank_extract
+        tools/ShaderBankExtract.cpp
+        src/Level/ShaderBankFile.cpp
+        src/Level/Skybox/CloudShaderBank.cpp
+        src/Level/Skybox/XenosShaderBinary.cpp
+)
+target_include_directories(shader_bank_extract PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(shader_bank_extract PRIVATE ZLIB::ZLIB)
 
 include(FetchContent)
 FetchContent_Declare(

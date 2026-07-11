@@ -932,7 +932,7 @@ int pick_level_mesh_at(const ImVec2& mouse,
 
         float t = 0.0f;
         if (!hit_sphere(m.center, m.radius, t)) continue;
-        if (t < best_t) { best_t = t; best = (int)i; }
+        if (t < best_t) { best_t = t; best = (int)i; best_id = 0; }
     }
     if (out_pick_id) *out_pick_id = best_id;
     return best;

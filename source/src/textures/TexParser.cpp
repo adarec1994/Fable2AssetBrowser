@@ -150,16 +150,16 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
 
             const size_t W = (size_t)out.TextureWidth;
             const size_t H = (size_t)out.TextureHeight;
+            const size_t Wb = W / 4u + (W % 4u != 0u);
+            const size_t Hb = H / 4u + (H % 4u != 0u);
             const size_t sz_argb8  = W * H * 4;
-            const size_t sz_bc1    = W * H / 2;
-            const size_t sz_bc3    = W * H * 1;
+            const size_t sz_bc1    = Wb * Hb * 8;
+            const size_t sz_bc3    = Wb * Hb * 16;
 
             const size_t pW_argb = (W + 31) & ~size_t(31);
             const size_t pH_argb = (H + 31) & ~size_t(31);
             const size_t sz_argb8_padded = pW_argb * pH_argb * 4;
 
-            const size_t Wb = (W + 3) / 4;
-            const size_t Hb = (H + 3) / 4;
             const size_t pWb = (Wb + 31) & ~size_t(31);
             const size_t pHb = (Hb + 31) & ~size_t(31);
             const size_t sz_bc1_padded = pWb * pHb * 8;
@@ -324,10 +324,44 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
             md.MipDataSizeParsed = use;
         }
         body_end = mo + 48 + (size_t)md.DataSize;
+        // Dual-channel records (notably PF39 cloud maps) store their alpha
+        // payload after the colour payload.  Unknown_4 is the alpha offset
+        // relative to the mip definition and Unknown_5 is its byte size.
+        if (md.Unknown_4 >= 48 + md.DataSize && md.Unknown_5 > 0) {
+            const size_t dual_end =
+                mo + size_t(md.Unknown_4) + size_t(md.Unknown_5);
+            if (dual_end <= d.size()) body_end = dual_end;
+        }
         return true;
     };
 
     if (out.MipMapOffset.empty()) return true;
+
+    // Full TEX headers carry one absolute definition offset per authored mip.
+    // Parse those directly rather than assuming records are tightly packed;
+    // dual colour/alpha records and packed tails need not be contiguous at
+    // mo + 48 + DataSize.
+    std::vector<size_t> explicit_offsets;
+    explicit_offsets.reserve(out.MipMapOffset.size());
+    for (uint32_t raw_offset : out.MipMapOffset) {
+        const size_t mip_offset = size_t(raw_offset);
+        if (mip_offset == 0 ||
+            std::find(explicit_offsets.begin(), explicit_offsets.end(),
+                      mip_offset) != explicit_offsets.end()) {
+            continue;
+        }
+        explicit_offsets.push_back(mip_offset);
+    }
+    if (explicit_offsets.size() > 1) {
+        for (size_t mip_offset : explicit_offsets) {
+            TexInfo::MipDef md{};
+            size_t body_end = 0;
+            if (parse_one_mip(mip_offset, md, body_end)) {
+                out.Mips.push_back(md);
+            }
+        }
+        return true;
+    }
 
     size_t walk_off = (size_t) out.MipMapOffset[0];
     int safety = 64;

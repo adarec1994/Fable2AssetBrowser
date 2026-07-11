@@ -4,3 +4,9 @@
 source/strip_comments.py
 /source/Archive/audio
 /source/Archive
+/--entries
+/--decode
+fx_debug.log
+source/build/_cloud_gdb_probe.exe
+/source/tests
+/source/build

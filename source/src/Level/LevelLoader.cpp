@@ -7,6 +7,9 @@
 #include "VfsConfig.h"
 #include "GdbModelHashlist.h"
 #include "GdbParser.h"
+#include "ParticleBank.h"
+#include "ParticleFX.h"
+#include "../MDL/ModelParser.h"
 #include "../Havok/HavokPackfileReader.h"
 #include "../ISO/IsoMount.h"
 
@@ -72,6 +75,9 @@ Gdb::SkyTheme                 g_pending_level_sky_theme;
 Gdb::CloudTheme               g_pending_level_cloud_theme;
 Gdb::WeatherTheme             g_pending_level_weather_theme;
 Gdb::EnvironmentThemeTimeline g_pending_level_environment_timeline;
+std::vector<Fx::Placement>    g_pending_level_fx;
+Fx::Bank                      g_particle_bank;
+bool                          g_particle_bank_loaded = false;
 std::vector<std::string>           g_level_vfs_texture_body_bnks;
 std::vector<std::string>           g_level_vfs_model_bnks;
 std::vector<std::string>           g_level_vfs_streaming_bnks;
@@ -872,6 +878,287 @@ bool build_ehf_vista_patch_mesh(const std::vector<uint8_t>& ehf,
     return true;
 }
 
+// Read the object's FX socket from its model: the model-space position of the
+// "FX_Particle_DummyObject" bone (the reference point the engine attaches
+// particle effects to). Bone transforms are parent-relative (quat + pos), so
+// the position is composed up the parent chain. Returns false if the model has
+// no such bone (many props emit at the origin and have none).
+static bool ReadMdlSocket(const std::vector<uint8_t>& d,
+                          const std::string& socket_name,
+                          bool allow_fx_particle_prefix,
+                          float out[3],
+                          float out_q[4] = nullptr) {
+    // Self-contained skeleton read (no ModelParser dependency): the MeshFile
+    // header size is VARIABLE — stored as a u32 at offset 12 — not a fixed 104.
+    // Bones live at headerSize + 32: u32 boneCount, boneCount x {strz name,
+    // u32 parent}, u32 transformCount, transformCount x 44B {quat 4f, pos 3f,
+    // scale 3f, pad}. Reading the real header size is what lets streaming props
+    // (whose header != 104) resolve their FX socket correctly.
+    const size_t n = d.size();
+    if (n < 40) return false;
+    auto beU = [&](size_t o) -> uint32_t {
+        return (uint32_t(d[o]) << 24) | (uint32_t(d[o + 1]) << 16) |
+               (uint32_t(d[o + 2]) << 8) | uint32_t(d[o + 3]);
+    };
+    auto beF = [&](size_t o) -> float {
+        uint32_t v = beU(o); float f; std::memcpy(&f, &v, 4); return f;
+    };
+    size_t o;
+    if (n >= 16 && std::memcmp(d.data(), "MeshFile", 8) == 0) {
+        uint32_t hs = beU(12);                 // HeaderSize
+        if (hs < 16 || hs > n) return false;
+        o = hs;
+    } else {
+        o = 0;
+    }
+    o += 32;                                   // LOD-section prologue
+    if (o + 4 > n) return false;
+    uint32_t bc = beU(o); o += 4;
+    if (bc == 0 || bc > 1024) return false;
+    std::vector<std::string> names(bc);
+    std::vector<int> parents(bc);
+    for (uint32_t i = 0; i < bc; ++i) {
+        size_t s = o;
+        while (o < n && d[o] != 0) ++o;
+        if (o >= n) return false;
+        names[i].assign(reinterpret_cast<const char*>(&d[s]), o - s);
+        ++o;                                   // nul
+        if (o + 4 > n) return false;
+        uint32_t pid = beU(o); o += 4;
+        parents[i] = (pid == 0xFFFFFFFFu) ? -1 : (int)pid;
+    }
+    if (o + 4 > n) return false;
+    uint32_t tc = beU(o); o += 4;
+    if (tc != bc) return false;                // need per-bone transforms
+    const size_t xf = o;
+    if (xf + size_t(tc) * 44 > n) return false;
+
+    auto lower = [](std::string s) {
+        for (char& c : s) c = (char)std::tolower((unsigned char)c);
+        return s;
+    };
+    const std::string want = lower(socket_name);
+    int idx = -1;
+    if (!want.empty()) {
+        for (uint32_t i = 0; i < bc; ++i)
+            if (lower(names[i]) == want) { idx = int(i); break; }
+    }
+    if (idx < 0 && allow_fx_particle_prefix)
+        for (uint32_t i = 0; i < bc; ++i)
+            if (lower(names[i]).rfind("fx_particle", 0) == 0) {
+                idx = int(i); break;
+            }
+    if (idx < 0) return false;
+
+    // transform[i] = quat(x,y,z,w) at +0, pos at +16, scale at +28 (44B stride).
+    auto par = [&](int i) -> int {
+        int p = parents[i];
+        return (p >= 0 && (uint32_t)p < bc && p != i) ? p : -1;
+    };
+    auto qx = [&](int i) { return beF(xf + 44 * i + 0); };
+    auto qy = [&](int i) { return beF(xf + 44 * i + 4); };
+    auto qz = [&](int i) { return beF(xf + 44 * i + 8); };
+    auto qw = [&](int i) { return beF(xf + 44 * i + 12); };
+    auto px = [&](int i) { return beF(xf + 44 * i + 16); };
+    auto py = [&](int i) { return beF(xf + 44 * i + 20); };
+    auto pz = [&](int i) { return beF(xf + 44 * i + 24); };
+
+    // chain of valid bone indices from socket to root (cycle-safe)
+    std::vector<int> chain;
+    std::vector<char> seen(bc, 0);
+    for (int cur = idx, guard = 0; guard < 256; ++guard) {
+        if (cur < 0 || (uint32_t)cur >= bc || seen[cur]) break;
+        seen[cur] = 1; chain.push_back(cur); cur = par(cur);
+    }
+
+    auto qnorm = [](float q[4]) {
+        const float len = std::sqrt(q[0] * q[0] + q[1] * q[1] +
+                                    q[2] * q[2] + q[3] * q[3]);
+        if (std::isfinite(len) && len > 1e-6f) {
+            q[0] /= len; q[1] /= len; q[2] /= len; q[3] /= len;
+        } else {
+            q[0] = q[1] = q[2] = 0.0f; q[3] = 1.0f;
+        }
+    };
+    auto qmul = [](const float a[4], const float b[4], float out[4]) {
+        out[0] = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1];
+        out[1] = a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0];
+        out[2] = a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3];
+        out[3] = a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2];
+    };
+    auto qrot = [](const float q[4], const float v[3], float out[3]) {
+        const float tx = 2.0f * (q[1] * v[2] - q[2] * v[1]);
+        const float ty = 2.0f * (q[2] * v[0] - q[0] * v[2]);
+        const float tz = 2.0f * (q[0] * v[1] - q[1] * v[0]);
+        out[0] = v[0] + q[3] * tx + (q[1] * tz - q[2] * ty);
+        out[1] = v[1] + q[3] * ty + (q[2] * tx - q[0] * tz);
+        out[2] = v[2] + q[3] * tz + (q[0] * ty - q[1] * tx);
+    };
+
+    float w[3] = { 0, 0, 0 };
+    float q[4] = { 0, 0, 0, 1 };
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        int i = *it;
+        float lp[3] = { px(i), py(i), pz(i) };
+        float rp[3] = { 0, 0, 0 };
+        qrot(q, lp, rp);
+        w[0] += rp[0]; w[1] += rp[1]; w[2] += rp[2];
+
+        float lq[4] = { qx(i), qy(i), qz(i), qw(i) };
+        qnorm(lq);
+        float nq[4] = { 0, 0, 0, 1 };
+        qmul(q, lq, nq);
+        q[0] = nq[0]; q[1] = nq[1]; q[2] = nq[2]; q[3] = nq[3];
+        qnorm(q);
+    }
+    out[0] = w[0]; out[1] = w[1]; out[2] = w[2];
+    if (out_q) {
+        out_q[0] = q[0]; out_q[1] = q[1]; out_q[2] = q[2]; out_q[3] = q[3];
+    }
+    return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]);
+}
+
+static bool ReadMdlFxSocket(const std::vector<uint8_t>& d, float out[3]) {
+    return ReadMdlSocket(d, "fx_particle_dummyobject", true, out);
+}
+
+// ---------------------------------------------------------------------------
+// <model>.mdl.gmd — the ENGINE's authored prop-FX source ("GameMesh" scene
+// metadata in the level streaming BNKs; the render prim resolves reference
+// points from this, NOT from .mdl bones — many props are boneless). Layout
+// (big-endian):
+//   "GameMesh"  u32 version, zero block, u32 nodeCount @0x2C
+//   nodeCount x { strz name, i32 parent }
+//   u32 transformCount (== nodeCount)
+//   transformCount x 44B { quat[4], pos[3], scale[3], pad }
+//   u32 attachCount
+//   attachCount x { strz name, f32 quat[4], f32 pos[3], i32 parentNode }
+// Attachments named "Prop.FX.Particle.[slot.]<Effect>.par" carry the exact
+// authored effect + model-space socket (composed through the node tree when
+// parented). Verified against real data: torch flame @z=2.966, wall brazier
+// bowl @2.577, campfire logs @0.212 (+ pot steam @1.325), the waterfall rock
+// = 4 individually rotated falls. "Prop.Layout.Light" entries are lights.
+// ---------------------------------------------------------------------------
+struct GmdFxAttachment {
+    std::string effect;      // e.g. "FX_Torch_Fire_01"
+    float pos[3] = { 0, 0, 0 };    // model space (model Z = up)
+    float quat[4] = { 0, 0, 0, 1 };
+};
+
+static bool ParseGmdFxAttachments(const std::vector<uint8_t>& d,
+                                  std::vector<GmdFxAttachment>& out) {
+    out.clear();
+    const size_t n = d.size();
+    if (n < 0x3C || std::memcmp(d.data(), "GameMesh", 8) != 0) return false;
+    auto beU = [&](size_t o) -> uint32_t {
+        return (uint32_t(d[o]) << 24) | (uint32_t(d[o + 1]) << 16) |
+               (uint32_t(d[o + 2]) << 8) | uint32_t(d[o + 3]);
+    };
+    auto beI = [&](size_t o) -> int32_t { return (int32_t)beU(o); };
+    auto beF = [&](size_t o) -> float {
+        uint32_t v = beU(o); float f; std::memcpy(&f, &v, 4); return f;
+    };
+    auto qrot = [](const float q[4], const float v[3], float o3[3]) {
+        const float tx = 2.0f * (q[1] * v[2] - q[2] * v[1]);
+        const float ty = 2.0f * (q[2] * v[0] - q[0] * v[2]);
+        const float tz = 2.0f * (q[0] * v[1] - q[1] * v[0]);
+        o3[0] = v[0] + q[3] * tx + (q[1] * tz - q[2] * ty);
+        o3[1] = v[1] + q[3] * ty + (q[2] * tx - q[0] * tz);
+        o3[2] = v[2] + q[3] * tz + (q[0] * ty - q[1] * tx);
+    };
+    auto qmul = [](const float a[4], const float b[4], float o4[4]) {
+        o4[0] = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1];
+        o4[1] = a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0];
+        o4[2] = a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3];
+        o4[3] = a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2];
+    };
+
+    const uint32_t node_count = beU(0x2C);
+    if (node_count > 512) return false;
+    size_t o = 0x30;
+    std::vector<int> parents(node_count, -1);
+    std::vector<std::array<float, 7>> node_tf;   // quat[4] + pos[3]
+    for (uint32_t i = 0; i < node_count; ++i) {
+        while (o < n && d[o] != 0) ++o;
+        if (++o + 4 > n) return false;
+        parents[i] = beI(o); o += 4;
+    }
+    if (node_count) {
+        if (o + 4 > n) return false;
+        const uint32_t tc = beU(o); o += 4;
+        if (tc != node_count || o + size_t(tc) * 44 > n) return false;
+        node_tf.resize(node_count);
+        for (uint32_t i = 0; i < node_count; ++i) {
+            for (int k = 0; k < 7; ++k)
+                node_tf[i][k] = beF(o + size_t(k) * 4);
+            o += 44;
+        }
+    }
+    if (o + 4 > n) return false;
+    const uint32_t att_count = beU(o); o += 4;
+    if (att_count > 64) return false;
+
+    for (uint32_t i = 0; i < att_count; ++i) {
+        const size_t s = o;
+        while (o < n && d[o] != 0) ++o;
+        if (o >= n) return false;
+        std::string name(reinterpret_cast<const char*>(&d[s]), o - s);
+        ++o;
+        if (o + 32 > n) return false;
+        float q[4], p3[3];
+        for (int k = 0; k < 4; ++k) q[k] = beF(o + size_t(k) * 4);
+        for (int k = 0; k < 3; ++k) p3[k] = beF(o + 16 + size_t(k) * 4);
+        const int par = beI(o + 28);
+        o += 32;
+
+        // "Prop.FX.Particle.[slot.]<Effect>.par" -> effect name
+        constexpr const char* kPfx = "Prop.FX.Particle.";
+        if (name.rfind(kPfx, 0) != 0) continue;
+        std::string rest = name.substr(std::strlen(kPfx));
+        if (rest.size() > 4 &&
+            rest.compare(rest.size() - 4, 4, ".par") == 0)
+            rest.resize(rest.size() - 4);
+        const size_t dot = rest.find_last_of('.');
+        if (dot != std::string::npos) rest = rest.substr(dot + 1);
+        if (rest.empty()) continue;
+
+        GmdFxAttachment att;
+        att.effect = std::move(rest);
+        // compose through the node parent chain (attachment-local first)
+        float wq[4] = { 0, 0, 0, 1 };
+        float wp[3] = { 0, 0, 0 };
+        std::vector<int> chain;
+        for (int cur = par, guard = 0;
+             cur >= 0 && cur < (int)node_count && guard < 64; ++guard) {
+            chain.push_back(cur);
+            cur = parents[cur];
+        }
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            const auto& tf = node_tf[*it];
+            const float lp[3] = { tf[4], tf[5], tf[6] };
+            float rp[3];
+            qrot(wq, lp, rp);
+            wp[0] += rp[0]; wp[1] += rp[1]; wp[2] += rp[2];
+            const float lq[4] = { tf[0], tf[1], tf[2], tf[3] };
+            float nq[4];
+            qmul(wq, lq, nq);
+            std::memcpy(wq, nq, sizeof nq);
+        }
+        float rp[3];
+        qrot(wq, p3, rp);
+        att.pos[0] = wp[0] + rp[0];
+        att.pos[1] = wp[1] + rp[1];
+        att.pos[2] = wp[2] + rp[2];
+        float fq[4];
+        qmul(wq, q, fq);
+        std::memcpy(att.quat, fq, sizeof fq);
+        if (std::isfinite(att.pos[0]) && std::isfinite(att.pos[1]) &&
+            std::isfinite(att.pos[2]))
+            out.push_back(std::move(att));
+    }
+    return !out.empty();
+}
+
 struct StreamingModelCandidate {
     std::string hint_path;
     std::string resolved_path;
@@ -1160,6 +1447,29 @@ void fill_gdb_rotation_matrix(Level::PropInstance& pi,
     }
     pi.values[12] = scale;
     pi.has_full_transform = true;
+}
+
+// The game-space (pre Y/Z-swap) 3x3 rotation the mesh builds from a GDB euler
+// triple — same `game[]` as fill_gdb_rotation_matrix, without the axis remap.
+// Fed to Fx::Placement.rot so an attached effect's socket/emitter offsets are
+// oriented exactly like the prop mesh (critical for tilted / wall-mounted props).
+void fx_game_rotation_matrix(float rx, float ry, float rz, float out[9])
+{
+    if (!std::isfinite(rx)) rx = 0.0f;
+    if (!std::isfinite(ry)) ry = 0.0f;
+    if (!std::isfinite(rz)) rz = 0.0f;
+    const float sx = std::sin(rx), cx = std::cos(rx);
+    const float sy = std::sin(ry), cy = std::cos(ry);
+    const float sz = std::sin(rz), cz = std::cos(rz);
+    out[0] = cy * cx;
+    out[1] = sx;
+    out[2] = -sy * cx;
+    out[3] = sy * sz - cy * cz * sx;
+    out[4] = cz * cx;
+    out[5] = sy * cz * sx + cy * sz;
+    out[6] = cy * sz * sx + sy * cz;
+    out[7] = -sz * cx;
+    out[8] = cy * cz - sy * sz * sx;
 }
 
 const StreamingModelCandidate*
@@ -3834,14 +4144,390 @@ bool Open(const FlatAssetEntry& entry)
             }
             g_level_gdb_placements.reserve(info.placements.size());
 
+            // ---- FX placements ----
+            // A level entity spawns a particle effect when either (a) its name
+            // hashes directly to a bank effect (environment FX placed as
+            // entities, e.g. fxenv_waterfall_top), (b) its object template
+            // carries a ParticleEffect binding in the GDB (props: braziers,
+            // potions, ...), or (c) its name matches a coarse FX heuristic
+            // (fallback for code-spawned / unnamed FX). The world transform is
+            // taken straight from the GDB placement, so the effect appears at
+            // the exact authored position.
+            g_pending_level_fx.clear();
+
+            // Load the (permanent) particle bank up front so name membership can
+            // be tested while collecting placements.
+            if (!g_particle_bank_loaded) {
+                std::vector<uint8_t> bank_bytes;
+                if (load_text_sibling(
+                        "data\\art\\particles\\particle_bank.bnk",
+                        bank_bytes) && !bank_bytes.empty()) {
+                    if (Fx::ParseParticleBank(bank_bytes, g_particle_bank)) {
+                        g_particle_bank_loaded = true;
+                        OutputLog::success("fx: particle_bank.bnk parsed (" +
+                            std::to_string(g_particle_bank.emitters.size()) +
+                            " emitters, " +
+                            std::to_string(g_particle_bank.systems.size()) +
+                            " systems, " +
+                            std::to_string(g_particle_bank.effects.size()) +
+                            " effects, " +
+                            std::to_string(g_particle_bank.textures.size()) +
+                            " textures)");
+                    } else {
+                        OutputLog::warn("fx: particle_bank.bnk parse failed: " +
+                                        g_particle_bank.error);
+                    }
+                } else {
+                    OutputLog::warn("fx: particle_bank.bnk not found in data");
+                }
+            }
+
+            // Object-template -> FX bindings from the GDB ParticleEffect /
+            // ParticleAttacher chains (globals + supplemental + level gdb).
+            std::unordered_map<uint32_t, std::vector<Gdb::ParticleFxBinding>>
+                fx_bindings;
+            std::unordered_map<uint32_t,
+                std::vector<Gdb::ParticleAttachmentBinding>> fx_attach_bindings;
+            {
+                std::vector<const std::vector<uint8_t>*> fx_gdbs;
+                fx_gdbs.push_back(&gdb_bytes);
+                for (const auto& db : supplemental_gdbs) fx_gdbs.push_back(&db.bytes);
+                fx_bindings = Gdb::ExtractParticleFxBindings(fx_gdbs);
+                fx_attach_bindings =
+                    Gdb::ExtractParticleAttachmentBindings(fx_gdbs);
+                if (!fx_bindings.empty()) {
+                    OutputLog::info("fx: " + std::to_string(fx_bindings.size()) +
+                        " GDB record(s) carry a ParticleEffect binding");
+                }
+                if (!fx_attach_bindings.empty()) {
+                    OutputLog::info("fx: " +
+                        std::to_string(fx_attach_bindings.size()) +
+                        " GDB record(s) carry a ParticleAttacher binding");
+                }
+            }
+
+            auto name_hits_bank = [&](const std::string& n) -> bool {
+                return g_particle_bank_loaded &&
+                       g_particle_bank.find_by_hash(Fx::Fnv1Lower(n)) != nullptr;
+            };
+
+            // Same-effect proximity dedup: authored entities are emitted
+            // first, so heuristic duplicates (e.g. the campfire prop next to
+            // its fire marker) are dropped here.
+            auto push_fx_dedup = [&](Fx::Placement&& fx) -> size_t {
+                for (const auto& e : g_pending_level_fx) {
+                    if (e.effect_hash != fx.effect_hash) continue;
+                    const float dx = e.pos[0] - fx.pos[0];
+                    const float dy = e.pos[1] - fx.pos[1];
+                    const float dz = e.pos[2] - fx.pos[2];
+                    if (dx * dx + dy * dy + dz * dz < 2.5f * 2.5f)
+                        return SIZE_MAX;
+                }
+                g_pending_level_fx.push_back(std::move(fx));
+                return g_pending_level_fx.size() - 1;
+            };
+
+            // ---- authored FX entities ----
+            // The level's real FX spawns: .save-named records (e.g.
+            // "FX_Water_Fall_Main_Wider", "fire_4") whose transform comes
+            // from the 0x619F96CF component chain and whose effect is the
+            // CParticleSystemEntityType hash (field 0x4EDC9083) in the type
+            // chain. Positions are exact; no name guessing. Fire markers
+            // ("fire"/"fire_N") carry no effect hash (the fire visual is
+            // script-spawned in retail) and map to the canonical campfire.
+            std::vector<std::array<float, 3>> authored_fx_pos;
+            {
+                std::vector<const std::vector<uint8_t>*> fx_gdbs_all;
+                fx_gdbs_all.push_back(&gdb_bytes);
+                for (const auto& db : supplemental_gdbs)
+                    fx_gdbs_all.push_back(&db.bytes);
+                std::vector<Gdb::FxEntityPlacement> fx_entities =
+                    Gdb::ExtractFxEntityPlacements(gdb_bytes, fx_gdbs_all,
+                                                   save_hash_to_name);
+                size_t authored = 0;
+                const size_t fire_markers = 0;
+                for (const auto& fe : fx_entities) {
+                    // Only entities whose type chain carries a bank-resolvable
+                    // effect hash spawn FX. NOTE: "fire_N" save entities are
+                    // gameplay/light markers that FLANK the fire pits, not
+                    // flame spawns — mapping them to campfire FX produced two
+                    // offset flames and suppressed the real prop flame.
+                    uint32_t hash = 0;
+                    std::string name;
+                    if (fe.fx_hash && g_particle_bank_loaded &&
+                        g_particle_bank.find_by_hash(fe.fx_hash)) {
+                        hash = fe.fx_hash;
+                        name = fe.name;
+                        ++authored;
+                    } else {
+                        continue;
+                    }
+                    Fx::Placement fx;
+                    fx.pos[0] = fe.x; fx.pos[1] = fe.y; fx.pos[2] = fe.z;
+                    if (fe.has_rotation) {
+                        fx_game_rotation_matrix(fe.rot_x, fe.rot_y, fe.rot_z,
+                                                fx.rot);
+                        fx.has_rot = true;
+                    }
+                    fx.effect_name = name;
+                    fx.effect_hash = hash;
+                    const float ax = fe.x, ay = fe.y, az = fe.z;
+                    if (push_fx_dedup(std::move(fx)) != SIZE_MAX)
+                        authored_fx_pos.push_back({ ax, ay, az });
+                }
+                if (authored || fire_markers) {
+                    OutputLog::success(
+                        "fx: " + std::to_string(authored) +
+                        " authored FX entit(ies) + " +
+                        std::to_string(fire_markers) +
+                        " fire marker(s) from level records");
+                }
+            }
+            // Heuristic (keyword/name-guessed) FX near an authored spawn are
+            // suppressed — the authored entity is the real one.
+            auto near_authored_fx = [&](float x, float y, float z) {
+                for (const auto& a : authored_fx_pos) {
+                    const float dx = a[0] - x, dy = a[1] - y, dz = a[2] - z;
+                    if (dx * dx + dy * dy + dz * dz < 5.0f * 5.0f) return true;
+                }
+                return false;
+            };
+            auto entity_is_fx = [](const std::string& n) -> bool {
+                std::string s;
+                s.reserve(n.size());
+                for (char c : n) s.push_back((char)std::tolower((unsigned char)c));
+                static const char* kFx[] = {
+                    "fxenv", "waterfall", "water_fall", "chimney", "smoke",
+                    "steam", "fountain", "watermill", "falls", "hot_pool",
+                    "fx_water_flow", "brazier", "campfire", "bonfire", "torch"
+                };
+                for (const char* k : kFx)
+                    if (s.find(k) != std::string::npos) return true;
+                // "fx_" / "FX_" prefix (but skip one-shot combat/gui fx)
+                if (s.rfind("fx_", 0) == 0 || s.rfind("fx ", 0) == 0)
+                    return s.find("hit") == std::string::npos &&
+                           s.find("orb") == std::string::npos &&
+                           s.find("recoil") == std::string::npos;
+                return false;
+            };
+            // Map a level OBJECT name (e.g. "RITCAVBrazierWall_20",
+            // "ForestcampFire", "Waterfall_Medium") to a real bank effect.
+            // Levels name their fire/water objects by convention rather than by
+            // the FX name, and the object->FX link lives in the level gdb /
+            // script (not globals), so we resolve it here to the actual
+            // multi-layer bank effect instead of the crude category fallback.
+            // Ordered most-specific first; the chosen effect must exist in the
+            // bank to be used.
+            // Returns the canonical bank effect + a vertical socket offset
+            // (game up units) approximating where the FX bone sits on the model
+            // (torch head, brazier bowl, ...) since the bank has no offset.
+            // Map a level object name to its canonical bank effect. The FX
+            // POSITION is not decided here — it comes from the object model's
+            // FX_Particle_DummyObject socket bone (resolved below).
+            auto map_object_to_effect = [&](const std::string& n) -> std::string {
+                std::string s;
+                for (char c : n) s.push_back((char)std::tolower((unsigned char)c));
+                auto has = [&](const char* k) {
+                    return s.find(k) != std::string::npos;
+                };
+                struct Rule { const char* key; const char* effect; };
+                static const Rule kRules[] = {
+                    // water
+                    { "waterfall_medium", "fxenv_waterfall_medium_01" },
+                    { "waterfall_thin",   "fxenv_waterfall_thin_01" },
+                    { "waterfall_long",   "fxenv_waterfall_long_01" },
+                    { "waterfall",        "fxenv_water_fall_main" },
+                    { "water_fall",       "fxenv_water_fall_main" },
+                    { "falls",            "fxenv_water_fall_main" },
+                    { "watermill",        "fxenv_watermill_splash" },
+                    { "fountain",         "fxenv_fountain_top" },
+                    { "water_flow",       "fx_water_flow" },
+                    // fire
+                    { "brazier_evil",     "FXENV_Brazier_Evil_01" },
+                    { "brazier",          "FXENV_Medium_Brazier_Fire_01" },
+                    { "banditcampfire",   "FX_Camp_Fire_01" },
+                    { "campfire",         "FX_Camp_Fire_01" },
+                    { "camp_fire",        "FX_Camp_Fire_01" },
+                    { "bonfire",          "FX_Camp_Fire_01" },
+                    { "firepit",          "FX_Camp_Fire_01" },
+                    { "torch",            "fxenv_torch_fire_03" },
+                    // vapour
+                    { "chimney",          "FXENV_Drifting_Smoke_01" },
+                    { "smoke",            "FXENV_Drifting_Smoke_01" },
+                    { "steam",            "fxenv_steam_grating" },
+                };
+                for (const auto& r : kRules) {
+                    if (!has(r.key)) continue;
+                    if (g_particle_bank_loaded &&
+                        g_particle_bank.find_by_hash(Fx::Fnv1Lower(r.effect)))
+                        return r.effect;
+                }
+                return {};
+            };
+
+            // Pick the FX binding whose effect actually exists in the bank
+            // (prefer a bank hit; else the first candidate).
+            struct FxBindingChoice {
+                uint32_t hash = 0;
+                std::string name;
+            };
+            auto binding_for = [&](uint32_t rec_hash, uint32_t parent_hash,
+                                   FxBindingChoice& out_choice) -> bool {
+                for (uint32_t key : { rec_hash, parent_hash }) {
+                    if (!key) continue;
+                    auto it = fx_bindings.find(key);
+                    if (it == fx_bindings.end()) continue;
+                    const Gdb::ParticleFxBinding* best = nullptr;
+                    for (const auto& b : it->second) {
+                        if (g_particle_bank_loaded &&
+                            g_particle_bank.find_by_hash(b.fx_hash_lower)) {
+                            best = &b; break;
+                        }
+                        if (!best) best = &b;
+                    }
+                    if (best) {
+                        out_choice.hash = best->fx_hash_lower;
+                        out_choice.name = best->fx_name;
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            // FX placements attached to an object model — their exact socket
+            // (the model's FX_Particle_DummyObject bone) is resolved in a
+            // second pass, after the streaming model resolver below is defined.
+            struct FxSocketJob {
+                size_t fx_index;
+                std::string entity_name;
+                uint32_t parent_hash;
+                uint32_t model_path_hash = 0;   // GDB ModelFile hash (mesh route)
+                bool attached = false;
+                std::string dummy_name;
+                float offset[3] = {0, 0, 0};
+            };
+            std::vector<FxSocketJob> fx_socket_jobs;
+
+            auto add_attached_fx_for = [&](const Gdb::Placement& p) -> bool {
+                bool added_any = false;
+                for (uint32_t key : { p.hash_a, p.parent_hash }) {
+                    if (!key) continue;
+                    auto ait = fx_attach_bindings.find(key);
+                    if (ait == fx_attach_bindings.end()) continue;
+                    for (const auto& b : ait->second) {
+                        if (g_particle_bank_loaded &&
+                            !g_particle_bank.find_by_hash(b.fx_hash_lower))
+                            continue;
+
+                        Fx::Placement fx;
+                        fx.pos[0] = p.x; fx.pos[1] = p.y; fx.pos[2] = p.z;
+                        fx.yaw = p.yaw;
+                        fx.scale = (p.scale > 0.0001f) ? p.scale : 1.0f;
+                        if (p.has_rotation) {
+                            fx_game_rotation_matrix(p.rot_x, p.rot_y, p.rot_z,
+                                                    fx.rot);
+                            fx.has_rot = true;
+                        }
+                        fx.effect_name = !b.fx_name.empty()
+                            ? b.fx_name
+                            : p.entity_name;
+                        fx.effect_hash = b.fx_hash_lower;
+                        const size_t fx_idx = push_fx_dedup(std::move(fx));
+                        if (fx_idx == SIZE_MAX) { added_any = true; continue; }
+
+                        if (!p.entity_name.empty()) {
+                            FxSocketJob job;
+                            job.fx_index = fx_idx;
+                            job.entity_name = p.entity_name;
+                            job.parent_hash = p.parent_hash;
+                            job.model_path_hash = p.model_path_hash;
+                            job.attached = true;
+                            job.dummy_name = b.dummy_name;
+                            job.offset[0] = b.offset[0];
+                            job.offset[1] = b.offset[1];
+                            job.offset[2] = b.offset[2];
+                            fx_socket_jobs.push_back(std::move(job));
+                        }
+                        added_any = true;
+                    }
+                    if (added_any) break;
+                }
+                return added_any;
+            };
+
             size_t fixed_count = 0, var_count = 0, named_count = 0;
             size_t model_hash_count = 0;
             size_t placement_poll = 0;
+            size_t fx_by_name = 0, fx_by_binding = 0, fx_by_mapping = 0,
+                   fx_by_heuristic = 0;
             for (const auto& p : info.placements) {
                 if ((++placement_poll & 0xffu) == 0 &&
                     bail_if_cancelled("placement table build"))
                 {
                     return false;
+                }
+                // Decide whether this placement spawns an FX and what effect.
+                bool make_fx = false;
+                bool from_object = false;   // FX attached to a prop model
+                std::string fx_name = p.entity_name;
+                uint32_t fx_hash = 0;
+                if (!p.entity_name.empty() && name_hits_bank(p.entity_name)) {
+                    make_fx = true;
+                    fx_hash = Fx::Fnv1Lower(p.entity_name);
+                    ++fx_by_name;
+                } else {
+                    if (add_attached_fx_for(p)) {
+                        ++fx_by_binding;
+                    } else {
+                        FxBindingChoice choice;
+                        std::string mapped = p.entity_name.empty()
+                            ? std::string()
+                            : map_object_to_effect(p.entity_name);
+                        if (binding_for(p.hash_a, p.parent_hash, choice)) {
+                            make_fx = true;
+                            fx_hash = choice.hash;
+                            if (!choice.name.empty()) fx_name = choice.name;
+                            from_object = true;
+                            ++fx_by_binding;
+                        } else if (!mapped.empty() &&
+                                   !near_authored_fx(p.x, p.y, p.z)) {
+                            make_fx = true;
+                            fx_name = mapped;
+                            fx_hash = Fx::Fnv1Lower(mapped);
+                            from_object = true;
+                            ++fx_by_mapping;
+                        } else if (!p.entity_name.empty() &&
+                                   entity_is_fx(p.entity_name) &&
+                                   !near_authored_fx(p.x, p.y, p.z)) {
+                            make_fx = true;
+                            fx_hash = Fx::Fnv1Lower(p.entity_name);
+                            from_object = true;
+                            ++fx_by_heuristic;
+                        }
+                    }
+                }
+                if (make_fx) {
+                    Fx::Placement fx;
+                    fx.pos[0] = p.x; fx.pos[1] = p.y; fx.pos[2] = p.z;
+                    fx.yaw = p.yaw;
+                    fx.scale = (p.scale > 0.0001f) ? p.scale : 1.0f;
+                    if (p.has_rotation) {
+                        fx_game_rotation_matrix(p.rot_x, p.rot_y, p.rot_z,
+                                                fx.rot);
+                        fx.has_rot = true;
+                    }
+                    fx.effect_name = fx_name;
+                    fx.effect_hash = fx_hash;
+                    const size_t fx_idx = push_fx_dedup(std::move(fx));
+                    if (fx_idx != SIZE_MAX && from_object &&
+                        !p.entity_name.empty()) {
+                        FxSocketJob job;
+                        job.fx_index = fx_idx;
+                        job.entity_name = p.entity_name;
+                        job.parent_hash = p.parent_hash;
+                        job.model_path_hash = p.model_path_hash;
+                        fx_socket_jobs.push_back(std::move(job));
+                    }
                 }
                 GdbWorldPlacement gp;
                 gp.x      = p.x;
@@ -3869,6 +4555,15 @@ bool Open(const FlatAssetEntry& entry)
                << named_count << " resolved to .save entity names, "
                << model_hash_count << " with model path hashes)";
             OutputLog::success(os.str());
+            if (!g_pending_level_fx.empty()) {
+                OutputLog::success("fx: " +
+                    std::to_string(g_pending_level_fx.size()) +
+                    " particle effect placement(s) in level (" +
+                    std::to_string(fx_by_name) + " by name, " +
+                    std::to_string(fx_by_binding) + " by GDB binding, " +
+                    std::to_string(fx_by_mapping) + " by object-map, " +
+                    std::to_string(fx_by_heuristic) + " by heuristic)");
+            }
 
             struct GdbStreamingChoiceCacheValue {
                 const StreamingModelCandidate* hit = nullptr;
@@ -3906,6 +4601,343 @@ bool Open(const FlatAssetEntry& entry)
                     return hit;
                 };
 
+            // Resolve each object-attached FX socket from the same model bytes
+            // the renderer loads. ParticleAttacher records use their authored
+            // DummyObject + OffsetFromDummy; generic ParticleEffect bindings use
+            // the model FX_Particle_DummyObject bone.
+            std::unordered_map<size_t, std::string> fx_socket_diag;
+            if (!fx_socket_jobs.empty()) {
+                struct SocketCache {
+                    bool has = false;
+                    float p[3] = {0,0,0};
+                    float q[4] = {0,0,0,1};
+                };
+                std::unordered_map<std::string, SocketCache> socket_cache;
+                size_t resolved_sockets = 0;
+                size_t attached_sockets = 0;
+                size_t missing_attached_sockets = 0;
+                auto rotate_by_quat = [](const float q[4],
+                                         const float v[3],
+                                         float out[3]) {
+                    const float tx = 2.0f * (q[1] * v[2] - q[2] * v[1]);
+                    const float ty = 2.0f * (q[2] * v[0] - q[0] * v[2]);
+                    const float tz = 2.0f * (q[0] * v[1] - q[1] * v[0]);
+                    out[0] = v[0] + q[3] * tx + (q[1] * tz - q[2] * ty);
+                    out[1] = v[1] + q[3] * ty + (q[2] * tx - q[0] * tz);
+                    out[2] = v[2] + q[3] * tz + (q[0] * ty - q[1] * tx);
+                };
+                // Resolve the socket model the SAME way the mesh does: by the
+                // GDB ModelFile hash (fnv1 of the model's full path). The
+                // name-based streaming candidate is a flaky fallback and often
+                // resolves a tiny stub file, so this is tried first.
+                std::unordered_map<uint32_t, const FlatAssetEntry*> mdl_by_hash;
+                mdl_by_hash.reserve(S.all_mdl_files.size() * 2);
+                for (const auto& m : S.all_mdl_files) {
+                    if (m.full_path.empty()) continue;
+                    mdl_by_hash.emplace(fnv1_model_path_hash(m.full_path), &m);
+                }
+                // .gmd lookup by model path (the streaming candidates index
+                // every <model>.mdl.gmd in the level streaming BNKs).
+                std::unordered_map<std::string, std::pair<std::string, int>>
+                    gmd_by_mdl;
+                for (const auto& c : streaming_model_candidates) {
+                    if (c.from_gmd && c.gmd_file_index >= 0 &&
+                        !c.gmd_bnk_path.empty()) {
+                        gmd_by_mdl.emplace(
+                            c.hint_lower,
+                            std::make_pair(c.gmd_bnk_path, c.gmd_file_index));
+                    }
+                }
+                OutputLog::info("fx: gmd index: " +
+                                std::to_string(gmd_by_mdl.size()) +
+                                " model(s) with .gmd scene data");
+                std::unordered_map<std::string, std::vector<GmdFxAttachment>>
+                    gmd_cache;
+                auto gmd_attachments_for =
+                    [&](const FlatAssetEntry* he_,
+                        const StreamingModelCandidate* cand_,
+                        std::string* why)
+                    -> const std::vector<GmdFxAttachment>* {
+                    std::string bnk;
+                    int idx = -1;
+                    if (cand_ && cand_->from_gmd &&
+                        cand_->gmd_file_index >= 0) {
+                        bnk = cand_->gmd_bnk_path;
+                        idx = cand_->gmd_file_index;
+                    } else if (he_) {
+                        auto git = gmd_by_mdl.find(lower_slash(he_->full_path));
+                        if (git != gmd_by_mdl.end()) {
+                            bnk = git->second.first;
+                            idx = git->second.second;
+                        } else if (why) {
+                            *why = " gmd-miss('" +
+                                   lower_slash(he_->full_path) + "')";
+                        }
+                    } else if (why) {
+                        *why = " gmd-nosrc";
+                    }
+                    if (idx < 0 || bnk.empty()) return nullptr;
+                    std::string key = bnk + "#" + std::to_string(idx);
+                    auto cit = gmd_cache.find(key);
+                    if (cit == gmd_cache.end()) {
+                        std::vector<GmdFxAttachment> atts;
+                        try {
+                            std::vector<uint8_t> gbytes =
+                                BnkCache::extract_bytes(bnk, idx);
+                            ParseGmdFxAttachments(gbytes, atts);
+                        } catch (...) {
+                        }
+                        cit = gmd_cache.emplace(std::move(key),
+                                                std::move(atts)).first;
+                    }
+                    return cit->second.empty() ? nullptr : &cit->second;
+                };
+                // Extra authored attachments (a prop can carry several FX,
+                // e.g. campfire flame + pot steam) — appended after the job
+                // loop so g_pending_level_fx isn't reallocated mid-iteration.
+                std::vector<Fx::Placement> gmd_extra_fx;
+                size_t gmd_fx_applied = 0;
+                for (const auto& job : fx_socket_jobs) {
+                    if (job.fx_index >= g_pending_level_fx.size()) continue;
+                    std::string& diag = fx_socket_diag[job.fx_index];
+                    diag = "ent='" + job.entity_name + "' ";
+
+                    // Prefer the model-path-hash route.
+                    const FlatAssetEntry* he = nullptr;
+                    if (job.model_path_hash) {
+                        auto hit = mdl_by_hash.find(job.model_path_hash);
+                        if (hit != mdl_by_hash.end()) he = hit->second;
+                    }
+                    const StreamingModelCandidate* cand = he
+                        ? nullptr
+                        : choose_streaming_cached(job.entity_name,
+                                                  job.parent_hash, nullptr);
+                    if (he) {
+                        diag += "byhash '" + he->full_path + "' @'" +
+                                he->bnk_path + "'#" +
+                                std::to_string(he->file_index);
+                    } else if (!cand) {
+                        diag += "cand=NULL (hash=" +
+                                std::to_string(job.model_path_hash) + ")";
+                    } else if (cand->from_gmd) {
+                        diag += "cand gmd='" + cand->gmd_bnk_path + "'#" +
+                                std::to_string(cand->gmd_file_index);
+                    } else if (cand->entry) {
+                        diag += "cand bnk='" + cand->entry->bnk_path + "'#" +
+                                std::to_string(cand->entry->file_index);
+                    } else {
+                        diag += "cand (no entry/gmd)";
+                    }
+                    // ---- authored FX from the model's .gmd scene ----
+                    // The engine's real prop-FX source: exact effect name +
+                    // exact model-space socket per attachment. When present
+                    // it supersedes both the keyword-guessed effect and the
+                    // .mdl bone socket.
+                    if (!job.attached) {
+                        std::string gmd_why;
+                        const std::vector<GmdFxAttachment>* atts =
+                            gmd_attachments_for(he, cand, &gmd_why);
+                        if (!atts && !gmd_why.empty()) diag += gmd_why;
+                        else if (!atts) diag += " gmd-empty";
+                        if (atts) {
+                            bool applied = false;
+                            Fx::Placement base_copy =
+                                g_pending_level_fx[job.fx_index];
+                            for (const auto& att : *atts) {
+                                const uint32_t ah = Fx::Fnv1Lower(att.effect);
+                                if (!g_particle_bank_loaded ||
+                                    !g_particle_bank.find_by_hash(ah))
+                                    continue;
+                                if (!applied) {
+                                    auto& fx =
+                                        g_pending_level_fx[job.fx_index];
+                                    fx.effect_name = att.effect;
+                                    fx.effect_hash = ah;
+                                    fx.socket[0] = att.pos[0];
+                                    fx.socket[1] = att.pos[1];
+                                    fx.socket[2] = att.pos[2];
+                                    applied = true;
+                                } else {
+                                    Fx::Placement extra = base_copy;
+                                    extra.effect_name = att.effect;
+                                    extra.effect_hash = ah;
+                                    extra.socket[0] = att.pos[0];
+                                    extra.socket[1] = att.pos[1];
+                                    extra.socket[2] = att.pos[2];
+                                    gmd_extra_fx.push_back(std::move(extra));
+                                }
+                                diag += " gmd-fx('" + att.effect + "' @" +
+                                        std::to_string(att.pos[0]) + "," +
+                                        std::to_string(att.pos[1]) + "," +
+                                        std::to_string(att.pos[2]) + ")";
+                            }
+                            if (applied) {
+                                ++gmd_fx_applied;
+                                ++resolved_sockets;
+                                continue;   // authored socket; skip bone path
+                            }
+                        }
+                    }
+                    SocketCache sc;
+                    if (job.attached && job.dummy_name.empty()) {
+                        sc.has = true;
+                    } else if (he || cand) {
+                        std::string cache_key = he
+                            ? (he->bnk_path + "#" +
+                               std::to_string(he->file_index))
+                            : std::to_string(
+                                  reinterpret_cast<uintptr_t>(cand));
+                        cache_key.push_back('|');
+                        cache_key += job.attached ? job.dummy_name
+                                                  : std::string();
+                        auto cached = socket_cache.find(cache_key);
+                        if (cached != socket_cache.end()) {
+                            sc = cached->second;
+                        } else {
+                            std::vector<uint8_t> mbytes;
+                            try {
+                                if (he) {
+                                    // Combine the model header (bones) + body
+                                    // (geometry) the same way the mesh loader
+                                    // does; the body bnk alone has no bone table.
+                                    build_mdl_buffer_for_name_with_body(
+                                        he->full_path, he->bnk_path, mbytes);
+                                } else if (cand->from_gmd &&
+                                    cand->gmd_file_index >= 0 &&
+                                    !cand->gmd_bnk_path.empty()) {
+                                    mbytes = BnkCache::extract_bytes(
+                                        cand->gmd_bnk_path,
+                                        cand->gmd_file_index);
+                                } else if (cand->entry) {
+                                    mbytes = BnkCache::extract_bytes(
+                                        cand->entry->bnk_path,
+                                        cand->entry->file_index);
+                                }
+                            } catch (...) {
+                            }
+                            diag += " mbytes=" + std::to_string(mbytes.size());
+                            if (mbytes.size() >= 16) {
+                                char hx[80];
+                                std::snprintf(hx, sizeof hx,
+                                    " magic=%c%c%c%c hs=%u b32=%u",
+                                    mbytes[0], mbytes[1], mbytes[2], mbytes[3],
+                                    (unsigned)((mbytes[12] << 24) |
+                                        (mbytes[13] << 16) |
+                                        (mbytes[14] << 8) | mbytes[15]),
+                                    mbytes.size() >= 36 ? (unsigned)(
+                                        (mbytes[32] << 24) | (mbytes[33] << 16) |
+                                        (mbytes[34] << 8) | mbytes[35]) : 0u);
+                                diag += hx;
+                            }
+                            if (!mbytes.empty()) {
+                                if (job.attached) {
+                                    if (ReadMdlSocket(mbytes, job.dummy_name,
+                                                      false, sc.p, sc.q))
+                                        sc.has = true;
+                                    diag += sc.has ? " ReadMdlSocket=OK"
+                                                   : " ReadMdlSocket=FAIL";
+                                } else if (ReadMdlFxSocket(mbytes, sc.p)) {
+                                    sc.has = true;
+                                    diag += " ReadMdlFxSocket=OK";
+                                } else {
+                                    diag += " ReadMdlFxSocket=FAIL";
+                                }
+                            }
+                            socket_cache.emplace(std::move(cache_key), sc);
+                        }
+                    }
+                    float socket[3] = { sc.p[0], sc.p[1], sc.p[2] };
+                    if (sc.has && job.attached) {
+                        float off[3] = {
+                            job.offset[0], job.offset[1], job.offset[2]
+                        };
+                        float roff[3] = {0, 0, 0};
+                        rotate_by_quat(sc.q, off, roff);
+                        socket[0] += roff[0];
+                        socket[1] += roff[1];
+                        socket[2] += roff[2];
+                    }
+                    if (sc.has) {
+                        auto& fx = g_pending_level_fx[job.fx_index];
+                        fx.socket[0] = socket[0];
+                        fx.socket[1] = socket[1];
+                        fx.socket[2] = socket[2];
+                        if (job.attached) ++attached_sockets;
+                        else ++resolved_sockets;
+                    } else if (job.attached) {
+                        ++missing_attached_sockets;
+                    }
+                }
+                // Additional authored attachments (flame + steam etc.) from
+                // the same props, deferred to avoid reallocation above. The
+                // same-effect dedup keeps overlaps with authored FX entities
+                // out.
+                for (auto& extra : gmd_extra_fx) {
+                    bool dup = false;
+                    for (const auto& e : g_pending_level_fx) {
+                        if (e.effect_hash != extra.effect_hash) continue;
+                        // compare pos AND socket: the waterfall rock carries
+                        // two fxenv_water_fall_main at different sockets.
+                        const float dx = (e.pos[0] + e.socket[0]) -
+                                         (extra.pos[0] + extra.socket[0]);
+                        const float dy = (e.pos[1] + e.socket[1]) -
+                                         (extra.pos[1] + extra.socket[1]);
+                        const float dz = (e.pos[2] + e.socket[2]) -
+                                         (extra.pos[2] + extra.socket[2]);
+                        if (dx * dx + dy * dy + dz * dz < 0.25f) {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (!dup) g_pending_level_fx.push_back(std::move(extra));
+                }
+                if (gmd_fx_applied || !gmd_extra_fx.empty()) {
+                    OutputLog::success("fx: " +
+                        std::to_string(gmd_fx_applied) +
+                        " prop FX from authored .gmd attachments (+" +
+                        std::to_string(gmd_extra_fx.size()) +
+                        " extra attachment(s))");
+                }
+                if (resolved_sockets > 0 || attached_sockets > 0 ||
+                    missing_attached_sockets > 0) {
+                    OutputLog::info("fx: resolved " +
+                        std::to_string(resolved_sockets) + "/" +
+                        std::to_string(fx_socket_jobs.size()) +
+                        " generic FX socket(s), " +
+                        std::to_string(attached_sockets) +
+                        " ParticleAttacher dummy socket(s), " +
+                        std::to_string(missing_attached_sockets) +
+                        " missing authored dummy socket(s)");
+                }
+            }
+
+            // FX diagnostic dump to a file (bank status + every placement).
+            {
+                std::ofstream fxdbg(
+                    "C:\\Users\\pwd12\\OneDrive\\Documents\\GitHub\\"
+                    "Fable2AssetBrowser\\fx_debug.log", std::ios::trunc);
+                if (fxdbg) {
+                    fxdbg << "particle_bank_loaded=" << g_particle_bank_loaded
+                          << " pending_fx=" << g_pending_level_fx.size()
+                          << " socket_jobs=" << fx_socket_jobs.size() << "\n";
+                    for (size_t i = 0; i < g_pending_level_fx.size(); ++i) {
+                        const auto& fx = g_pending_level_fx[i];
+                        fxdbg << "fx[" << i << "] '" << fx.effect_name
+                              << "' hash=" << fx.effect_hash
+                              << " socket=(" << fx.socket[0] << ","
+                              << fx.socket[1] << "," << fx.socket[2] << ")"
+                              << " rot=" << (fx.has_rot ? "euler" : "yaw")
+                              << " scale=" << fx.scale
+                              << " pos=(" << fx.pos[0] << "," << fx.pos[1]
+                              << "," << fx.pos[2] << ")";
+                        auto dit = fx_socket_diag.find(i);
+                        if (dit != fx_socket_diag.end())
+                            fxdbg << " [" << dit->second << "]";
+                        fxdbg << "\n";
+                    }
+                    fxdbg.flush();
+                }
+            }
 
             struct GdbArchetypeDiag {
                 size_t count = 0;
@@ -7752,7 +8784,15 @@ bool Open(const FlatAssetEntry& entry)
                                 add_unique_water(water_ref);
                             }
 
+                            // The engine loads one .water per heightfield
+                            // resource (main + every adjacent/vista
+                            // heightfield; WaterBody_LoadFromResource fires
+                            // for each type-5 resource). Heightfield chunk
+                            // origins are world-space, and so are the .water
+                            // patch centres, so all files merge directly into
+                            // one scene with no transform.
                             bool found_water_file = false;
+                            Level::WaterScene merged;
                             for (const auto& water_path : water_candidates) {
                                 std::vector<uint8_t> water_bytes;
                                 if (!load_text_sibling(water_path, water_bytes) ||
@@ -7772,14 +8812,29 @@ bool Open(const FlatAssetEntry& entry)
                                         " bodies, " +
                                         std::to_string(total_tiles) + " tiles from " +
                                         water_path);
-                                    g_pending_level_water_scene = std::move(scene);
-                                    g_pending_level_water_present = true;
-                                    break;
+                                    merged.version = scene.version;
+                                    merged.tile_count += scene.tile_count;
+                                    for (auto& b : scene.bodies) {
+                                        merged.bodies.push_back(std::move(b));
+                                    }
+                                    continue;
                                 }
 
                                 OutputLog::warn(
                                     ".water sibling found but failed to parse: " +
                                     water_path);
+                            }
+                            if (!merged.bodies.empty()) {
+                                merged.body_count =
+                                    uint32_t(merged.bodies.size());
+                                OutputLog::success(
+                                    ".water merged scene: " +
+                                    std::to_string(merged.bodies.size()) +
+                                    " bodies, " +
+                                    std::to_string(merged.tile_count) +
+                                    " tiles across all heightfields");
+                                g_pending_level_water_scene = std::move(merged);
+                                g_pending_level_water_present = true;
                             }
 
                             if (!found_water_file && !water_candidates.empty()) {

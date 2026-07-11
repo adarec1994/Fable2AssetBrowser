@@ -66,7 +66,10 @@ Category categorize(const std::string& name) {
         return { "flames",     2.0f, 0.35f,0.5f, 0.5f, 45.f, 1.0f,0.7f,0.35f, 2, false };
     if (has("dust") || has("sand"))
         return { "dust",       0.2f, 0.7f, 1.6f, 0.4f, 12.f, 0.55f,0.45f,0.3f, 6, true };
-    return { "smokepuff",      0.9f, 0.5f, 1.5f, 0.6f, 12.f, 0.8f,0.8f,0.8f, 6, false };
+    // No keyword hit: null tex_key = "no category", the caller skips the
+    // placement. Guessing a generic smoke puff here painted fake smoke over
+    // every window-light placement (ESA_*Win* et al) the bank can't resolve.
+    return { nullptr,          0.0f, 0.0f, 0.0f, 0.0f, 0.f, 0.0f,0.0f,0.0f, 6, false };
 }
 
 const std::string* pick_texture(const Bank& bank, const char* key) {
@@ -269,8 +272,9 @@ void System::build(const Bank& bank, std::vector<Placement>& places) {
             ++resolved_count_;
         } else {
             // ---- category fallback ----
-            inst.fallback = true;
             Category cat = categorize(p.effect_name);
+            if (!cat.tex_key) continue;   // unknown effect: don't invent smoke
+            inst.fallback = true;
             EmitterRT rt;
             rt.scale = sc;
             rt.yaw_cos = cy; rt.yaw_sin = sy;

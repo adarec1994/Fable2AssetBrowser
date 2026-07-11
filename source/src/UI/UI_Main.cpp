@@ -30,6 +30,7 @@
 #include "../ISO/IsoMount.h"
 #include "../ISO/IsoDump.h"
 #include "OutputLog.h"
+#include "../Level/LevelEdit.h"
 #ifndef _WIN32
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
@@ -434,6 +435,70 @@ void draw_main(GLFWwindow* window) {
 #endif
                 }
                 ImGui::EndMenu();
+            }
+            {
+                static bool s_confirm_restore = false;
+                const bool level_ready = LevelEdit::Available();
+                if (ImGui::BeginMenu("Level", level_ready)) {
+                    bool edit_on = LevelEdit::Enabled();
+                    if (ImGui::MenuItem("Edit Level", nullptr, &edit_on)) {
+                        std::string msg;
+                        if (!LevelEdit::SetEnabled(edit_on, msg)) {
+                            OutputLog::error("level edit: " + msg);
+                        } else {
+                            OutputLog::info("level edit: " + msg);
+                        }
+                    }
+                    if (LevelEdit::Enabled()) {
+                        const std::string save_label =
+                            LevelEdit::Dirty()
+                                ? "Save Level*"
+                                : "Save Level";
+                        if (ImGui::MenuItem(save_label.c_str(), nullptr,
+                                            false, LevelEdit::Dirty())) {
+                            std::string msg;
+                            if (LevelEdit::Save(msg)) {
+                                OutputLog::success("level edit: " + msg);
+                            } else {
+                                OutputLog::error("level edit: " + msg);
+                            }
+                        }
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("Restore Defaults")) {
+                            s_confirm_restore = true;
+                        }
+                    }
+                    ImGui::EndMenu();
+                }
+                if (s_confirm_restore) {
+                    ImGui::OpenPopup("Restore Level Defaults?");
+                    s_confirm_restore = false;
+                }
+                if (ImGui::BeginPopupModal("Restore Level Defaults?",
+                                           nullptr,
+                                           ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGui::TextWrapped(
+                        "This restores the level back to its original "
+                        "state: the level's files are OVERWRITTEN with "
+                        "the .bak backups and the level is reloaded. Any "
+                        "saved or unsaved edits are lost.");
+                    ImGui::Spacing();
+                    if (ImGui::Button("Restore", ImVec2(120, 0))) {
+                        std::string msg;
+                        if (LevelEdit::RestoreDefaults(msg)) {
+                            OutputLog::success("level edit: " + msg);
+                        } else {
+                            OutputLog::error("level edit: " + msg);
+                        }
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SetItemDefaultFocus();
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
             }
             if (ImGui::BeginMenu("Settings")) {
                 if (ImGui::Checkbox("Show file paths in tree tooltips", &S.show_paths)) {

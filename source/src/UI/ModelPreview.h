@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <array>
 #include "../MDL/ModelParser.h"
 #include "../Level/Skybox/CloudRuntime.h"
 #include "../Level/Skybox/SkyboxTypes.h"
@@ -92,6 +93,14 @@ struct MPPerMesh {
         uint32_t index_count = 0;
         float center[3] = {0.0f, 0.0f, 0.0f};
         float radius = 0.0f;
+        // instance transform in engine axes (Z up), rotation in degrees
+        float inst_pos[3] = {0.0f, 0.0f, 0.0f};
+        float inst_rot_deg[3] = {0.0f, 0.0f, 0.0f};
+        bool  has_transform = false;
+        // entity hash (groups the parts of one authored object) and the
+        // byte offset of the position in the level file (0 = not on disk)
+        uint64_t inst_hash = 0;
+        uint32_t pos_file_offset = 0;
     };
     std::vector<PickRange> pick_ranges;
     std::vector<float> pick_positions;
@@ -290,6 +299,12 @@ struct ModelPreview {
 
     bool no_tilt = false;
     uint32_t selected_pick_id = 0;
+    // Groups every part of the selected authored object (see
+    // PickRange::inst_hash); 0 = single-instance selection only.
+    uint64_t selected_pick_hash = 0;
+    // Live level-edit movement, preview-space offset keyed by selection
+    // id. Filled per frame by the render panel from LevelEdit deltas.
+    std::unordered_map<uint32_t, std::array<float, 3>> range_edit_offsets;
 
     uint32_t lod_count    = 1;
     int32_t  selected_lod = -1;

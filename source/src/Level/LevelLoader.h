@@ -26,6 +26,9 @@ struct PropInstance {
     uint8_t flags[3] = {0, 0, 0};
     float values[20] = {};
     bool has_full_transform = false;
+    // Byte offset of this instance's position (3 BE f32) in the level
+    // file; 0 = not stored there (GDB/derived), so not editable on disk.
+    uint32_t pos_file_offset = 0;
 };
 
 struct PropBlock {

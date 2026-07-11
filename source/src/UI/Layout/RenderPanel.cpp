@@ -5,7 +5,9 @@
 #include "../../Level/TerrainTextureRegistry.h"
 #include "../../Level/EhfLodThumbnails.h"
 #include "../../Level/TerrainEdit.h"
+#include "../../Level/LevelEdit.h"
 #include "../../Level/LevelLoader.h"
+#include "../LevelGizmo.h"
 #include "../../animations/AnimBank.h"
 #include "../../animations/AnimDataFile.h"
 #include "../../animations/AnimPlayer.h"
@@ -56,6 +58,9 @@ int g_highlight_mesh_idx    = -1;
 int g_isolate_mesh_idx      = -1;
 int g_selected_level_mesh_idx = -1;
 uint32_t g_selected_level_pick_id = 0;
+// Entity hash of the picked instance: groups every part of the authored
+// object (submesh chunks, GMD children) for highlight and movement.
+uint64_t g_selected_level_hash = 0;
 
 #ifdef _WIN32
 ID3D11ShaderResourceView* g_tex_popout_srv = nullptr;
@@ -785,8 +790,10 @@ static int pick_bone_at(const ImVec2& mouse, const ImVec2& origin,
 int pick_level_mesh_at(const ImVec2& mouse,
                        const ImVec2& origin,
                        const ImVec2& region,
-                       uint32_t* out_pick_id = nullptr) {
+                       uint32_t* out_pick_id = nullptr,
+                       uint64_t* out_pick_hash = nullptr) {
     if (out_pick_id) *out_pick_id = 0;
+    if (out_pick_hash) *out_pick_hash = 0;
     if (!g_mp.has_model || !g_mp.no_tilt || g_mp.meshes.empty()) return -1;
     const float fw = std::max(1.0f, region.x);
     const float fh = std::max(1.0f, region.y);
@@ -842,6 +849,7 @@ int pick_level_mesh_at(const ImVec2& mouse,
     auto hit_triangle = [&](const float* a,
                             const float* b,
                             const float* c,
+                            const float ro[3],
                             float& out_t) {
         const float e1x = b[0] - a[0];
         const float e1y = b[1] - a[1];
@@ -855,9 +863,9 @@ int pick_level_mesh_at(const ImVec2& mouse,
         const float det = e1x * px + e1y * py + e1z * pz;
         if (std::fabs(det) < 1e-7f) return false;
         const float inv_det = 1.0f / det;
-        const float tx = ox - a[0];
-        const float ty = oy - a[1];
-        const float tz = oz - a[2];
+        const float tx = ro[0] - a[0];
+        const float ty = ro[1] - a[1];
+        const float tz = ro[2] - a[2];
         const float u = (tx * px + ty * py + tz * pz) * inv_det;
         if (u < 0.0f || u > 1.0f) return false;
         const float qx = ty * e1z - tz * e1y;
@@ -871,9 +879,10 @@ int pick_level_mesh_at(const ImVec2& mouse,
         return true;
     };
 
-    int      best     = -1;
-    uint32_t best_id  = 0;
-    float    best_t   = std::numeric_limits<float>::infinity();
+    int      best      = -1;
+    uint32_t best_id   = 0;
+    uint64_t best_hash = 0;
+    float    best_t    = std::numeric_limits<float>::infinity();
     for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
         const auto& m = g_mp.meshes[i];
         if (m.index_count == 0 || m.radius <= 0.0f) continue;
@@ -885,8 +894,23 @@ int pick_level_mesh_at(const ImVec2& mouse,
         if (!m.pick_ranges.empty()) {
             for (const auto& pr : m.pick_ranges) {
                 if (pr.selection_id == 0 || pr.radius <= 0.0f) continue;
+
+                // Live level-edit move: test against the shifted instance
+                // (shift the ray origin instead of every vertex).
+                float ro[3] = { ox, oy, oz };
+                float ctr[3] = { pr.center[0], pr.center[1], pr.center[2] };
+                auto eo = g_mp.range_edit_offsets.find(pr.selection_id);
+                if (eo != g_mp.range_edit_offsets.end()) {
+                    ctr[0] += eo->second[0];
+                    ctr[1] += eo->second[1];
+                    ctr[2] += eo->second[2];
+                    ro[0] -= eo->second[0];
+                    ro[1] -= eo->second[1];
+                    ro[2] -= eo->second[2];
+                }
+
                 float sphere_t = 0.0f;
-                if (!hit_sphere(pr.center, pr.radius, sphere_t)) continue;
+                if (!hit_sphere(ctr, pr.radius, sphere_t)) continue;
 
                 bool tri_hit = false;
                 float tri_t = std::numeric_limits<float>::infinity();
@@ -909,7 +933,7 @@ int pick_level_mesh_at(const ImVec2& mouse,
                         float t = 0.0f;
                         if (!hit_triangle(&m.pick_positions[pa],
                                           &m.pick_positions[pb],
-                                          &m.pick_positions[pc], t)) {
+                                          &m.pick_positions[pc], ro, t)) {
                             continue;
                         }
                         if (t < tri_t) {
@@ -924,6 +948,7 @@ int pick_level_mesh_at(const ImVec2& mouse,
                     best_t = t;
                     best = (int)i;
                     best_id = pr.selection_id;
+                    best_hash = pr.inst_hash;
                 }
             }
             continue;
@@ -932,9 +957,15 @@ int pick_level_mesh_at(const ImVec2& mouse,
 
         float t = 0.0f;
         if (!hit_sphere(m.center, m.radius, t)) continue;
-        if (t < best_t) { best_t = t; best = (int)i; best_id = 0; }
+        if (t < best_t) {
+            best_t = t;
+            best = (int)i;
+            best_id = 0;
+            best_hash = 0;
+        }
     }
     if (out_pick_id) *out_pick_id = best_id;
+    if (out_pick_hash) *out_pick_hash = best_hash;
     return best;
 }
 
@@ -948,6 +979,7 @@ void draw_model_in_panel(ID3D11Device* device) {
         !g_mp.has_model || !g_mp.no_tilt) {
         ::g_selected_level_mesh_idx = -1;
         ::g_selected_level_pick_id = 0;
+        ::g_selected_level_hash = 0;
     }
     if (::g_selected_level_mesh_idx >= 0 && !S.dev_mode &&
         is_adjacent_terrain_mesh_name(
@@ -955,6 +987,18 @@ void draw_model_in_panel(ID3D11Device* device) {
     {
         ::g_selected_level_mesh_idx = -1;
         ::g_selected_level_pick_id = 0;
+        ::g_selected_level_hash = 0;
+    }
+
+    // Sync live level-edit offsets into the renderer/picker whenever the
+    // edit state changes.
+    {
+        static uint64_t s_edit_rev_seen = ~0ull;
+        const uint64_t rev = LevelEdit::Revision();
+        if (rev != s_edit_rev_seen) {
+            s_edit_rev_seen = rev;
+            LevelEdit::CollectPreviewOffsets(g_mp.range_edit_offsets);
+        }
     }
 
     if (!g_mp_initialized) {
@@ -1041,15 +1085,19 @@ void draw_model_in_panel(ID3D11Device* device) {
     }
 
     if (g_mp.no_tilt && hovered && !rotate_active &&
+        !LevelGizmo::WantsMouse() &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
         !ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f))
     {
         uint32_t picked_id = 0;
+        uint64_t picked_hash = 0;
         const ImVec2 mouse = ImGui::GetIO().MousePos;
         const int picked = pick_level_mesh_at(mouse, origin, region,
-                                              &picked_id);
+                                              &picked_id, &picked_hash);
         ::g_selected_level_mesh_idx = picked;
         ::g_selected_level_pick_id = picked >= 0 ? picked_id : 0;
+        ::g_selected_level_hash = picked >= 0 ? picked_hash : 0;
+        if (picked < 0) LevelGizmo::CancelDrag();
     }
 
     if (S.terrain_mode) {
@@ -1104,6 +1152,7 @@ void draw_model_in_panel(ID3D11Device* device) {
         g_mp.meshes[i].isolated  = ((int)i == ::g_isolate_mesh_idx);
     }
     g_mp.selected_pick_id = ::g_selected_level_pick_id;
+    g_mp.selected_pick_hash = ::g_selected_level_hash;
 
     if (!S.terrain_mode) apply_orbit_to_flycam();
     MP_Render(device, g_mp, g_flycam);
@@ -1121,12 +1170,132 @@ void draw_model_in_panel(ID3D11Device* device) {
     }
 #endif
 
+    if (g_mp.no_tilt && ::g_selected_level_mesh_idx >= 0 &&
+        ::g_selected_level_mesh_idx < (int)g_mp.meshes.size())
+    {
+        const auto& sel_mesh =
+            g_mp.meshes[(size_t)::g_selected_level_mesh_idx];
+        // Engine axes for display: Z is up/down. The preview world is Y-up
+        // (coords swapped at load), so preview-space fallbacks swap back.
+        float sel_pos[3] = {0.0f, 0.0f, 0.0f};
+        float sel_rot[3] = {0.0f, 0.0f, 0.0f};
+        bool  sel_has_rot = false;
+        bool  sel_found = false;
+        if (::g_selected_level_pick_id != 0) {
+            for (const auto& pr : sel_mesh.pick_ranges) {
+                if (pr.selection_id != ::g_selected_level_pick_id) continue;
+                if (pr.has_transform) {
+                    sel_pos[0] = pr.inst_pos[0];
+                    sel_pos[1] = pr.inst_pos[1];
+                    sel_pos[2] = pr.inst_pos[2];
+                    sel_rot[0] = pr.inst_rot_deg[0];
+                    sel_rot[1] = pr.inst_rot_deg[1];
+                    sel_rot[2] = pr.inst_rot_deg[2];
+                    sel_has_rot = true;
+                } else {
+                    sel_pos[0] = pr.center[0];
+                    sel_pos[1] = pr.center[2];
+                    sel_pos[2] = pr.center[1];
+                }
+                sel_found = true;
+                break;
+            }
+        }
+        if (!sel_found) {
+            sel_pos[0] = sel_mesh.center[0];
+            sel_pos[1] = sel_mesh.center[2];
+            sel_pos[2] = sel_mesh.center[1];
+        }
+        // Live level-edit movement shows in the displayed position.
+        if (const float* d =
+                LevelEdit::DeltaFor(::g_selected_level_pick_id)) {
+            sel_pos[0] += d[0];
+            sel_pos[1] += d[1];
+            sel_pos[2] += d[2];
+        }
+
+        const float kOverlayW = 150.0f;
+        ImGui::SetNextWindowPos(ImVec2(origin.x + region.x - kOverlayW - 8.0f,
+                                       origin.y + 6.0f));
+        ImGui::SetNextWindowSize(ImVec2(kOverlayW, 0), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.78f);
+        ImGuiWindowFlags ofl = ImGuiWindowFlags_NoTitleBar
+                             | ImGuiWindowFlags_NoResize
+                             | ImGuiWindowFlags_NoMove
+                             | ImGuiWindowFlags_NoCollapse
+                             | ImGuiWindowFlags_NoSavedSettings
+                             | ImGuiWindowFlags_AlwaysAutoResize
+                             | ImGuiWindowFlags_NoFocusOnAppearing
+                             | ImGuiWindowFlags_NoNav;
+        if (ImGui::Begin("##sel_transform_overlay", nullptr, ofl)) {
+            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Position:");
+            ImGui::Text("X: %.3f", sel_pos[0]);
+            ImGui::Text("Y: %.3f", sel_pos[1]);
+            ImGui::Text("Z: %.3f", sel_pos[2]);
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Rotation:");
+            if (sel_has_rot) {
+                ImGui::Text("X: %.1f", sel_rot[0]);
+                ImGui::Text("Y: %.1f", sel_rot[1]);
+                ImGui::Text("Z: %.1f", sel_rot[2]);
+            } else {
+                ImGui::TextDisabled("n/a");
+            }
+        }
+        ImGui::End();
+
+        // ---- translate gizmo (edit mode) ----
+        if (LevelEdit::Enabled() && ::g_selected_level_pick_id != 0 &&
+            sel_found)
+        {
+            // The whole authored object: the clicked instance plus every
+            // range sharing its entity hash. Movable when any member's
+            // position lives in the level file.
+            auto range_in_group = [](const MPPerMesh::PickRange& pr) {
+                if (pr.selection_id == ::g_selected_level_pick_id)
+                    return true;
+                return ::g_selected_level_hash != 0 &&
+                       pr.inst_hash == ::g_selected_level_hash;
+            };
+            bool editable = false;
+            for (const auto& m2 : g_mp.meshes) {
+                for (const auto& pr : m2.pick_ranges) {
+                    if (range_in_group(pr) && pr.pos_file_offset != 0) {
+                        editable = true;
+                        break;
+                    }
+                }
+                if (editable) break;
+            }
+
+            LevelGizmo::Result gz = LevelGizmo::DrawAndHandle(
+                g_flycam, origin, region, sel_pos, editable);
+            if (gz.moved && editable) {
+                std::unordered_set<uint32_t> moved_ids;
+                for (const auto& m2 : g_mp.meshes) {
+                    for (const auto& pr : m2.pick_ranges) {
+                        if (!range_in_group(pr)) continue;
+                        if (!moved_ids.insert(pr.selection_id).second)
+                            continue;
+                        LevelEdit::AddDelta(pr.selection_id, gz.step,
+                                            pr.inst_pos,
+                                            pr.pos_file_offset);
+                    }
+                }
+            }
+        } else {
+            LevelGizmo::CancelDrag();
+        }
+    }
+
     if (hovered && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         if (S.bone_rotate_mode) {
             cancel_rotate();
         } else if (g_mp.no_tilt && ::g_selected_level_mesh_idx >= 0) {
             ::g_selected_level_mesh_idx = -1;
             ::g_selected_level_pick_id = 0;
+            ::g_selected_level_hash = 0;
+            LevelGizmo::CancelDrag();
         } else if (g_mp.no_tilt) {
 
         } else {

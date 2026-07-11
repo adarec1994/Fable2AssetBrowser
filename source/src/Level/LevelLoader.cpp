@@ -1,5 +1,6 @@
 #include "LevelLoader.h"
 #include "HeightfieldLoader.h"
+#include "LevelEdit.h"
 #include "TextureAtlasDecoder.h"
 #include "EhfPalette.h"
 #include "EhfChunkParser.h"
@@ -2799,6 +2800,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                         out.error = "truncated reading type-2 instance header";
                         return false;
                     }
+                    inst.pos_file_offset = (uint32_t)r.i;
                     for (float& v : inst.values) {
                         if (!r.f32(v)) {
                             out.error = "truncated reading type-2 instance floats";
@@ -2866,6 +2868,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                 if (out.version == 11) {
                     for (uint32_t k = 0; k < loop1_count; ++k) {
                         PropInstance inst;
+                        inst.pos_file_offset = (uint32_t)r.i;
                         for (int j = 0; j < 4; ++j) {
                             if (!r.f32(inst.values[j])) {
                                 out.error = "truncated type-21 v11 loop1 body";
@@ -2878,6 +2881,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                     }
                 } else {
                     for (uint32_t k = 0; k < loop1_count; ++k) {
+                        const uint32_t pos_off = (uint32_t)r.i;
                         float pos[3];
                         if (!r.f32(pos[0]) || !r.f32(pos[1]) || !r.f32(pos[2])) {
                             out.error = "truncated type-21 v12 instance vec3";
@@ -2891,6 +2895,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                             return false;
                         }
                         PropInstance inst;
+                        inst.pos_file_offset = pos_off;
                         inst.values[0] = pos[0];
                         inst.values[1] = pos[1];
                         inst.values[2] = pos[2];
@@ -2927,6 +2932,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                 size_t loop2_emitted = 0;
                 size_t loop2_skipped = 0;
                 for (uint32_t k = 0; k < loop2_count; ++k) {
+                    const uint32_t rec_off = (uint32_t)r.i;
                     float a_val, b_val;
                     float p1[3], p2[3];
                     if (!r.f32(a_val) || !r.f32(b_val) ||
@@ -2951,6 +2957,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                     }
 
                     PropInstance inst;
+                    inst.pos_file_offset = rec_off + 8;   // p1 after a,b
                     inst.values[0] = p1[0];
                     inst.values[1] = p1[1];
                     inst.values[2] = p1[2];
@@ -3072,6 +3079,7 @@ bool Open(const FlatAssetEntry& entry)
     if (bail_if_cancelled("after-parse")) return false;
 
     info.source_path = entry.full_path;
+    LevelEdit::OnLevelLoaded(entry);
     const bool is_bwsmarket_engine_level =
         lower_slash(entry.full_path).find("bwsmarket") != std::string::npos;
 

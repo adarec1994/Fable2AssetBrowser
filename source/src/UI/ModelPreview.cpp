@@ -1139,6 +1139,7 @@ cbuffer CB : register(b0){
     float4   lightDir;
     float4x4 mv;
     float4   params;
+    float4   edit_off;   // level-edit world offset (preview space)
 }
 
 cbuffer Bones : register(b1){
@@ -1162,7 +1163,7 @@ VSOUT VS(VSIN i){
           bones[i.bid.z] * i.bw.z +
           bones[i.bid.w] * i.bw.w;
 
-    float4 p_skin = mul(float4(i.p, 1.0), skin);
+    float4 p_skin = mul(float4(i.p + edit_off.xyz, 1.0), skin);
     float3 n_skin = mul(i.n, (float3x3)skin);
 
     o.p = mul(p_skin, mvp);
@@ -2238,7 +2239,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     if(FAILED(dev->CreateInputLayout(il,5,vsb->GetBufferPointer(),vsb->GetBufferSize(),&mp.layout))){ vsb->Release(); psb->Release(); return false; }
     vsb->Release(); psb->Release();
 
-    struct CB { XMFLOAT4X4 mvp; XMFLOAT4 lightDir; XMFLOAT4X4 mv; XMFLOAT4 params; };
+    struct CB { XMFLOAT4X4 mvp; XMFLOAT4 lightDir; XMFLOAT4X4 mv; XMFLOAT4 params; XMFLOAT4 edit_off; };
     D3D11_BUFFER_DESC cbd{};
     cbd.BindFlags=D3D11_BIND_CONSTANT_BUFFER; cbd.ByteWidth=sizeof(CB); cbd.Usage=D3D11_USAGE_DYNAMIC; cbd.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
     if(FAILED(dev->CreateBuffer(&cbd,nullptr,&mp.cbuffer))) return false;
@@ -3013,6 +3014,15 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             mr.center[1] = pr.center[1];
             mr.center[2] = pr.center[2];
             mr.radius = pr.radius;
+            mr.inst_pos[0] = pr.inst_pos[0];
+            mr.inst_pos[1] = pr.inst_pos[1];
+            mr.inst_pos[2] = pr.inst_pos[2];
+            mr.inst_rot_deg[0] = pr.inst_rot_deg[0];
+            mr.inst_rot_deg[1] = pr.inst_rot_deg[1];
+            mr.inst_rot_deg[2] = pr.inst_rot_deg[2];
+            mr.has_transform = pr.has_transform;
+            mr.inst_hash = pr.inst_hash;
+            mr.pos_file_offset = pr.pos_file_offset;
             m.pick_ranges.push_back(mr);
         }
         if (!m.pick_ranges.empty()) {
@@ -3122,6 +3132,8 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         mp.selected_lod = 0;
     }
     mp.selected_pick_id = 0;
+    mp.selected_pick_hash = 0;
+    mp.range_edit_offsets.clear();
 
     mp.bone_count = 0;
     mp.bone_parents.clear();
@@ -3245,7 +3257,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                     sun_dir_f.z,
                     0.0f));
     XMFLOAT4 lightDirF; XMStoreFloat4(&lightDirF, lightDirV);
-    struct CB { XMFLOAT4X4 mvp; XMFLOAT4 lightDir; XMFLOAT4X4 mv; XMFLOAT4 params; } cb;
+    struct CB { XMFLOAT4X4 mvp; XMFLOAT4 lightDir; XMFLOAT4X4 mv; XMFLOAT4 params; XMFLOAT4 edit_off; } cb;
     XMStoreFloat4x4(&cb.mvp, MVP);
     XMStoreFloat4x4(&cb.mv,  MV);
     cb.lightDir = lightDirF;
@@ -3433,11 +3445,15 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
 
     const float water_time = (float)ImGui::GetTime();
     auto upload_per_mesh_cb = [&](bool highlight, bool is_cloth, bool alpha_test,
-                                  bool no_skin = false){
+                                  bool no_skin = false,
+                                  const float* edit_off = nullptr){
 
         cb.params = XMFLOAT4(alpha_test ? 1.0f : 0.0f, no_skin ? 1.0f : 0.0f,
                              is_cloth ? 2.0f : (highlight ? 1.0f : 0.0f),
                              water_time);
+        cb.edit_off = edit_off
+            ? XMFLOAT4(edit_off[0], edit_off[1], edit_off[2], 0.0f)
+            : XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
         D3D11_MAPPED_SUBRESOURCE pms{};
         if (SUCCEEDED(ctx->Map(mp.cbuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &pms))) {
             std::memcpy(pms.pData, &cb, sizeof(cb));
@@ -3815,6 +3831,53 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         ctx->PSSetShaderResources(0, 5, nullsrvs);
     };
 
+    // Draw a mesh honouring live level-edit offsets: index spans of moved
+    // instances draw with the edit offset in the VS cbuffer, the rest of
+    // the mesh draws unshifted. Meshes with no moved ranges take the plain
+    // path (terrain/water/cloth never carry pick ranges).
+    auto draw_one_with_edits = [&](const MPPerMesh& m, ID3D11BlendState* bs) {
+        struct Seg {
+            uint32_t start, count;
+            const std::array<float, 3>* off;
+        };
+        std::vector<Seg> edited;
+        if (!mp.range_edit_offsets.empty() && !m.pick_ranges.empty() &&
+            !m.is_terrain && !m.is_water && !m.cloth_sim) {
+            for (const auto& pr : m.pick_ranges) {
+                auto it = mp.range_edit_offsets.find(pr.selection_id);
+                if (it == mp.range_edit_offsets.end()) continue;
+                edited.push_back({pr.index_start, pr.index_count,
+                                  &it->second});
+            }
+        }
+        upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test,
+                           m.cloth_sim);
+        if (edited.empty()) {
+            draw_one(m, bs);
+            return;
+        }
+        std::sort(edited.begin(), edited.end(),
+                  [](const Seg& a, const Seg& b) {
+                      return a.start < b.start;
+                  });
+        uint32_t cursor = 0;
+        for (const auto& s : edited) {
+            if (s.start > cursor) {
+                draw_regular_range(m, cursor, s.start - cursor, bs);
+            }
+            const float off[3] = { (*s.off)[0], (*s.off)[1], (*s.off)[2] };
+            upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test,
+                               m.cloth_sim, off);
+            draw_regular_range(m, s.start, s.count, bs);
+            upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test,
+                               m.cloth_sim);
+            if (s.start + s.count > cursor) cursor = s.start + s.count;
+        }
+        if (cursor < m.index_count) {
+            draw_regular_range(m, cursor, m.index_count - cursor, bs);
+        }
+    };
+
     ctx->OMSetDepthStencilState(mp.dssWrite, 0);
     for(const auto& m : mp.meshes){
         if (mp_should_hide_mesh(m)) continue;
@@ -3823,8 +3886,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         if (any_isolated && !m.isolated) continue;
         if (mp.selected_lod >= 0 &&
             m.lod_index != (uint32_t)mp.selected_lod) continue;
-        upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test, m.cloth_sim);
-        draw_one(m, mp.bs);
+        draw_one_with_edits(m, mp.bs);
     }
     ctx->OMSetDepthStencilState(mp.dssNoWrite, 0);
     for(const auto& m : mp.meshes){
@@ -3833,8 +3895,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         if (any_isolated && !m.isolated) continue;
         if (mp.selected_lod >= 0 &&
             m.lod_index != (uint32_t)mp.selected_lod) continue;
-        upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test, m.cloth_sim);
-        draw_one(m, mp.bsAlpha);
+        draw_one_with_edits(m, mp.bsAlpha);
     }
     // Water last: the ONE/SRC_ALPHA composite reads the scene behind the
     // surface out of the framebuffer as the retail refraction tile, so
@@ -4046,13 +4107,13 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         ctx->RSSetState((mp.wireframe && mp.rs_wire) ? mp.rs_wire : mp.rs);
     }
 
-    if (mp.selected_pick_id != 0 && mp.dssNoWriteLEqual) {
+    if ((mp.selected_pick_id != 0 || mp.selected_pick_hash != 0) &&
+        mp.dssNoWriteLEqual) {
         // The FX pass above nulls VS constant-buffer slot 0 on exit; rebind
         // the scene cbuffer or the highlight verts transform through garbage.
         ctx->VSSetConstantBuffers(0, 1, &mp.cbuffer);
         ctx->PSSetConstantBuffers(0, 1, &mp.cbuffer);
         ctx->OMSetDepthStencilState(mp.dssNoWriteLEqual, 0);
-        upload_per_mesh_cb(true, false, false);
         for (const auto& m : mp.meshes) {
             if (mp_should_hide_mesh(m)) continue;
             if (!m.vb || !m.ib || m.index_count == 0) continue;
@@ -4062,7 +4123,22 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 m.lod_index != (uint32_t)mp.selected_lod) continue;
             ID3D11BlendState* bs = m.has_alpha ? mp.bsAlpha : mp.bs;
             for (const auto& pr : m.pick_ranges) {
-                if (pr.selection_id != mp.selected_pick_id) continue;
+                // The clicked instance, plus every range sharing its
+                // entity hash: parts of one authored object (submeshes,
+                // GMD children like doors/windows) highlight together.
+                const bool match =
+                    pr.selection_id == mp.selected_pick_id ||
+                    (mp.selected_pick_hash != 0 && pr.inst_hash != 0 &&
+                     pr.inst_hash == mp.selected_pick_hash);
+                if (!match) continue;
+                auto it = mp.range_edit_offsets.find(pr.selection_id);
+                if (it != mp.range_edit_offsets.end()) {
+                    const float off[3] = { it->second[0], it->second[1],
+                                           it->second[2] };
+                    upload_per_mesh_cb(true, false, false, false, off);
+                } else {
+                    upload_per_mesh_cb(true, false, false);
+                }
                 draw_regular_range(m, pr.index_start, pr.index_count, bs);
             }
         }

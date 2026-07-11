@@ -83,6 +83,10 @@ set(APP_SOURCES
         src/Level/TerrainSplat.h
         src/Level/TerrainEdit.cpp
         src/Level/TerrainEdit.h
+        src/Level/LevelEdit.cpp
+        src/Level/LevelEdit.h
+        src/UI/LevelGizmo.cpp
+        src/UI/LevelGizmo.h
         src/Level/VfsConfig.cpp
         src/Level/VfsConfig.h
         src/Level/GdbModelHashlist.cpp

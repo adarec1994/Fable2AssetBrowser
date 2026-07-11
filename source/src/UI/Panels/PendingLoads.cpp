@@ -473,6 +473,53 @@ static void transform_instance_normal(const Level::PropInstance& inst,
     z = -lx * s + lz * c;
 }
 
+// Instance transform for display, in engine axes: values[0..2] are already
+// engine-ordered (X, Y, Z with Z up). The full-transform matrix in
+// values[3..11] is stored in preview axes (Y up), so rows/columns 1<->2 are
+// swapped back before extracting Z-up euler angles; single-axis GDB
+// rotations (including the ry=rz=pi yaw-pair encoding) round-trip exactly.
+static void instance_display_transform(const Level::PropInstance& inst,
+                                       float out_pos[3],
+                                       float out_rot_deg[3])
+{
+    out_pos[0] = inst.values[0];
+    out_pos[1] = inst.values[1];
+    out_pos[2] = inst.values[2];
+    out_rot_deg[0] = 0.0f;
+    out_rot_deg[1] = 0.0f;
+    out_rot_deg[2] = 0.0f;
+    constexpr float kRadToDeg = 57.29577951308232f;
+
+    if (!inst.has_full_transform) {
+        out_rot_deg[2] =
+            std::atan2(inst.values[6], inst.values[7]) * kRadToDeg;
+        return;
+    }
+
+    const float* pv = &inst.values[3];
+    static const int axis_map[3] = {0, 2, 1};
+    float g[9];
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            g[r * 3 + c] = pv[axis_map[r] * 3 + axis_map[c]];
+        }
+    }
+    for (int r = 0; r < 3; ++r) {   // strip any baked scale
+        const float len = std::sqrt(g[r*3+0] * g[r*3+0] +
+                                    g[r*3+1] * g[r*3+1] +
+                                    g[r*3+2] * g[r*3+2]);
+        if (std::isfinite(len) && len > 1e-6f) {
+            g[r*3+0] /= len;
+            g[r*3+1] /= len;
+            g[r*3+2] /= len;
+        }
+    }
+    const float sp = std::max(-1.0f, std::min(1.0f, -g[2]));
+    out_rot_deg[0] = std::atan2(g[5], g[8]) * kRadToDeg;
+    out_rot_deg[1] = std::asin(sp) * kRadToDeg;
+    out_rot_deg[2] = std::atan2(g[1], g[0]) * kRadToDeg;
+}
+
 static void merge_transformed_instance_into(MDLMeshGeom& dst,
                                             const MDLMeshGeom& src,
                                             const Level::PropInstance& inst,
@@ -572,6 +619,10 @@ static void merge_transformed_instance_into(MDLMeshGeom& dst,
         }
         pr.radius = std::sqrt(r2);
         if (pr.radius < 0.0001f) pr.radius = 0.25f;
+        instance_display_transform(inst, pr.inst_pos, pr.inst_rot_deg);
+        pr.has_transform = true;
+        pr.inst_hash = inst.hash;
+        pr.pos_file_offset = inst.pos_file_offset;
         dst.pick_ranges.push_back(pr);
     }
 }

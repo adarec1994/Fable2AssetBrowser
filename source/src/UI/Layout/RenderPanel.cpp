@@ -7,6 +7,7 @@
 #include "../../Level/TerrainEdit.h"
 #include "../../Level/LevelEdit.h"
 #include "../../Level/LevelLoader.h"
+#include "../../Utilities/DebugTrace.h"
 #include "../LevelGizmo.h"
 #include "../../animations/AnimBank.h"
 #include "../../animations/AnimDataFile.h"
@@ -785,6 +786,20 @@ static int pick_bone_at(const ImVec2& mouse, const ImVec2& origin,
     return best;
 }
 
+static void rp_quat_rot(const float q[4], const float v[3], float o[3]) {
+    const float tx = 2.0f * (q[1]*v[2] - q[2]*v[1]);
+    const float ty = 2.0f * (q[2]*v[0] - q[0]*v[2]);
+    const float tz = 2.0f * (q[0]*v[1] - q[1]*v[0]);
+    o[0] = v[0] + q[3]*tx + (q[1]*tz - q[2]*ty);
+    o[1] = v[1] + q[3]*ty + (q[2]*tx - q[0]*tz);
+    o[2] = v[2] + q[3]*tz + (q[0]*ty - q[1]*tx);
+}
+
+static void rp_quat_rot_inv(const float q[4], const float v[3], float o[3]) {
+    const float qc[4] = { -q[0], -q[1], -q[2], q[3] };
+    rp_quat_rot(qc, v, o);
+}
+
 int pick_level_mesh_at(const ImVec2& mouse,
                        const ImVec2& origin,
                        const ImVec2& region,
@@ -826,11 +841,13 @@ int pick_level_mesh_at(const ImVec2& mouse,
     const float oy = g_flycam.pos[1];
     const float oz = g_flycam.pos[2];
 
-    auto hit_sphere = [&](const float center[3], float radius, float& out_t) {
-        const float lx = ox - center[0];
-        const float ly = oy - center[1];
-        const float lz = oz - center[2];
-        const float l_dot_d = lx*dx + ly*dy + lz*dz;
+    auto hit_sphere = [&](const float center[3], float radius,
+                          const float o[3], const float dv[3],
+                          float& out_t) {
+        const float lx = o[0] - center[0];
+        const float ly = o[1] - center[1];
+        const float lz = o[2] - center[2];
+        const float l_dot_d = lx*dv[0] + ly*dv[1] + lz*dv[2];
         const float l_len2  = lx*lx + ly*ly + lz*lz;
         const float r2      = radius * radius;
         const float c       = l_len2 - r2;
@@ -848,6 +865,7 @@ int pick_level_mesh_at(const ImVec2& mouse,
                             const float* b,
                             const float* c,
                             const float ro[3],
+                            const float rd[3],
                             float& out_t) {
         const float e1x = b[0] - a[0];
         const float e1y = b[1] - a[1];
@@ -855,9 +873,9 @@ int pick_level_mesh_at(const ImVec2& mouse,
         const float e2x = c[0] - a[0];
         const float e2y = c[1] - a[1];
         const float e2z = c[2] - a[2];
-        const float px = dy * e2z - dz * e2y;
-        const float py = dz * e2x - dx * e2z;
-        const float pz = dx * e2y - dy * e2x;
+        const float px = rd[1] * e2z - rd[2] * e2y;
+        const float py = rd[2] * e2x - rd[0] * e2z;
+        const float pz = rd[0] * e2y - rd[1] * e2x;
         const float det = e1x * px + e1y * py + e1z * pz;
         if (std::fabs(det) < 1e-7f) return false;
         const float inv_det = 1.0f / det;
@@ -869,7 +887,7 @@ int pick_level_mesh_at(const ImVec2& mouse,
         const float qx = ty * e1z - tz * e1y;
         const float qy = tz * e1x - tx * e1z;
         const float qz = tx * e1y - ty * e1x;
-        const float v = (dx * qx + dy * qy + dz * qz) * inv_det;
+        const float v = (rd[0] * qx + rd[1] * qy + rd[2] * qz) * inv_det;
         if (v < 0.0f || u + v > 1.0f) return false;
         const float t = (e2x * qx + e2y * qy + e2z * qz) * inv_det;
         if (t <= 0.0f) return false;
@@ -1102,8 +1120,17 @@ void draw_model_in_panel(ID3D11Device* device) {
         uint32_t picked_id = 0;
         uint64_t picked_hash = 0;
         const ImVec2 mouse = ImGui::GetIO().MousePos;
+        DebugTrace::log("pick: begin mouse=(%.0f,%.0f) meshes=%zu edit=%d",
+                        mouse.x, mouse.y, g_mp.meshes.size(),
+                        LevelEdit::Enabled() ? 1 : 0);
         const int picked = pick_level_mesh_at(mouse, origin, region,
                                               &picked_id, &picked_hash);
+        DebugTrace::log("pick: done mesh=%d id=%u hash=%llu name='%s'",
+                        picked, picked_id,
+                        (unsigned long long)picked_hash,
+                        picked >= 0
+                            ? g_mp.meshes[(size_t)picked].name.c_str()
+                            : "");
         ::g_selected_level_mesh_idx = picked;
         ::g_selected_level_pick_id = picked >= 0 ? picked_id : 0;
         ::g_selected_level_hash = picked >= 0 ? picked_hash : 0;
@@ -1265,8 +1292,30 @@ void draw_model_in_panel(ID3D11Device* device) {
                 }
             }
         };
+        const bool sel_finite = std::isfinite(sel_pos[0]) &&
+                                std::isfinite(sel_pos[1]) &&
+                                std::isfinite(sel_pos[2]);
         const bool edit_active = LevelEdit::Enabled() &&
-                                 (whole_mesh_sel || sel_found);
+                                 (whole_mesh_sel || sel_found) &&
+                                 sel_finite;
+
+        static int      s_dbg_idx = -2;
+        static uint32_t s_dbg_id  = 0xFFFFFFFFu;
+        const bool dbg_sel_changed =
+            s_dbg_idx != ::g_selected_level_mesh_idx ||
+            s_dbg_id  != ::g_selected_level_pick_id;
+        if (dbg_sel_changed) {
+            s_dbg_idx = ::g_selected_level_mesh_idx;
+            s_dbg_id  = ::g_selected_level_pick_id;
+            DebugTrace::log(
+                "sel: idx=%d id=%u hash=%llu ranges=%zu found=%d whole=%d "
+                "finite=%d pos=(%.2f,%.2f,%.2f) edit_active=%d",
+                ::g_selected_level_mesh_idx, ::g_selected_level_pick_id,
+                (unsigned long long)::g_selected_level_hash,
+                sel_mesh.pick_ranges.size(), sel_found ? 1 : 0,
+                whole_mesh_sel ? 1 : 0, sel_finite ? 1 : 0,
+                sel_pos[0], sel_pos[1], sel_pos[2], edit_active ? 1 : 0);
+        }
 
         const float kOverlayW = LevelEdit::Enabled() ? 190.0f : 150.0f;
         ImGui::SetNextWindowPos(ImVec2(origin.x + region.x - kOverlayW - 8.0f,
@@ -1281,6 +1330,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                              | ImGuiWindowFlags_AlwaysAutoResize
                              | ImGuiWindowFlags_NoFocusOnAppearing;
         if (ImGui::Begin("##sel_transform_overlay", nullptr, ofl)) {
+            if (dbg_sel_changed) DebugTrace::log("ov: begin");
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Position:");
             if (edit_active) {
                 static const char* kAxis[3] = { "X##selpos", "Y##selpos",
@@ -1289,12 +1339,10 @@ void draw_model_in_panel(ID3D11Device* device) {
                 bool commit = false;
                 for (int a = 0; a < 3; ++a) {
                     ImGui::SetNextItemWidth(120.0f);
-                    if (ImGui::InputFloat(kAxis[a], &edit_pos[a], 0.0f,
-                                          0.0f, "%.3f",
-                                          ImGuiInputTextFlags_EnterReturnsTrue)) {
-                        commit = true;
-                    }
+                    ImGui::InputFloat(kAxis[a], &edit_pos[a], 0.0f, 0.0f,
+                                      "%.3f");
                     if (ImGui::IsItemDeactivatedAfterEdit()) commit = true;
+                    if (dbg_sel_changed) DebugTrace::log("ov: input %d", a);
                 }
                 if (commit) {
                     const float step[3] = { edit_pos[0] - sel_pos[0],
@@ -1302,10 +1350,13 @@ void draw_model_in_panel(ID3D11Device* device) {
                                             edit_pos[2] - sel_pos[2] };
                     if (step[0] != 0.0f || step[1] != 0.0f ||
                         step[2] != 0.0f) {
+                        DebugTrace::log("ov: commit step=(%.3f,%.3f,%.3f)",
+                                        step[0], step[1], step[2]);
                         LevelEdit::PushUndoSnapshot(collect_group_ids());
                         apply_group_step(step);
                     }
                 }
+                if (dbg_sel_changed) DebugTrace::log("ov: pos done");
             } else {
                 ImGui::Text("X: %.3f", sel_pos[0]);
                 ImGui::Text("Y: %.3f", sel_pos[1]);
@@ -1322,19 +1373,23 @@ void draw_model_in_panel(ID3D11Device* device) {
             }
         }
         ImGui::End();
+        if (dbg_sel_changed) DebugTrace::log("sel: overlay done");
 
         if (edit_active) {
+            if (dbg_sel_changed) DebugTrace::log("gz: call");
             LevelGizmo::Result gz = LevelGizmo::DrawAndHandle(
                 g_flycam, origin, region, sel_pos, true);
             static bool s_was_dragging = false;
             if (gz.dragging && !s_was_dragging) {
                 LevelEdit::PushUndoSnapshot(collect_group_ids());
+                DebugTrace::log("gizmo: drag begin");
             }
             s_was_dragging = gz.dragging;
             if (gz.moved) apply_group_step(gz.step);
         } else {
             LevelGizmo::CancelDrag();
         }
+        if (dbg_sel_changed) DebugTrace::log("sel: gizmo done");
     }
 
     if (LevelEdit::Enabled() && !ImGui::GetIO().WantTextInput &&

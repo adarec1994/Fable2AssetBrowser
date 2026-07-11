@@ -2801,6 +2801,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                         return false;
                     }
                     inst.pos_file_offset = (uint32_t)r.i;
+                    inst.lev_rec_kind = 1;
                     for (float& v : inst.values) {
                         if (!r.f32(v)) {
                             out.error = "truncated reading type-2 instance floats";
@@ -2869,6 +2870,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                     for (uint32_t k = 0; k < loop1_count; ++k) {
                         PropInstance inst;
                         inst.pos_file_offset = (uint32_t)r.i;
+                        inst.lev_rec_kind = 2;
                         for (int j = 0; j < 4; ++j) {
                             if (!r.f32(inst.values[j])) {
                                 out.error = "truncated type-21 v11 loop1 body";
@@ -2896,6 +2898,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                         }
                         PropInstance inst;
                         inst.pos_file_offset = pos_off;
+                        inst.lev_rec_kind = 3;
                         inst.values[0] = pos[0];
                         inst.values[1] = pos[1];
                         inst.values[2] = pos[2];
@@ -2958,6 +2961,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
 
                     PropInstance inst;
                     inst.pos_file_offset = rec_off + 8;
+                    inst.lev_rec_kind = 4;
                     inst.values[0] = p1[0];
                     inst.values[1] = p1[1];
                     inst.values[2] = p1[2];

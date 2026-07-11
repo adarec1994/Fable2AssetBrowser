@@ -48,6 +48,7 @@ extern bool                       g_particle_bank_loaded;
 #include "../Utilities/Files.h"
 #include "../Utilities/Utils.h"
 #include "../Utilities/State.h"
+#include "../Utilities/DebugTrace.h"
 #include "../BNKCore.cpp"
 #include "../textures/TexParser.h"
 #include "../textures/LhTexCodec.h"
@@ -1140,6 +1141,8 @@ cbuffer CB : register(b0){
     float4x4 mv;
     float4   params;
     float4   edit_off;
+    float4   edit_rot;
+    float4   edit_piv;
 }
 
 cbuffer Bones : register(b1){
@@ -1163,8 +1166,18 @@ VSOUT VS(VSIN i){
           bones[i.bid.z] * i.bw.z +
           bones[i.bid.w] * i.bw.w;
 
-    float4 p_skin = mul(float4(i.p + edit_off.xyz, 1.0), skin);
-    float3 n_skin = mul(i.n, (float3x3)skin);
+    float3 pin = i.p;
+    float3 nin = i.n;
+    if (edit_off.w > 0.5) {
+        float3 q = (pin - edit_piv.xyz) * edit_piv.w;
+        float3 tq = 2.0 * cross(edit_rot.xyz, q);
+        q = q + edit_rot.w * tq + cross(edit_rot.xyz, tq);
+        pin = q + edit_piv.xyz + edit_off.xyz;
+        float3 tn = 2.0 * cross(edit_rot.xyz, nin);
+        nin = nin + edit_rot.w * tn + cross(edit_rot.xyz, tn);
+    }
+    float4 p_skin = mul(float4(pin, 1.0), skin);
+    float3 n_skin = mul(nin, (float3x3)skin);
 
     o.p = mul(p_skin, mvp);
     float3 n = mul(n_skin, (float3x3)mv);
@@ -2239,7 +2252,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     if(FAILED(dev->CreateInputLayout(il,5,vsb->GetBufferPointer(),vsb->GetBufferSize(),&mp.layout))){ vsb->Release(); psb->Release(); return false; }
     vsb->Release(); psb->Release();
 
-    struct CB { XMFLOAT4X4 mvp; XMFLOAT4 lightDir; XMFLOAT4X4 mv; XMFLOAT4 params; XMFLOAT4 edit_off; };
+    struct CB { XMFLOAT4X4 mvp; XMFLOAT4 lightDir; XMFLOAT4X4 mv; XMFLOAT4 params; XMFLOAT4 edit_off; XMFLOAT4 edit_rot; XMFLOAT4 edit_piv; };
     D3D11_BUFFER_DESC cbd{};
     cbd.BindFlags=D3D11_BIND_CONSTANT_BUFFER; cbd.ByteWidth=sizeof(CB); cbd.Usage=D3D11_USAGE_DYNAMIC; cbd.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
     if(FAILED(dev->CreateBuffer(&cbd,nullptr,&mp.cbuffer))) return false;
@@ -3026,6 +3039,8 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             mr.gdb_pos_off[0] = pr.gdb_pos_off[0];
             mr.gdb_pos_off[1] = pr.gdb_pos_off[1];
             mr.gdb_pos_off[2] = pr.gdb_pos_off[2];
+            mr.inst_scale = pr.inst_scale;
+            mr.lev_rec_kind = pr.lev_rec_kind;
             m.pick_ranges.push_back(mr);
         }
         if (!m.pick_ranges.empty()) {
@@ -3136,7 +3151,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     }
     mp.selected_pick_id = 0;
     mp.selected_pick_hash = 0;
-    mp.range_edit_offsets.clear();
+    mp.range_edit_xforms.clear();
 
     mp.bone_count = 0;
     mp.bone_parents.clear();
@@ -3260,7 +3275,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                     sun_dir_f.z,
                     0.0f));
     XMFLOAT4 lightDirF; XMStoreFloat4(&lightDirF, lightDirV);
-    struct CB { XMFLOAT4X4 mvp; XMFLOAT4 lightDir; XMFLOAT4X4 mv; XMFLOAT4 params; XMFLOAT4 edit_off; } cb;
+    struct CB { XMFLOAT4X4 mvp; XMFLOAT4 lightDir; XMFLOAT4X4 mv; XMFLOAT4 params; XMFLOAT4 edit_off; XMFLOAT4 edit_rot; XMFLOAT4 edit_piv; } cb;
     XMStoreFloat4x4(&cb.mvp, MVP);
     XMStoreFloat4x4(&cb.mv,  MV);
     cb.lightDir = lightDirF;
@@ -3449,14 +3464,22 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     const float water_time = (float)ImGui::GetTime();
     auto upload_per_mesh_cb = [&](bool highlight, bool is_cloth, bool alpha_test,
                                   bool no_skin = false,
-                                  const float* edit_off = nullptr){
+                                  const LevelEdit::EditXform* ex = nullptr){
 
         cb.params = XMFLOAT4(alpha_test ? 1.0f : 0.0f, no_skin ? 1.0f : 0.0f,
                              is_cloth ? 2.0f : (highlight ? 1.0f : 0.0f),
                              water_time);
-        cb.edit_off = edit_off
-            ? XMFLOAT4(edit_off[0], edit_off[1], edit_off[2], 0.0f)
-            : XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (ex) {
+            cb.edit_off = XMFLOAT4(ex->off[0], ex->off[1], ex->off[2], 1.0f);
+            cb.edit_rot = XMFLOAT4(ex->quat[0], ex->quat[1], ex->quat[2],
+                                   ex->quat[3]);
+            cb.edit_piv = XMFLOAT4(ex->pivot[0], ex->pivot[1], ex->pivot[2],
+                                   ex->scale);
+        } else {
+            cb.edit_off = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+            cb.edit_rot = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
+            cb.edit_piv = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
+        }
         D3D11_MAPPED_SUBRESOURCE pms{};
         if (SUCCEEDED(ctx->Map(mp.cbuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &pms))) {
             std::memcpy(pms.pData, &cb, sizeof(cb));
@@ -3835,20 +3858,18 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     };
 
     auto draw_one_with_edits = [&](const MPPerMesh& m, ID3D11BlendState* bs) {
-        const bool has_base = m.edit_offset[0] != 0.0f ||
-                              m.edit_offset[1] != 0.0f ||
-                              m.edit_offset[2] != 0.0f;
-        const float* base = has_base ? m.edit_offset : nullptr;
+        const LevelEdit::EditXform* base =
+            m.edit_xform.active() ? &m.edit_xform : nullptr;
         struct Seg {
             uint32_t start, count;
-            const std::array<float, 3>* off;
+            const LevelEdit::EditXform* ex;
         };
         std::vector<Seg> edited;
-        if (!mp.range_edit_offsets.empty() && !m.pick_ranges.empty() &&
+        if (!mp.range_edit_xforms.empty() && !m.pick_ranges.empty() &&
             !m.is_terrain && !m.is_water && !m.cloth_sim) {
             for (const auto& pr : m.pick_ranges) {
-                auto it = mp.range_edit_offsets.find(pr.selection_id);
-                if (it == mp.range_edit_offsets.end()) continue;
+                auto it = mp.range_edit_xforms.find(pr.selection_id);
+                if (it == mp.range_edit_xforms.end()) continue;
                 edited.push_back({pr.index_start, pr.index_count,
                                   &it->second});
             }
@@ -3868,13 +3889,8 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             if (s.start > cursor) {
                 draw_regular_range(m, cursor, s.start - cursor, bs);
             }
-            const float off[3] = {
-                (*s.off)[0] + m.edit_offset[0],
-                (*s.off)[1] + m.edit_offset[1],
-                (*s.off)[2] + m.edit_offset[2],
-            };
             upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test,
-                               m.cloth_sim, off);
+                               m.cloth_sim, s.ex);
             draw_regular_range(m, s.start, s.count, bs);
             upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test,
                                m.cloth_sim, base);
@@ -4116,6 +4132,18 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
 
     if ((mp.selected_pick_id != 0 || mp.selected_pick_hash != 0) &&
         mp.dssNoWriteLEqual) {
+        static uint32_t s_dbg_id = 0;
+        static uint64_t s_dbg_hash = 0;
+        const bool dbg_new = s_dbg_id != mp.selected_pick_id ||
+                             s_dbg_hash != mp.selected_pick_hash;
+        if (dbg_new) {
+            s_dbg_id = mp.selected_pick_id;
+            s_dbg_hash = mp.selected_pick_hash;
+            DebugTrace::log("hl: begin id=%u hash=%llu",
+                            mp.selected_pick_id,
+                            (unsigned long long)mp.selected_pick_hash);
+        }
+        size_t dbg_matched = 0;
         ctx->VSSetConstantBuffers(0, 1, &mp.cbuffer);
         ctx->PSSetConstantBuffers(0, 1, &mp.cbuffer);
         ctx->OMSetDepthStencilState(mp.dssNoWriteLEqual, 0);
@@ -4133,21 +4161,17 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                     (mp.selected_pick_hash != 0 && pr.inst_hash != 0 &&
                      pr.inst_hash == mp.selected_pick_hash);
                 if (!match) continue;
-                float off[3] = { m.edit_offset[0], m.edit_offset[1],
-                                 m.edit_offset[2] };
-                auto it = mp.range_edit_offsets.find(pr.selection_id);
-                if (it != mp.range_edit_offsets.end()) {
-                    off[0] += it->second[0];
-                    off[1] += it->second[1];
-                    off[2] += it->second[2];
-                }
-                if (off[0] != 0.0f || off[1] != 0.0f || off[2] != 0.0f) {
-                    upload_per_mesh_cb(true, false, false, false, off);
-                } else {
-                    upload_per_mesh_cb(true, false, false);
-                }
+                const LevelEdit::EditXform* ex = nullptr;
+                auto it = mp.range_edit_xforms.find(pr.selection_id);
+                if (it != mp.range_edit_xforms.end()) ex = &it->second;
+                else if (m.edit_xform.active()) ex = &m.edit_xform;
+                upload_per_mesh_cb(true, false, false, false, ex);
                 draw_regular_range(m, pr.index_start, pr.index_count, bs);
+                ++dbg_matched;
             }
+        }
+        if (dbg_new) {
+            DebugTrace::log("hl: done matched=%zu", dbg_matched);
         }
     }
     ctx->Release();

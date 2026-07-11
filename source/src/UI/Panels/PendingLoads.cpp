@@ -621,6 +621,16 @@ static void merge_transformed_instance_into(MDLMeshGeom& dst,
         pr.gdb_pos_off[0] = inst.gdb_pos_off[0];
         pr.gdb_pos_off[1] = inst.gdb_pos_off[1];
         pr.gdb_pos_off[2] = inst.gdb_pos_off[2];
+        pr.lev_rec_kind = inst.lev_rec_kind;
+        if (inst.has_full_transform) {
+            pr.inst_scale =
+                (std::isfinite(inst.values[12]) && inst.values[12] != 0.0f)
+                    ? inst.values[12] : 1.0f;
+        } else {
+            pr.inst_scale =
+                (std::isfinite(inst.values[9]) && inst.values[9] != 0.0f)
+                    ? inst.values[9] : 1.0f;
+        }
         dst.pick_ranges.push_back(pr);
     }
 }

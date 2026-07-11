@@ -32,6 +32,7 @@
 #include "Splashscreen/Splashscreen.h"
 #include "Utilities/Files.h"
 #include "Utilities/AutoPilot.h"
+#include "Utilities/DebugTrace.h"
 #include "Audio/AudioPlayer.h"
 #include "Splashscreen/IconFont.h"
 #include <cmath>
@@ -273,6 +274,7 @@ static void build_theme() {
 }
 #ifdef _WIN32
 int main() {
+    DebugTrace::install_crash_handler();
 
     HINSTANCE hInstance = GetModuleHandle(nullptr);
     WNDCLASSEXA wc{};

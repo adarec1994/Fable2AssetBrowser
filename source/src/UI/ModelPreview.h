@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <array>
 #include "../MDL/ModelParser.h"
+#include "../Level/LevelEdit.h"
 #include "../Level/Skybox/CloudRuntime.h"
 #include "../Level/Skybox/SkyboxTypes.h"
 #include "../Level/ParticleFX.h"
@@ -69,7 +70,7 @@ struct MPPerMesh {
 
     bool highlight = false;
     bool isolated  = false;
-    float edit_offset[3] = {0.0f, 0.0f, 0.0f};
+    LevelEdit::EditXform edit_xform;
 
     bool is_terrain = false;
     bool is_water   = false;
@@ -100,6 +101,8 @@ struct MPPerMesh {
         uint64_t inst_hash = 0;
         uint32_t pos_file_offset = 0;
         uint32_t gdb_pos_off[3] = {0, 0, 0};
+        float inst_scale = 1.0f;
+        uint8_t lev_rec_kind = 0;
     };
     std::vector<PickRange> pick_ranges;
     std::vector<float> pick_positions;
@@ -299,7 +302,7 @@ struct ModelPreview {
     bool no_tilt = false;
     uint32_t selected_pick_id = 0;
     uint64_t selected_pick_hash = 0;
-    std::unordered_map<uint32_t, std::array<float, 3>> range_edit_offsets;
+    std::unordered_map<uint32_t, LevelEdit::EditXform> range_edit_xforms;
 
     uint32_t lod_count    = 1;
     int32_t  selected_lod = -1;

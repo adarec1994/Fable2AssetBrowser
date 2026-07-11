@@ -2957,7 +2957,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                     }
 
                     PropInstance inst;
-                    inst.pos_file_offset = rec_off + 8;   // p1 after a,b
+                    inst.pos_file_offset = rec_off + 8;
                     inst.values[0] = p1[0];
                     inst.values[1] = p1[1];
                     inst.values[2] = p1[2];
@@ -3292,9 +3292,15 @@ bool Open(const FlatAssetEntry& entry)
     };
 
     auto load_text_sibling = [&](const std::string& sibling_full_path,
-                                 std::vector<uint8_t>& out_bytes) -> bool
+                                 std::vector<uint8_t>& out_bytes,
+                                 std::string* out_src_bnk = nullptr,
+                                 int* out_src_idx = nullptr,
+                                 std::string* out_src_file = nullptr) -> bool
     {
         out_bytes.clear();
+        if (out_src_bnk) out_src_bnk->clear();
+        if (out_src_idx) *out_src_idx = -1;
+        if (out_src_file) out_src_file->clear();
         auto normalize_asset_key = [](std::string s) {
             std::transform(s.begin(), s.end(), s.begin(),
                            [](unsigned char c){ return std::tolower(c); });
@@ -3313,6 +3319,8 @@ bool Open(const FlatAssetEntry& entry)
                 auto v = BnkCache::extract_bytes(bnk_path, idx);
                 if (v.empty()) return false;
                 out_bytes.assign(v.begin(), v.end());
+                if (out_src_bnk) *out_src_bnk = bnk_path;
+                if (out_src_idx) *out_src_idx = idx;
                 return true;
             } catch (...) {
                 return false;
@@ -3344,6 +3352,7 @@ bool Open(const FlatAssetEntry& entry)
                 out_bytes.clear();
                 return false;
             }
+            if (out_src_file) *out_src_file = p.string();
             return true;
         };
 
@@ -3784,7 +3793,12 @@ bool Open(const FlatAssetEntry& entry)
         const auto& level_prop_blocks = info.prop_blocks;
         std::vector<uint8_t> gdb_bytes;
         const std::string gdb_path = sibling_with_ext(".gdb");
-        if (load_text_sibling(gdb_path, gdb_bytes)) {
+        std::string gdb_src_bnk;
+        int gdb_src_idx = -1;
+        std::string gdb_src_file;
+        if (load_text_sibling(gdb_path, gdb_bytes,
+                              &gdb_src_bnk, &gdb_src_idx, &gdb_src_file)) {
+            LevelEdit::SetGdbSource(gdb_src_bnk, gdb_src_idx, gdb_src_file);
             auto info = Gdb::ParseWithSaveMap(gdb_bytes, save_hash_to_name);
             if (bail_if_cancelled("after gdb parse")) return false;
             {
@@ -5658,6 +5672,9 @@ bool Open(const FlatAssetEntry& entry)
                     pi.values[0] = p.x;
                     pi.values[1] = p.y;
                     pi.values[2] = p.z;
+                    pi.gdb_pos_off[0] = p.pos_value_off[0];
+                    pi.gdb_pos_off[1] = p.pos_value_off[1];
+                    pi.gdb_pos_off[2] = p.pos_value_off[2];
                     const float scale =
                         (std::isfinite(p.scale) && p.scale > 0.01f &&
                          p.scale < 100.0f)
@@ -6711,6 +6728,9 @@ bool Open(const FlatAssetEntry& entry)
                 pi.values[0] = p.x;
                 pi.values[1] = p.y;
                 pi.values[2] = p.z;
+                pi.gdb_pos_off[0] = p.pos_value_off[0];
+                pi.gdb_pos_off[1] = p.pos_value_off[1];
+                pi.gdb_pos_off[2] = p.pos_value_off[2];
                 const float scale =
                     (std::isfinite(p.scale) && p.scale > 0.01f && p.scale < 100.0f)
                         ? p.scale : 1.0f;

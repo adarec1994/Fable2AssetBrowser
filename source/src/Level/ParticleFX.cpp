@@ -66,9 +66,6 @@ Category categorize(const std::string& name) {
         return { "flames",     2.0f, 0.35f,0.5f, 0.5f, 45.f, 1.0f,0.7f,0.35f, 2, false };
     if (has("dust") || has("sand"))
         return { "dust",       0.2f, 0.7f, 1.6f, 0.4f, 12.f, 0.55f,0.45f,0.3f, 6, true };
-    // No keyword hit: null tex_key = "no category", the caller skips the
-    // placement. Guessing a generic smoke puff here painted fake smoke over
-    // every window-light placement (ESA_*Win* et al) the bank can't resolve.
     return { nullptr,          0.0f, 0.0f, 0.0f, 0.0f, 0.f, 0.0f,0.0f,0.0f, 6, false };
 }
 
@@ -273,7 +270,7 @@ void System::build(const Bank& bank, std::vector<Placement>& places) {
         } else {
             // ---- category fallback ----
             Category cat = categorize(p.effect_name);
-            if (!cat.tex_key) continue;   // unknown effect: don't invent smoke
+            if (!cat.tex_key) continue;
             inst.fallback = true;
             EmitterRT rt;
             rt.scale = sc;

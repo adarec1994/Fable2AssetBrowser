@@ -1139,7 +1139,7 @@ cbuffer CB : register(b0){
     float4   lightDir;
     float4x4 mv;
     float4   params;
-    float4   edit_off;   // level-edit world offset (preview space)
+    float4   edit_off;
 }
 
 cbuffer Bones : register(b1){
@@ -3023,6 +3023,9 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             mr.has_transform = pr.has_transform;
             mr.inst_hash = pr.inst_hash;
             mr.pos_file_offset = pr.pos_file_offset;
+            mr.gdb_pos_off[0] = pr.gdb_pos_off[0];
+            mr.gdb_pos_off[1] = pr.gdb_pos_off[1];
+            mr.gdb_pos_off[2] = pr.gdb_pos_off[2];
             m.pick_ranges.push_back(mr);
         }
         if (!m.pick_ranges.empty()) {
@@ -3831,11 +3834,11 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         ctx->PSSetShaderResources(0, 5, nullsrvs);
     };
 
-    // Draw a mesh honouring live level-edit offsets: index spans of moved
-    // instances draw with the edit offset in the VS cbuffer, the rest of
-    // the mesh draws unshifted. Meshes with no moved ranges take the plain
-    // path (terrain/water/cloth never carry pick ranges).
     auto draw_one_with_edits = [&](const MPPerMesh& m, ID3D11BlendState* bs) {
+        const bool has_base = m.edit_offset[0] != 0.0f ||
+                              m.edit_offset[1] != 0.0f ||
+                              m.edit_offset[2] != 0.0f;
+        const float* base = has_base ? m.edit_offset : nullptr;
         struct Seg {
             uint32_t start, count;
             const std::array<float, 3>* off;
@@ -3851,7 +3854,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             }
         }
         upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test,
-                           m.cloth_sim);
+                           m.cloth_sim, base);
         if (edited.empty()) {
             draw_one(m, bs);
             return;
@@ -3865,12 +3868,16 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             if (s.start > cursor) {
                 draw_regular_range(m, cursor, s.start - cursor, bs);
             }
-            const float off[3] = { (*s.off)[0], (*s.off)[1], (*s.off)[2] };
+            const float off[3] = {
+                (*s.off)[0] + m.edit_offset[0],
+                (*s.off)[1] + m.edit_offset[1],
+                (*s.off)[2] + m.edit_offset[2],
+            };
             upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test,
                                m.cloth_sim, off);
             draw_regular_range(m, s.start, s.count, bs);
             upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test,
-                               m.cloth_sim);
+                               m.cloth_sim, base);
             if (s.start + s.count > cursor) cursor = s.start + s.count;
         }
         if (cursor < m.index_count) {
@@ -4109,8 +4116,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
 
     if ((mp.selected_pick_id != 0 || mp.selected_pick_hash != 0) &&
         mp.dssNoWriteLEqual) {
-        // The FX pass above nulls VS constant-buffer slot 0 on exit; rebind
-        // the scene cbuffer or the highlight verts transform through garbage.
         ctx->VSSetConstantBuffers(0, 1, &mp.cbuffer);
         ctx->PSSetConstantBuffers(0, 1, &mp.cbuffer);
         ctx->OMSetDepthStencilState(mp.dssNoWriteLEqual, 0);
@@ -4123,18 +4128,20 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 m.lod_index != (uint32_t)mp.selected_lod) continue;
             ID3D11BlendState* bs = m.has_alpha ? mp.bsAlpha : mp.bs;
             for (const auto& pr : m.pick_ranges) {
-                // The clicked instance, plus every range sharing its
-                // entity hash: parts of one authored object (submeshes,
-                // GMD children like doors/windows) highlight together.
                 const bool match =
                     pr.selection_id == mp.selected_pick_id ||
                     (mp.selected_pick_hash != 0 && pr.inst_hash != 0 &&
                      pr.inst_hash == mp.selected_pick_hash);
                 if (!match) continue;
+                float off[3] = { m.edit_offset[0], m.edit_offset[1],
+                                 m.edit_offset[2] };
                 auto it = mp.range_edit_offsets.find(pr.selection_id);
                 if (it != mp.range_edit_offsets.end()) {
-                    const float off[3] = { it->second[0], it->second[1],
-                                           it->second[2] };
+                    off[0] += it->second[0];
+                    off[1] += it->second[1];
+                    off[2] += it->second[2];
+                }
+                if (off[0] != 0.0f || off[1] != 0.0f || off[2] != 0.0f) {
                     upload_per_mesh_cb(true, false, false, false, off);
                 } else {
                     upload_per_mesh_cb(true, false, false);

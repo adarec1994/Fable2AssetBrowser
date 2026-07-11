@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-#include "ModelPreview.h"   // FlyCam
+#include "ModelPreview.h"
 
 namespace LevelGizmo {
 namespace {
@@ -11,20 +11,18 @@ namespace {
 constexpr float kFov = 60.0f * 3.14159265f / 180.0f;
 constexpr float kHitPx = 10.0f;
 
-// Engine axis directions expressed in preview space (preview Y is up,
-// engine Z is up): engine X, Y, Z.
 const float kAxisPreview[3][3] = {
-    { 1.0f, 0.0f, 0.0f },   // engine X
-    { 0.0f, 0.0f, 1.0f },   // engine Y
-    { 0.0f, 1.0f, 0.0f },   // engine Z (up)
+    { 1.0f, 0.0f, 0.0f },
+    { 0.0f, 0.0f, 1.0f },
+    { 0.0f, 1.0f, 0.0f },
 };
 
 struct DragState {
     bool active = false;
     int axis = -1;
-    int hover_axis = -1;      // as of the last DrawAndHandle call
-    float t_prev = 0.0f;      // param along the axis line at last frame
-    float axis_origin[3] = {0, 0, 0};   // preview space, fixed at press
+    int hover_axis = -1;
+    float t_prev = 0.0f;
+    float axis_origin[3] = {0, 0, 0};
 };
 
 DragState& drag() {
@@ -46,7 +44,6 @@ CamBasis basis_of(const FlyCam& cam) {
     return b;
 }
 
-// World (preview space) -> screen pixels. Returns false when behind camera.
 bool project(const FlyCam& cam, const CamBasis& b,
              const ImVec2& origin, const ImVec2& region,
              const float wp[3], ImVec2& out) {
@@ -68,7 +65,6 @@ bool project(const FlyCam& cam, const CamBasis& b,
     return true;
 }
 
-// Mouse pixel -> world-space (preview) ray direction, matching the picker.
 void mouse_ray(const FlyCam& cam, const CamBasis& b,
                const ImVec2& mouse, const ImVec2& origin,
                const ImVec2& region, float out_dir[3]) {
@@ -91,8 +87,6 @@ void mouse_ray(const FlyCam& cam, const CamBasis& b,
     out_dir[2] = d[2] / len;
 }
 
-// Param of the closest point on line (p0 + a*t, |a|=1) to ray (o + d*u).
-// Returns false when nearly parallel.
 bool closest_axis_param(const float p0[3], const float a[3],
                         const float o[3], const float d[3], float& t) {
     const float w0[3] = { p0[0]-o[0], p0[1]-o[1], p0[2]-o[2] };
@@ -115,7 +109,7 @@ float dist_point_segment(const ImVec2& p, const ImVec2& a, const ImVec2& b) {
     return std::sqrt(dx*dx + dy*dy);
 }
 
-}  // namespace
+}
 
 bool WantsMouse() {
     return drag().active || drag().hover_axis >= 0;
@@ -136,7 +130,6 @@ Result DrawAndHandle(const FlyCam& cam,
     DragState& d = drag();
     const CamBasis b = basis_of(cam);
 
-    // Engine (X, Y, Z-up) -> preview (X, up, Y).
     const float wp[3] = { engine_pos[0], engine_pos[2], engine_pos[1] };
 
     const float dx = wp[0] - cam.pos[0];
@@ -166,7 +159,6 @@ Result DrawAndHandle(const FlyCam& cam,
         tip_ok[i] = project(cam, b, origin, region, tip, tip_px[i]);
     }
 
-    // Hover pick: nearest axis under the cursor.
     int hover = -1;
     if (editable && !d.active) {
         float best = kHitPx;
@@ -178,7 +170,6 @@ Result DrawAndHandle(const FlyCam& cam,
     }
     d.hover_axis = d.active ? d.axis : hover;
 
-    // Drag handling.
     if (editable && !d.active && hover >= 0 &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         float dir[3];
@@ -207,8 +198,7 @@ Result DrawAndHandle(const FlyCam& cam,
                 step = std::clamp(step, -200.0f, 200.0f);
                 if (step != 0.0f) {
                     d.t_prev = t;
-                    // preview axis step -> engine axes: preview X = engine
-                    // X, preview Z = engine Y, preview Y = engine Z.
+
                     const float* a = kAxisPreview[d.axis];
                     res.step[0] = a[0] * step;
                     res.step[1] = a[2] * step;
@@ -221,11 +211,10 @@ Result DrawAndHandle(const FlyCam& cam,
     }
     res.hovered = d.hover_axis >= 0;
 
-    // ---- draw ----
     static const ImU32 kCol[3] = {
-        IM_COL32(226, 61, 61, 255),    // X red
-        IM_COL32(96, 200, 96, 255),    // Y green
-        IM_COL32(66, 133, 244, 255),   // Z blue
+        IM_COL32(226, 61, 61, 255),
+        IM_COL32(96, 200, 96, 255),
+        IM_COL32(66, 133, 244, 255),
     };
     static const ImU32 kColHot[3] = {
         IM_COL32(255, 120, 120, 255),
@@ -240,7 +229,6 @@ Result DrawAndHandle(const FlyCam& cam,
         const ImU32 col = !editable ? grey : (hot ? kColHot[i] : kCol[i]);
         dl->AddLine(base_px, tip_px[i], col, hot ? 4.5f : 3.0f);
 
-        // Arrowhead: small triangle at the tip along the screen direction.
         ImVec2 dir = ImVec2(tip_px[i].x - base_px.x,
                             tip_px[i].y - base_px.y);
         const float len = std::sqrt(dir.x*dir.x + dir.y*dir.y);
@@ -268,4 +256,4 @@ Result DrawAndHandle(const FlyCam& cam,
     return res;
 }
 
-}  // namespace LevelGizmo
+}

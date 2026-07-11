@@ -129,6 +129,7 @@ struct InlineTransformCandidate {
     float rot_y = 0.0f;
     float rot_z = 0.0f;
     bool has_rotation = false;
+    size_t pos_slots[3] = {0, 0, 0};
 };
 
 bool TryTransformRecord(const GdbView& view,
@@ -139,7 +140,8 @@ bool TryTransformRecord(const GdbView& view,
                         float& rot_x,
                         float& rot_y,
                         float& rot_z,
-                        bool& has_rotation) {
+                        bool& has_rotation,
+                        size_t* out_pos_slots = nullptr) {
     size_t pos_slot = 0;
     size_t pos_owner = 0;
     if (!view.findFieldOwner(record, kHashPosition, 6,
@@ -147,7 +149,8 @@ bool TryTransformRecord(const GdbView& view,
         return false;
     }
     const uint32_t pos_hash = ReadBeU32(view.bytes.data() + pos_slot);
-    if (!view.readVec3Ref(pos_hash, x, y, z)) return false;
+    if (!view.readVec3Ref(pos_hash, x, y, z, nullptr, nullptr, nullptr,
+                          out_pos_slots)) return false;
     if (!PlausiblePosition(x, y, z)) return false;
 
     size_t rot_slot = 0;
@@ -175,7 +178,8 @@ bool TryComponentTransformField(const GdbView& view,
                                 float& rot_x,
                                 float& rot_y,
                                 float& rot_z,
-                                bool& has_rotation) {
+                                bool& has_rotation,
+                                size_t* out_pos_slots = nullptr) {
     size_t transform_slot = 0;
     if (!view.findLocal(record, component_field_hash, 6,
                         transform_slot, nullptr)) {
@@ -187,7 +191,8 @@ bool TryComponentTransformField(const GdbView& view,
     size_t transform_record = 0;
     if (!view.lookup(transform_hash, transform_record)) return false;
     return TryTransformRecord(view, transform_record, x, y, z,
-                              rot_x, rot_y, rot_z, has_rotation);
+                              rot_x, rot_y, rot_z, has_rotation,
+                              out_pos_slots);
 }
 
 bool TryComponentTransformRecord(const GdbView& view,
@@ -198,20 +203,21 @@ bool TryComponentTransformRecord(const GdbView& view,
                                  float& rot_x,
                                  float& rot_y,
                                  float& rot_z,
-                                 bool& has_rotation) {
+                                 bool& has_rotation,
+                                 size_t* out_pos_slots = nullptr) {
     if (TryComponentTransformField(view, record, kHashTransformComponent,
                                    x, y, z, rot_x, rot_y, rot_z,
-                                   has_rotation)) {
+                                   has_rotation, out_pos_slots)) {
         return true;
     }
     if (TryComponentTransformField(
             view, record, kHashPhysicsSimulationKeyframedComponent,
-            x, y, z, rot_x, rot_y, rot_z, has_rotation)) {
+            x, y, z, rot_x, rot_y, rot_z, has_rotation, out_pos_slots)) {
         return true;
     }
     return TryComponentTransformField(
         view, record, kHashPhysicsSimulationStaticComponent,
-        x, y, z, rot_x, rot_y, rot_z, has_rotation);
+        x, y, z, rot_x, rot_y, rot_z, has_rotation, out_pos_slots);
     // NOTE: kHashSimpleTransformComponent (0x619F96CF) is deliberately NOT
     // tried here — routing it through the general placement parser makes
     // entities that already stream a model via another record produce a
@@ -945,6 +951,9 @@ std::vector<InlineTransformCandidate> CollectInlineTransforms(
         InlineTransformCandidate c;
         if (!TryReadInlineVec3(bytes, q, re, c.x, c.y, c.z)) continue;
         if (!PlausiblePosition(c.x, c.y, c.z)) continue;
+        c.pos_slots[0] = q + 12;
+        c.pos_slots[1] = q + 8;
+        c.pos_slots[2] = q + 4;
         if (LooksLikeRotationTriplet(c.x, c.y, c.z)) continue;
         c.has_rotation = FindNearbyInlineRotation(
             bytes, rs, re, q, c.rot_x, c.rot_y, c.rot_z);
@@ -972,7 +981,8 @@ bool TryInlineTransform(const std::vector<uint8_t>& bytes,
                         float& rot_x,
                         float& rot_y,
                         float& rot_z,
-                        bool& has_rotation) {
+                        bool& has_rotation,
+                        size_t* out_pos_slots = nullptr) {
     std::vector<InlineTransformCandidate> candidates =
         CollectInlineTransforms(bytes, rs, re);
     if (candidates.empty()) return false;
@@ -984,6 +994,11 @@ bool TryInlineTransform(const std::vector<uint8_t>& bytes,
     rot_y = c.rot_y;
     rot_z = c.rot_z;
     has_rotation = c.has_rotation;
+    if (out_pos_slots) {
+        out_pos_slots[0] = c.pos_slots[0];
+        out_pos_slots[1] = c.pos_slots[1];
+        out_pos_slots[2] = c.pos_slots[2];
+    }
     return true;
 }
 
@@ -1005,11 +1020,13 @@ bool TryInlineTransformRange(const std::vector<uint8_t>& bytes,
                              float& rot_x,
                              float& rot_y,
                              float& rot_z,
-                             bool& has_rotation) {
+                             bool& has_rotation,
+                             size_t* out_pos_slots = nullptr) {
     if (begin >= end || end > bytes.size()) return false;
     const size_t shim = (begin >= 4) ? begin - 4 : begin;
     return TryInlineTransform(bytes, shim, end, x, y, z,
-                              rot_x, rot_y, rot_z, has_rotation);
+                              rot_x, rot_y, rot_z, has_rotation,
+                              out_pos_slots);
 }
 
 bool TryIndexedInlineTransform(const GdbView& view,
@@ -1020,13 +1037,14 @@ bool TryIndexedInlineTransform(const GdbView& view,
                                float& rot_x,
                                float& rot_y,
                                float& rot_z,
-                               bool& has_rotation) {
+                               bool& has_rotation,
+                               size_t* out_pos_slots = nullptr) {
     size_t payload_start = 0;
     size_t payload_end = 0;
     if (!view.payloadRange(record, payload_start, payload_end)) return false;
     return TryInlineTransformRange(view.bytes, payload_start, payload_end,
                                    x, y, z, rot_x, rot_y, rot_z,
-                                   has_rotation);
+                                   has_rotation, out_pos_slots);
 }
 
 bool TryEmbeddedTransformRecords(const GdbView& view,
@@ -1109,21 +1127,22 @@ bool LookupPlacement(
     float pos_x = 0.0f, pos_y = 0.0f, pos_z = 0.0f;
     float rot_x = 0.0f, rot_y = 0.0f, rot_z = 0.0f;
     bool has_rotation = false;
+    size_t pos_slots[3] = {0, 0, 0};
     bool have_pos = TryComponentTransformRecord(view, record,
                                                 pos_x, pos_y, pos_z,
                                                 rot_x, rot_y, rot_z,
-                                                has_rotation);
+                                                has_rotation, pos_slots);
     if (!have_pos) {
         have_pos = TryTransformRecord(view, record,
                                       pos_x, pos_y, pos_z,
                                       rot_x, rot_y, rot_z,
-                                      has_rotation);
+                                      has_rotation, pos_slots);
     }
     if (!have_pos) {
         have_pos = TryIndexedInlineTransform(view, record,
                                              pos_x, pos_y, pos_z,
                                              rot_x, rot_y, rot_z,
-                                             has_rotation);
+                                             has_rotation, pos_slots);
     }
     if (!have_pos) return false;
 
@@ -1131,6 +1150,9 @@ bool LookupPlacement(
     pl.x = pos_x;
     pl.y = pos_y;
     pl.z = pos_z;
+    pl.pos_value_off[0] = (uint32_t)pos_slots[0];
+    pl.pos_value_off[1] = (uint32_t)pos_slots[1];
+    pl.pos_value_off[2] = (uint32_t)pos_slots[2];
     pl.rot_x = rot_x;
     pl.rot_y = rot_y;
     pl.rot_z = rot_z;

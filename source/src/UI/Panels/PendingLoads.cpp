@@ -473,11 +473,6 @@ static void transform_instance_normal(const Level::PropInstance& inst,
     z = -lx * s + lz * c;
 }
 
-// Instance transform for display, in engine axes: values[0..2] are already
-// engine-ordered (X, Y, Z with Z up). The full-transform matrix in
-// values[3..11] is stored in preview axes (Y up), so rows/columns 1<->2 are
-// swapped back before extracting Z-up euler angles; single-axis GDB
-// rotations (including the ry=rz=pi yaw-pair encoding) round-trip exactly.
 static void instance_display_transform(const Level::PropInstance& inst,
                                        float out_pos[3],
                                        float out_rot_deg[3])
@@ -504,7 +499,7 @@ static void instance_display_transform(const Level::PropInstance& inst,
             g[r * 3 + c] = pv[axis_map[r] * 3 + axis_map[c]];
         }
     }
-    for (int r = 0; r < 3; ++r) {   // strip any baked scale
+    for (int r = 0; r < 3; ++r) {
         const float len = std::sqrt(g[r*3+0] * g[r*3+0] +
                                     g[r*3+1] * g[r*3+1] +
                                     g[r*3+2] * g[r*3+2]);
@@ -623,6 +618,9 @@ static void merge_transformed_instance_into(MDLMeshGeom& dst,
         pr.has_transform = true;
         pr.inst_hash = inst.hash;
         pr.pos_file_offset = inst.pos_file_offset;
+        pr.gdb_pos_off[0] = inst.gdb_pos_off[0];
+        pr.gdb_pos_off[1] = inst.gdb_pos_off[1];
+        pr.gdb_pos_off[2] = inst.gdb_pos_off[2];
         dst.pick_ranges.push_back(pr);
     }
 }
@@ -2055,6 +2053,23 @@ void process_pending_loads() {
             g_flycam.pos[0] = cx_mesh;
             g_flycam.pos[1] = maxy + diag * 0.7f;
             g_flycam.pos[2] = cz_mesh - diag * 1.0f;
+            {
+                float cloud_min = 1e30f;
+                if (g_pending_level_cloud_theme.has_any) {
+                    for (int li = 0; li < 4; ++li) {
+                        const auto& cl =
+                            g_pending_level_cloud_theme.layers[li];
+                        if (cl.enabled && cl.has_height &&
+                            cl.height > 1.0f) {
+                            cloud_min = std::min(cloud_min, cl.height);
+                        }
+                    }
+                }
+                float cap = (cloud_min < 1e29f) ? (cloud_min - 15.0f)
+                                                : (maxy + 60.0f);
+                if (cap < maxy + 10.0f) cap = maxy + 10.0f;
+                if (g_flycam.pos[1] > cap) g_flycam.pos[1] = cap;
+            }
             g_flycam.yaw    = 0.0f;
             g_flycam.pitch  = -0.6f;
             g_flycam.is_looking = false;

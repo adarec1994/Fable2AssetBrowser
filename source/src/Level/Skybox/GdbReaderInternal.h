@@ -202,23 +202,30 @@ struct GdbView {
         return false;
     }
 
-    bool readLocalFloat(size_t record, uint32_t field_hash, float& value) const
+    bool readLocalFloat(size_t record, uint32_t field_hash, float& value,
+                        size_t* out_slot = nullptr) const
     {
         size_t slot = 0;
         if (!findLocal(record, field_hash, 3, slot, nullptr)) return false;
         if (slot + 4 > body_end) return false;
         value = ReadBeF32(bytes.data() + slot);
-        return std::isfinite(value);
+        if (!std::isfinite(value)) return false;
+        if (out_slot) *out_slot = slot;
+        return true;
     }
 
     bool readVectorFields(size_t record,
                           float& vx,
                           float& vy,
-                          float& vz) const
+                          float& vz,
+                          size_t* out_slots = nullptr) const
     {
-        return readLocalFloat(record, kHashVecX, vx) &&
-               readLocalFloat(record, kHashVecY, vy) &&
-               readLocalFloat(record, kHashVecZ, vz);
+        return readLocalFloat(record, kHashVecX, vx,
+                              out_slots ? &out_slots[0] : nullptr) &&
+               readLocalFloat(record, kHashVecY, vy,
+                              out_slots ? &out_slots[1] : nullptr) &&
+               readLocalFloat(record, kHashVecZ, vz,
+                              out_slots ? &out_slots[2] : nullptr);
     }
 
     bool hasVectorSchema(size_t record) const
@@ -235,10 +242,11 @@ struct GdbView {
                         float& z,
                         float* raw_x = nullptr,
                         float* raw_y = nullptr,
-                        float* raw_z = nullptr) const
+                        float* raw_z = nullptr,
+                        size_t* out_slots = nullptr) const
     {
         float vx = 0.0f, vy = 0.0f, vz = 0.0f;
-        if (!readVectorFields(record, vx, vy, vz)) return false;
+        if (!readVectorFields(record, vx, vy, vz, out_slots)) return false;
         if (!std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(vz)) {
             return false;
         }
@@ -257,11 +265,12 @@ struct GdbView {
                      float& z,
                      float* raw_x = nullptr,
                      float* raw_y = nullptr,
-                     float* raw_z = nullptr) const
+                     float* raw_z = nullptr,
+                     size_t* out_slots = nullptr) const
     {
         size_t rec = 0;
         return lookup(hash, rec) &&
-               readVec3Record(rec, x, y, z, raw_x, raw_y, raw_z);
+               readVec3Record(rec, x, y, z, raw_x, raw_y, raw_z, out_slots);
     }
 
     bool readRotationVec3Ref(uint32_t hash,

@@ -116,14 +116,12 @@ struct MDLMeshGeom {
         uint32_t index_count = 0;
         float center[3] = {0.0f, 0.0f, 0.0f};
         float radius = 0.0f;
-        // instance transform in engine axes (Z up), rotation in degrees
         float inst_pos[3] = {0.0f, 0.0f, 0.0f};
         float inst_rot_deg[3] = {0.0f, 0.0f, 0.0f};
         bool  has_transform = false;
-        // entity hash (groups the parts of one authored object) and the
-        // byte offset of the position in the level file (0 = not on disk)
         uint64_t inst_hash = 0;
         uint32_t pos_file_offset = 0;
+        uint32_t gdb_pos_off[3] = {0, 0, 0};
     };
     std::vector<PickRange> pick_ranges;
 };

@@ -37,6 +37,7 @@ struct EditEntry {
     uint8_t lev_kind = 0;
     uint32_t gdb_off[3] = {0, 0, 0};
     uint32_t gdb_rot_off[3] = {0, 0, 0};
+    uint32_t gdb_entity_hash = 0;
     bool registered = false;
     bool deleted = false;
 
@@ -871,6 +872,7 @@ void register_entry(EditEntry& e, const InstInfo& info) {
         e.gdb_rot_off[1] = info.gdb_rot_off[1];
         e.gdb_rot_off[2] = info.gdb_rot_off[2];
     }
+    e.gdb_entity_hash = info.gdb_entity_hash;
     if (info.orig_pos) {
         e.orig[0] = info.orig_pos[0];
         e.orig[1] = info.orig_pos[1];
@@ -1610,7 +1612,9 @@ uint32_t create_entity_addition(GdbEdit::GdbFile& g,
 
     const uint32_t pos_rec = vec3_record(a.pos[0], a.pos[1], a.pos[2]);
     const float yaw = a.yaw_deg * 0.01745329252f;
-    const uint32_t rot_rec = vec3_record(0.0f, 0.0f, yaw);
+    // GDB rotation vec3 convention: VecX = yaw (rotation about the up
+    // axis); VecY / VecZ carry the editor Y / X tilts.
+    const uint32_t rot_rec = vec3_record(yaw, 0.0f, 0.0f);
     if (!pos_rec || !rot_rec) {
         err = "transform record append failed";
         return 0;
@@ -1710,6 +1714,182 @@ bool append_save_entities(
     return true;
 }
 
+struct SavePhysPatch {
+    uint32_t hash = 0;
+    float pos[3] = {0, 0, 0};
+    float rot_deg[3] = {0, 0, 0};
+    bool set_rot = false;
+};
+
+int find_level_save_index(const std::string& bnk_path, int lev_index) {
+    if (bnk_path.empty() || lev_index < 0) return -1;
+    try {
+        const auto bc = BnkCache::get(bnk_path);
+        std::string nm = bc.reader->list_files()[(size_t)lev_index].name;
+        for (char& c : nm) c = (char)std::tolower((unsigned char)c);
+        const std::string suffix = ".engine_level";
+        const size_t sp = nm.rfind(suffix);
+        if (sp == std::string::npos || sp + suffix.size() != nm.size()) {
+            return -1;
+        }
+        std::string stem = nm.substr(0, sp);
+        std::replace(stem.begin(), stem.end(), '\\', '/');
+        return BnkCache::find_index(bnk_path, stem + ".save");
+    } catch (...) {
+        return -1;
+    }
+}
+
+// Rewrites <Position> (and optionally <Orientation>) inside the
+// <PhysicsData> block of matching .save entities. The game restores
+// entity physics transforms from the .save, so GDB patches alone are
+// not enough for entities that carry PhysicsData.
+size_t apply_save_physics_patches(std::vector<uint8_t>& xml_bytes,
+                                  const std::vector<SavePhysPatch>& patches)
+{
+    if (patches.empty()) return 0;
+    std::unordered_map<uint32_t, const SavePhysPatch*> by_hash;
+    by_hash.reserve(patches.size() * 2);
+    for (const auto& p : patches) by_hash.emplace(p.hash, &p);
+
+    std::string xml(reinterpret_cast<const char*>(xml_bytes.data()),
+                    xml_bytes.size());
+
+    auto replace_payload = [&](size_t region_start, size_t& region_end,
+                               const char* tag, const std::string& text)
+        -> bool {
+        const std::string open = std::string("<") + tag;
+        const std::string close = std::string("</") + tag + ">";
+        size_t a = region_start;
+        while (true) {
+            a = xml.find(open, a);
+            if (a == std::string::npos || a >= region_end) return false;
+            const char nxt = a + open.size() < xml.size()
+                                 ? xml[a + open.size()] : '\0';
+            if (nxt == '>' || nxt == ' ' || nxt == '\t') break;
+            a += open.size();
+        }
+        const size_t gt = xml.find('>', a);
+        if (gt == std::string::npos || gt >= region_end) return false;
+        const size_t vs = gt + 1;
+        const size_t b = xml.find(close, vs);
+        if (b == std::string::npos || b > region_end) return false;
+        xml.replace(vs, b - vs, text);
+        region_end += text.size() - (b - vs);
+        return true;
+    };
+    auto fmt_f = [](float v) {
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "%.6f", v);
+        return std::string(buf);
+    };
+    auto find_open_tag = [&](size_t from, size_t limit,
+                             const char* tag) -> size_t {
+        const std::string open = std::string("<") + tag;
+        size_t a = from;
+        while (true) {
+            a = xml.find(open, a);
+            if (a == std::string::npos || a >= limit) {
+                return std::string::npos;
+            }
+            const char nxt = a + open.size() < xml.size()
+                                 ? xml[a + open.size()] : '\0';
+            if (nxt == '>' || nxt == ' ' || nxt == '\t') return a;
+            a += open.size();
+        }
+    };
+
+    size_t patched = 0;
+    const std::string tag_open = "<Entity name=\"";
+    const std::string tag_close = "</Entity>";
+    size_t pos = 0;
+    while (true) {
+        size_t a = xml.find(tag_open, pos);
+        if (a == std::string::npos) break;
+        const size_t name_end = xml.find('"', a + tag_open.size());
+        if (name_end == std::string::npos) break;
+        const size_t hash_start = xml.find("0x", name_end);
+        if (hash_start == std::string::npos) break;
+        size_t entity_close = xml.find(tag_close, hash_start);
+        if (entity_close == std::string::npos) break;
+        uint32_t h = 0;
+        for (size_t i = hash_start + 2;
+             i < xml.size() && std::isxdigit((unsigned char)xml[i]); ++i) {
+            h <<= 4;
+            const char c = xml[i];
+            if (c >= '0' && c <= '9') h |= uint32_t(c - '0');
+            else if (c >= 'A' && c <= 'F') h |= uint32_t(c - 'A' + 10);
+            else h |= uint32_t(c - 'a' + 10);
+        }
+        auto it = by_hash.find(h);
+        if (it == by_hash.end()) {
+            pos = entity_close + tag_close.size();
+            continue;
+        }
+        const SavePhysPatch& p = *it->second;
+
+        const size_t phys = find_open_tag(name_end, entity_close,
+                                          "PhysicsData");
+        if (phys != std::string::npos) {
+            size_t phys_end = xml.find("</PhysicsData>", phys);
+            if (phys_end != std::string::npos && phys_end < entity_close) {
+                const size_t pos_tag = find_open_tag(phys, phys_end,
+                                                     "Position");
+                if (pos_tag != std::string::npos) {
+                    size_t pos_end = xml.find("</Position>", pos_tag);
+                    if (pos_end != std::string::npos && pos_end < phys_end) {
+                        const size_t before = pos_end;
+                        replace_payload(pos_tag, pos_end, "X",
+                                        fmt_f(p.pos[0]));
+                        replace_payload(pos_tag, pos_end, "Y",
+                                        fmt_f(p.pos[1]));
+                        replace_payload(pos_tag, pos_end, "Z",
+                                        fmt_f(p.pos[2]));
+                        phys_end += pos_end - before;
+                        entity_close = xml.find(tag_close, pos_tag);
+                        ++patched;
+                    }
+                }
+                if (p.set_rot) {
+                    const size_t ori = find_open_tag(phys, phys_end,
+                                                     "Orientation");
+                    if (ori != std::string::npos) {
+                        size_t ori_end = xml.find("</Orientation>", ori);
+                        if (ori_end != std::string::npos &&
+                            ori_end < phys_end) {
+                            // Engine axes, Z up: q = qz(yaw)*qy(y)*qx(x)
+                            const float hx =
+                                p.rot_deg[0] * kDegToRad * 0.5f;
+                            const float hy =
+                                p.rot_deg[1] * kDegToRad * 0.5f;
+                            const float hz =
+                                p.rot_deg[2] * kDegToRad * 0.5f;
+                            const float qx4[4] = {std::sin(hx), 0, 0,
+                                                  std::cos(hx)};
+                            const float qy4[4] = {0, std::sin(hy), 0,
+                                                  std::cos(hy)};
+                            const float qz4[4] = {0, 0, std::sin(hz),
+                                                  std::cos(hz)};
+                            float t[4], q[4];
+                            quat_mul(qy4, qx4, t);
+                            quat_mul(qz4, t, q);
+                            replace_payload(ori, ori_end, "X", fmt_f(q[0]));
+                            replace_payload(ori, ori_end, "Y", fmt_f(q[1]));
+                            replace_payload(ori, ori_end, "Z", fmt_f(q[2]));
+                            replace_payload(ori, ori_end, "W", fmt_f(q[3]));
+                            entity_close = xml.find(tag_close, ori);
+                        }
+                    }
+                }
+            }
+        }
+        if (entity_close == std::string::npos) break;
+        pos = entity_close + tag_close.size();
+    }
+    if (patched) xml_bytes.assign(xml.begin(), xml.end());
+    return patched;
+}
+
 }
 
 bool Save(std::string& msg) {
@@ -1744,6 +1924,8 @@ bool Save(std::string& msg) {
     int save_rewrite_index = -1;
     std::string save_rewrite_bnk;
     size_t chest_entities_created = 0;
+    size_t save_physics_patched = 0;
+    bool deferred_work = false;
     {
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
@@ -1765,11 +1947,25 @@ bool Save(std::string& msg) {
     std::vector<LevPatch> lev_patches;
     struct GdbPatch { uint32_t off; float v; };
     std::vector<GdbPatch> gdb_patches;
+    std::vector<SavePhysPatch> save_physics_patches;
 
     size_t adds_updated = 0;
     for (const auto& kv : s.edits) {
         const EditEntry& e = kv.second;
         if (!e.changed()) continue;
+        if (e.gdb_entity_hash != 0 && e.lev_kind != 5) {
+            SavePhysPatch sp;
+            sp.hash = e.gdb_entity_hash;
+            sp.pos[0] = e.orig[0] + e.delta[0];
+            sp.pos[1] = e.orig[1] + e.delta[1];
+            sp.pos[2] = e.orig[2] + e.delta[2] -
+                        (e.deleted ? 10000.0f : 0.0f);
+            sp.rot_deg[0] = e.orig_rot[0] + e.rot_deg[0];
+            sp.rot_deg[1] = e.orig_rot[1] + e.rot_deg[1];
+            sp.rot_deg[2] = e.orig_rot[2] + e.rot_deg[2];
+            sp.set_rot = e.rotated() && !e.deleted;
+            save_physics_patches.push_back(sp);
+        }
         if (e.lev_kind == 5) {
             if (e.lev_off >= 1 && e.lev_off <= s.additions.size()) {
                 Addition& a = s.additions[e.lev_off - 1];
@@ -1840,7 +2036,8 @@ bool Save(std::string& msg) {
         }
     }
     if (lev_patches.empty() && gdb_patches.empty() && adds_updated == 0 &&
-        s.additions.empty() && s.contents_edits.empty()) {
+        s.additions.empty() && s.contents_edits.empty() &&
+        save_physics_patches.empty()) {
         msg = (skipped || rs_visual)
                   ? "no file-backed changes to save (visual-only edits "
                     "skipped)"
@@ -2018,32 +2215,8 @@ bool Save(std::string& msg) {
         }
         if (!new_save_entities.empty()) {
 
-            const int save_idx = [&]() -> int {
-                if (s.lev.bnk_path.empty() || s.lev.file_index < 0) {
-                    return -1;
-                }
-                try {
-                    const auto bc = BnkCache::get(s.lev.bnk_path);
-                    std::string nm =
-                        bc.reader->list_files()
-                            [(size_t)s.lev.file_index].name;
-                    for (char& c : nm) {
-                        c = (char)std::tolower((unsigned char)c);
-                    }
-                    const std::string suffix = ".engine_level";
-                    const size_t sp = nm.rfind(suffix);
-                    if (sp == std::string::npos ||
-                        sp + suffix.size() != nm.size()) {
-                        return -1;
-                    }
-                    std::string stem = nm.substr(0, sp);
-                    std::replace(stem.begin(), stem.end(), '\\', '/');
-                    return BnkCache::find_index(s.lev.bnk_path,
-                                                stem + ".save");
-                } catch (...) {
-                    return -1;
-                }
-            }();
+            const int save_idx = find_level_save_index(s.lev.bnk_path,
+                                                       s.lev.file_index);
             std::string serr;
             if (save_idx < 0) {
                 serr = ".save entry not found";
@@ -2081,6 +2254,43 @@ bool Save(std::string& msg) {
                 gdb_rewrite_index = s.gdb.file_index;
                 gdb_rewrite_iso = s.gdb.in_iso;
             }
+        }
+    }
+
+    // The game restores entity transforms from the .save PhysicsData
+    // blocks, so moved/rotated GDB entities must be patched there too.
+    if (!save_physics_patches.empty()) {
+        if (save_rewrite_bytes.empty()) {
+            const int save_idx = find_level_save_index(s.lev.bnk_path,
+                                                       s.lev.file_index);
+            if (save_idx >= 0) {
+                try {
+                    save_rewrite_bytes = BnkCache::extract_bytes(
+                        s.lev.bnk_path, save_idx);
+                } catch (...) {
+                    save_rewrite_bytes.clear();
+                }
+                if (!save_rewrite_bytes.empty()) {
+                    save_rewrite_index = save_idx;
+                    save_rewrite_bnk = s.lev.bnk_path;
+                }
+            }
+        }
+        if (!save_rewrite_bytes.empty()) {
+            save_physics_patched = apply_save_physics_patches(
+                save_rewrite_bytes, save_physics_patches);
+            DebugTrace::log(
+                "save: .save PhysicsData patched %zu of %zu entit(ies)",
+                save_physics_patched, save_physics_patches.size());
+            if (save_physics_patched == 0 &&
+                chest_entities_created == 0) {
+                save_rewrite_bytes.clear();
+                save_rewrite_index = -1;
+                save_rewrite_bnk.clear();
+            }
+        } else {
+            DebugTrace::log(
+                "save: .save entry unavailable for PhysicsData patches");
         }
     }
 
@@ -2281,11 +2491,33 @@ bool Save(std::string& msg) {
                                 if (slash != std::string::npos) {
                                     const std::string folder =
                                         want.substr(0, slash + 1);
-                                    const size_t got =
+                                    size_t got =
                                         collect_folder_from_nested_banks(
                                             s.lev.bnk_path,
                                             "_streaming.bnk", folder,
                                             stream_adds);
+                                    if (got == 0) {
+                                        // model comes from another world:
+                                        // hunt its streaming files (physics
+                                        // .hkx etc.) across the other BNKs
+                                        for (const auto& other :
+                                             S.bnk_paths) {
+                                            if (other == s.lev.bnk_path) {
+                                                continue;
+                                            }
+                                            got =
+                                            collect_folder_from_nested_banks(
+                                                other, "_streaming.bnk",
+                                                folder, stream_adds);
+                                            if (got) {
+                                                DebugTrace::log(
+                                                    "save: streaming donor "
+                                                    "bnk %s",
+                                                    other.c_str());
+                                                break;
+                                            }
+                                        }
+                                    }
                                     DebugTrace::log(
                                         "save: inject %s (+%zu streaming "
                                         "file(s))", src_name.c_str(),
@@ -2563,15 +2795,28 @@ bool Save(std::string& msg) {
                " visual-only edit(s) not saved)";
     }
     msg += bake_note;
-    if (!need_bake && gdb_rewrite_bytes.empty()) {
+    deferred_work = need_bake || !gdb_rewrite_bytes.empty() ||
+                    save_rewrite_index >= 0;
+    if (!deferred_work) {
         s.dirty = false;
-    }
-    if (need_bake || !gdb_rewrite_bytes.empty()) {
+        if (lev_written || gdb_written || rs_written) {
+            BnkCache::invalidate(s.lev.bnk_path);
+            if (!s.gdb.bnk_path.empty()) {
+                BnkCache::invalidate(s.gdb.bnk_path);
+            }
+            reload_needed = true;
+            reload_entry = s.entry;
+            msg += "; reloading";
+        }
+    } else {
         s.saving = true;
     }
     }
 
-    if (!need_bake && gdb_rewrite_bytes.empty()) return true;
+    if (!deferred_work) {
+        if (reload_needed) Level::OpenAsync(reload_entry);
+        return true;
+    }
 
     std::string berr;
     bool rebuilt = true;
@@ -2671,7 +2916,7 @@ bool Save(std::string& msg) {
                 gdb_rewrite_index, gdb_rewrite_bytes, gerr);
             if (contents_ok && save_rewrite_index >= 0) {
                 contents_ok = BnkWriter::RebuildIsoLevelBnk(
-                    ISO::IsoMount::strip_iso_prefix(gdb_rewrite_bnk),
+                    ISO::IsoMount::strip_iso_prefix(save_rewrite_bnk),
                     save_rewrite_index, save_rewrite_bytes, gerr);
             }
         } else if (gdb_rewrite_index >= 0) {
@@ -2707,6 +2952,26 @@ bool Save(std::string& msg) {
             "%s",
             contents_ok ? "OK" : "FAILED", contents_applied,
             chest_entities_created, gerr.c_str());
+    }
+
+    if (rebuilt && contents_ok && gdb_rewrite_bytes.empty() &&
+        save_rewrite_index >= 0 && !save_rewrite_bytes.empty()) {
+        progress_update(85, 100, "Writing entity save data...");
+        std::string gerr;
+        BnkCache::invalidate(save_rewrite_bnk);
+        if (ISO::IsoMount::is_iso_path(save_rewrite_bnk)) {
+            contents_ok = BnkWriter::RebuildIsoLevelBnk(
+                ISO::IsoMount::strip_iso_prefix(save_rewrite_bnk),
+                save_rewrite_index, save_rewrite_bytes, gerr);
+        } else {
+            contents_ok = BnkWriter::RebuildWithReplacedEntry(
+                save_rewrite_bnk, save_rewrite_index, save_rewrite_bytes,
+                gerr);
+        }
+        BnkCache::invalidate(save_rewrite_bnk);
+        DebugTrace::log("save: .save physics rewrite %s (%zu entit(ies)) %s",
+                        contents_ok ? "OK" : "FAILED",
+                        save_physics_patched, gerr.c_str());
     }
 
     {
@@ -2745,6 +3010,11 @@ bool Save(std::string& msg) {
                 msg += "; created " +
                        std::to_string(chest_entities_created) +
                        " chest entit(ies)";
+            }
+            if (save_physics_patched > 0) {
+                msg += "; updated " +
+                       std::to_string(save_physics_patched) +
+                       " entity save transform(s)";
             }
             msg += "; reloading";
         } else if (!rebuilt) {

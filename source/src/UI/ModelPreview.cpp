@@ -2959,6 +2959,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             mr.gdb_rot_off[0] = pr.gdb_rot_off[0];
             mr.gdb_rot_off[1] = pr.gdb_rot_off[1];
             mr.gdb_rot_off[2] = pr.gdb_rot_off[2];
+            mr.gdb_entity_hash = pr.gdb_entity_hash;
             mr.lev_rec_kind = pr.lev_rec_kind;
             m.pick_ranges.push_back(mr);
         }

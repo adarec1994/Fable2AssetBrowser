@@ -545,6 +545,25 @@ void draw_main(GLFWwindow* window) {
                     }
                     ImGui::EndPopup();
                 }
+                if (S.level_edit_guard_popup) {
+                    ImGui::OpenPopup("Level Editing Active");
+                    S.level_edit_guard_popup = false;
+                }
+                if (ImGui::BeginPopupModal("Level Editing Active", nullptr,
+                                           ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGui::TextWrapped("%s.",
+                                       S.level_edit_guard_message.c_str());
+                    ImGui::TextDisabled(
+                        "Turn off Edit Level (Level menu) to browse other "
+                        "assets. Further attempts are noted in the output "
+                        "log instead of this popup.");
+                    ImGui::Spacing();
+                    if (ImGui::Button("OK", ImVec2(120, 0))) {
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SetItemDefaultFocus();
+                    ImGui::EndPopup();
+                }
             }
             if (ImGui::BeginMenu("Settings")) {
                 if (ImGui::Checkbox("Show file paths in tree tooltips", &S.show_paths)) {

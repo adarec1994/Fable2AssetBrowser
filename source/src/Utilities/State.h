@@ -132,6 +132,14 @@ struct State {
     std::vector<FlatAssetEntry> all_heightfield_files;
     bool terrain_mode = false;
     bool show_gdb_placements = false;
+
+    // level-edit click guard: previews that would tear down the loaded
+    // level are blocked while edit mode is on; first hit = modal, later
+    // hits = output-log line
+    bool level_edit_guard_popup = false;
+    bool level_edit_guard_seen = false;
+    std::string level_edit_guard_message;
+
     std::string mdl_filter;
     std::string tex_filter;
     std::string wav_filter;

@@ -1400,6 +1400,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                     info.lev_kind = pr.lev_rec_kind;
                     info.gdb_off = pr.gdb_pos_off;
                     info.gdb_rot_off = pr.gdb_rot_off;
+                    info.gdb_entity_hash = pr.gdb_entity_hash;
                     if (what == kEditMove) {
                         LevelEdit::AddMove(pr.selection_id, v, info);
                     } else if (what == kEditRotate) {

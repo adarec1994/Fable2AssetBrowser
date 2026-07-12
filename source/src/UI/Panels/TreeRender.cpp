@@ -255,7 +255,8 @@ void draw_tree_node(TreeNode& node) {
                         open_gdb_viewer_for_bnk_entry(
                             node.bnk_source, node.bnk_index, node.name);
                     }
-                    if (is_lua(node.name)) {
+                    if (is_lua(node.name) &&
+                        !level_edit_click_guard("Script preview")) {
                         g_pending_mdl_load = false;
                         g_pending_tex_load = false;
                         g_pending_mdl_index = -1;

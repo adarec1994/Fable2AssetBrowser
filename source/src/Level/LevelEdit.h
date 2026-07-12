@@ -30,6 +30,7 @@ struct InstInfo {
     uint8_t lev_kind = 0;
     const uint32_t* gdb_off = nullptr;
     const uint32_t* gdb_rot_off = nullptr;
+    uint32_t gdb_entity_hash = 0;
 };
 
 enum class AdditionEntityKind : uint8_t {

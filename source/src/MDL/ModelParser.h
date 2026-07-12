@@ -123,6 +123,7 @@ struct MDLMeshGeom {
         uint32_t pos_file_offset = 0;
         uint32_t gdb_pos_off[3] = {0, 0, 0};
         uint32_t gdb_rot_off[3] = {0, 0, 0};
+        uint32_t gdb_entity_hash = 0;
         uint8_t lev_rec_kind = 0;
     };
     std::vector<PickRange> pick_ranges;

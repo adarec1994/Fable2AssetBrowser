@@ -2319,6 +2319,35 @@ std::unordered_map<uint32_t, PropTemplateInfo> BuildPropTemplateIndex(
                     break;
                 }
             }
+            if (!has_graphics) {
+                // derived templates inherit their graphics but override
+                // the physics component locally; accept those too, but
+                // reject placed instances (their transform component
+                // resolves to a world Position)
+                bool has_local_physics = false;
+                for (uint32_t pc : kPhysicsComponents) {
+                    size_t slot = 0;
+                    if (view.findLocal(rec, pc, 6, slot, nullptr)) {
+                        has_local_physics = true;
+                        break;
+                    }
+                }
+                if (!has_local_physics) continue;
+                float ix = 0, iy = 0, iz = 0;
+                float rx = 0, ry = 0, rz = 0;
+                bool has_rot = false;
+                if (TryComponentTransformRecord(view, rec, ix, iy, iz,
+                                                rx, ry, rz, has_rot)) {
+                    continue;
+                }
+                for (uint32_t gc : kGraphicsComponents) {
+                    size_t slot = 0;
+                    if (view.findField(rec, gc, 6, slot, nullptr)) {
+                        has_graphics = true;
+                        break;
+                    }
+                }
+            }
             if (!has_graphics) continue;
 
             const std::vector<uint32_t> model_hashes =

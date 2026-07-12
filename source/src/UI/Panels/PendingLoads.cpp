@@ -625,6 +625,7 @@ static void merge_transformed_instance_into(MDLMeshGeom& dst,
         pr.gdb_rot_off[0] = inst.gdb_rot_off[0];
         pr.gdb_rot_off[1] = inst.gdb_rot_off[1];
         pr.gdb_rot_off[2] = inst.gdb_rot_off[2];
+        pr.gdb_entity_hash = inst.gdb_entity_hash;
         pr.lev_rec_kind = inst.lev_rec_kind;
         dst.pick_ranges.push_back(pr);
     }
@@ -1349,11 +1350,38 @@ bool spawn_level_model_at(ID3D11Device* device,
 }
 #endif
 
+bool level_edit_click_guard(const char* what) {
+    if (!LevelEdit::Enabled()) return false;
+    const std::string msg =
+        std::string(what) + " is disabled while level editing";
+    if (!S.level_edit_guard_seen) {
+        S.level_edit_guard_seen = true;
+        S.level_edit_guard_message = msg;
+        S.level_edit_guard_popup = true;
+    } else {
+        OutputLog::warn(msg);
+    }
+    return true;
+}
+
 #ifdef _WIN32
 void process_pending_loads(ID3D11Device* device) {
 #else
 void process_pending_loads() {
 #endif
+    if (g_pending_mdl_load && level_edit_click_guard("Model loading")) {
+        g_pending_mdl_load = false;
+        g_pending_mdl_index = -1;
+        g_pending_mdl_full_path.clear();
+    }
+    if (g_pending_tex_load && level_edit_click_guard("Texture preview")) {
+        g_pending_tex_load = false;
+        g_pending_tex_index = -1;
+    }
+    if (S.pending_preview_build &&
+        level_edit_click_guard("Model preview")) {
+        S.pending_preview_build = false;
+    }
     if (g_pending_mdl_load && g_pending_mdl_index >= 0 && g_pending_mdl_index < (int)S.files.size()) {
         g_pending_mdl_load = false;
         auto item = S.files[(size_t)g_pending_mdl_index];

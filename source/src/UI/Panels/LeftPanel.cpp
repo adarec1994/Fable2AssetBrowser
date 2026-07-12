@@ -201,6 +201,7 @@ std::string lua_script_list_label(const LuaFileUI& e) {
 }
 
 void select_lua_script(size_t idx) {
+    if (level_edit_click_guard("Script preview")) return;
     S.viewing_lua = true;
     S.viewing_adb = false;
     S.show_gdb_render = false;
@@ -1537,7 +1538,9 @@ void draw_left_panel() {
                     if (ImGui::Selectable(friendly.c_str(), false,
                                           ImGuiSelectableFlags_SpanAllColumns))
                     {
-                        Level::OpenAsync(e);
+                        if (!level_edit_click_guard("Level loading")) {
+                            Level::OpenAsync(e);
+                        }
                     }
                     if (level_busy) ImGui::EndDisabled();
                     if (ImGui::BeginPopupContextItem("##lvl_ctx")) {

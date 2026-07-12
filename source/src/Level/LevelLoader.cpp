@@ -3811,6 +3811,10 @@ bool Open(const FlatAssetEntry& entry)
                     for (const auto& db : supplemental_gdbs) {
                         template_gdbs.push_back(&db.bytes);
                     }
+                    // level-local object templates (e.g. region props like
+                    // esa_coffin_v2) live in the level's own gdb; keep it
+                    // last so game-wide templates win on ties
+                    template_gdbs.push_back(&gdb_bytes);
                     g_level_prop_entity_templates =
                         Gdb::BuildPropTemplateIndex(template_gdbs);
                     size_t with_phys = 0;
@@ -5273,6 +5277,40 @@ bool Open(const FlatAssetEntry& entry)
 
             std::unordered_map<std::string, std::array<uint32_t, 6>>
                 gdb_dup_slot_offsets;
+            // Position-only fallback links: .lev/GDB transform value
+            // layouts rarely match exactly (sin/cos yaw vs full matrix),
+            // so buildings and their exterior/interior companions link
+            // to the GDB entity slots by model path + position instead.
+            struct GdbSlotLink {
+                std::array<uint32_t, 6> slots{};
+                uint32_t entity_hash = 0;
+            };
+            std::unordered_map<std::string, GdbSlotLink> gdb_pos_slot_links;
+            auto gdb_pos_link_key = [](const std::string& model_path,
+                                       float x, float y, float z) {
+                auto q = [](float v) -> long long {
+                    if (!std::isfinite(v)) return 0ll;
+                    return (long long)std::llround(v * 100.0f);
+                };
+                std::ostringstream os;
+                os << lower_slash(model_path) << '|'
+                   << q(x) << ',' << q(y) << ',' << q(z);
+                return os.str();
+            };
+            auto record_gdb_pos_link = [&](const std::string& model_path,
+                                           const Gdb::Placement& p) {
+                if (!p.pos_value_off[0] && !p.pos_value_off[1] &&
+                    !p.pos_value_off[2]) {
+                    return;
+                }
+                GdbSlotLink link;
+                link.slots = {p.pos_value_off[0], p.pos_value_off[1],
+                              p.pos_value_off[2], p.rot_value_off[0],
+                              p.rot_value_off[1], p.rot_value_off[2]};
+                link.entity_hash = p.hash_a;
+                gdb_pos_slot_links.emplace(
+                    gdb_pos_link_key(model_path, p.x, p.y, p.z), link);
+            };
             auto record_gdb_dup_offsets =
                 [&](const Level::PropInstance& inst,
                     const std::string& model_path) {
@@ -5286,6 +5324,15 @@ bool Open(const FlatAssetEntry& entry)
                             inst.gdb_pos_off[0], inst.gdb_pos_off[1],
                             inst.gdb_pos_off[2], inst.gdb_rot_off[0],
                             inst.gdb_rot_off[1], inst.gdb_rot_off[2]});
+                    GdbSlotLink link;
+                    link.slots = {inst.gdb_pos_off[0], inst.gdb_pos_off[1],
+                                  inst.gdb_pos_off[2], inst.gdb_rot_off[0],
+                                  inst.gdb_rot_off[1], inst.gdb_rot_off[2]};
+                    link.entity_hash = inst.gdb_entity_hash;
+                    gdb_pos_slot_links.emplace(
+                        gdb_pos_link_key(model_path, inst.values[0],
+                                         inst.values[1], inst.values[2]),
+                        link);
                 };
             for (const auto& block : level_prop_blocks) {
                 if (block.model_path.empty()) continue;
@@ -5618,6 +5665,7 @@ bool Open(const FlatAssetEntry& entry)
                 [](const Gdb::Placement& p) {
                     Level::PropInstance pi;
                     pi.hash = p.hash_a;
+                    pi.gdb_entity_hash = p.hash_a;
                     pi.values[0] = p.x;
                     pi.values[1] = p.y;
                     pi.values[2] = p.z;
@@ -6517,6 +6565,26 @@ bool Open(const FlatAssetEntry& entry)
                         samples.push_back(
                             gdb_shell_sample_text(p, authored_path));
                     }
+                    // remember this entity's GDB transform slots so the
+                    // authored .lev instance (and its exterior/interior
+                    // companions) can patch the real entity on save
+                    record_gdb_pos_link(authored_path, p);
+                    if (!shop_companion_exterior.empty()) {
+                        record_gdb_pos_link(shop_companion_exterior, p);
+                        const std::string shop_interior =
+                            companion_interior_path(shop_companion_exterior);
+                        if (!shop_interior.empty()) {
+                            record_gdb_pos_link(shop_interior, p);
+                        }
+                    }
+                    if (!companion_exterior.empty()) {
+                        record_gdb_pos_link(companion_exterior, p);
+                        const std::string house_interior =
+                            companion_interior_path(companion_exterior);
+                        if (!house_interior.empty()) {
+                            record_gdb_pos_link(house_interior, p);
+                        }
+                    }
                     continue;
                 }
 
@@ -6677,6 +6745,7 @@ bool Open(const FlatAssetEntry& entry)
 
                 Level::PropInstance pi;
                 pi.hash = p.hash_a;
+                pi.gdb_entity_hash = p.hash_a;
                 pi.values[0] = p.x;
                 pi.values[1] = p.y;
                 pi.values[2] = p.z;
@@ -7728,32 +7797,65 @@ bool Open(const FlatAssetEntry& entry)
                     }
                 }
 
-                if (!gdb_dup_slot_offsets.empty()) {
+                if (!gdb_dup_slot_offsets.empty() ||
+                    !gdb_pos_slot_links.empty()) {
                     size_t linked = 0;
-                    for (auto& block : level_prop_blocks) {
-                        if (block.model_path.empty()) continue;
+                    auto link_block_instances = [&](Level::PropBlock& block) {
+                        if (block.model_path.empty()) return;
                         for (auto& inst : block.instances) {
+                            auto pos_hit = gdb_pos_slot_links.find(
+                                gdb_pos_link_key(block.model_path,
+                                                 inst.values[0],
+                                                 inst.values[1],
+                                                 inst.values[2]));
+                            const bool have_pos_link =
+                                pos_hit != gdb_pos_slot_links.end();
                             if (inst.gdb_pos_off[0] || inst.gdb_pos_off[1] ||
                                 inst.gdb_pos_off[2]) {
+                                if (have_pos_link &&
+                                    inst.gdb_entity_hash == 0) {
+                                    inst.gdb_entity_hash =
+                                        pos_hit->second.entity_hash;
+                                }
                                 continue;
                             }
                             auto hit = gdb_dup_slot_offsets.find(
                                 prop_instance_transform_key(
                                     inst, block.model_path));
-                            if (hit == gdb_dup_slot_offsets.end()) continue;
-                            inst.gdb_pos_off[0] = hit->second[0];
-                            inst.gdb_pos_off[1] = hit->second[1];
-                            inst.gdb_pos_off[2] = hit->second[2];
-                            inst.gdb_rot_off[0] = hit->second[3];
-                            inst.gdb_rot_off[1] = hit->second[4];
-                            inst.gdb_rot_off[2] = hit->second[5];
+                            if (hit != gdb_dup_slot_offsets.end()) {
+                                inst.gdb_pos_off[0] = hit->second[0];
+                                inst.gdb_pos_off[1] = hit->second[1];
+                                inst.gdb_pos_off[2] = hit->second[2];
+                                inst.gdb_rot_off[0] = hit->second[3];
+                                inst.gdb_rot_off[1] = hit->second[4];
+                                inst.gdb_rot_off[2] = hit->second[5];
+                            } else if (have_pos_link) {
+                                inst.gdb_pos_off[0] = pos_hit->second.slots[0];
+                                inst.gdb_pos_off[1] = pos_hit->second.slots[1];
+                                inst.gdb_pos_off[2] = pos_hit->second.slots[2];
+                                inst.gdb_rot_off[0] = pos_hit->second.slots[3];
+                                inst.gdb_rot_off[1] = pos_hit->second.slots[4];
+                                inst.gdb_rot_off[2] = pos_hit->second.slots[5];
+                            } else {
+                                continue;
+                            }
+                            if (have_pos_link && inst.gdb_entity_hash == 0) {
+                                inst.gdb_entity_hash =
+                                    pos_hit->second.entity_hash;
+                            }
                             ++linked;
                         }
+                    };
+                    for (auto& block : level_prop_blocks) {
+                        link_block_instances(block);
+                    }
+                    for (auto& kv : blocks_by_path) {
+                        link_block_instances(kv.second);
                     }
                     if (linked > 0) {
                         OutputLog::info(
                             "gdb-derived: linked " + std::to_string(linked) +
-                            " .lev prop instance(s) to their GDB entity "
+                            " prop instance(s) to their GDB entity "
                             "transform slots (edits move collision too)");
                     }
                 }

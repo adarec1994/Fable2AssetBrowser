@@ -4,9 +4,7 @@ namespace CloudBackgroundMap {
 
 const GeneratedTextureRecipe& ExactGeneratedTextureRecipe() noexcept
 {
-    // sub_82A79258 stores the two big-endian DWORDs with one 64-bit store at
-    // 0x82A79330.  BgMap_InitResources then passes object+0x100 and the exact
-    // immediates below to sub_821FBC60 at 0x82A7A514.
+
     static constexpr GeneratedTextureRecipe recipe = {
         0x82a79330u,
         0x82a7a514u,
@@ -106,4 +104,4 @@ const CloudBindRecipe& ExactCloudBindRecipe() noexcept
     return recipe;
 }
 
-}  // namespace CloudBackgroundMap
+}

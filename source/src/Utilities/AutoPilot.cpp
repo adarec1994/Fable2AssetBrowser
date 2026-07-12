@@ -41,8 +41,8 @@ bool        g_auto_exit = false;
 bool        g_vista_only = false;
 bool        g_sky_shot = false;
 bool        g_terrain_shot = false;
-float       g_time_of_day = -1.0f;   // hours 0..24; <0 = leave untouched
-float       g_pitch_offset = 0.0f;   // radians added after camera preset
+float       g_time_of_day = -1.0f;
+float       g_pitch_offset = 0.0f;
 int         g_settle_frames = 150;
 int         g_countdown = 0;
 int         g_timeout_frames = 0;
@@ -189,16 +189,13 @@ void AutoPilot_Tick() {
         if (g_vista_only) {
             g_mp_vista_only = true;
             S.show_adjacent_terrain = true;
-            // Elevated orbit so the surrounding vista ring is framed.
+
             S.cam_yaw   = 0.7f;
             S.cam_pitch = 0.65f;
             S.cam_dist  = 1.6f;
         }
         if (g_sky_shot) {
-            // Level loading frames the terrain from above and points down.
-            // Put the free camera near the level centre and look into the
-            // cloud planes instead, while remaining below their authored
-            // 200..700-unit heights.
+
             g_mp_vista_only = false;
             g_flycam.pos[0] = g_mp.center[0];
             g_flycam.pos[1] = g_mp.center[1] +
@@ -209,9 +206,7 @@ void AutoPilot_Tick() {
             g_flycam.is_looking = false;
         }
         if (g_terrain_shot) {
-            // Keep the camera below the authored cloud planes.  A high orbit
-            // looks down through those depth-writing layers and makes clear
-            // terrain resemble a solid bank of fog.
+
             g_mp_vista_only = false;
             S.show_adjacent_terrain = false;
             g_mp.show_mist = false;

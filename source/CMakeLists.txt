@@ -93,6 +93,8 @@ set(APP_SOURCES
         src/Level/VfsConfig.h
         src/Level/GdbModelHashlist.cpp
         src/Level/GdbModelHashlist.h
+        src/Level/GdbEdit.cpp
+        src/Level/GdbEdit.h
         src/Level/GdbParser.cpp
         src/Level/GdbParser.h
         src/Level/Skybox/CloudBackgroundGeneration.cpp
@@ -296,6 +298,24 @@ if(BUILD_TESTING)
     )
     target_link_libraries(shader_bank_tests PRIVATE ZLIB::ZLIB)
     add_test(NAME shader_bank_tests COMMAND shader_bank_tests)
+
+    add_executable(gdb_edit_tests
+            tests/GdbEditTests.cpp
+            src/Level/GdbEdit.cpp
+    )
+    target_include_directories(gdb_edit_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    add_test(NAME gdb_edit_tests COMMAND gdb_edit_tests)
+
+    add_executable(gdb_contents_probe
+            tests/GdbContentsProbe.cpp
+            src/Level/GdbParser.cpp
+            src/Level/Skybox/EnvironmentThemeParser.cpp
+    )
+    target_include_directories(gdb_contents_probe PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
 endif()
 
 add_executable(shader_bank_extract

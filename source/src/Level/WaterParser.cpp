@@ -8,11 +8,6 @@ namespace Level {
 
 namespace {
 
-// Straight port of the XEX stream reader used by WaterFile_DeserializeRecord
-// (@0x82B28398). No heuristics: any deviation from the on-disc layout is a
-// parse failure, exactly as in the engine (which then falls back to default
-// WaterParams).
-
 constexpr uint32_t kMarker       = 0x00000FECu;
 constexpr uint32_t kMaxBodyCount = 256;
 constexpr uint32_t kMaxTileCount = 4096;
@@ -98,8 +93,7 @@ bool parse_body(Reader& r, WaterBody& out)
         if (!r.u32(mask_count) || mask_count > kMaxMaskBytes) return false;
         if (!r.need(mask_count)) return false;
         if (mask_count != uint32_t(t.cells_x) * uint32_t(t.cells_z)) {
-            // The engine reads exactly cells_x*cells_z bytes; anything else
-            // means we misparsed.
+
             return false;
         }
         t.mask.assign(r.p + r.i, r.p + r.i + mask_count);
@@ -110,8 +104,6 @@ bool parse_body(Reader& r, WaterBody& out)
         out.tiles.push_back(std::move(t));
     }
 
-    // trailing u32 after the patch loop (present in every record; the engine
-    // reads and discards it). Tolerate a truncated final record.
     uint32_t trailing = 0;
     (void)r.u32(trailing);
 

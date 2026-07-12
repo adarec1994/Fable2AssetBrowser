@@ -399,7 +399,7 @@ struct GeneratedTerrainTexture {
     std::vector<uint8_t> rgba;
     int                  width = 0;
     int                  height = 0;
-    bool                 mipped = false;   // vista pages: mip to kill grazing aliasing
+    bool                 mipped = false;
 };
 
 static void append_transformed_prop_geom(std::vector<MDLMeshGeom>& out,
@@ -739,7 +739,6 @@ static void normalize_grid_uvs(MDLMeshGeom& geom, uint32_t width, uint32_t heigh
         }
     }
 }
-
 
 #ifdef _WIN32
 struct LevelPropStreamState {
@@ -1242,6 +1241,55 @@ bool spawn_level_model_at(ID3D11Device* device,
     if (add_idx < 0) {
         OutputLog::error("level edit: placement rejected (no level?)");
         return false;
+    }
+
+    {
+
+        std::string leaf = model_path;
+        const size_t sl = leaf.find_last_of("/\\");
+        if (sl != std::string::npos) leaf = leaf.substr(sl + 1);
+        std::transform(leaf.begin(), leaf.end(), leaf.begin(), ::tolower);
+        if (leaf.find("chest") == std::string::npos &&
+            (leaf.find("silverkey") != std::string::npos ||
+             leaf.find("silver_key") != std::string::npos)) {
+            LevelEdit::MarkAdditionEntityKind(
+                add_idx, LevelEdit::AdditionEntityKind::SilverKey);
+            OutputLog::info(
+                "level edit: placed as a REAL silver key pickup (Save "
+                "bakes it into the level)");
+        } else if (leaf.find("chest") != std::string::npos) {
+            LevelEdit::MarkAdditionEntityKind(
+                add_idx, LevelEdit::AdditionEntityKind::Chest);
+            OutputLog::info(
+                "level edit: placed as a REAL chest entity - click it to "
+                "edit its contents (Save bakes it into the level)");
+        } else {
+
+            std::string mp = model_path;
+            std::transform(mp.begin(), mp.end(), mp.begin(), ::tolower);
+            std::replace(mp.begin(), mp.end(), '/', '\\');
+            uint32_t mh = 0x811C9DC5u;
+            for (unsigned char c : mp) {
+                mh *= 0x01000193u;
+                mh ^= uint32_t(c);
+            }
+            auto tit = g_level_prop_entity_templates.find(mh);
+            if (tit != g_level_prop_entity_templates.end()) {
+                const auto& t = tit->second;
+                LevelEdit::MarkAdditionAsPropEntity(
+                    add_idx, t.template_hash, t.comp_field_hash,
+                    t.comp_template_hash, t.physics_file_hash);
+                OutputLog::info(
+                    std::string("level edit: placed as a REAL prop entity") +
+                    (t.physics_file_hash ? " with collision"
+                                         : " (template has no physics "
+                                           "shape)"));
+            } else {
+                OutputLog::info(
+                    "level edit: no object template for this model - "
+                    "baked as graphics-only (no collision)");
+            }
+        }
     }
 
     Level::PropInstance inst;
@@ -1857,10 +1905,6 @@ void process_pending_loads() {
             std::vector<MDLMeshGeom> geoms;
             geoms.push_back(std::move(g));
 
-            // Per-geom deferred texture bind, parallel to `geoms`. A non-empty
-            // page_rgba means a per-patch vista geom (bind its own tiled page);
-            // fallback_adj >= 0 means a single-mesh adjacent whose composite is
-            // baked at bind time. Index 0 (main terrain) is left empty.
             struct AdjGeomBind {
                 const std::vector<uint8_t>* page_rgba = nullptr;
                 int page_w = 0, page_h = 0;
@@ -1895,9 +1939,7 @@ void process_pending_loads() {
                     : std::string("adjacent terrain: ") + adj.label;
 
                 if (!adj.patch_geoms.empty()) {
-                    // Engine-exact: one grid sub-mesh per patch, each carrying
-                    // its own decoded background-map page (uv in cell units,
-                    // tiled by the wrap sampler). No composite/atlas.
+
                     for (size_t k = 0; k < adj.patch_geoms.size(); ++k) {
                         const Level::VistaPatchGeom& vg = adj.patch_geoms[k];
                         if (!vg.mesh.ok || vg.mesh.indices.empty()) continue;
@@ -1932,12 +1974,7 @@ void process_pending_loads() {
             size_t themed_water_geom_count = 0;
             float water_theme_opacity = 1.0f;
             if (g_pending_level_water_present) {
-                // Grid construction mirrors the engine exactly
-                // (WaterGridRenderer_Ctor / WaterGrid_BuildMesh in the XEX):
-                // one flat quad per mask cell at the body's water height,
-                // patch rect = centre +/- extent/2, holes where mask==0.
-                // Deformation is purely shader-side (scrolled normal maps),
-                // the WATERPATCH vertex shader emits a flat plane.
+
                 for (size_t bi = 0; bi < g_pending_level_water_scene.bodies.size(); ++bi) {
                     const auto& body = g_pending_level_water_scene.bodies[bi];
                     for (size_t ti = 0; ti < body.tiles.size(); ++ti) {
@@ -2012,21 +2049,12 @@ void process_pending_loads() {
                         wg.diffuse_tex_name = body.normal_map_path;
                         wg.is_water = true;
 
-                        // water_params: [0] = plane height,
-                        // [1..37] = the 37 WaterParams floats (WaterParamIdx).
                         wg.water_params[0] = y;
                         for (size_t pi = 0; pi < body.params.size() &&
                                             pi + 1 < 38; ++pi) {
                             wg.water_params[pi + 1] = body.params[pi];
                         }
 
-                        // Colours: the .water body params i18-20/i21-23 ARE
-                        // m_SurfaceWaterColour/m_DeepWaterColour, verified
-                        // against the XEX g_WaterConstants packer
-                        // (sub_82B2A008). The GDB env theme carries the same
-                        // two colours (its extractor labels them swapped), so
-                        // the file values are used directly and the theme is
-                        // only a fallback when the file has none.
                         wg.has_water_theme = true;
                         auto fin = [](float v, float d) {
                             return std::isfinite(v) ? v : d;
@@ -2048,9 +2076,7 @@ void process_pending_loads() {
                             wg.water_deep_colour[1] = dg;
                             wg.water_deep_colour[2] = db;
                         } else if (wt.has_shallow_colour || wt.has_deep_colour) {
-                            // GDB theme "deep" = engine surface colour,
-                            // "shallow" = engine deep colour (extractor labels
-                            // are swapped vs g_WaterConstants).
+
                             std::copy(std::begin(wt.deep_colour),
                                       std::end(wt.deep_colour),
                                       std::begin(wg.water_shallow_colour));
@@ -2252,10 +2278,6 @@ void process_pending_loads() {
             const std::vector<TerrainTextureRegistry::LodPaletteEntry>
                 main_lod_palette = TerrainTextureRegistry::GetLodPalette();
 
-            // Bind each adjacent geom's texture by geom index (geom_binds is
-            // parallel to `geoms`, hence to g_mp.meshes). Per-patch vista geoms
-            // carry their own decoded page (tiled by the wrap sampler);
-            // single-mesh fallbacks bake a composite here.
             std::vector<std::vector<uint8_t>> adj_composite_cache(
                 g_pending_adjacent_terrain_meshes.size());
             std::vector<int> adj_composite_wh(
@@ -2312,9 +2334,7 @@ void process_pending_loads() {
                 }
 
                 if (!rgba || rgba->empty() || w <= 0 || h <= 0) continue;
-                // Mipmapped: the vista ring recedes to the horizon at grazing
-                // angles and its pages tile several times per patch, so an
-                // unmipped texture minifies into RGB static.
+
                 ID3D11ShaderResourceView* adj_srv =
                     create_srv_from_rgba_mipped(device, w, h, *rgba);
                 if (!adj_srv) continue;

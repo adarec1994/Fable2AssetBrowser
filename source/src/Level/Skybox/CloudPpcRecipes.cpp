@@ -356,7 +356,7 @@ constexpr std::array<Step, 11> kAlphaReference = {{
        Sym(Symbol::AlphaIntegerBits, 4)),
 }};
 
-}  // namespace
+}
 
 const std::array<RawConstant, 13>& Constants() { return kConstants; }
 RecipeView VelocityScale() { return View(kVelocityScale); }
@@ -369,4 +369,4 @@ RecipeView VertexSignConstruction() { return View(kVertexSignConstruction); }
 const std::array<VertexWordRecipe, 20>& VertexWords() { return kVertexWords; }
 RecipeView AlphaReference() { return View(kAlphaReference); }
 
-}  // namespace CloudPpcRecipes
+}

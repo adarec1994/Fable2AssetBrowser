@@ -308,4 +308,4 @@ struct GdbView {
     }
 };
 
-}  // namespace Gdb::detail
+}

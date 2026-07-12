@@ -74,7 +74,7 @@ constexpr uint32_t kHashWindChangeFrequency = 0xA1C12827;
 constexpr uint32_t kHashWindChangeDuration = 0x5B45F873;
 constexpr uint32_t kHashWindDirectionVariation = 0x5B71ED9D;
 constexpr uint32_t kHashFoggingStart = 0x754D898A;
-// FNV-1 of the XEX theme registration camelCase names (celestial elements).
+
 constexpr uint32_t kHashMoonIntensity = 0x8DA685FD;
 constexpr uint32_t kHashMoonSize = 0x771E440D;
 constexpr uint32_t kHashMoonGlareIntensity = 0x326BAB3E;
@@ -94,11 +94,9 @@ constexpr uint32_t kHashGlareIntensity = 0x7ADC8EE5;
 constexpr uint32_t kHashGlareSize = 0x57AF2EF5;
 constexpr uint32_t kHashSunBeamsTexture = 0xC5C32228;
 constexpr uint32_t kHashGlareTexture = 0x495DCD2B;
-// The XEX registers the sun disc/beams/streaks/glare params under a "Sun"
-// group; in the GDB they live in a nested Sun sub-record of the Sky record.
-constexpr uint32_t kHashSunRecord = 0x2620C36D;  // FNV-1 "Sun"
-// Flat per-component colour fields (same convention as the water colours):
-// <Base>Red/Green/Blue in 0..255 plus an optional <Base>Factor multiplier.
+
+constexpr uint32_t kHashSunRecord = 0x2620C36D;
+
 constexpr uint32_t kHashSkyColourRed = 0x86B2D6AD;
 constexpr uint32_t kHashSkyColourGreen = 0x0E4C7541;
 constexpr uint32_t kHashSkyColourBlue = 0xFDCC27B4;
@@ -176,8 +174,7 @@ inline float Clamp01(float v)
 
 inline float EnvColourComponentToLinearInput(float v)
 {
-    
-    
+
     return Clamp01(v * (1.0f / 255.0f));
 }
 
@@ -449,9 +446,6 @@ public:
             }
         }
 
-        // A standalone environmentthemes.gdb has no LevelData owner.  Its
-        // concrete Clouds record is still unambiguous: it is the record that
-        // owns the four fixed Layer1..Layer4 references.
         if (!applied) {
             WaterThemeRecordRef clouds = firstCloudContainer();
             if (clouds.valid) {
@@ -488,9 +482,6 @@ public:
         std::fprintf(stderr, "[timeline] fields=%u\n", n);
 #endif
 
-        // The field-descriptor table lives in the schema area (between
-        // schema_base and hash_base), NOT in the record body; bounding it
-        // against body_end rejected every day set.
         const size_t descs = sch + 4 + size_t(n) * 4;
         if (descs + size_t(n) * 4 > v.hash_base) return false;
 
@@ -699,9 +690,6 @@ private:
             }
         }
 
-        // Levels carry more than one record with an EnvironmentThemeDaySet
-        // field and some are null references (e.g. a template record with
-        // value 0); try every owner and keep the first that resolves.
         for (size_t db = 0; db < db_count; ++db) {
             if (db >= views_.size()) continue;
             const GdbView& v = views_[db];
@@ -817,8 +805,6 @@ private:
         return true;
     }
 
-    // Flat per-component colour on the record itself (0..255 components,
-    // optional multiplier field).
     bool readFlatColour(WaterThemeRecordRef record,
                         uint32_t red_hash,
                         uint32_t green_hash,
@@ -1061,8 +1047,6 @@ private:
         return any;
     }
 
-    // Sun-group fields (disc/beams/glare/streaks) live in a Sun sub-record
-    // that is a sibling of Sky/Fogging/Lighting on the theme record.
     bool applySunRecord(WaterThemeRecordRef sun, SkyTheme& theme) const
     {
         if (!sun.valid) return false;
@@ -1535,7 +1519,6 @@ private:
         theme.layer_count = count;
     }
 };
-
 
 }
 

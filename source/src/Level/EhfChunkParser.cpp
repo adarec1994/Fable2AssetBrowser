@@ -116,7 +116,6 @@ bool skip_tex_blob(Walker& w) {
 
 }
 
-
 bool ParseEhfBody(const std::vector<uint8_t>& ehf, EhfParsedBody& out)
 {
     out = {};

@@ -5,10 +5,6 @@
 
 namespace CloudBackgroundMap {
 
-// Static creation recipe recovered from default.xex.  Names are assigned
-// only where the XEX identifies them itself.  The final four call arguments
-// intentionally stay numeric: their host-API meanings are not encoded by the
-// cloud call site.
 struct GeneratedTextureRecipe {
     std::uint32_t dimensions_initialise_site = 0;
     std::uint32_t create_call_site = 0;
@@ -47,9 +43,6 @@ struct GeneratedTextureRecipe {
     std::uint32_t owner_resource_field_offset = 0;
 };
 
-// Bind inputs consumed by BgMap_BindForRender.  The source texture is owned
-// by the landscape/background-map asset; the generated texture is the exact
-// 64x64 FMT_8 target described above.
 struct CloudBindRecipe {
     std::uint32_t bind_function = 0;
     std::uint32_t source_hardware_slot = 0;
@@ -63,13 +56,10 @@ struct CloudBindRecipe {
 const GeneratedTextureRecipe& ExactGeneratedTextureRecipe() noexcept;
 const CloudBindRecipe& ExactCloudBindRecipe() noexcept;
 
-// Exact alignment performed by sub_8225E300 before relocation.
 std::uint32_t AlignGeneratedAllocation(
     std::uint32_t current_allocation_address) noexcept;
 
-// Applies the same DWORD-8 relocation as sub_8225FCD8/sub_8225FDB0 to the
-// already-aligned allocation base and returns the six binder source words.
 std::array<std::uint32_t, 6> BuildGeneratedDescriptorWords(
     std::uint32_t aligned_allocation_base) noexcept;
 
-}  // namespace CloudBackgroundMap
+}

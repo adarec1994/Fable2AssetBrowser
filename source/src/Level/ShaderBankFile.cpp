@@ -48,9 +48,7 @@ bool inflate_zlib(const uint8_t* src, size_t src_len,
     z.avail_in  = static_cast<uInt>(src_len);
     z.next_out  = out.data();
     z.avail_out = static_cast<uInt>(expected);
-    // Lionhead's chunks end in Z_SYNC_FLUSH (00 00 FF FF), without a final
-    // BFINAL/trailer.  Asking for Z_FINISH turns that valid exact-size stream
-    // into Z_BUF_ERROR; the XEX likewise inflates to the known output size.
+
     int ret = inflate(&z, Z_SYNC_FLUSH);
     size_t produced = expected - z.avail_out;
     inflateEnd(&z);
@@ -77,8 +75,6 @@ bool advance(size_t& cursor, size_t amount, size_t limit) {
 bool parse_program_record(Program& program) {
     size_t cursor = 0;
 
-    // sub_82B8AA48 reads two arrays of 16-byte records.  Only the first is
-    // retained by the runtime, but both are present in the serialized child.
     for (unsigned array_index = 0; array_index < 2; ++array_index) {
         uint32_t count = 0;
         if (!be_u32(program.record, cursor, count) ||
@@ -105,8 +101,6 @@ bool parse_program_record(Program& program) {
         }
     }
 
-    // Four raw 8-byte fields, followed by the exact byte count passed to the
-    // Xbox vertex/pixel shader constructors.
     if (!advance(cursor, 32, program.record.size())) return false;
     uint32_t compiled_size = 0;
     if (!be_u32(program.record, cursor, compiled_size) ||
@@ -148,9 +142,7 @@ bool ParseShaderBank(const std::vector<uint8_t>& data, Bank& out) {
     }
     r.i = 14;
     if (!r.u32(out.version) || out.version != 3) { out.error = "bad version"; return false; }
-    // This byte is not an endianness marker.  The retail loader at
-    // 0x82B8A758 uses it to select the shader identifier representation:
-    // debug banks store a NUL-terminated name, release banks store a u32 hash.
+
     if (!r.u8(out.stores_shader_names)) { out.error = "shader identifier mode"; return false; }
 
     uint32_t pcnt = 0;

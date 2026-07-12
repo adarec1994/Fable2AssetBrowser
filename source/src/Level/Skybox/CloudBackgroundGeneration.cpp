@@ -65,7 +65,7 @@ constexpr std::array<std::uint8_t, 64> kGradientPayload = {{
         0x81u, 0x7fu, 0x00u, 0x00u, 0x00u, 0x81u, 0x81u, 0x80u,
 }};
 
-}  // namespace
+}
 
 const std::array<InputTextureRecipe, 2>& ExactInputTextureRecipes() noexcept
 {
@@ -169,4 +169,4 @@ const GenerationPassRecipe& ExactGenerationPassRecipe() noexcept
     return recipe;
 }
 
-}  // namespace CloudBackgroundGeneration
+}

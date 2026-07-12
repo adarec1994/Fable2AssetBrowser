@@ -30,26 +30,14 @@ using namespace DirectX;
 namespace Skybox {
 namespace {
 
-// Debug tap for the byte-derived dome path; writes next to the executable's
-// working directory (same convention as fx_debug.log).
-void SkyDomeDebug(const std::string& line) {
-    static std::ofstream file("sky_dome_debug.txt", std::ios::trunc);
-    if (!file.is_open()) return;
-    file << line << '\n';
-    file.flush();
+void SkyDomeDebug(const std::string&) {}
+
 }
 
-}  // namespace
-
-void DebugLog(const char* line) { SkyDomeDebug(line ? line : ""); }
+void DebugLog(const char*) {}
 
 namespace {
 
-// Celestial element billboards (retail: camera-facing quads submitted by
-// Sky_SubmitCelestialBillboard @ 0x82A5EFD8; pixel shaders 140/141/143/145
-// are texture * constant-colour).  The preview projects the quad corners on
-// the CPU and draws in clip space, which is equivalent to the retail
-// view-projection of a camera-centred quad.
 const char* kSkyElementVertexShader = R"(
 struct VSIN {
     float4 position : POSITION;
@@ -84,8 +72,6 @@ float4 PS(PSIN input) : SV_Target {
 }
 )";
 
-// Handwritten preview only.  The exact retail sky shaders have not yet been
-// recovered, so this source is excluded from the default build.
 #if FABLE_ENABLE_RECONSTRUCTED_SKY_PREVIEW
 const char* kSkyVertexShader = R"(
 struct VSOUT{
@@ -120,18 +106,18 @@ cbuffer SkyCB : register(b4){
     float4 sky_top;
     float4 sky_bottom;
     float4 sky_sunset;
-    float4 sky_params; 
-    float4 cloud_layer[4];  
-    float4 cloud_shape[4];  
-    float4 cloud_motion[4]; 
-    float4 cloud_light[4];  
-    float4 cloud_global;    
+    float4 sky_params;
+    float4 cloud_layer[4];
+    float4 cloud_shape[4];
+    float4 cloud_motion[4];
+    float4 cloud_light[4];
+    float4 cloud_global;
     float4 cloud_density_flags;
-    float4 sky_right;       
-    float4 sky_up;          
-    float4 sky_forward;     
-    float4 sky_sun;         
-    float4 sky_texture_flags; 
+    float4 sky_right;
+    float4 sky_up;
+    float4 sky_forward;
+    float4 sky_sun;
+    float4 sky_texture_flags;
 }
 
 struct PSIN{
@@ -261,9 +247,6 @@ float4 PS(PSIN i) : SV_Target {
 )";
 #endif
 
-// Non-authoritative D3D11 reconstruction retained only as an opt-in visual
-// aid. It is not the recovered Xenos ucode and must never be used for an
-// exactness comparison.
 #if FABLE_ENABLE_RECONSTRUCTED_CLOUD_PREVIEW
 const char* kCloudVertexShader = R"(
 cbuffer CloudCB : register(b5) {
@@ -596,7 +579,7 @@ std::string PreferredTextureBank()
         : S.selected_bnk;
 }
 
-}  // namespace
+}
 
 CameraFrame BuildCameraFrame(const FlyCam& camera, int width, int height)
 {
@@ -845,8 +828,6 @@ FrameState EvaluateFrame(ModelPreview& preview)
     frame.sun_direction[1] = sun_f.y;
     frame.sun_direction[2] = sun_f.z;
 
-    // Moon axis mirrors the sun axis maths (theme MoonAxis* records); when
-    // the theme has no moon axis the moon opposes the sun.
     if (preview.has_moon_axis) {
         const float moon_elevation =
             preview.moon_axis[0] * degrees_to_radians;
@@ -927,9 +908,7 @@ void CreateD3D11Resources(ID3D11Device* device, ModelPreview& preview)
     }
 
     {
-        // Byte-derived retail dome path (ShadersRelease.sbk entries 132/133,
-        // translated in SkyDomeXex).  Not gated by the reconstruction flag:
-        // this is the recovered program, not an approximation.
+
         ID3DBlob* vertex_blob = nullptr;
         ID3DBlob* pixel_blob = nullptr;
         if (CompileShader(SkyDomeXex::kDomeFullscreenVertexShaderHlsl,
@@ -961,8 +940,6 @@ void CreateD3D11Resources(ID3D11Device* device, ModelPreview& preview)
         device->CreateBuffer(
             &constant_buffer, nullptr, &preview.cbuffer_sky_dome);
 
-        // In-scatter LUT: 64x1 RGBA16F, rebuilt whenever the theme frame
-        // changes (retail triple-buffers three slices per frame).
         D3D11_TEXTURE2D_DESC lut_desc{};
         lut_desc.Width = SkyDomeXex::kLutWidth;
         lut_desc.Height = 1;
@@ -991,8 +968,7 @@ void CreateD3D11Resources(ID3D11Device* device, ModelPreview& preview)
     }
 
     {
-        // Celestial element billboards (sun disc/beams/glare, moon, moon
-        // glare).
+
         ID3DBlob* vertex_blob = nullptr;
         ID3DBlob* pixel_blob = nullptr;
         if (CompileShader(kSkyElementVertexShader, "VS", "vs_5_0",
@@ -1032,7 +1008,7 @@ void CreateD3D11Resources(ID3D11Device* device, ModelPreview& preview)
 
         D3D11_BUFFER_DESC vertex_buffer{};
         vertex_buffer.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        vertex_buffer.ByteWidth = 6 * 24;  // float4 position + float2 uv
+        vertex_buffer.ByteWidth = 6 * 24;
         vertex_buffer.Usage = D3D11_USAGE_DYNAMIC;
         vertex_buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         device->CreateBuffer(
@@ -1437,12 +1413,7 @@ void DrawSky(ID3D11Device* device,
                      "sky sun glare");
 
     if (exact_dome_ready) {
-        // Byte-derived retail dome (SkyDomeXex).  FrameState packing:
-        //   sky_params = (SUN_INTENSITY, SKY_COMPLEMENTARY_COLOUR_BIAS,
-        //                 SKY_BETA_RAYLEIGH_MULT, SKY_BETA_MIE_MULT)
-        //   sky_top / sky_bottom / sky_sunset =
-        //       SKY_COLOUR / SKY_COMPLEMENTARY_COLOUR / SKY_SUNSET_COLOUR
-        //   fog_range[0] = SKY_FOGGING_START
+
         SkyDomeXex::ThemeInputs theme{};
         theme.sun_intensity = frame.sky_params[0];
         theme.complementary_bias = frame.sky_params[1];
@@ -1455,8 +1426,7 @@ void DrawSky(ID3D11Device* device,
         }
         theme.fogging_start = frame.fog_range[0];
         theme.close_fog_max_distance = frame.fog_range[3];
-        // Preview world is Y-up; the engine (and the recovered pixel
-        // shader) is Z-up: swap the vertical axes.
+
         theme.sun_direction[0] = frame.sun_direction[0];
         theme.sun_direction[1] = frame.sun_direction[2];
         theme.sun_direction[2] = frame.sun_direction[1];
@@ -1485,13 +1455,9 @@ void DrawSky(ID3D11Device* device,
                     sizeof(constants.sun_direction));
         std::memcpy(constants.scattering_misc, state.scattering_misc,
                     sizeof(constants.scattering_misc));
-        // One evaluated theme frame: the second SKY_OVERLAY blend entry
-        // has zero weight (c47.x = 0), so pair A alone contributes.
+
         constants.overlay_blend[0] = 0.0f;
-        // Retail c20.w is 1.0 and the HDR tone-mapping pass (exposure
-        // adaptation, TONE_MAPPING_*) brightens the scene afterwards.  The
-        // preview has no tone mapper yet, so a flat exposure stands in;
-        // remove once the tone-map stage is ported.
+
         constants.dome_misc[2] = 10.0f;
         auto to_engine = [](const float v[3], float w, float out[4]) {
             out[0] = v[0];
@@ -1566,8 +1532,8 @@ void DrawSky(ID3D11Device* device,
         context->PSSetShaderResources(13, 1, &overlay_srv);
         ID3D11SamplerState* samplers[2] = {
             preview.sampler_cloud ? preview.sampler_cloud
-                                  : preview.sampler,  // s0 wrap
-            preview.sampler_sky_clamp,                // s1 clamp (LUT)
+                                  : preview.sampler,
+            preview.sampler_sky_clamp,
         };
         context->PSSetSamplers(0, 2, samplers);
         context->Draw(3, 0);
@@ -1579,13 +1545,6 @@ void DrawSky(ID3D11Device* device,
         context->PSSetShaderResources(4, 1, &null_srv);
         context->PSSetShaderResources(13, 1, &null_srv);
 
-        // ---------------------------------------------------------------
-        // Celestial element billboards.  Retail draw parameters recovered
-        // from the XEX (see SkyXexDecomp.h): world-space camera-anchored
-        // quads at fixed distances, texture * theme-colour pixel shaders.
-        // Occlusion-query visibility (glare fade behind geometry) is not
-        // implemented yet; visibility = 1.
-        // ---------------------------------------------------------------
         if (preview.vs_sky_element && preview.ps_sky_element &&
             preview.layout_sky_element && preview.sky_element_vb &&
             preview.cbuffer_sky_element) {
@@ -1683,19 +1642,15 @@ void DrawSky(ID3D11Device* device,
             const float* element = frame.element_params;
             const float exposure = constants.dome_misc[2];
             const float gate = 0.000099999997f;
-            // HOST STAND-IN: Reinhard-bound each element colour in place of
-            // the un-ported retail TONE_MAPPING pass (see dome PS epilogue).
+
             auto tonemap_colour = [](float c[4]) {
                 for (int i = 0; i < 3; ++i) c[i] = c[i] / (1.0f + c[i]);
             };
 
-            // Sun element tint (logical 244 source): lerp((1,1,0), SUNSET,
-            // cos(sun elevation)) computed by the constant builder.
             const float* sun_tint = state.sun_element_colour;
 
-            // Sun elements (gated on SUN_INTENSITY, record 7).
             if (frame.sky_params[0] >= gate) {
-                if (element[13] >= gate) {  // SunBeamsIntensity
+                if (element[13] >= gate) {
                     float colour[4] = {
                         sun_tint[0] * element[13] * exposure,
                         sun_tint[1] * element[13] * exposure,
@@ -1726,8 +1681,7 @@ void DrawSky(ID3D11Device* device,
                 const float facing = dot3(frame.sun_direction,
                                           camera.forward);
                 if (element[14] >= gate && facing > 0.0f) {
-                    // c244 = tint * GlareIntensity * facing^2 * visibility^2
-                    // (occlusion-query visibility = 1 in the preview).
+
                     const float scale =
                         element[14] * facing * facing * exposure;
                     float colour[4] = {
@@ -1744,7 +1698,6 @@ void DrawSky(ID3D11Device* device,
                 }
             }
 
-            // Moon (gated on MoonIntensity; 8-phase strip texture).
             if (element[0] >= gate) {
                 const int phase =
                     std::clamp(preview.moon_phase, 0, 7);
@@ -1753,14 +1706,7 @@ void DrawSky(ID3D11Device* device,
                 const float u1 = static_cast<float>(phase + 1) *
                                  SkyXex::kMoonPhaseUStep;
                 {
-                    // Logical constant 147 (symbolically recovered from
-                    // 0x821D3E60..0x821D3F6C): (0.5*MoonIntensity,
-                    // 0.5*MoonIntensity, MoonTransparency, 0).  PS 143 then
-                    // outputs alpha = c147.w * tex.a, which is literally 0
-                    // in the main-view pass; the visible moon presumably
-                    // arrives via the half-res occlusion-pass composite.
-                    // Preview deviation (documented): alpha scale =
-                    // MoonTransparency so the moon is visible.
+
                     float colour[4] = {
                         0.5f * element[0] * exposure,
                         0.5f * element[0] * exposure,
@@ -1787,14 +1733,12 @@ void DrawSky(ID3D11Device* device,
                 }
             }
 
-            // Starfield (byte-derived VS 150 / PS 151): 512 point sprites,
-            // additive, gated on STARS_BRIGHTNESS (record 70).
             if (element[5] >= gate && preview.vs_sky_stars &&
                 preview.ps_sky_stars) {
                 const float star_constants[4] = {
                     static_cast<float>(frame.elapsed_time),
                     element[5],
-                    // 1.5-pixel retail point size -> NDC half extents.
+
                     SkyDomeXex::kStarPointSize /
                         static_cast<float>(std::max(preview.width, 1)),
                     SkyDomeXex::kStarPointSize /
@@ -1821,7 +1765,6 @@ void DrawSky(ID3D11Device* device,
                 }
             }
 
-            // Restore neutral state for the pipeline after us.
             context->OMSetBlendState(preview.bs, blend_factor, 0xFFFFFFFF);
             context->VSSetConstantBuffers(6, 1, &null_buffer);
             context->PSSetConstantBuffers(6, 1, &null_buffer);
@@ -2058,7 +2001,7 @@ void DrawClouds(ID3D11DeviceContext* context,
         preview.cloud_ib, DXGI_FORMAT_R16_UINT, 0);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->RSSetState(preview.rs);
-    // 0x8223AE40 enables Z writes for the cloud geometry pass.
+
     context->OMSetDepthStencilState(preview.dssWrite, 0);
     context->OMSetBlendState(preview.bsAlpha, blend_factor, 0xFFFFFFFF);
     context->VSSetShader(preview.vs_cloud, nullptr, 0);
@@ -2092,8 +2035,7 @@ void DrawClouds(ID3D11DeviceContext* context,
             layer.config.texture_scale_x,
             layer.config.texture_scale_y,
             layer.uv_x, layer.uv_y);
-        // PS c20.w is the renderer's luminance-driven exposure. With no
-        // histogram/adaptation pass, sub_82191C50's disabled value is 1.0f.
+
         constants.globals = XMFLOAT4(
             1.0f, 0.0f,
             CloudRuntime::AlphaTestThreshold(layer.config, true),
@@ -2121,7 +2063,6 @@ void DrawClouds(ID3D11DeviceContext* context,
     context->VSSetConstantBuffers(5, 1, &null_buffer);
     context->PSSetConstantBuffers(5, 1, &null_buffer);
 
-    // Restore the regular model pipeline used by the passes below.
     context->IASetInputLayout(preview.layout);
     context->VSSetShader(preview.vs, nullptr, 0);
     context->PSSetShader(preview.ps, nullptr, 0);
@@ -2135,6 +2076,6 @@ void DrawClouds(ID3D11DeviceContext* context,
             : preview.rs);
 }
 
-}  // namespace Skybox
+}
 
-#endif  // _WIN32
+#endif

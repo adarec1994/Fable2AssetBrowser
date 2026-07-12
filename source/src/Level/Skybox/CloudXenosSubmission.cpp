@@ -33,4 +33,4 @@ const SubmissionRecipe& ExactSubmissionRecipe() noexcept
     return recipe;
 }
 
-}  // namespace CloudXenosSubmission
+}

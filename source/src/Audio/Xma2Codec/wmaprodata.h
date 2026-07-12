@@ -1,26 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef AVCODEC_WMAPRODATA_H
 #define AVCODEC_WMAPRODATA_H
 

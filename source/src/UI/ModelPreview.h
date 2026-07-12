@@ -129,7 +129,7 @@ struct ModelPreview {
     ID3D11VertexShader* vs_sky = nullptr;
     ID3D11PixelShader*  ps_sky = nullptr;
     ID3D11Buffer*       cbuffer_sky = nullptr;
-    // Byte-derived retail dome path (SkyDomeXex, sbk entries 132/133).
+
     ID3D11VertexShader* vs_sky_dome = nullptr;
     ID3D11PixelShader*  ps_sky_dome = nullptr;
     ID3D11Buffer*       cbuffer_sky_dome = nullptr;
@@ -159,10 +159,10 @@ struct ModelPreview {
     bool sky_moon_glare_tried = false;
     bool sky_sun_beams_tried = false;
     bool sky_sun_glare_tried = false;
-    // Celestial element billboard pipeline (screen-space quads).
+
     ID3D11VertexShader* vs_sky_element = nullptr;
     ID3D11PixelShader*  ps_sky_element = nullptr;
-    // Byte-derived starfield (sbk entries 150/151).
+
     ID3D11VertexShader* vs_sky_stars = nullptr;
     ID3D11PixelShader*  ps_sky_stars = nullptr;
     ID3D11InputLayout*  layout_sky_element = nullptr;
@@ -180,19 +180,15 @@ struct ModelPreview {
     ID3D11RasterizerState* rs_wire = nullptr;
     ID3D11BlendState* bs = nullptr;
     ID3D11BlendState* bsAlpha = nullptr;
-    // Water refraction composite: SRC=ONE, DEST=SRC_ALPHA. The retail water
-    // PS samples an explicit refraction copy of the scene; the preview emits
-    // the microcode's refraction coefficient as alpha so the framebuffer
-    // behind the surface supplies that term.
+
     ID3D11BlendState* bs_water = nullptr;
     ID3D11DepthStencilState* dssWrite = nullptr;
     ID3D11DepthStencilState* dssNoWrite = nullptr;
     ID3D11DepthStencilState* dssNoWriteLEqual = nullptr;
-    // Depth write + stencil gate so overlapping coplanar water surfaces
-    // (one .water per heightfield) composite once per pixel.
+
     ID3D11DepthStencilState* dssWaterOnce = nullptr;
     ID3D11ShaderResourceView* default_srv = nullptr;
-    // Particle FX rendering
+
     ID3D11VertexShader* vs_fx = nullptr;
     ID3D11PixelShader*  ps_fx = nullptr;
     ID3D11InputLayout*  layout_fx = nullptr;
@@ -201,9 +197,7 @@ struct ModelPreview {
     size_t              fx_vb_capacity = 0;
     ID3D11BlendState*   bs_fx_alpha = nullptr;
     ID3D11BlendState*   bs_fx_add = nullptr;
-    // Per-(src,dst) fixed-function blend states for FX batches — the retail
-    // particle pipeline uses the material's Src/DestBlendMode factors
-    // directly (default SrcAlpha/InvSrcAlpha). Keyed src*100+dst.
+
     std::unordered_map<int, ID3D11BlendState*> fx_blend_states;
     std::unordered_map<std::string, ID3D11ShaderResourceView*> fx_tex_srv;
     Fx::System          fx_system;
@@ -263,15 +257,14 @@ struct ModelPreview {
     std::string sky_sun_beams_tex_name;
     std::string sky_sun_glare_tex_name;
     float sky_moon_tiles[2] = {1.0f, 1.0f};
-    // Base (non-keyframed) celestial element records; layout matches
-    // Skybox::Keyframe::element_params.
+
     float sky_element_params[16] = {1.0f, 1.0f, 0.0f, 1.0f,
                                     1.0f, 0.0f, 1.0f, 1.0f,
                                     1.0f, 1.0f, 1.0f, 1.0f,
                                     1.0f, 0.0f, 0.0f, 1.0f};
     bool has_moon_axis = false;
     float moon_axis[3] = {26.0f, 0.0f, 0.0f};
-    int moon_phase = 4;  // 0..7 strip index; engine runtime state
+    int moon_phase = 4;
     bool has_day_night_cycle = false;
     float day_night_cycle_seconds = 180.0f;
     std::vector<MPSkyCloudKeyframe> day_night_keyframes;

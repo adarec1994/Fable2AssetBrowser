@@ -20,28 +20,8 @@
 #include "ModelPreview.h"
 #include "../Level/TerrainSplat.h"
 #include "../Level/Skybox/SkyboxRenderer.h"
-// Temporary water-flashing diagnosis log -> water_debug.txt (app CWD).
-// Truncated at app start, capped so it cannot grow unbounded.
-static void water_debug_line(const char* fmt, ...) {
-    static FILE* f = nullptr;
-    static int lines = -1;
-    if (lines < 0) {
-        f = std::fopen("water_debug.txt", "w");
-        lines = 0;
-    }
-    if (!f || lines >= 900) return;
-    va_list ap;
-    va_start(ap, fmt);
-    std::vfprintf(f, fmt, ap);
-    va_end(ap);
-    std::fflush(f);
-    if (++lines >= 900) {
-        std::fclose(f);
-        f = nullptr;
-    }
-}
+static void water_debug_line(const char*, ...) {}
 
-// Level FX produced by the level loader (particle placements + parsed bank).
 extern std::vector<Fx::Placement> g_pending_level_fx;
 extern Fx::Bank                   g_particle_bank;
 extern bool                       g_particle_bank_loaded;
@@ -76,7 +56,7 @@ static bool mp_is_adjacent_terrain_mesh(const MPPerMesh& m)
 {
     return m.name.rfind("adjacent terrain", 0) == 0;
 }
-bool g_mp_vista_only = false;   // debug: draw ONLY adjacent (vista) terrain
+bool g_mp_vista_only = false;
 static bool mp_should_hide_mesh(const MPPerMesh& m)
 {
     if (g_mp_vista_only && !mp_is_adjacent_terrain_mesh(m)) return true;
@@ -1288,17 +1268,12 @@ cbuffer CB : register(b0){
     float4   params;
 }
 cbuffer TerrainCB : register(b2){
-    
+
     float4 chunk_origin_extent;
-    
+
     float4 chunk_grid_size;
-    
 
     float4 splat_params;
-    
-
-
-
 
     float4 mesh_xform;
 }
@@ -1319,14 +1294,11 @@ struct VSOUT{
 };
 
 float3 sample_lod(int slice, float2 uv){
-    
+
     return lod_array.Sample(smp_wrap, float3(uv, slice)).rgb;
 }
 
 float4 PS(VSOUT i) : SV_Target {
-    
-
-
 
     float2 mesh_xy  = float2(i.wp.x, i.wp.z);
     float2 world_xy = mesh_xy * mesh_xform.xy + mesh_xform.zw;
@@ -1337,17 +1309,14 @@ float4 PS(VSOUT i) : SV_Target {
     float  max_lod  = chunk_grid_size.z;
     float2 mat_uv   = world_xy * splat_params.y;
 
-    
     float2 chunk_co = (world_xy - origin) / extent;
 
-    
     float2 chunk_clamped = clamp(chunk_co,
                                  float2(0, 0),
                                  float2(CW - 0.001, CH - 0.001));
     int2   chunk_xy = int2(floor(chunk_clamped));
     float2 corner_uv = frac(chunk_clamped);
 
-    
     float wx = corner_uv.x, wy = corner_uv.y;
     float w00 = (1.0 - wx) * (1.0 - wy);
     float w10 =        wx  * (1.0 - wy);
@@ -1357,9 +1326,6 @@ float4 PS(VSOUT i) : SV_Target {
     float3 final = float3(0.0, 0.0, 0.0);
     float  weight_sum = 0.0;
 
-    
-
-
     [loop]
     for (int L = 0; L < 16; ++L) {
         float4 idx_norm = chunk_idx.Load(int4(chunk_xy, L, 0));
@@ -1368,21 +1334,17 @@ float4 PS(VSOUT i) : SV_Target {
 
         float4 bln_norm = chunk_blend.Load(int4(chunk_xy, L, 0));
         float4 uv_info  = chunk_uv.Load(int4(chunk_xy, L, 0));
-        
 
         float bscale = splat_params.x;
         float4 bln   = bln_norm * 255.0 / bscale;
         float2 mask_uv = uv_info.xy + corner_uv * uv_info.zw * 2.0;
         float mask_w = splat_mask.SampleLevel(smp_point, mask_uv, 0).r;
 
-        
-
         float3 c00 = sample_lod((int)idx255.x, mat_uv);
         float3 c10 = sample_lod((int)idx255.y, mat_uv);
         float3 c01 = sample_lod((int)idx255.z, mat_uv);
         float3 c11 = sample_lod((int)idx255.w, mat_uv);
 
-        
         float cw00 = mask_w * saturate(bln.x) * w00;
         float cw10 = mask_w * saturate(bln.y) * w10;
         float cw01 = mask_w * saturate(bln.z) * w01;
@@ -1392,28 +1354,22 @@ float4 PS(VSOUT i) : SV_Target {
         weight_sum += cw00 + cw10 + cw01 + cw11;
     }
 
-    
-
     if (weight_sum > 0.001) {
         final /= weight_sum;
     } else {
         final = sample_lod(0, mat_uv);
     }
 
-    
-
     float2 lm_uv = chunk_co / float2(CW, CH);
     float  ao    = lightmap.Sample(smp_wrap, lm_uv).r;
     final *= (ao * 0.55 + 0.45);
 
-    
     float3 N = normalize(i.n);
     float3 light_vec = normalize(float3(0.3, 0.7, 0.5));
     float  ndotl = saturate(dot(N, light_vec));
     float  shade = 0.55 + 0.45 * ndotl;
     final *= shade;
 
-    
     if (params.z > 0.5) {
         float3 hi = float3(0.15, 0.45, 1.00);
         final = lerp(final, hi, 0.65);
@@ -2091,11 +2047,6 @@ ID3D11ShaderResourceView* create_srv_from_rgba(ID3D11Device* dev, int w, int h, 
     return v;
 }
 
-// Like create_srv_from_rgba but with a full mip chain. Vista/background
-// terrain recedes to the horizon at grazing angles, so without mips its pages
-// minify into RGB static. The chain is built on the CPU (box filter) and
-// uploaded as an IMMUTABLE texture -- GenerateMips proved unreliable in this
-// device/context setup, this is deterministic.
 ID3D11ShaderResourceView* create_srv_from_rgba_mipped(
         ID3D11Device* dev, int w, int h, const std::vector<uint8_t>& rgba){
     constexpr int kMaxUploadDim = 8192;
@@ -2105,7 +2056,6 @@ ID3D11ShaderResourceView* create_srv_from_rgba_mipped(
     const uint64_t expected = uint64_t(w) * uint64_t(h) * 4ull;
     if (expected == 0 || rgba.size() < expected) return nullptr;
 
-    // Build the box-filtered mip chain down to 1x1.
     std::vector<std::vector<uint8_t>> mips;
     std::vector<std::pair<int,int>> dims;
     mips.emplace_back(rgba.begin(), rgba.begin() + size_t(expected));
@@ -2176,25 +2126,14 @@ static bool srv_from_tex_blob_auto(ID3D11Device* dev, const std::vector<unsigned
     if (out_h) *out_h = h;
     return (*out_srv != nullptr);
 }
-// Particle FX billboard shader. Vertices are pre-transformed to world space by
-// the CPU sim (camera-facing quads); the VS only applies view-projection.
+
 static const char* g_fx_vs = R"(
 cbuffer FxCB : register(b0){ float4x4 vp; }
 struct VSIN { float3 p:POSITION; float2 t:TEXCOORD0; float4 c:COLOR0; };
 struct VSOUT{ float4 p:SV_Position; float2 t:TEXCOORD0; float4 c:COLOR0; };
 VSOUT VS(VSIN i){ VSOUT o; o.p=mul(float4(i.p,1.0),vp); o.t=i.t; o.c=i.c; return o; }
 )";
-// 1:1 port of the retail particle pixel shader (ShadersRelease.sbk entry 244,
-// program 210 — the base variant of the 16-entry particle PS table registered
-// at 0x8335F648). Exact microcode:
-//   o0.rgb = vertexAlpha * c20.w * vertexColour.rgb * tex.rgb * tex.rgb
-//   o0.a   = tex.a * vertexAlpha
-// The texture is SQUARED (pfx textures are sqrt-encoded); vertex alpha is
-// premultiplied into rgb while o0.a carries tex.a for the fixed-function
-// destination factor. HOST STAND-INS: c20.w exposure = 1 (the preview scene
-// has no exposure pass); the multi-texture cross-fade variants (entries
-// 248-259) are approximated with complementary quads CPU-side; the soft-depth
-// variants (f13 depth fetch) are not run (no scene-depth SRV bound here).
+
 static const char* g_fx_ps = R"(
 Texture2D tex0 : register(t0);
 SamplerState smp : register(s0);
@@ -2398,10 +2337,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     bda.RenderTarget[0].BlendOpAlpha          = D3D11_BLEND_OP_ADD;
     bda.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     if(FAILED(dev->CreateBlendState(&bda,&mp.bsAlpha))) return false;
-    // Water: SRC=ONE, DEST=SRC_ALPHA. The retail water PS reads an explicit
-    // refraction copy of the scene (sampler f14); the preview PS emits the
-    // microcode's exact refraction coefficient as alpha so the framebuffer
-    // already behind the surface supplies that term.
+
     D3D11_BLEND_DESC bdw = bda;
     bdw.RenderTarget[0].SrcBlend       = D3D11_BLEND_ONE;
     bdw.RenderTarget[0].DestBlend      = D3D11_BLEND_SRC_ALPHA;
@@ -2421,13 +2357,7 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     D3D11_DEPTH_STENCIL_DESC dssle = dssn;
     dssle.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
     if(FAILED(dev->CreateDepthStencilState(&dssle, &mp.dssNoWriteLEqual))) return false;
-    // Water: levels load one .water per heightfield (main + every
-    // vista/adjacent), so the same surface is often present several times at
-    // the same height. Retail can draw the copies on top of each other
-    // (identical output, z-fight invisible), but the preview's framebuffer
-    // refraction composite is dst-dependent, so a second coplanar copy would
-    // re-composite and z-fighting would flash. Stencil-gate the pass: a
-    // pixel takes the water composite once (stencil EQUAL 0, INCR on pass).
+
     D3D11_DEPTH_STENCIL_DESC dsswat = dssw;
     dsswat.StencilEnable = TRUE;
     dsswat.StencilReadMask = 0xFF;
@@ -2440,7 +2370,6 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
     if(FAILED(dev->CreateDepthStencilState(&dsswat, &mp.dssWaterOnce))) return false;
     if(!create_white_srv(dev, &mp.default_srv)) return false;
 
-    // ---- particle FX pipeline ----
     {
         ID3DBlob* fvs = nullptr; ID3DBlob* fps = nullptr;
         if (compile_shader(g_fx_vs, "VS", "vs_5_0", &fvs) &&
@@ -2462,12 +2391,11 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
 
         D3D11_BUFFER_DESC cb{};
         cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        cb.ByteWidth = 4 * 16;          // one float4x4
+        cb.ByteWidth = 4 * 16;
         cb.Usage = D3D11_USAGE_DYNAMIC;
         cb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         dev->CreateBuffer(&cb, nullptr, &mp.cbuffer_fx);
 
-        // Premultiplied-alpha output => SrcBlend = ONE for both modes.
         D3D11_BLEND_DESC ba{};
         ba.RenderTarget[0].BlendEnable = TRUE;
         ba.RenderTarget[0].SrcBlend  = D3D11_BLEND_ONE;
@@ -2501,13 +2429,6 @@ void MP_BuildLevelFx(ID3D11Device* dev, ModelPreview& mp){
     mp.fx_system.clear();
     for (auto& kv : mp.fx_tex_srv) { if (kv.second) kv.second->Release(); }
     mp.fx_tex_srv.clear();
-    {
-        std::ofstream f("C:\\Users\\pwd12\\OneDrive\\Documents\\GitHub\\"
-                        "Fable2AssetBrowser\\fx_debug.log", std::ios::app);
-        if (f) f << "MP_BuildLevelFx called: pending_fx="
-                 << g_pending_level_fx.size() << " bank_loaded="
-                 << g_particle_bank_loaded << "\n";
-    }
     if (g_pending_level_fx.empty() || !g_particle_bank_loaded) return;
 
     mp.fx_system.build(g_particle_bank, g_pending_level_fx);
@@ -2525,10 +2446,8 @@ void MP_BuildLevelFx(ID3D11Device* dev, ModelPreview& mp){
         srv_from_tex_blob_auto(dev, buf, &srv, &ha);
         mp.fx_tex_srv[t] = srv;
     }
-    mp.fx_last_time = 0.0;   // first render frame clamps the initial dt
+    mp.fx_last_time = 0.0;
 
-    // Diagnostics: which effects actually resolved to real bank data, and
-    // which fell back to the name heuristic (so missing/wrong FX are visible).
     {
         std::map<std::string, int> resolved, unresolved;
         for (const auto& p : g_pending_level_fx)
@@ -2553,12 +2472,6 @@ void MP_BuildLevelFx(ID3D11Device* dev, ModelPreview& mp){
         if (!unresolved.empty())
             OutputLog::warn("fx UNRESOLVED (name heuristic only): " +
                             join(unresolved));
-        std::ofstream f("C:\\Users\\pwd12\\OneDrive\\Documents\\GitHub\\"
-                        "Fable2AssetBrowser\\fx_debug.log", std::ios::app);
-        if (f) f << "MP_BuildLevelFx built: instances="
-                 << mp.fx_system.instance_count() << " resolved="
-                 << mp.fx_system.resolved_count() << " textures="
-                 << mp.fx_tex_srv.size() << " fx_show=" << mp.fx_show << "\n";
     }
 }
 
@@ -3125,13 +3038,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
         if (!m.srv_metallic     && mp.default_srv) { m.srv_metallic     = mp.default_srv; m.srv_metallic->AddRef(); }
         if (!m.srv_extra    && mp.default_srv) { m.srv_extra    = mp.default_srv; m.srv_extra->AddRef(); }
         m.has_alpha = m.is_water ? m.has_water_theme : hasA;
-        // Water normal maps: the retail water pixel program fetches them
-        // with a full mip chain and 16x anisotropic filtering (tfetch
-        // mag/min/mip=3/3/3 aniso=7). The shared texture cache uploads mip 0
-        // only, which minifies into per-frame static at a distance — and the
-        // retail fresnel normal normalize(nx, ny, NormalScale*nz) amplifies
-        // that into reflection flashing. Rebuild the water normal SRV with a
-        // CPU-built mip chain (same approach as the vista pages).
+
         if (m.is_water && !g.diffuse_tex_name.empty()) {
             std::vector<unsigned char> wtex;
             if (build_any_tex_buffer_for_name(g.diffuse_tex_name, wtex,
@@ -3318,10 +3225,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         auto fin = [](float v, float fb) {
             return std::isfinite(v) ? v : fb;
         };
-        // Engine fog curve (XEX sub_821FDF10): optical depth
-        // OD(d) = od_far * pow((d - start)/span2, e), fog = 1 - exp(-OD*k).
-        // span1/span2/densities and the exponent e are engine-exact; k is
-        // calibrated so fog(FarDistance) == FarDensity.
+
         const float fog_start = std::max(fin(render_fog_range[0], 0.0f),
                                          0.0f);
         const float near_dist = fin(render_fog_range[1], 60.0f);
@@ -3653,10 +3557,9 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                     return float(ph - std::floor(ph));
                 };
 
-                // indices per the XEX g_WaterConstants packer sub_82B2A008
-                w.w_bias[0] = p(0, 0.2f);        // m_FresnelBias
-                w.w_bias[1] = p(1, 0.0f);        // m_ReflectionBias
-                w.w_bias[2] = p(24, 0.05f);      // m_NormalScale
+                w.w_bias[0] = p(0, 0.2f);
+                w.w_bias[1] = p(1, 0.0f);
+                w.w_bias[2] = p(24, 0.05f);
                 w.w_bias[3] = std::clamp(m.has_water_theme
                     ? m.water_opacity : 0.78f, 0.05f, 1.0f);
 
@@ -3672,25 +3575,24 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 w.w_surface[0] = m.water_shallow_colour[0];
                 w.w_surface[1] = m.water_shallow_colour[1];
                 w.w_surface[2] = m.water_shallow_colour[2];
-                w.w_surface[3] = p(30, 0.1f);    // m_DiffuseAbsorption
+                w.w_surface[3] = p(30, 0.1f);
                 w.w_deep[0] = m.water_deep_colour[0];
                 w.w_deep[1] = m.water_deep_colour[1];
                 w.w_deep[2] = m.water_deep_colour[2];
-                w.w_deep[3] = p(29, 0.75f);      // m_ReflectionStrength
+                w.w_deep[3] = p(29, 0.75f);
 
-                w.w_reflp[0] = p(25, 2.0f);      // m_ReflectionScale.x
-                w.w_reflp[1] = p(27, 2.0f);      // m_RefractionScale.x
-                w.w_reflp[2] = p(34, 0.3f);      // m_GlitteringNormalBendFactor
-                w.w_reflp[3] = p(35, 5.0f);      // m_GlitteringStrength
+                w.w_reflp[0] = p(25, 2.0f);
+                w.w_reflp[1] = p(27, 2.0f);
+                w.w_reflp[2] = p(34, 0.3f);
+                w.w_reflp[3] = p(35, 5.0f);
 
                 const bool sky_ok = mp.has_sky_theme && mp.show_sky &&
                                     mp.cbuffer_sky;
-                // Exact dome reflection needs the sky pass's constant block
-                // and in-scatter LUT (refreshed by DrawSky each frame).
+
                 const bool dome_ok = sky_ok && mp.cbuffer_sky_dome &&
                                      mp.sky_lut_srv && mp.sampler_sky_clamp;
-                w.w_glit[0] = p(36, 128.0f);     // m_GlitteringPower
-                w.w_glit[1] = 0.0f;              // highlight flag
+                w.w_glit[0] = p(36, 128.0f);
+                w.w_glit[1] = 0.0f;
                 w.w_glit[2] = sky_ok ? 1.0f : 0.0f;
                 w.w_glit[3] = dome_ok ? 1.0f : 0.0f;
 
@@ -3699,9 +3601,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 w.w_eye[2] = cam.pos[2];
                 w.w_eye[3] = water_time;
 
-                // c143 light colour: the theme's evaluated MainLightColour
-                // (time-of-day keyframed); the old sun ramp remains as the
-                // no-theme fallback.
                 if (mp.has_sky_theme) {
                     w.w_sun[0] = sky_frame.main_light_colour[0];
                     w.w_sun[1] = sky_frame.main_light_colour[1];
@@ -3715,10 +3614,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 }
                 w.w_sun[3] = sun_dir_f.y;
 
-                // c142 light direction (direction the light travels): sun by
-                // day; when the sun is below the horizon the engine's main
-                // light is the moon. The mesh path's lightDir clamps the sun
-                // above the horizon, which is wrong for glints.
                 if (sun_dir_f.y < 0.0f && mp.has_moon_axis) {
                     w.w_light[0] = -sky_frame.moon_direction[0];
                     w.w_light[1] = -sky_frame.moon_direction[1];
@@ -3733,9 +3628,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 std::memcpy(wms.pData, &w, sizeof(w));
                 ctx->Unmap(mp.cbuffer_water, 0);
 
-                // Water flashing diagnosis: log every global input the water
-                // shader sees. If a value alternates frame-to-frame the
-                // culprit is visible immediately.
                 UINT tex_mips = 0, tex_w = 0;
                 if (m.srv_diffuse) {
                     ID3D11Resource* res = nullptr;
@@ -3778,9 +3670,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             if (mp.cbuffer_sky) {
                 ctx->PSSetConstantBuffers(4, 1, &mp.cbuffer_sky);
             }
-            // Exact dome reflection inputs (see dome_reflect in the PS):
-            // the sky pass's constant block, in-scatter LUT and clamp
-            // sampler, refreshed by DrawSky earlier this frame.
+
             if (mp.cbuffer_sky_dome) {
                 ctx->PSSetConstantBuffers(6, 1, &mp.cbuffer_sky_dome);
             }
@@ -3916,7 +3806,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     for(const auto& m : mp.meshes){
         if (mp_should_hide_mesh(m)) continue;
         if(!m.vb || !m.ib || m.index_count==0 || (m.has_alpha && m.alpha_test)) continue;
-        if (m.is_water) continue; // drawn after everything it refracts
+        if (m.is_water) continue;
         if (any_isolated && !m.isolated) continue;
         if (mp.selected_lod >= 0 &&
             m.lod_index != (uint32_t)mp.selected_lod) continue;
@@ -3931,11 +3821,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             m.lod_index != (uint32_t)mp.selected_lod) continue;
         draw_one_with_edits(m, mp.bsAlpha);
     }
-    // Water last: the ONE/SRC_ALPHA composite reads the scene behind the
-    // surface out of the framebuffer as the retail refraction tile, so
-    // everything it refracts must already be drawn. Depth writes stay on
-    // (retail water z-writes); the stencil gate keeps overlapping coplanar
-    // water copies (one .water per heightfield) from re-compositing.
+
     ctx->OMSetDepthStencilState(
         mp.dssWaterOnce ? mp.dssWaterOnce : mp.dssWrite, 0);
     for(const auto& m : mp.meshes){
@@ -3963,8 +3849,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         int rain_count = (int)(rain_density * 15000.0f);
         rain_count = std::clamp(rain_count, 0, 20000);
         if (rain_size <= 0.001f) rain_count = 0;
-        // Retail draws 4096 snow point sprites (WeatherPrim_RenderSnowFlakes
-        // @ 0x821BE068, Draw_PointList(0, 4096)).
+
         int snow_count = has_snow
             ? (int)(4096.0f * std::max(mp.snow_intensity_mult, 0.0f))
             : 0;
@@ -4042,7 +3927,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
         }
     }
 
-    // ---- particle FX (chimney smoke, waterfalls, ...) ----
     if (mp.fx_show && mp.vs_fx && mp.ps_fx && mp.layout_fx && mp.cbuffer_fx &&
         !mp.fx_system.empty()) {
         double now = ImGui::GetTime();
@@ -4102,9 +3986,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 (it != mp.fx_tex_srv.end() && it->second) ? it->second
                                                           : mp.default_srv;
             ctx->PSSetShaderResources(0, 1, &srv);
-            // Retail fixed-function factors from the material's
-            // Src/DestBlendMode (batch carries D3D11_BLEND values; default
-            // SrcAlpha/InvSrcAlpha). States are created on demand and cached.
+
             ID3D11BlendState* fx_bs = nullptr;
             {
                 const int key = b.src_blend * 100 + b.dst_blend;

@@ -14,25 +14,19 @@ constexpr double kFloorMagnitudeLimit = 1.0e18;
 
 float RoundSingle(float value)
 {
-    // The XEX uses separate fmuls/fadds/fsubs instructions.  A volatile
-    // single-precision store prevents a host compiler from contracting two
-    // operations into an FMA with a different final bit pattern for ordinary
-    // finite inputs.  It does not claim PPC NaN/denorm/exception semantics.
+
     volatile float rounded = value;
     return rounded;
 }
 
 double CloudFloorPpc(double value)
 {
-    // Control-flow translation of 0x8222C3E8.  Unlike std::floor, the helper
-    // returns the input unchanged for magnitudes above 1e18 and preserves a
-    // signed zero.  Full PPC fctidz/fcfid payload/exception behavior remains
-    // outside this host convenience implementation.
+
     const double magnitude = std::fabs(value);
     if (magnitude == 0.0 || !(magnitude <= kFloorMagnitudeLimit)) {
         return value;
     }
-    const double truncated = std::trunc(value); // fctidz + fcfid
+    const double truncated = std::trunc(value);
     const double remainder = value - truncated;
     return remainder >= 0.0 ? truncated : truncated - 1.0;
 }
@@ -47,8 +41,7 @@ float WrapUnit(float value)
 bool DensityLess(const DensityCandidate& lhs,
                  const DensityCandidate& rhs)
 {
-    // Two explicit fcmpu/blt pairs.  If either comparison is unordered, both
-    // branches are false and the XEX falls through to the unsigned token.
+
     if (lhs.weight < rhs.weight) return true;
     if (rhs.weight < lhs.weight) return false;
     return lhs.token < rhs.token;
@@ -59,9 +52,7 @@ void DensityAdjustHeap(std::vector<DensityCandidate>& values,
                        std::size_t length,
                        DensityCandidate moving)
 {
-    // Literal index flow from 0x82AB22F0.  This is a min-heap used by the
-    // partial sort, not std::partial_sort, so unordered inputs keep the same
-    // movement/order as the PPC implementation.
+
     const std::size_t top = hole;
     std::size_t child = 2 * (hole + 1);
     while (child < length) {
@@ -115,9 +106,7 @@ void DensityPartialSortTopTwo(std::vector<DensityCandidate>& values)
 
 const BackgroundMapConstantProvenance& ExactBackgroundMapConstantProvenance()
 {
-    // BgMap_BindForRender 0x82A7A8A8.  This is a description of the source
-    // loads and PPC single-precision instructions, not a host evaluation of
-    // them.  In particular, the immediate values remain their exact words.
+
     static const BackgroundMapConstantProvenance provenance = [] {
         BackgroundMapConstantProvenance result{};
         result.copied_float4s = {{
@@ -205,11 +194,11 @@ const BackgroundMapConstantProvenance& ExactBackgroundMapConstantProvenance()
     return provenance;
 }
 
-}  // namespace
+}
 
 LayerConfig BuildConfig(const LayerThemeValues& theme)
 {
-    // default.xex 0x822675D0
+
     LayerConfig result{};
     result.transparency = theme.transparency;
     result.height = theme.height;
@@ -232,7 +221,7 @@ LayerConfig BuildConfig(const LayerThemeValues& theme)
 
 void InitialiseLayer(LayerRuntimeXex& layer)
 {
-    // Four instances are allocated by Sky primitive ctor 0x82A5F7E8.
+
     layer = {};
     layer.config.texture_scale_x = 0.001f;
     layer.config.texture_scale_y = 0.001f;
@@ -245,11 +234,7 @@ bool UpdateLayer(LayerRuntimeXex& layer,
                  const DensityResourceBinding& resolved_density_resource,
                  std::vector<DensityResourceLifetimeEvent>* lifetime_events)
 {
-    // 0x822675D0 followed by the config/resource copier at 0x8227AE18.
-    // The PPC code rounds the double time delta to float before both FMULS.
-    // The real object identity is read through layer+0x40 at object+0x1C.
-    // Reject inconsistent detached metadata instead of silently taking a
-    // branch the XEX would not take.
+
     if (lifetime_events != nullptr) lifetime_events->clear();
     if (current_density_resource.object_token != layer.density_resource) {
         return false;
@@ -277,8 +262,7 @@ bool UpdateLayer(LayerRuntimeXex& layer,
     layer.config = next;
     if (refresh_resource) {
         if (next.density_token == 0) {
-            // 0x8227AFC8..0x8227B014 releases and clears +0x40 without
-            // consulting the resolver result.
+
             if (lifetime_events != nullptr && layer.density_resource != 0) {
                 lifetime_events->push_back({
                     DensityResourceLifetimeEventKind::
@@ -370,7 +354,7 @@ bool IsActive(const LayerRuntimeXex& layer)
 ActiveOrder BuildActiveOrder(
     const std::array<LayerRuntimeXex, kLayerCount>& layers)
 {
-    // Filter loop 0x82267818; comparator 0x8218D9E0.
+
     ActiveOrder result;
     for (std::uint8_t i = 0; i < kLayerCount; ++i) {
         if (IsActive(layers[i])) {
@@ -378,10 +362,6 @@ ActiveOrder BuildActiveOrder(
         }
     }
 
-    // The <=32-element path at 0x8218DA00 compares against the first item
-    // before doing the ordinary backward insertion.  Keeping that detail
-    // also reproduces its unordered-NaN behaviour; finite equal heights stay
-    // stable because the comparator is strictly lhs.Height > rhs.Height.
     auto before = [&](std::uint8_t lhs, std::uint8_t rhs) {
         return layers[lhs].config.height > layers[rhs].config.height;
     };
@@ -407,9 +387,7 @@ ActiveOrder BuildActiveOrder(
 
 std::array<Vertex, 4> BuildVertices(const LayerConfig& config)
 {
-    // Host-float convenience with the recovered vertex order.  Exact word
-    // production, including LFS/FNEG/STFS behavior, is represented by
-    // CloudPpcRecipes::VertexSignConstruction/VertexWords instead.
+
     return {{
         {-config.size_x, -config.size_y, config.height, 0.0f, 0.0f},
         { config.size_x, -config.size_y, config.height, 1.0f, 0.0f},
@@ -428,7 +406,7 @@ const std::array<std::uint16_t, 6>& Indices()
 
 const std::array<VertexElement, 2>& VertexDeclaration()
 {
-    // 0x82B80500 / 0x82B86DF8: FLOAT3 POSITION followed by FLOAT2 TEXCOORD0.
+
     static constexpr std::array<VertexElement, 2> kDeclaration = {{
         {0, 0,  2, 0, 0},
         {0, 12, 1, 5, 0},
@@ -443,8 +421,6 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
     setup.primary_resource_object = layer.density_resource;
     setup.secondary_resource_object = layer.secondary_resource;
 
-    // CloudLayers_UpdateSortDraw/IsActive establishes this precondition.  The
-    // inner XEX function itself later dereferences +0x40 unconditionally.
     setup.caller_preconditions_met = layer.density_resource != 0;
     if (!setup.caller_preconditions_met) {
         return setup;
@@ -462,8 +438,6 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
         return setup;
     }
 
-    // 0x8223A208..0x8223A25C prepares the primary object and then the
-    // optional secondary object before either streaming-sentinel test.
     setup.resource_prepare_calls.push_back({
         layer.density_resource, 0x20, 0x24,
         inputs.primary_resource.prepare_result_plus4_payload_known,
@@ -483,9 +457,6 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
         setup.events.push_back({DrawEventKind::PrepareResource, 1});
     }
 
-    // Both resources are prepared before shader selection.  Either sentinel
-    // aborts the draw; +0x44 is otherwise dormant in all release cloud PSes.
-    // The XEX reads/checks secondary +0x54 first, then primary +0x54.
     if (layer.secondary_resource != 0) {
         if (!inputs.secondary_resource.object_plus54_state_known) {
             return setup;
@@ -508,8 +479,6 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
     setup.should_draw = true;
     const bool mode_two = inputs.render_context == 2;
 
-    // 0x8223A26C..0x8223A398: select VS113, request state 56, then
-    // encounter the guarded direct c0-c3 upload.
     setup.vertex_shader_entry = CloudShaderBank::kVertexShaderEntry;
     setup.events.push_back({DrawEventKind::SelectVertexShader});
     setup.render_state_writes.push_back({56, 0});
@@ -519,8 +488,7 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
     setup.vertex_c0_c3_upload.stage = DirectConstantStage::Vertex;
     setup.vertex_c0_c3_upload.first_register = 0;
     setup.vertex_c0_c3_upload.register_count = 4;
-    // li 1; extldi ...,64,63 at 0x8223A36C..0x8223A370.
-    // clrrdi ...,63 at 0x8223A378 independently proves bit 63.
+
     setup.vertex_c0_c3_upload.dirty_mask = 0x8000000000000000ull;
     setup.vertex_c0_c3_upload.guard_known =
         inputs.vertex_c0_c3_upload_guard_known;
@@ -535,14 +503,10 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
         kNoDrawEventRecord,
         DirectConstantUploadId::VertexC0C3});
 
-    // Pixel-shader selection follows the VS upload site at 0x8223A39C.
     setup.pixel_shader_entry = CloudShaderBank::SelectPixelShaderEntry(
         inputs.render_context, inputs.background_map_argument);
     setup.events.push_back({DrawEventKind::SelectPixelShader});
-    // PS114/115 multiply RGB by inherited global pixel c20.w.  Context-2's
-    // ordinary renderer loads a dynamic field (+0x41AC); CloudLayer_Draw does
-    // not write it.  The depth/repopulation paths set exactly 1.0f, but PS116
-    // does not consume c20 at all.
+
     setup.inherited_c20_w = {
         20, 3, mode_two,
         mode_two ? inputs.inherited_c20_w_known : true,
@@ -573,10 +537,9 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
             setup.constant_calls.size() - 1});
     };
 
-    // Exact setter order at 0x8223A458..0x8223A640.
     vector(38, {layer.config.texture_scale_x,
                 layer.config.texture_scale_y, 0.0f, 0.0f});
-    // Logical c0 uses the distinct two-float setter at 0x82205A50.
+
     float2(0, layer.uv_x, layer.uv_y);
     vector(272, inputs.viewer_position);
     scalar(264, layer.config.transparency);
@@ -591,8 +554,7 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
             ? inputs.light_direction : Float4{};
         const Float4 colour = inputs.has_environment_item
             ? inputs.light_colour : Float4{};
-        // The CPU calls the logical-126 setter, but release programs 136 and
-        // 137 have no descriptor for it, so the call is provably a no-op.
+
         vector(126, direction, false);
         vector(122, colour);
 
@@ -609,15 +571,11 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
         }
         vector(131, position);
 
-        // 0x8223A644..0x8223A6DC constructs raw c28 and conditionally writes
-        // it outside reflection.  The call site remains observable when its
-        // qword_83491590 guard is false.
         setup.pixel_c28_upload.call_site_reached = true;
         setup.pixel_c28_upload.stage = DirectConstantStage::Pixel;
         setup.pixel_c28_upload.first_register = 28;
         setup.pixel_c28_upload.register_count = 1;
-        // li 1; extldi ...,64,56 at 0x8223A66C..0x8223A674, repeated for
-        // the dirty OR at 0x8223A6B0..0x8223A6DC.
+
         setup.pixel_c28_upload.dirty_mask = 0x0100000000000000ull;
         setup.pixel_c28_upload.guard_known =
             inputs.pixel_c28_upload_guard_known;
@@ -641,17 +599,13 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
                     inputs.background_map_argument;
                 setup.background_map.writes_boolean_b129 = true;
                 setup.background_map.boolean_b129 = true;
-                // BgMap_BindForRender 0x82A7A8A8: object+0x114 is f12;
-                // object+0x11C is the generated render texture in f11.
+
                 setup.background_map.resource_bindings = {{
                     {12, inputs.background_map_argument, 0x114, 0x80000},
                     {11, inputs.background_map_argument, 0x11c, 0x100000},
                 }};
                 setup.background_map.resource_binding_count = 2;
 
-                // Raw method writes issued by BgMap_BindForRender.  These
-                // offsets are retained verbatim because the XEX does not
-                // identify them with host-API sampler-state names.
                 setup.background_map.sampler_method_writes = {{
                     {12, 12, 0},
                     {12, 0, 6},
@@ -667,10 +621,6 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
                 }};
                 setup.background_map.sampler_method_write_count = 11;
 
-                // The binder conditionally uploads five direct pixel
-                // constants.  Keep both the bit-19 guard and the values
-                // explicit when the owning background object is available;
-                // unknown input is not silently converted into zeroes.
                 setup.background_map.constant_upload.present = true;
                 setup.background_map.constant_upload.first_register = 72;
                 setup.background_map.constant_upload.register_count = 5;
@@ -689,8 +639,7 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
             } else {
                 setup.background_map.action =
                     BackgroundMapAction::BindDefault;
-                // sub_8226E048 writes Boolean logical index1 = 0.  Entry137
-                // may still be selected, but every b129 clause is skipped.
+
                 setup.background_map.writes_boolean_b129 = true;
                 setup.background_map.boolean_b129 = false;
             }
@@ -699,10 +648,6 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
         }
     }
 
-    // Runtime descriptor offsets +0x1BC and +0x750 are logical 37 and 156.
-    // Every recovered cloud PS binds 37; none contains descriptor 156.  The
-    // XEX still processes logical156 when +0x44 is null, selecting its global
-    // default resource at 0x8223A8F0..0x8223A910.
     setup.resource_binding_calls.push_back({
         37,
         13,
@@ -739,8 +684,6 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
     setup.events.push_back({
         DrawEventKind::ProcessLogicalResourceBinding, 1});
 
-    // State 56 was requested immediately after the VS.  These remaining
-    // requests occur after both logical-resource blocks, in exact order.
     const std::array<RenderStateWrite, 7> final_state_writes = {{
         {100, AlphaTestReference(layer.config, mode_two)},
         {96, 1},
@@ -757,37 +700,27 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
             setup.render_state_writes.size() - 1});
     }
     setup.events.push_back({DrawEventKind::SubmitDraw});
-    // These states are consumed by the draw but are not written by
-    // 0x8223A1E8.  State 44 is established as 6 by 0x8221BE70 for contexts
-    // 1/2.  Context 1 also establishes state 212=0 before the inner call.
-    // Apparent 40/212 writes on the context-7 path are inside scopes popped
-    // before clouds run (0x82279224 and 0x821C56B0), so they remain unknown.
+
     const bool known_state_44 =
         inputs.render_context == 1 || inputs.render_context == 2;
     const bool known_colour_write = inputs.render_context == 1;
     setup.inherited_state_requirements = {
-        {40, false, 0},                                       // inherited
+        {40, false, 0},
         {44, known_state_44, known_state_44 ? 6u : 0u},
-        {80, false, 0},                                       // BLENDOP
-        // No game cache descriptors exist for 84/88/92.  Their device state
-        // cannot be recovered from this XEX and is deliberately unresolved.
+        {80, false, 0},
+
         {84, false, 0},
         {88, false, 0},
         {92, false, 0},
-        {212, known_colour_write, 0},                          // COLORWRITE
+        {212, known_colour_write, 0},
     };
-    // CloudLayer_Draw performs no sampler-state setter calls.  The resource
-    // binder at 0x821B7020 deliberately preserves slot-13 address fields.
-    // 0x82B9FB28 initializes U/V/W state indices 0/1/2 to raw code zero, but
-    // the value at this draw is inherited from the enclosing renderer.
+
     setup.inherited_sampler_state_requirements = {
         {13, 0, true, 0},
         {13, 1, true, 0},
         {13, 2, true, 0},
     };
-    // All three retail cloud pixel programs' density fetches carry these
-    // exact fields (0x83104E98): normalized slot 13, linear mag/min/mip,
-    // anisotropy off, filter2x4_sym, volume filters off, computed LOD.
+
     setup.density_fetch_controls = {
         true, 13, true,
         1, 1, 1, 7, 0, 3, 3, true, 0,
@@ -798,7 +731,7 @@ DrawSetup BuildDrawSetup(const LayerRuntimeXex& layer,
 LayerPassSetup BuildLayerPassSetup(const LayerRuntimeXex& layer,
                                    const DrawInputs& inputs)
 {
-    // Literal state/argument protocol around 0x8223A1E8 in 0x821DB170.
+
     LayerPassSetup pass{};
     DrawInputs effective = inputs;
     if (inputs.render_context == 1) {
@@ -821,8 +754,7 @@ LayerPassSetup BuildLayerPassSetup(const LayerRuntimeXex& layer,
 
 float ShaderNormalStrength(float authored_normal_strength)
 {
-    // fsubs + fsel + fsel at 0x8223A3C8..0x8223A4CC.  The unordered case
-    // selects 0.1f; std::min/std::max would propagate a NaN on MSVC.
+
     float transformed = RoundSingle(1.0f - authored_normal_strength);
     if (!(transformed >= 0.1f)) transformed = 0.1f;
     if (transformed > 2.0f) transformed = 2.0f;
@@ -832,8 +764,7 @@ float ShaderNormalStrength(float authored_normal_strength)
 std::uint32_t AlphaTestReference(const LayerConfig& config,
                                  bool render_context_two)
 {
-    // 0x8223AA78..0x8223AAA0: context 2 selects 5; the other path uses
-    // fctidz(config[0x10] * 255.0f), which truncates toward zero.
+
     if (render_context_two) {
         return 5;
     }
@@ -848,4 +779,4 @@ float AlphaTestThreshold(const LayerConfig& config,
         AlphaTestReference(config, render_context_two)) * (1.0f / 255.0f);
 }
 
-}  // namespace CloudRuntime
+}

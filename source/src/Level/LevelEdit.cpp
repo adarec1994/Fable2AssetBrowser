@@ -22,6 +22,7 @@
 #include "../Utilities/Progress.h"
 #include "../Utilities/State.h"
 #include "BnkWriter.h"
+#include "GdbEdit.h"
 #include "LevelLoader.h"
 
 namespace LevelEdit {
@@ -84,6 +85,8 @@ struct ModuleState {
     std::unordered_map<uint32_t, EditEntry> edits;
     std::vector<UndoStep> undo_stack;
     std::vector<Addition> additions;
+
+    std::unordered_map<uint32_t, std::vector<uint32_t>> contents_edits;
 };
 
 ModuleState& st() {
@@ -956,6 +959,36 @@ void load_additions(ModuleState& s) {
         if (std::sscanf(line.c_str() + p0 + 1, "%f\t%f\t%f\t%f",
                         &a.pos[0], &a.pos[1], &a.pos[2],
                         &a.yaw_deg) < 3) continue;
+        const size_t chest_tag = line.find("\tCHEST");
+        const size_t key_tag = line.find("\tKEY");
+        if (chest_tag != std::string::npos) {
+            a.entity_kind = AdditionEntityKind::Chest;
+            size_t p = chest_tag + 6;
+            while (p < line.size() && line[p] == '\t') {
+                unsigned int h = 0;
+                if (std::sscanf(line.c_str() + p + 1, "%x", &h) == 1 && h) {
+                    a.chest_items.push_back(h);
+                }
+                p = line.find('\t', p + 1);
+                if (p == std::string::npos) break;
+            }
+        } else if (key_tag != std::string::npos) {
+            a.entity_kind = AdditionEntityKind::SilverKey;
+        } else {
+            const size_t prop_tag = line.find("\tPROP");
+            if (prop_tag != std::string::npos) {
+                unsigned int tpl = 0, cf = 0, ct = 0, pf = 0;
+                if (std::sscanf(line.c_str() + prop_tag + 5,
+                                "\t%x\t%x\t%x\t%x",
+                                &tpl, &cf, &ct, &pf) >= 3 && tpl && cf) {
+                    a.entity_kind = AdditionEntityKind::GenericProp;
+                    a.entity_template = tpl;
+                    a.entity_comp_field = cf;
+                    a.entity_comp_template = ct;
+                    a.physics_file_hash = pf;
+                }
+            }
+        }
         s.additions.push_back(std::move(a));
     }
     if (!s.additions.empty()) {
@@ -986,7 +1019,25 @@ bool write_additions(const ModuleState& s, std::string& msg) {
     for (const auto& a : s.additions) {
         if (a.removed) continue;
         f << a.model_path << '\t' << a.pos[0] << '\t' << a.pos[1] << '\t'
-          << a.pos[2] << '\t' << a.yaw_deg << '\n';
+          << a.pos[2] << '\t' << a.yaw_deg;
+        if (a.entity_kind == AdditionEntityKind::Chest) {
+            f << "\tCHEST";
+            char buf[16];
+            for (uint32_t h : a.chest_items) {
+                std::snprintf(buf, sizeof(buf), "%08X", h);
+                f << '\t' << buf;
+            }
+        } else if (a.entity_kind == AdditionEntityKind::SilverKey) {
+            f << "\tKEY";
+        } else if (a.entity_kind == AdditionEntityKind::GenericProp) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf),
+                          "\tPROP\t%08X\t%08X\t%08X\t%08X",
+                          a.entity_template, a.entity_comp_field,
+                          a.entity_comp_template, a.physics_file_hash);
+            f << buf;
+        }
+        f << '\n';
     }
     return true;
 }
@@ -1100,6 +1151,103 @@ size_t EditedCount() {
 uint64_t Revision() {
     std::lock_guard<std::mutex> lk(mtx());
     return st().revision;
+}
+
+void SetChestContents(uint32_t entity_hash,
+                      const std::vector<uint32_t>& item_hashes)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (!s.available) return;
+    s.contents_edits[entity_hash] = item_hashes;
+    s.dirty = true;
+    ++s.revision;
+}
+
+bool GetChestContents(uint32_t entity_hash, std::vector<uint32_t>& out)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    auto it = s.contents_edits.find(entity_hash);
+    if (it == s.contents_edits.end()) return false;
+    out = it->second;
+    return true;
+}
+
+void ClearChestContents(uint32_t entity_hash)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    s.contents_edits.erase(entity_hash);
+    ++s.revision;
+}
+
+size_t ChestContentsEditCount()
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    return st().contents_edits.size();
+}
+
+bool AdditionIsChest(int index)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    return index >= 0 && size_t(index) < s.additions.size() &&
+           s.additions[size_t(index)].entity_kind ==
+               AdditionEntityKind::Chest;
+}
+
+bool GetAdditionChestItems(int index, std::vector<uint32_t>& out)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.additions.size() ||
+        s.additions[size_t(index)].entity_kind !=
+            AdditionEntityKind::Chest) {
+        return false;
+    }
+    out = s.additions[size_t(index)].chest_items;
+    return true;
+}
+
+void SetAdditionChestItems(int index, const std::vector<uint32_t>& items)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.additions.size()) return;
+    s.additions[size_t(index)].chest_items = items;
+    s.additions[size_t(index)].entity_kind = AdditionEntityKind::Chest;
+    s.dirty = true;
+    ++s.revision;
+}
+
+void MarkAdditionEntityKind(int index, AdditionEntityKind kind)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.additions.size()) return;
+    s.additions[size_t(index)].entity_kind = kind;
+    s.dirty = true;
+    ++s.revision;
+}
+
+void MarkAdditionAsPropEntity(int index,
+                              uint32_t template_hash,
+                              uint32_t comp_field_hash,
+                              uint32_t comp_template_hash,
+                              uint32_t physics_file_hash)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.additions.size()) return;
+    auto& a = s.additions[size_t(index)];
+    a.entity_kind = AdditionEntityKind::GenericProp;
+    a.entity_template = template_hash;
+    a.entity_comp_field = comp_field_hash;
+    a.entity_comp_template = comp_template_hash;
+    a.physics_file_hash = physics_file_hash;
+    s.dirty = true;
+    ++s.revision;
 }
 
 bool SetEnabled(bool on, std::string& msg) {
@@ -1308,6 +1456,262 @@ bool Undo() {
     return true;
 }
 
+namespace {
+
+bool apply_chest_contents(GdbEdit::GdbFile& g,
+                          uint32_t entity_hash,
+                          const std::vector<uint32_t>& items,
+                          std::string& err)
+{
+    constexpr uint32_t kParent = 0x5F6317D5u;
+    constexpr uint32_t kNull = 0x811C9DC5u;
+    constexpr uint32_t kInvCompA = 0x1C7D7B74u;
+    constexpr uint32_t kInvCompB = 0x73AB8B6Au;
+    constexpr uint32_t kInitialItems = 0x9C24A50Du;
+
+    if (g.FindRecord(entity_hash) < 0) {
+        err = "entity record not in level gdb";
+        return false;
+    }
+
+    std::vector<GdbEdit::Field> fields;
+    fields.reserve(items.size());
+    std::unordered_set<uint32_t> used{kParent};
+    for (size_t i = 0; i < items.size(); ++i) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "F2ABItem%zu", i);
+        uint32_t fh = 0x811C9DC5u;
+        for (const char* p = name; *p; ++p) {
+            fh *= 0x01000193u;
+            fh ^= uint32_t(uint8_t(*p));
+        }
+        while (!used.insert(fh).second) ++fh;
+        GdbEdit::Field f;
+        f.hash = fh;
+        f.type = 7;
+        f.value = items[i];
+        fields.push_back(f);
+    }
+    const uint32_t list_hash = g.AllocRecordHash();
+    if (!g.AddRecord(list_hash, std::move(fields), 0)) {
+        err = "list record append failed";
+        return false;
+    }
+
+    GdbEdit::Field f;
+    uint32_t inv_hash = 0;
+    uint32_t inv_field_hash = kInvCompA;
+    bool have_local_field = false;
+    if (g.FindLocalField(entity_hash, kInvCompA, f)) {
+        have_local_field = true;
+        inv_field_hash = kInvCompA;
+    } else if (g.FindLocalField(entity_hash, kInvCompB, f)) {
+        have_local_field = true;
+        inv_field_hash = kInvCompB;
+    }
+    if (have_local_field && f.value != 0 && f.value != kNull &&
+        g.FindRecord(f.value) >= 0) {
+        inv_hash = f.value;
+    } else {
+
+        const uint32_t inherit =
+            (have_local_field && f.value != 0 && f.value != kNull)
+                ? f.value
+                : 0;
+        inv_hash = g.AllocRecordHash();
+        std::vector<GdbEdit::Field> fs;
+        if (inherit) {
+            GdbEdit::Field pf;
+            pf.hash = kParent;
+            pf.type = 6;
+            pf.value = inherit;
+            fs.push_back(pf);
+        }
+        if (!g.AddRecord(inv_hash, fs, 0)) {
+            err = "inventory record append failed";
+            return false;
+        }
+        if (have_local_field) {
+            if (!g.SetFieldValue(entity_hash, inv_field_hash, inv_hash)) {
+                err = "inventory field rewrite failed";
+                return false;
+            }
+        } else if (!g.AddField(entity_hash, kInvCompA, 6, inv_hash)) {
+            err = "inventory field append failed";
+            return false;
+        }
+    }
+
+    GdbEdit::Field items_field;
+    if (g.FindLocalField(inv_hash, kInitialItems, items_field)) {
+        if (!g.SetFieldValue(inv_hash, kInitialItems, list_hash)) {
+            err = "InitialItems rewrite failed";
+            return false;
+        }
+    } else if (!g.AddField(inv_hash, kInitialItems, 6, list_hash)) {
+        err = "InitialItems append failed";
+        return false;
+    }
+    return true;
+}
+
+uint32_t create_entity_addition(GdbEdit::GdbFile& g,
+                                const Addition& a,
+                                std::string& err)
+{
+    constexpr uint32_t kParent = 0x5F6317D5u;
+    constexpr uint32_t kNull = 0x811C9DC5u;
+    constexpr uint32_t kVecX = 0x050C5D47u;
+    constexpr uint32_t kVecY = 0x050C5D46u;
+    constexpr uint32_t kVecZ = 0x050C5D45u;
+    constexpr uint32_t kPosition = 0xBD7C27D4u;
+    constexpr uint32_t kRotation = 0x21EBC83Bu;
+    constexpr uint32_t kKeyframed = 0x6B177DD0u;
+    constexpr uint32_t kDynamic = 0xFC8A57C5u;
+
+    constexpr uint32_t kChestTemplate = 0x8C13FB53u;
+    constexpr uint32_t kChestTemplateKeyframed = 0x9AB9A90Cu;
+
+    constexpr uint32_t kSilverKeyTemplate = 0x4AB4C31Au;
+    constexpr uint32_t kSilverKeyTemplateDynamic = 0xEA7C60E5u;
+
+    const bool is_key = a.entity_kind == AdditionEntityKind::SilverKey;
+    const bool is_prop = a.entity_kind == AdditionEntityKind::GenericProp;
+    uint32_t entity_template =
+        is_key ? kSilverKeyTemplate : kChestTemplate;
+    uint32_t comp_field = is_key ? kDynamic : kKeyframed;
+    uint32_t comp_template =
+        is_key ? kSilverKeyTemplateDynamic : kChestTemplateKeyframed;
+    if (is_prop) {
+        if (!a.entity_template || !a.entity_comp_field) {
+            err = "prop entity missing template info";
+            return 0;
+        }
+        entity_template = a.entity_template;
+        comp_field = a.entity_comp_field;
+        comp_template = a.entity_comp_template;
+    }
+
+    auto fbits = [](float f) {
+        uint32_t u;
+        std::memcpy(&u, &f, 4);
+        return u;
+    };
+
+    auto vec3_record = [&](float x, float y, float z) -> uint32_t {
+        const uint32_t h = g.AllocRecordHash();
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kVecZ; f.type = 3; f.value = fbits(z); fs.push_back(f);
+        f.hash = kVecY; f.type = 3; f.value = fbits(y); fs.push_back(f);
+        f.hash = kVecX; f.type = 3; f.value = fbits(x); fs.push_back(f);
+        return g.AddRecord(h, fs, 0) ? h : 0;
+    };
+
+    const uint32_t pos_rec = vec3_record(a.pos[0], a.pos[1], a.pos[2]);
+    const float yaw = a.yaw_deg * 0.01745329252f;
+    const uint32_t rot_rec = vec3_record(0.0f, 0.0f, yaw);
+    if (!pos_rec || !rot_rec) {
+        err = "transform record append failed";
+        return 0;
+    }
+
+    const uint32_t comp_rec = g.AllocRecordHash();
+    {
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kRotation; f.type = 6; f.value = rot_rec; fs.push_back(f);
+        if (comp_template && comp_template != kNull) {
+            f.hash = kParent; f.type = 6; f.value = comp_template;
+            fs.push_back(f);
+        }
+        f.hash = kPosition; f.type = 6; f.value = pos_rec; fs.push_back(f);
+        if (!g.AddRecord(comp_rec, fs, 0)) {
+            err = "transform component append failed";
+            return 0;
+        }
+    }
+
+    const uint32_t entity_rec = g.AllocRecordHash();
+    {
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kParent; f.type = 6; f.value = entity_template;
+        fs.push_back(f);
+        f.hash = comp_field; f.type = 6; f.value = comp_rec;
+        fs.push_back(f);
+        if (!g.AddRecord(entity_rec, fs, 0)) {
+            err = "entity record append failed";
+            return 0;
+        }
+    }
+
+    if (a.entity_kind == AdditionEntityKind::Chest &&
+        !apply_chest_contents(g, entity_rec, a.chest_items, err)) {
+        return 0;
+    }
+    return entity_rec;
+}
+
+bool append_save_entities(
+    std::vector<uint8_t>& xml_bytes,
+    const std::vector<std::pair<std::string, uint32_t>>& entities,
+    std::string& err)
+{
+    if (entities.empty()) return true;
+    std::string xml(reinterpret_cast<const char*>(xml_bytes.data()),
+                    xml_bytes.size());
+    const size_t layer = xml.find("load=\"AlwaysOn\">");
+    if (layer == std::string::npos) {
+        err = "no AlwaysOn layer in .save";
+        return false;
+    }
+
+    const size_t open = xml.rfind("<id_", layer);
+    if (open == std::string::npos) {
+        err = "no layer tag in .save";
+        return false;
+    }
+    const size_t id_end = xml.find_first_of(" \t", open);
+    if (id_end == std::string::npos) {
+        err = "bad layer tag";
+        return false;
+    }
+    const std::string close_tag =
+        "</" + xml.substr(open + 1, id_end - open - 1) + ">";
+    size_t close = xml.find(close_tag, layer);
+    if (close == std::string::npos) {
+        err = "layer close tag missing";
+        return false;
+    }
+
+    while (close > 0 &&
+           (xml[close - 1] == '\t' || xml[close - 1] == ' ')) {
+        --close;
+    }
+    std::string ins;
+    for (const auto& [name, hash] : entities) {
+        char line[128];
+        std::snprintf(line, sizeof(line),
+                      "\t\t<Entity name=\"%s\">0x%08X</Entity>\r\n",
+                      name.c_str(), hash);
+        ins += line;
+    }
+
+    if (xml.find('\r') == std::string::npos) {
+        std::string tmp;
+        for (char c : ins) {
+            if (c != '\r') tmp.push_back(c);
+        }
+        ins = tmp;
+    }
+    xml.insert(close, ins);
+    xml_bytes.assign(xml.begin(), xml.end());
+    return true;
+}
+
+}
+
 bool Save(std::string& msg) {
     bool reload_needed = false;
     FlatAssetEntry reload_entry;
@@ -1328,6 +1732,18 @@ bool Save(std::string& msg) {
     int bake_models_index = -1;
     std::vector<uint8_t> bake_models_bytes;
     std::vector<BnkWriter::EntryReplacement> bake_more;
+
+    std::vector<uint8_t> gdb_rewrite_bytes;
+    std::string gdb_rewrite_bnk;
+    int gdb_rewrite_index = -1;
+    std::string gdb_rewrite_loose;
+    bool gdb_rewrite_iso = false;
+    size_t contents_applied = 0;
+
+    std::vector<uint8_t> save_rewrite_bytes;
+    int save_rewrite_index = -1;
+    std::string save_rewrite_bnk;
+    size_t chest_entities_created = 0;
     {
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
@@ -1374,38 +1790,49 @@ bool Save(std::string& msg) {
                                   e.orig[1] + e.delta[1],
                                   e.orig[2] + e.delta[2] -
                                       (e.deleted ? 10000.0f : 0.0f) };
+
+            bool wrote = false;
             if (e.lev_off != 0) {
                 lev_patches.push_back({ e.lev_off,
                                         { np[0], np[1], np[2] }, 3 });
-            } else if (e.gdb_off[0] || e.gdb_off[1] || e.gdb_off[2]) {
+                wrote = true;
+            }
+            if (e.gdb_off[0] || e.gdb_off[1] || e.gdb_off[2]) {
                 for (int i = 0; i < 3; ++i) {
                     if (e.gdb_off[i]) {
                         gdb_patches.push_back({ e.gdb_off[i], np[i] });
                     }
                 }
-            } else {
+                wrote = true;
+            }
+            if (!wrote) {
                 ++skipped;
             }
         }
         if (e.rotated() && !e.deleted) {
+            bool wrote_rot = false;
             if (e.lev_kind == 1 && e.lev_off != 0) {
                 const float yaw =
                     (e.orig_rot[2] + e.rot_deg[2]) * kDegToRad;
                 lev_patches.push_back({ e.lev_off + 24,
                                         { std::sin(yaw), std::cos(yaw),
                                           0 }, 2 });
-                ++rs_written;
+                wrote_rot = true;
                 if (e.rot_deg[0] != 0.0f || e.rot_deg[1] != 0.0f) {
                     ++rs_visual;
                 }
-            } else if (e.gdb_rot_off[0] && e.gdb_rot_off[1] &&
-                       e.gdb_rot_off[2]) {
+            }
+            if (e.gdb_rot_off[0] && e.gdb_rot_off[1] &&
+                e.gdb_rot_off[2]) {
                 gdb_patches.push_back({ e.gdb_rot_off[0],
                     (e.orig_rot[2] + e.rot_deg[2]) * kDegToRad });
                 gdb_patches.push_back({ e.gdb_rot_off[1],
                     (e.orig_rot[1] + e.rot_deg[1]) * kDegToRad });
                 gdb_patches.push_back({ e.gdb_rot_off[2],
                     (e.orig_rot[0] + e.rot_deg[0]) * kDegToRad });
+                wrote_rot = true;
+            }
+            if (wrote_rot) {
                 ++rs_written;
             } else {
                 ++rs_visual;
@@ -1413,7 +1840,7 @@ bool Save(std::string& msg) {
         }
     }
     if (lev_patches.empty() && gdb_patches.empty() && adds_updated == 0 &&
-        s.additions.empty()) {
+        s.additions.empty() && s.contents_edits.empty()) {
         msg = (skipped || rs_visual)
                   ? "no file-backed changes to save (visual-only edits "
                     "skipped)"
@@ -1509,6 +1936,154 @@ bool Save(std::string& msg) {
         }
     }
 
+    bool have_chest_adds = false;
+    for (const auto& a : s.additions) {
+        if (!a.removed && a.as_entity()) {
+            have_chest_adds = true;
+            break;
+        }
+    }
+    if (!s.contents_edits.empty() || have_chest_adds) {
+        progress_update(6, 100, "Rewriting chest contents...");
+        std::vector<uint8_t> gbytes;
+        if (!s.gdb.file_path.empty()) {
+            std::ifstream f(s.gdb.file_path, std::ios::binary);
+            if (f) {
+                f.seekg(0, std::ios::end);
+                gbytes.resize(size_t(f.tellg()));
+                f.seekg(0);
+                f.read(reinterpret_cast<char*>(gbytes.data()),
+                       std::streamsize(gbytes.size()));
+                if (!f) gbytes.clear();
+            }
+        } else if (s.gdb.valid) {
+            try {
+                gbytes = BnkCache::extract_bytes(s.gdb.bnk_path,
+                                                 s.gdb.file_index);
+            } catch (...) {
+                gbytes.clear();
+            }
+            if (!gbytes.empty() && !target_patchable_in_place(s.gdb)) {
+
+                for (const auto& p : gdb_patches) {
+                    if (size_t(p.off) + 4 <= gbytes.size()) {
+                        put_f32_be(gbytes.data() + p.off, p.v);
+                    }
+                }
+            }
+        }
+        if (gbytes.empty()) {
+            msg = "save failed: .gdb source unavailable for chest "
+                  "contents edits";
+            return false;
+        }
+        GdbEdit::GdbFile g;
+        std::string gerr;
+        if (!g.Parse(gbytes, gerr)) {
+            msg = "save failed: .gdb parse for contents edits: " + gerr;
+            return false;
+        }
+        for (const auto& kv : s.contents_edits) {
+            std::string aerr;
+            if (apply_chest_contents(g, kv.first, kv.second, aerr)) {
+                ++contents_applied;
+            } else {
+                DebugTrace::log(
+                    "save: contents edit 0x%08X skipped: %s",
+                    kv.first, aerr.c_str());
+            }
+        }
+
+        std::vector<std::pair<std::string, uint32_t>> new_save_entities;
+        for (const auto& a : s.additions) {
+            if (a.removed || !a.as_entity()) continue;
+            std::string aerr;
+            const uint32_t eh = create_entity_addition(g, a, aerr);
+            if (!eh) {
+                DebugTrace::log("save: entity addition skipped: %s",
+                                aerr.c_str());
+                continue;
+            }
+            const char* name_fmt = "F2AB_Chest_%08X";
+            if (a.entity_kind == AdditionEntityKind::SilverKey) {
+                name_fmt = "F2AB_Key_%08X";
+            } else if (a.entity_kind == AdditionEntityKind::GenericProp) {
+                name_fmt = "F2AB_Prop_%08X";
+            }
+            char name[48];
+            std::snprintf(name, sizeof(name), name_fmt, eh);
+            g.AddNameMapping(name, eh);
+            new_save_entities.emplace_back(name, eh);
+            ++chest_entities_created;
+        }
+        if (!new_save_entities.empty()) {
+
+            const int save_idx = [&]() -> int {
+                if (s.lev.bnk_path.empty() || s.lev.file_index < 0) {
+                    return -1;
+                }
+                try {
+                    const auto bc = BnkCache::get(s.lev.bnk_path);
+                    std::string nm =
+                        bc.reader->list_files()
+                            [(size_t)s.lev.file_index].name;
+                    for (char& c : nm) {
+                        c = (char)std::tolower((unsigned char)c);
+                    }
+                    const std::string suffix = ".engine_level";
+                    const size_t sp = nm.rfind(suffix);
+                    if (sp == std::string::npos ||
+                        sp + suffix.size() != nm.size()) {
+                        return -1;
+                    }
+                    std::string stem = nm.substr(0, sp);
+                    std::replace(stem.begin(), stem.end(), '\\', '/');
+                    return BnkCache::find_index(s.lev.bnk_path,
+                                                stem + ".save");
+                } catch (...) {
+                    return -1;
+                }
+            }();
+            std::string serr;
+            if (save_idx < 0) {
+                serr = ".save entry not found";
+            } else {
+                try {
+                    save_rewrite_bytes = BnkCache::extract_bytes(
+                        s.lev.bnk_path, save_idx);
+                } catch (...) {
+                    save_rewrite_bytes.clear();
+                }
+                if (save_rewrite_bytes.empty()) {
+                    serr = ".save extract failed";
+                } else if (append_save_entities(save_rewrite_bytes,
+                                                new_save_entities,
+                                                serr)) {
+                    save_rewrite_index = save_idx;
+                    save_rewrite_bnk = s.lev.bnk_path;
+                }
+            }
+            if (save_rewrite_index < 0) {
+                DebugTrace::log(
+                    "save: chest .save registry rewrite skipped: %s",
+                    serr.c_str());
+                save_rewrite_bytes.clear();
+                chest_entities_created = 0;
+            }
+        }
+
+        if (contents_applied > 0 || chest_entities_created > 0) {
+            gdb_rewrite_bytes = g.Serialize();
+            if (!s.gdb.file_path.empty()) {
+                gdb_rewrite_loose = s.gdb.file_path;
+            } else {
+                gdb_rewrite_bnk = s.gdb.bnk_path;
+                gdb_rewrite_index = s.gdb.file_index;
+                gdb_rewrite_iso = s.gdb.in_iso;
+            }
+        }
+    }
+
     std::string bake_note;
     if (!s.additions.empty()) {
         const bool rewritable = s.lev.valid && !s.lev.compressed &&
@@ -1521,9 +2096,15 @@ bool Save(std::string& msg) {
                 bake_bytes.clear();
             }
             std::string berr;
+
+            std::vector<Addition> lev_additions;
+            lev_additions.reserve(s.additions.size());
+            for (const auto& a : s.additions) {
+                if (!a.as_entity()) lev_additions.push_back(a);
+            }
             if (bake_bytes.empty()) {
                 bake_note = "; bake skipped: level re-extract failed";
-            } else if (!append_additions_to_level(bake_bytes, s.additions,
+            } else if (!append_additions_to_level(bake_bytes, lev_additions,
                                                   berr)) {
                 bake_note = "; bake skipped: " + berr;
                 bake_bytes.clear();
@@ -1543,6 +2124,10 @@ bool Save(std::string& msg) {
                         if (a.removed) continue;
                         mdl_hashes.push_back(
                             fnv1_32(lower_model_path(a.model_path)));
+
+                        if (a.physics_file_hash) {
+                            mdl_hashes.push_back(a.physics_file_hash);
+                        }
                     }
                     try {
                         const auto bc = BnkCache::get(s.lev.bnk_path);
@@ -1978,17 +2563,21 @@ bool Save(std::string& msg) {
                " visual-only edit(s) not saved)";
     }
     msg += bake_note;
-    if (!need_bake) {
+    if (!need_bake && gdb_rewrite_bytes.empty()) {
         s.dirty = false;
     }
+    if (need_bake || !gdb_rewrite_bytes.empty()) {
+        s.saving = true;
+    }
     }
 
-    if (!need_bake) return true;
+    if (!need_bake && gdb_rewrite_bytes.empty()) return true;
 
+    std::string berr;
+    bool rebuilt = true;
+    if (need_bake) {
     progress_update(10, 100, "Rebuilding level BNK...");
     BnkCache::invalidate(bake_bnk_path);
-    std::string berr;
-    bool rebuilt;
     if (bake_iso) {
         rebuilt = BnkWriter::RebuildIsoLevelBnk(bake_vpath, bake_index,
                                                 bake_bytes, berr);
@@ -2051,37 +2640,122 @@ bool Save(std::string& msg) {
                     rebuilt ? "OK" : "FAILED", bake_iso ? 1 : 0,
                     bake_iso ? bake_vpath.c_str() : bake_bnk_path.c_str(),
                     berr.c_str());
+    }
+
+    bool contents_ok = true;
+    if (rebuilt && !gdb_rewrite_bytes.empty()) {
+        progress_update(85, 100, "Writing chest contents...");
+        std::string gerr;
+        if (!gdb_rewrite_loose.empty()) {
+            std::ofstream f(gdb_rewrite_loose,
+                            std::ios::binary | std::ios::trunc);
+            contents_ok = bool(f);
+            if (contents_ok) {
+                f.write(reinterpret_cast<const char*>(
+                            gdb_rewrite_bytes.data()),
+                        std::streamsize(gdb_rewrite_bytes.size()));
+                contents_ok = f.good();
+            }
+            if (!contents_ok) gerr = "loose .gdb write failed";
+            if (contents_ok && save_rewrite_index >= 0 &&
+                !save_rewrite_bnk.empty()) {
+                BnkCache::invalidate(save_rewrite_bnk);
+                contents_ok = BnkWriter::RebuildWithReplacedEntry(
+                    save_rewrite_bnk, save_rewrite_index,
+                    save_rewrite_bytes, gerr);
+                BnkCache::invalidate(save_rewrite_bnk);
+            }
+        } else if (gdb_rewrite_iso) {
+            contents_ok = BnkWriter::RebuildIsoLevelBnk(
+                ISO::IsoMount::strip_iso_prefix(gdb_rewrite_bnk),
+                gdb_rewrite_index, gdb_rewrite_bytes, gerr);
+            if (contents_ok && save_rewrite_index >= 0) {
+                contents_ok = BnkWriter::RebuildIsoLevelBnk(
+                    ISO::IsoMount::strip_iso_prefix(gdb_rewrite_bnk),
+                    save_rewrite_index, save_rewrite_bytes, gerr);
+            }
+        } else if (gdb_rewrite_index >= 0) {
+            BnkCache::invalidate(gdb_rewrite_bnk);
+            std::vector<BnkWriter::EntryReplacement> reps(1);
+            reps[0].file_index = gdb_rewrite_index;
+            reps[0].payload = std::move(gdb_rewrite_bytes);
+            const bool save_same_bnk =
+                save_rewrite_index >= 0 &&
+                save_rewrite_bnk == gdb_rewrite_bnk;
+            if (save_same_bnk) {
+                BnkWriter::EntryReplacement r;
+                r.file_index = save_rewrite_index;
+                r.payload = std::move(save_rewrite_bytes);
+                reps.push_back(std::move(r));
+            }
+            contents_ok = BnkWriter::RebuildWithReplacedEntries(
+                gdb_rewrite_bnk, reps, gerr);
+            BnkCache::invalidate(gdb_rewrite_bnk);
+            if (contents_ok && save_rewrite_index >= 0 && !save_same_bnk) {
+                BnkCache::invalidate(save_rewrite_bnk);
+                contents_ok = BnkWriter::RebuildWithReplacedEntry(
+                    save_rewrite_bnk, save_rewrite_index,
+                    save_rewrite_bytes, gerr);
+                BnkCache::invalidate(save_rewrite_bnk);
+            }
+        } else {
+            contents_ok = false;
+            gerr = "no .gdb target";
+        }
+        DebugTrace::log(
+            "save: gdb contents rewrite %s (%zu edit(s), %zu new chest(s)) "
+            "%s",
+            contents_ok ? "OK" : "FAILED", contents_applied,
+            chest_entities_created, gerr.c_str());
+    }
 
     {
         std::lock_guard<std::mutex> lk(mtx());
         auto& s = st();
         s.saving = false;
-        if (rebuilt) {
-            s.additions.clear();
-            s.edits.clear();
-            s.undo_stack.clear();
+        if (rebuilt && contents_ok) {
+            if (need_bake) {
+                s.additions.clear();
+                s.edits.clear();
+                s.undo_stack.clear();
+                {
+                    std::error_code ec;
+                    std::filesystem::remove(additions_path(), ec);
+                }
+            }
+            if (contents_applied > 0) s.contents_edits.clear();
             BnkCache::invalidate(s.lev.bnk_path);
             if (!s.gdb.bnk_path.empty()) {
                 BnkCache::invalidate(s.gdb.bnk_path);
             }
             fill_bnk_target(s.lev);
             if (!s.gdb.bnk_path.empty()) fill_bnk_target(s.gdb);
-            {
-                std::error_code ec;
-                std::filesystem::remove(additions_path(), ec);
-            }
             s.dirty = false;
             reload_needed = true;
             reload_entry = s.entry;
-            msg += "; baked " + std::to_string(bake_count) +
-                   " model(s) into the level BNK; reloading";
-        } else {
+            if (need_bake) {
+                msg += "; baked " + std::to_string(bake_count) +
+                       " model(s) into the level BNK";
+            }
+            if (contents_applied > 0) {
+                msg += "; rewrote contents of " +
+                       std::to_string(contents_applied) + " container(s)";
+            }
+            if (chest_entities_created > 0) {
+                msg += "; created " +
+                       std::to_string(chest_entities_created) +
+                       " chest entit(ies)";
+            }
+            msg += "; reloading";
+        } else if (!rebuilt) {
             msg += "; BAKE FAILED: " + berr +
                    " (placements kept app-side)";
+        } else {
+            msg += "; CONTENTS REWRITE FAILED (edits kept app-side)";
         }
     }
     if (reload_needed) Level::OpenAsync(reload_entry);
-    return rebuilt;
+    return rebuilt && contents_ok;
 }
 
 bool RestoreDefaults(std::string& msg) {
@@ -2139,6 +2813,7 @@ bool RestoreDefaults(std::string& msg) {
         s.edits.clear();
         s.undo_stack.clear();
         s.additions.clear();
+        s.contents_edits.clear();
         {
             std::error_code ec;
             std::filesystem::remove(additions_path(), ec);
@@ -2157,6 +2832,7 @@ void ClearEdits() {
     std::lock_guard<std::mutex> lk(mtx());
     st().edits.clear();
     st().undo_stack.clear();
+    st().contents_edits.clear();
     st().dirty = false;
     ++st().revision;
 }

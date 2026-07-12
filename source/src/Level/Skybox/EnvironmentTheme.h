@@ -81,7 +81,6 @@ struct SkyTheme {
     uint32_t moon_glare_texture_hash = 0;
     uint32_t sun_disc_texture_hash = 0;
 
-    // Celestial element records (XEX theme registration names).
     bool has_moon_params = false;
     bool has_moon_axis = false;
     bool has_star_brightness = false;
@@ -91,25 +90,25 @@ struct SkyTheme {
     bool has_sun_glare = false;
     bool has_sun_beams_texture = false;
     bool has_sun_glare_texture = false;
-    float moon_intensity = 1.0f;        // MoonIntensity
-    float moon_size = 1.0f;             // MoonSize
-    float moon_glare_intensity = 0.0f;  // MoonGlareIntensity
-    float moon_glare_size = 1.0f;       // MoonGlareSize
-    float moon_transparency = 1.0f;     // MoonTransparency
-    float moon_axis_elevation = 26.0f;  // MoonAxisElevation
-    float moon_axis_z_offset = 0.0f;    // MoonAxisZOffset
-    float moon_axis_xy_rotation = 0.0f; // MoonAxisXYRotationOffset
-    float star_brightness = 0.0f;       // StarBrightness
-    float sun_disc_size = 1.0f;         // DiscSize
-    float sun_disc_intensity = 1.0f;    // DiscIntensity
-    float sun_disc_colour[3] = {1.0f, 1.0f, 1.0f};  // DiscColour
-    float sun_beams_width = 1.0f;       // SunBeamsWidth
-    float sun_beams_height = 1.0f;      // SunBeamsHeight
-    float sun_beams_intensity = 0.0f;   // SunBeamsIntensity
-    float sun_glare_intensity = 0.0f;   // GlareIntensity
-    float sun_glare_size = 1.0f;        // GlareSize
-    uint32_t sun_beams_texture_hash = 0;  // SunBeamsTexture
-    uint32_t sun_glare_texture_hash = 0;  // GlareTexture
+    float moon_intensity = 1.0f;
+    float moon_size = 1.0f;
+    float moon_glare_intensity = 0.0f;
+    float moon_glare_size = 1.0f;
+    float moon_transparency = 1.0f;
+    float moon_axis_elevation = 26.0f;
+    float moon_axis_z_offset = 0.0f;
+    float moon_axis_xy_rotation = 0.0f;
+    float star_brightness = 0.0f;
+    float sun_disc_size = 1.0f;
+    float sun_disc_intensity = 1.0f;
+    float sun_disc_colour[3] = {1.0f, 1.0f, 1.0f};
+    float sun_beams_width = 1.0f;
+    float sun_beams_height = 1.0f;
+    float sun_beams_intensity = 0.0f;
+    float sun_glare_intensity = 0.0f;
+    float sun_glare_size = 1.0f;
+    uint32_t sun_beams_texture_hash = 0;
+    uint32_t sun_glare_texture_hash = 0;
 };
 
 struct CloudLayerTheme {
@@ -190,4 +189,4 @@ struct EnvironmentThemeTimeline {
     std::vector<EnvironmentThemeKeyframe> keyframes;
 };
 
-}  // namespace Gdb
+}

@@ -16,8 +16,6 @@ struct XMMATRIX;
 
 namespace Skybox {
 
-// Appends a line to sky_dome_debug.txt (diagnostics for the byte-derived
-// sky path); no-op when the file cannot be opened.
 void DebugLog(const char* line);
 
 struct CameraFrame {
@@ -32,8 +30,7 @@ struct CameraFrame {
 };
 
 struct FrameState {
-    // default.xex keeps the absolute cloud clock as a double and rounds only
-    // the post-subtraction delta to single precision.
+
     double elapsed_time = 0.0;
     float time_of_day = 0.5f;
 
@@ -58,7 +55,7 @@ struct FrameState {
 
     float sun_direction[3] = {};
     float moon_direction[3] = {};
-    // Same layout as Skybox::Keyframe::element_params.
+
     float element_params[16] = {1.0f, 1.0f, 0.0f, 1.0f,
                                 1.0f, 0.0f, 1.0f, 1.0f,
                                 1.0f, 1.0f, 1.0f, 1.0f,
@@ -90,4 +87,4 @@ void DrawClouds(ID3D11DeviceContext* context,
                 const DirectX::XMMATRIX& projection);
 #endif
 
-}  // namespace Skybox
+}

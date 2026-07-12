@@ -3,14 +3,6 @@
 #include <cmath>
 #include <cstring>
 
-// CPU ports follow the XEX instruction streams (disassembly captured from
-// 0x82263530 / 0x821F71F0; see SkyDomeXex.h for provenance).  Transcendentals
-// (cos/acos/pow/exp) use the CRT instead of the XEX's own minimax kernels
-// (sub_82239E88 cos, sub_82260900 acos, sub_821FE378 pow, sub_821FDE30 exp);
-// the deviation is below one float ulp of the inputs and vanishes inside the
-// RGBA16F LUT quantisation.  Everything else preserves the original operation
-// order and single/double precision choices.
-
 namespace SkyDomeXex {
 namespace {
 
@@ -18,7 +10,6 @@ inline float Dot3(const float* a, const float* b) {
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
-// Angle between two vectors, port of 0x82260808 (guards included).
 float VectorAngle(const float* a, const float* b) {
     const float length_product =
         std::sqrt(Dot3(a, a)) * std::sqrt(Dot3(b, b));
@@ -31,10 +22,6 @@ float VectorAngle(const float* a, const float* b) {
     return 3.1415927f;
 }
 
-// Sun elevation angle, port of 0x82295020: angle between -sun_direction and
-// its horizontal projection (engine Z zeroed by the vperm at 0x820991F0).
-// The |dot - 1| special case in the original compares against a zero vector
-// and never fires; kept out as dead code.
 float SunElevationAngle(const float sun_direction[4]) {
     const float negated[3] = {-sun_direction[0], -sun_direction[1],
                               -sun_direction[2]};
@@ -42,20 +29,19 @@ float SunElevationAngle(const float sun_direction[4]) {
     return VectorAngle(negated, horizontal);
 }
 
-// IEEE 754 binary32 -> binary16, round to nearest even (vpkd3d FLOAT16_4).
 std::uint16_t FloatToHalf(float value) {
     std::uint32_t bits = 0;
     std::memcpy(&bits, &value, sizeof(bits));
     const std::uint32_t sign = (bits >> 16) & 0x8000u;
     std::uint32_t abs_bits = bits & 0x7fffffffu;
-    if (abs_bits >= 0x7f800000u) {  // inf/nan
+    if (abs_bits >= 0x7f800000u) {
         return static_cast<std::uint16_t>(
             sign | 0x7c00u | ((abs_bits > 0x7f800000u) ? 0x200u : 0u));
     }
-    if (abs_bits >= 0x47800000u) {  // overflow -> inf
+    if (abs_bits >= 0x47800000u) {
         return static_cast<std::uint16_t>(sign | 0x7c00u);
     }
-    if (abs_bits < 0x38800000u) {  // subnormal half
+    if (abs_bits < 0x38800000u) {
         const std::uint32_t shift = 126u - (abs_bits >> 23);
         std::uint32_t mantissa = (abs_bits & 0x7fffffu) | 0x800000u;
         if (shift > 24u) return static_cast<std::uint16_t>(sign);
@@ -77,12 +63,11 @@ std::uint16_t FloatToHalf(float value) {
     return static_cast<std::uint16_t>(sign | rounded);
 }
 
-}  // namespace
+}
 
 AtmosphereState ComputeAtmosphereState(const ThemeInputs& theme) {
     AtmosphereState state{};
 
-    // 0x82263590..0x822636A8: Rayleigh base per channel (double), Mie base.
     const double rayleigh_common =
         std::pow(kBetaRayleighPowBase, kBetaRayleighPowExponent) *
         kBetaRayleighCommon;
@@ -92,7 +77,6 @@ AtmosphereState ComputeAtmosphereState(const ThemeInputs& theme) {
             rayleigh_common * kBetaRayleighChannel[channel]);
     }
 
-    // 0x822636E4: the Rayleigh theme multiplier is scaled by 500 first.
     const float rayleigh_scale =
         theme.beta_rayleigh_multiplier * kRayleighMultiplierScale;
     const float mie_scale = theme.beta_mie_multiplier;
@@ -108,9 +92,6 @@ AtmosphereState ComputeAtmosphereState(const ThemeInputs& theme) {
         state.sun_direction[i] = theme.sun_direction[i];
     }
 
-    // 0x822637DC..0x8226387C + 0x822638AC: c67 block.  The reciprocal lane
-    // divides by SKY_FOGGING_CLOSE_FOG_MAX_DISTANCE (record 20, theme+336),
-    // matching the sbk member name ..._RecipCloseFogMaxDistance_...
     state.scattering_misc[0] = theme.fogging_start;
     state.scattering_misc[1] = kHorizonDistance;
     state.scattering_misc[2] =
@@ -119,7 +100,6 @@ AtmosphereState ComputeAtmosphereState(const ThemeInputs& theme) {
             : 1.0f;
     state.scattering_misc[3] = kRecipMaxFogDistance;
 
-    // 0x822638B4..D0: phase-normalised betas for the LUT.
     for (int channel = 0; channel < 3; ++channel) {
         state.lut_beta_rayleigh_phase[channel] =
             state.beta_rayleigh[channel] * kRayleighPhaseNorm;
@@ -129,14 +109,10 @@ AtmosphereState ComputeAtmosphereState(const ThemeInputs& theme) {
     state.lut_beta_rayleigh_phase[3] = 0.0f;
     state.lut_beta_mie_phase[3] = 0.0f;
 
-    // 0x822638D4: cos of the sun elevation angle.
     const float elevation = SunElevationAngle(theme.sun_direction);
     state.lut_cos_sun_elevation =
         static_cast<float>(std::cos(elevation));
 
-    // 0x8226391C..0x82263974: Mie asymmetry, linear in elevation; exact
-    // float operation order preserved (fmsubs against -0.0 folds to
-    // negation).
     const float f10 = elevation * kMieG_A1;
     const float f8 = -f10;
     const float f7 = f8 + kMieG_A0;
@@ -145,8 +121,6 @@ AtmosphereState ComputeAtmosphereState(const ThemeInputs& theme) {
     const float g = static_cast<float>(
         static_cast<double>(f6) * 0.5 + static_cast<double>(f7));
 
-    // 0x822639AC..0x82263AC0: HG parameter pack (1-g^2, 1+g^2, 2g, 0);
-    // 1-g^2 is computed in double (dbl_8209FFD8 = 1.0) then narrowed.
     const float g_squared = g * g;
     state.lut_hg[0] =
         static_cast<float>(1.0 - static_cast<double>(g_squared));
@@ -154,15 +128,11 @@ AtmosphereState ComputeAtmosphereState(const ThemeInputs& theme) {
     state.lut_hg[2] = g * 2.0f;
     state.lut_hg[3] = 0.0f;
 
-    // 0x8226381C..0x82263BC4: (1, 1, 1, SUN_INTENSITY); the .w lane
-    // multiplies every LUT texel, so the in-scatter dims with the sun.
     state.lut_scale[0] = 1.0f;
     state.lut_scale[1] = 1.0f;
     state.lut_scale[2] = 1.0f;
     state.lut_scale[3] = theme.sun_intensity;
 
-    // Tail of 0x82263530 (prim+128/prim+144): sun element tint =
-    // lerp((1, 1, 0), SUNSET_COLOUR, cos(sun elevation)).
     const float cos_elev = state.lut_cos_sun_elevation;
     state.sun_element_colour[0] =
         (theme.sunset_colour[0] - 1.0f) * cos_elev + 1.0f;
@@ -178,71 +148,62 @@ AtmosphereState ComputeAtmosphereState(const ThemeInputs& theme) {
     state.lut_colour_a[3] = 0.0f;
     state.lut_colour_b[3] = 0.0f;
 
-    // 0x82263BC8: record 12 + 0.5 (flt_82099334).
     state.lut_bias_plus_half = theme.complementary_bias + 0.5f;
     return state;
 }
 
 void BuildInScatterLutFloat(const AtmosphereState& state,
                             std::array<float, kLutWidth * 4>& out_rgba) {
-    // Loop preamble of 0x821F71F0.
-    // v127: Newton-Raphson refined reciprocal of (betaR + betaM); ported as
-    // plain division (the refined vrefp matches rcp to < 1 ulp).
+
     float recip[3];
     for (int channel = 0; channel < 3; ++channel) {
         recip[channel] = 1.0f / (state.beta_rayleigh[channel] +
                                  state.beta_mie[channel]);
     }
-    // v124 (loop variant): colour delta SKY - COMPLEMENTARY.
+
     float colour_delta[3];
     for (int channel = 0; channel < 3; ++channel) {
         colour_delta[channel] =
             state.lut_colour_a[channel] - state.lut_colour_b[channel];
     }
-    // Ramp constants staged on the stack: v9 = (1.0, 0.3, 0.1, 0),
-    // v0 = (1, 1, 1, 0).  vmaddfp v26, v29, v0, v1 is vD = vA*vC + vB
-    // (AltiVec VA-form; verified against the Newton-Raphson reciprocal
-    // sequence in this same function), so
-    //   v26 = (v9 - v0) * t_cos + v0 = lerp(1, (1, 0.3, 0.1), t_cos):
-    // a warm shift toward the sun direction.
+
     const float ramp_delta[3] = {1.0f - 1.0f, 0.3f - 1.0f, 0.1f - 1.0f};
 
     for (int i = 0; i < kLutWidth; ++i) {
         const float t =
             static_cast<float>(i) / static_cast<float>(kLutWidth);
-        // v86 = t^2 + 1 (Rayleigh phase without normalisation).
+
         const float one_plus_t2 = t * t + 1.0f;
-        // powf(-(2g*t - (1+g^2)), 1.5): Henyey-Greenstein denominator.
+
         const float hg_denominator = std::pow(
             state.lut_hg[1] - state.lut_hg[2] * t, 1.5f);
-        // v87.x = t * cos(sun elevation).
+
         const float t_cos = t * state.lut_cos_sun_elevation;
-        // v85 = (1-g^2) / denominator.
+
         const float hg_ratio = state.lut_hg[0] / hg_denominator;
-        // fsel chain: gate below the biased horizon, then clamp to 1.
+
         const float gated =
             (t * 0.5f + state.lut_bias_plus_half < 0.0f) ? 0.0f : hg_ratio;
         const float colour_factor = gated < 1.0f ? gated : 1.0f;
 
         for (int channel = 0; channel < 3; ++channel) {
-            // v27 = betaM_phase * HG + betaR_phase * (1 + t^2).
+
             const float phase =
                 state.lut_beta_mie_phase[channel] * hg_ratio +
                 state.lut_beta_rayleigh_phase[channel] * one_plus_t2;
-            // v26 = (v9 - v0) * t_cos + v0, per channel.
+
             const float ramp = ramp_delta[channel] * t_cos + 1.0f;
-            // v13 = (SKY - COMP) * factor + COMP.
+
             const float colour =
                 colour_delta[channel] * colour_factor +
                 state.lut_colour_b[channel];
-            // v22 = v26 * lut_scale; v5 = v22 * lut_scale.w;
-            // v23 = v27 * recip; v2 = v5 * v23; v1 = v2 * v13.
+
             const float scaled =
                 ramp * state.lut_scale[channel] * state.lut_scale[3];
             out_rgba[std::size_t(i) * 4 + channel] =
                 scaled * (phase * recip[channel]) * colour;
         }
-        out_rgba[std::size_t(i) * 4 + 3] = 0.0f;  // v76 = 0.0
+        out_rgba[std::size_t(i) * 4 + 3] = 0.0f;
     }
 }
 
@@ -254,15 +215,6 @@ void BuildInScatterLut(const AtmosphereState& state,
         out[i] = FloatToHalf(texels[i]);
     }
 }
-
-// ---------------------------------------------------------------------------
-// HLSL ports.  Statements carry their Xenos packet index from packed
-// programs 110 (VS) / 111 (PS) of ShadersRelease.sbk.
-//
-// Space conventions: the preview world is Y-up; the engine is Z-up.  The
-// interpolated ray and every atmosphere constant stay in ENGINE space; only
-// the clip-space transform maps through preview space (component swap .xzy).
-// ---------------------------------------------------------------------------
 
 const char* const kDomeVertexShaderHlsl = R"(
 cbuffer SkyDomeXexCB : register(b6) {
@@ -606,16 +558,8 @@ float4 PSMain(PSIN input) : SV_Target {
 }
 )";
 
-// Both vertex entry points share one translation unit; compile the same
-// source with entry "VSMainFullscreen" for the host fullscreen variant.
 const char* const kDomeFullscreenVertexShaderHlsl = kDomeVertexShaderHlsl;
 
-// ---------------------------------------------------------------------------
-// Starfield (packed programs 126/127; statements tagged with packet indices).
-// Host expands each retail point sprite into a 6-vertex quad via
-// SV_VertexID; b6 supplies the camera basis (engine-space, same cbuffer as
-// the dome), b7 the star parameters.
-// ---------------------------------------------------------------------------
 const char* const kStarsVertexShaderHlsl = R"(
 cbuffer SkyDomeXexCB : register(b6) {
     row_major float4x4 view_projection;
@@ -716,4 +660,4 @@ float4 PSMain(PSIN input) : SV_Target {
 }
 )";
 
-}  // namespace SkyDomeXex
+}

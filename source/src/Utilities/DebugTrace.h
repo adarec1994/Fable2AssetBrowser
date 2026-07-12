@@ -31,27 +31,7 @@ inline const std::string& log_path() {
     return p;
 }
 
-inline void log(const char* fmt, ...) {
-    FILE* f = nullptr;
-#ifdef _WIN32
-    fopen_s(&f, log_path().c_str(), "ab");
-#else
-    f = std::fopen(log_path().c_str(), "ab");
-#endif
-    if (!f) return;
-#ifdef _WIN32
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    std::fprintf(f, "[%02u:%02u:%02u.%03u] ",
-                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-#endif
-    va_list ap;
-    va_start(ap, fmt);
-    std::vfprintf(f, fmt, ap);
-    va_end(ap);
-    std::fputc('\n', f);
-    std::fclose(f);
-}
+inline void log(const char*, ...) {}
 
 #ifdef _WIN32
 inline void log_exception(const char* tag, EXCEPTION_POINTERS* ep) {

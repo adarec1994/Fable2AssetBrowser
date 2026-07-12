@@ -228,33 +228,6 @@ bool is_noisy_message(Level lvl, const std::string& msg) {
 }
 
 void log(Level lvl, std::string msg) {
-    {
-        static std::mutex file_mx;
-        static FILE*      file    = nullptr;
-        static bool       tried   = false;
-        std::lock_guard<std::mutex> lk(file_mx);
-        if (!tried) {
-            tried = true;
-            std::error_code ec;
-            auto p = std::filesystem::temp_directory_path(ec)
-                   / "f2ab_output.log";
-            if (!ec) file = std::fopen(p.string().c_str(), "w");
-        }
-        if (file) {
-            char ts[12];
-            format_time(ts, sizeof(ts));
-            const char* sev = "INFO ";
-            switch (lvl) {
-                case Level::Info:    sev = "INFO "; break;
-                case Level::Success: sev = "OK   "; break;
-                case Level::Warn:    sev = "WARN "; break;
-                case Level::Error:   sev = "ERROR"; break;
-            }
-            std::fprintf(file, "[%s] [%s] %s\n", ts, sev, msg.c_str());
-            std::fflush(file);
-        }
-    }
-
     if (is_noisy_message(lvl, msg)) return;
 
     Entry e;

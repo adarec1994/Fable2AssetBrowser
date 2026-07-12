@@ -32,11 +32,29 @@ struct InstInfo {
     const uint32_t* gdb_rot_off = nullptr;
 };
 
+enum class AdditionEntityKind : uint8_t {
+    None = 0,
+    Chest = 1,
+    SilverKey = 2,
+    GenericProp = 3,
+};
+
 struct Addition {
     std::string model_path;
     float pos[3] = {0, 0, 0};
     float yaw_deg = 0.0f;
     bool removed = false;
+    AdditionEntityKind entity_kind = AdditionEntityKind::None;
+    std::vector<uint32_t> chest_items;
+
+    uint32_t entity_template = 0;
+    uint32_t entity_comp_field = 0;
+    uint32_t entity_comp_template = 0;
+    uint32_t physics_file_hash = 0;
+
+    bool as_entity() const {
+        return entity_kind != AdditionEntityKind::None;
+    }
 };
 
 void OnLevelLoaded(const FlatAssetEntry& entry);
@@ -63,6 +81,23 @@ void SetDeleted(uint32_t selection_id, const InstInfo& info);
 
 int AddPlacement(const std::string& model_path, const float pos[3]);
 void GetAdditions(std::vector<Addition>& out);
+
+void SetChestContents(uint32_t entity_hash,
+                      const std::vector<uint32_t>& item_hashes);
+bool GetChestContents(uint32_t entity_hash, std::vector<uint32_t>& out);
+void ClearChestContents(uint32_t entity_hash);
+size_t ChestContentsEditCount();
+
+bool AdditionIsChest(int index);
+bool GetAdditionChestItems(int index, std::vector<uint32_t>& out);
+void SetAdditionChestItems(int index, const std::vector<uint32_t>& items);
+void MarkAdditionEntityKind(int index, AdditionEntityKind kind);
+
+void MarkAdditionAsPropEntity(int index,
+                              uint32_t template_hash,
+                              uint32_t comp_field_hash,
+                              uint32_t comp_template_hash,
+                              uint32_t physics_file_hash);
 
 bool   Dirty();
 bool   Saving();

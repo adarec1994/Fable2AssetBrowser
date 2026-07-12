@@ -7,7 +7,7 @@ struct CloudTheme;
 struct EnvironmentThemeTimeline;
 struct SkyTheme;
 struct WeatherTheme;
-}  // namespace Gdb
+}
 
 namespace Skybox::PreviewBinding {
 
@@ -20,4 +20,4 @@ void ApplyEnvironmentTimeline(
     ModelPreview& preview,
     const Gdb::EnvironmentThemeTimeline& timeline);
 
-}  // namespace Skybox::PreviewBinding
+}

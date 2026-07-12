@@ -77,8 +77,6 @@ FetchConstantMergeTrace BuildExactMergeTrace(
         result.final_words[destination] = value;
     };
 
-    // Store order and formulas are the literal integer operations at
-    // 0x821B70AC..0x821B711C.  All arithmetic is unsigned 32-bit arithmetic.
     store(0, 0x821b70acu, 2u, source[2]);
     store(1, 0x821b70c0u, 4u,
           (old[4] & 0xfffffc03u) | (source[4] & 0x000003fcu));
@@ -172,4 +170,4 @@ MipDimensions DecodeMipDimensions(
     };
 }
 
-}  // namespace CloudTextureBindings
+}

@@ -144,15 +144,10 @@ extern FlatAssetEntry     g_pending_terrain_level_entry;
 extern std::vector<uint8_t> g_pending_terrain_ehf_bytes;
 
 namespace Level {
-// One background ("vista") patch drawn the way the engine draws it: each
-// M x M cell is a 16x16 sub-grid whose atlas uv comes from the .ehf's two
-// pf98 per-cell lookup tables (17 non-uniform coords per axis; one tile per
-// cell, packed arbitrarily in the patch's page), textured with the patch's
-// own decoded background-map page. Populated for the dedicated vista filler
-// heightfields; when present it replaces the single-mesh + composite path.
+
 struct VistaPatchGeom {
     TerrainMesh          mesh;
-    std::vector<uint8_t> page_rgba;   // this patch's page atlas (RGBA)
+    std::vector<uint8_t> page_rgba;
     int                  page_w = 0;
     int                  page_h = 0;
 };
@@ -164,7 +159,7 @@ struct PendingAdjacentTerrain {
     std::string          preferred_bnk;
     bool                 preserve_mesh_uvs = false;
     bool                 prefer_embedded_albedo = false;
-    std::vector<VistaPatchGeom> patch_geoms;   // per-patch path (preferred)
+    std::vector<VistaPatchGeom> patch_geoms;
 };
 }
 extern std::vector<Level::PendingAdjacentTerrain> g_pending_adjacent_terrain_meshes;
@@ -209,3 +204,11 @@ struct GdbWorldPlacement {
     uint32_t marker;
 };
 extern std::vector<GdbWorldPlacement> g_level_gdb_placements;
+
+extern std::unordered_map<uint32_t, Gdb::EntityContents>
+    g_level_entity_contents;
+
+extern std::vector<Gdb::ItemCatalogEntry> g_level_item_catalog;
+
+extern std::unordered_map<uint32_t, Gdb::PropTemplateInfo>
+    g_level_prop_entity_templates;

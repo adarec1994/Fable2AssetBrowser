@@ -48,9 +48,6 @@ std::string ResolveEnvironmentTextureHash(std::uint32_t hash)
     return {};
 }
 
-// Diagnostic wrapper: records hash -> name resolution into
-// sky_dome_debug.txt so per-level failures are attributable (parser found
-// no hash vs. resolution failed vs. texture index empty).
 std::string ResolveEnvironmentTextureHashLogged(std::uint32_t hash,
                                                 const char* label)
 {
@@ -274,7 +271,7 @@ void CopyWeatherThemeToKeyframe(MPSkyCloudKeyframe& key,
     }
 }
 
-}  // namespace
+}
 
 void ApplySkyTheme(ModelPreview& preview, const Gdb::SkyTheme& sky)
 {
@@ -545,4 +542,4 @@ void ApplyEnvironmentTimeline(
     OutputLog::info(summary.str());
 }
 
-}  // namespace Skybox::PreviewBinding
+}

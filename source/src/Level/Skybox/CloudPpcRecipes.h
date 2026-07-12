@@ -4,8 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 
-// Symbolic metadata recovered from default.xex.  Nothing in this namespace
-// evaluates a PowerPC or VMX operation with host floating-point arithmetic.
 namespace CloudPpcRecipes {
 
 enum class Opcode : std::uint16_t {
@@ -161,8 +159,7 @@ enum class OperandKind : std::uint8_t {
 struct Operand {
     OperandKind kind = OperandKind::None;
     std::uint64_t value = 0;
-    // Component index, signed displacement encoded as u32, or other
-    // opcode-specific metadata.  Zero when unused.
+
     std::uint32_t auxiliary = 0;
 };
 
@@ -186,7 +183,7 @@ struct RecipeView {
 struct RawConstant {
     std::uint32_t address = 0;
     std::uint8_t byte_width = 0;
-    // Numeric value of the big-endian word(s) stored in the XEX image.
+
     std::uint64_t bits = 0;
 };
 
@@ -200,11 +197,10 @@ enum class VertexSource : std::uint8_t {
 
 struct VertexWordRecipe {
     std::uint8_t vertex_index = 0;
-    std::uint8_t component_index = 0; // x/y/z/u/v
+    std::uint8_t component_index = 0;
     VertexSource source = VertexSource::PositiveZero;
     bool ppc_fneg = false;
-    // Nonzero entries are the scalar LFS/FNEG/STFS provenance.  Pure VMX
-    // packing is intentionally represented by the destination word mapping.
+
     std::array<std::uint32_t, 4> scalar_addresses{};
     std::uint8_t scalar_address_count = 0;
 };
@@ -220,4 +216,4 @@ RecipeView VertexSignConstruction();
 const std::array<VertexWordRecipe, 20>& VertexWords();
 RecipeView AlphaReference();
 
-}  // namespace CloudPpcRecipes
+}

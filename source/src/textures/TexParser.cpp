@@ -324,9 +324,7 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
             md.MipDataSizeParsed = use;
         }
         body_end = mo + 48 + (size_t)md.DataSize;
-        // Dual-channel records (notably PF39 cloud maps) store their alpha
-        // payload after the colour payload.  Unknown_4 is the alpha offset
-        // relative to the mip definition and Unknown_5 is its byte size.
+
         if (md.Unknown_4 >= 48 + md.DataSize && md.Unknown_5 > 0) {
             const size_t dual_end =
                 mo + size_t(md.Unknown_4) + size_t(md.Unknown_5);
@@ -337,10 +335,6 @@ bool parse_tex_info(const std::vector<unsigned char> &d, TexInfo &out) {
 
     if (out.MipMapOffset.empty()) return true;
 
-    // Full TEX headers carry one absolute definition offset per authored mip.
-    // Parse those directly rather than assuming records are tightly packed;
-    // dual colour/alpha records and packed tails need not be contiguous at
-    // mo + 48 + DataSize.
     std::vector<size_t> explicit_offsets;
     explicit_offsets.reserve(out.MipMapOffset.size());
     for (uint32_t raw_offset : out.MipMapOffset) {

@@ -9,9 +9,6 @@ enum class RetailExecutionBackend : std::uint8_t {
     DirectXenosCommandBuffer,
 };
 
-// Exact call/packet boundary present in default.xex.  This deliberately does
-// not invent a software shader backend: retail ucode and texture descriptors
-// are copied into command packets and executed by the Xbox 360 GPU.
 struct SubmissionRecipe {
     RetailExecutionBackend backend =
         RetailExecutionBackend::DirectXenosCommandBuffer;
@@ -39,4 +36,4 @@ struct SubmissionRecipe {
 
 const SubmissionRecipe& ExactSubmissionRecipe() noexcept;
 
-}  // namespace CloudXenosSubmission
+}

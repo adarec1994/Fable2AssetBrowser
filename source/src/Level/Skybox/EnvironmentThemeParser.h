@@ -27,4 +27,4 @@ bool ExtractEnvironmentThemeTimeline(
     const std::vector<const std::vector<uint8_t>*>& gdbs,
     EnvironmentThemeTimeline& out_timeline);
 
-}  // namespace Gdb
+}

@@ -101,4 +101,4 @@ const std::array<std::uint32_t, 49>& ExactGradientSourceWords() noexcept;
 const std::array<std::uint8_t, 64>& ExactGradientPayload() noexcept;
 const GenerationPassRecipe& ExactGenerationPassRecipe() noexcept;
 
-}  // namespace CloudBackgroundGeneration
+}

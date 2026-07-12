@@ -8,16 +8,6 @@
 
 namespace XenosShaderBinary {
 
-// These layouts are ports of the Microsoft/XDK encoder, retail disassembler,
-// driver walker, and declaration patcher embedded in default.xex (not an
-// external ISA reconstruction).  The decoded fields describe the original
-// Xenos program; diagnostic mnemonics are stable normalized aliases rather
-// than byte-for-byte copies of one embedded disassembler's text dialect.
-// In particular, IDA proves opcode topology but not Xenos NaN selection,
-// denormal/FTZ behavior, dot-product reduction rounding, or MAD contraction.
-// Those remain Xenos primitives here instead of being approximated with host
-// std::max/std::fma/arithmetic.
-
 enum class ControlFlowOpcode : std::uint8_t {
     Nop = 0,
     Exec = 1,
@@ -64,8 +54,7 @@ struct ProgramDescriptor {
     std::uint32_t descriptor_offset = 0;
     std::uint32_t subprogram_offset = 0;
     std::uint32_t subprogram_size = 0;
-    // First ALU/fetch packet address, in 12-byte packets.  The preceding
-    // first_packet*12 bytes are the word-swapped control-flow prefix.
+
     std::uint32_t first_packet = 0;
 };
 
@@ -179,19 +168,14 @@ struct AluSource {
     bool absolute = false;
     bool negate = false;
     bool literal_constant = false;
-    // Raw eight-bit source-swizzle encoding.  swizzle is its four-lane vector
-    // expansion.  Scalar ALU opcodes select components with their scalar
-    // encoding rules, so scalar consumers must not assume swizzle[0] is the
-    // selected scalar component.
+
     std::uint8_t encoded_swizzle = 0;
     std::array<std::uint8_t, 4> swizzle{};
     std::uint8_t displayed_components = 0;
 };
 
 struct AluInstruction {
-    // The vector and scalar halves are one parallel hardware packet: both
-    // consume pre-packet state and commit together.  They are not sequential
-    // C++ statements.
+
     std::uint8_t vector_opcode = 0;
     std::uint8_t vector_operand_count = 0;
     std::uint8_t scalar_opcode = 0;
@@ -205,8 +189,7 @@ struct AluInstruction {
     AluDestination scalar_destination{};
     std::array<AluSource, 3> vector_sources{};
     std::array<AluSource, 2> scalar_sources{};
-    // Stable normalized diagnostic text.  The typed fields above, not these
-    // strings, are the authoritative representation for exact translation.
+
     std::string vector_disassembly;
     std::string scalar_disassembly;
 };
@@ -242,8 +225,6 @@ struct DecodedProgram {
     std::vector<ClauseInstruction> clause_instructions;
 };
 
-// Reads the root at compiled_shader+0x18 and the descriptor's exact +0/+4
-// subprogram fields, then ports the embedded control-flow/clause dispatcher.
 bool DecodeProgram(ByteView compiled_shader,
                    ByteView xenos_ucode,
                    DecodedProgram& out,
@@ -258,8 +239,6 @@ VertexFetchInstruction DecodeVertexFetch(
 AluInstruction DecodeAluInstruction(
     const std::array<std::uint32_t, 3>& words) noexcept;
 
-// Literal port of the matched-declaration path in the patcher at default.xex
-// 0x821D3318. stride_code is the device's DWORD stride byte for element.stream.
 std::array<std::uint32_t, 3> PatchVertexFetch(
     const std::array<std::uint32_t, 3>& words,
     const VertexDeclarationElement& element,
@@ -271,4 +250,4 @@ const char* FetchOpcodeName(std::uint8_t opcode) noexcept;
 const char* VectorOpcodeName(std::uint8_t opcode) noexcept;
 const char* ScalarOpcodeName(std::uint8_t opcode) noexcept;
 
-}  // namespace XenosShaderBinary
+}

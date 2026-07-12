@@ -9,10 +9,6 @@
 namespace CloudShaderBank {
 namespace {
 
-// IDA-Python provenance anchor for the retail bank used to recover these
-// records: 653060 bytes, SHA-256
-// c2732102a0aedb8c7a950e5781fa15092a3c12c2721380944c4e717dade5e736.
-
 struct ExpectedBinding {
     std::uint32_t logical_id;
     std::uint32_t hardware_binding;
@@ -53,7 +49,7 @@ constexpr std::array<ExpectedBinding, 11> kContext2Bindings = {{
     {0,   46, 1, 3},
     {9,   71, 1, 0},
     {23,  51, 1, 0},
-    {37,  13, 1, 1}, // Texture logical 37 is fetch slot 13.
+    {37,  13, 1, 1},
     {38,  31, 1, 3},
     {122, 47, 1, 5},
     {131, 77, 1, 5},
@@ -65,15 +61,12 @@ constexpr std::array<ExpectedBinding, 11> kContext2Bindings = {{
 
 constexpr std::array<ExpectedBinding, 5> kOtherContextBindings = {{
     {0,   46, 1, 3},
-    {37,  13, 1, 1}, // Texture logical 37 is fetch slot 13.
+    {37,  13, 1, 1},
     {38,  31, 1, 3},
     {264, 77, 1, 0},
     {272, 47, 1, 5},
 }};
 
-// 0x82B86DF8 declaration records selected by CloudLayer_Draw, with the
-// exact encoded formats from table 0x83316B80.  The patcher 0x821D3318 uses
-// DWORD offsets/strides; DrawPrimitiveUP installs 20/4 == 5 for stream zero.
 constexpr std::array<XenosShaderBinary::VertexDeclarationElement, 2>
     kCloudVertexElements = {{
         {0, 0,  0x002a23b9u, 0, 0, 0},
@@ -86,7 +79,6 @@ constexpr std::array<std::array<std::uint32_t, 3>, 2>
         {{0x05f80000u, 0x00253fc8u, 0x00000305u}},
     }};
 
-// Raw IEEE-754 words uploaded to pixel c254/c255 by sub_8222BFF8.
 constexpr std::array<
     std::array<std::array<std::uint32_t, 4>, 2>, 3>
     kExpectedEmbeddedPixelConstants = {{
@@ -351,9 +343,7 @@ bool ValidateBindings(const ShaderBank::Program& program,
         const ShaderBank::BindingDescriptor& actual =
             program.binding_lists[0][i];
         const ExpectedBinding& wanted = expected.bindings[i];
-        // hardware_binding is the direct constant-register index (or, for
-        // logical texture 37, fetch slot 13).  Constant dirty tracking later
-        // groups four registers; it does not change this serialized value.
+
         if (actual.logical_id != wanted.logical_id ||
             actual.hardware_binding != wanted.hardware_binding ||
             actual.count != wanted.count || actual.tag != wanted.tag) {
@@ -363,7 +353,7 @@ bool ValidateBindings(const ShaderBank::Program& program,
     return true;
 }
 
-}  // namespace
+}
 
 bool ResolveRetailCloudShaders(const ShaderBank::Bank& bank,
                                RetailCloudShaders& out,
@@ -535,8 +525,7 @@ bool ResolveRetailCloudShaders(const ShaderBank::Bank& bank,
             view.runtime_vertex_fetches_valid = true;
             out.vertex_shader = view;
         } else {
-            // Pixel constructor/flush path 0x82B84550 -> 0x8221B140 ->
-            // 0x8222BFF8 consumes this exact one-entry compiler upload list.
+
             if (view.compiled_shader.size < 0x18) {
                 return Fail(error, &expected,
                             "pixel constant-upload root is missing");
@@ -749,4 +738,4 @@ const ProgramView* SelectPixelShader(
         ? &view : nullptr;
 }
 
-}  // namespace CloudShaderBank
+}

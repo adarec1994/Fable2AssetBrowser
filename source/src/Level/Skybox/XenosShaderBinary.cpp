@@ -24,10 +24,6 @@ constexpr std::array<const char*, 32> kFetchNames = {{
     nullptr, nullptr, nullptr, nullptr,
 }};
 
-// Stable semantic aliases used by the host diagnostic output.  The embedded
-// Microsoft formatters use several different textual dialects (for example,
-// sete/seq and pred_sete_push/setp_eq_push); opcode values and typed operands
-// remain authoritative.
 constexpr std::array<const char*, 32> kVectorNames = {{
     "add", "mul", "max", "min", "seq", "sgt", "sge", "sne",
     "frc", "trunc", "floor", "mad", "cndeq", "cndge", "cndgt",
@@ -69,8 +65,6 @@ constexpr std::array<std::uint8_t, 64> kScalarOperandCounts = {{
     0, 0, 0, 0, 0, 0, 0, 0,
 }};
 
-// Retail scalar formatter component counts (default.xex 0x8208FBE0).
-// These are independent of the source operand counts above.
 constexpr std::array<std::uint8_t, 64> kScalarDisplayComponentCounts = {{
     2, 1, 2, 1, 2, 2, 2, 1,
     1, 1, 1, 1, 1, 1, 1, 1,
@@ -123,7 +117,7 @@ std::string FormatDestination(std::uint8_t encoded,
                               bool raw_seven,
                               std::uint8_t auxiliary_mask)
 {
-    // Literal port of default.xex 0x83104148.
+
     const bool absolute = ((encoded >> 7) & 1u) != 0;
     const std::uint8_t index = encoded & 0x3fu;
     const bool brackets = !is_export && relative;
@@ -209,9 +203,7 @@ const char* PredicatePrefix(PredicateMode mode) noexcept
 
 unsigned ExportContributionFlags(std::uint32_t w0) noexcept
 {
-    // Literal simplification of default.xex 0x82BE7F20.  The vector and
-    // scalar export masks share one packet; 1/2/8 identify vector-only,
-    // scalar-only, and overlapping contributions respectively.
+
     if ((w0 & 0x00008000u) == 0) return 0;
     const unsigned vector_mask = (w0 >> 16) & 0x0fu;
     const unsigned scalar_mask = (w0 >> 20) & 0x0fu;
@@ -282,10 +274,7 @@ AluSource DecodeAluSource(bool is_register,
 bool DecodeRetailScalarRelative(std::uint32_t w1,
                                 std::uint32_t w2) noexcept
 {
-    // XG_DisasmFormatScalarALU at 0x82BE85C0..0x82BE8668 chooses the first
-    // constant among the three shared source slots.  Only a scalar constant
-    // in slot three uses relative-selector bit 31; every other case uses bit
-    // 30.  This differs from the older formatter at 0x83104BB8.
+
     unsigned first_constant_source = 0;
     if ((w2 & 0x80000000u) == 0) first_constant_source = 1;
     else if ((w2 & 0x40000000u) == 0) first_constant_source = 2;
@@ -303,8 +292,7 @@ std::string FormatSource(bool is_register,
                          std::uint8_t swizzle,
                          std::uint8_t component_count)
 {
-    // Literal port of default.xex 0x831044E0.  Register operands carry their
-    // absolute bit in encoded bit 7; constant operands use the separate bit.
+
     const bool use_absolute =
         (!is_register && absolute) ||
         (is_register && (encoded & 0x80u) != 0);
@@ -350,7 +338,7 @@ std::string FormatLiteralConstant(std::uint8_t encoded,
                                   bool negate,
                                   std::uint8_t swizzle)
 {
-    // Literal port of default.xex 0x83104798.
+
     const bool absolute = (encoded & 0x80u) != 0;
     std::string text;
     if (negate) text += '-';
@@ -384,8 +372,7 @@ std::string FormatVectorAlu(const std::array<std::uint32_t, 3>& words,
     if ((w0 & 0x01000000u) != 0) text += "_sat";
     text += FormatDestination(
         static_cast<std::uint8_t>(w0 & 0x3fu),
-        // 0x83104950/64: vector write mask is bits16..19; the auxiliary
-        // export mask is bits20..23.  (Scalar ALU uses the reverse layout.)
+
         static_cast<std::uint8_t>((w0 >> 16) & 0x0fu),
         ((w0 >> 15) & 1u) != 0,
         false,
@@ -466,8 +453,7 @@ std::string FormatScalarAlu(const std::array<std::uint32_t, 3>& words,
 
     if (decoded.scalar_operand_count == 0) return text;
     if (decoded.scalar_operand_count == 2) {
-        // Retail scalar opcodes 42..47 carry one constant and one temporary
-        // source in their compact paired encoding (0x82BE86A8..0x82BE8794).
+
         const std::uint8_t constant_component =
             static_cast<std::uint8_t>(((w1 >> 6) - 1u) & 3u);
         text += ", ";
@@ -518,8 +504,7 @@ std::uint32_t ExtractControlFlowBits(const std::uint8_t* bytes,
                                      unsigned width,
                                      bool& ok) noexcept
 {
-    // Literal simplification of default.xex 0x831033E8.  Bit numbering is
-    // one-based and the decoder reads an unaligned little-endian dword.
+
     if (bit_one_based == 0 || width == 0 || width > 31) {
         ok = false;
         return 0;
@@ -536,10 +521,7 @@ std::uint32_t ExtractControlFlowBits(const std::uint8_t* bytes,
 
 std::vector<std::uint8_t> UndoRetailControlFlowWordSwap(ByteView subprogram)
 {
-    // default.xex 0x830F91F0..0x830F91FC uses lwbrx/stw on precisely the
-    // first 3*clause_address dwords when producing retail/GPU ucode.  A full
-    // temporary inverse lets 0x831033E8 find clause_address; only the prefix
-    // it identifies is subsequently consumed as control flow.
+
     std::vector<std::uint8_t> decoder_bytes(
         subprogram.data, subprogram.data + subprogram.size);
     for (std::size_t offset = 0; offset + 4 <= decoder_bytes.size();
@@ -648,8 +630,6 @@ AluInstruction DecodeAlu(const std::array<std::uint32_t, 3>& words,
             register_swizzle, 1);
     }
 
-    // Retail contribution/sentinel tests at 0x82BE7F20, 0x82BE7FC0 and
-    // 0x82BEA04C..0x82BEA178.
     const unsigned export_flags = ExportContributionFlags(w0);
     if (result.vector_opcode != 2) {
         result.vector_suppressed = false;
@@ -681,13 +661,12 @@ AluInstruction DecodeAlu(const std::array<std::uint32_t, 3>& words,
     return result;
 }
 
-}  // namespace
+}
 
 VertexFetchInstruction DecodeVertexFetch(
     const std::array<std::uint32_t, 3>& words) noexcept
 {
-    // Exact vfetch fields formatted by 0x831053E8..0x83105750.  The
-    // exponent-adjust correction comes from its lbz 4(packet) at 0x831056D0.
+
     const std::uint32_t w0 = words[0];
     const std::uint32_t w1 = words[1];
     const std::uint32_t w2 = words[2];
@@ -728,8 +707,7 @@ std::array<std::uint32_t, 3> PatchVertexFetch(
     std::uint8_t stride_code,
     std::uint16_t previous_availability) noexcept
 {
-    // Literal algebraic port of 0x821D3424..0x821D3550.  Offsets and stride
-    // are written in DWORD units by DrawPrimitiveUP before the shader flush.
+
     const std::uint32_t stream = element.stream;
     const std::uint32_t fetch_constant =
         ((2u - (stream % 3u)) << 5) | (31u - stream / 3u);
@@ -808,9 +786,7 @@ AluInstruction DecodeAluInstruction(
 TextureFetchInstruction DecodeTextureFetch(
     const std::array<std::uint32_t, 3>& words) noexcept
 {
-    // Literal fields printed by default.xex 0x83104E98.  The original PPC
-    // uses byte/halfword loads for several fields; the shifts below express
-    // their correct positions in the big-endian GPU words.
+
     const std::uint32_t w0 = words[0];
     const std::uint32_t w1 = words[1];
     const std::uint32_t w2 = words[2];
@@ -1112,4 +1088,4 @@ const char* ScalarOpcodeName(std::uint8_t opcode) noexcept
     return opcode < kScalarNames.size() ? kScalarNames[opcode] : nullptr;
 }
 
-}  // namespace XenosShaderBinary
+}

@@ -181,9 +181,7 @@ void untile_xbox360_imageheat(const uint8_t* tiled,
         linear_out.clear();
         return;
     }
-    // BC textures still contain a complete block for a partial 1-3 pixel
-    // edge.  Keep this grid identical to the one consumed by the BC blitters
-    // below; floor division made odd-sized atlases allocate too few blocks.
+
     const uint32_t width = (uint32_t)width_pixels;
     const uint32_t height = (uint32_t)height_pixels;
     const uint32_t width_in_blocks = width / block_pixel_size +
@@ -191,11 +189,6 @@ void untile_xbox360_imageheat(const uint8_t* tiled,
     const uint32_t height_in_blocks = height / block_pixel_size +
                                       (height % block_pixel_size != 0u);
 
-    // Xbox 360 "packed mip" layout: textures 16 texels or smaller along an
-    // axis live inside a shared 32x32-block tile at a 16-texel offset on
-    // that axis (mip0 of the packed tail). Verified against the Fable 2
-    // vista background-map pages (128x16 / 64x8 / 32x4: content sits at
-    // block row 16/block_pixel_size, i.e. +16 texels in y).
     uint32_t block_off_x = 0;
     uint32_t block_off_y = 0;
     if (width_pixels <= 16 && height_pixels <= 16) {

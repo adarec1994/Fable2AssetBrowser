@@ -9,20 +9,12 @@ namespace Fx {
 
 namespace {
 
-// Emission-rate scale — EXACT (XEX sub_8322F808 frame-factor init): the
-// engine runs particles at 30 fps internally; factor arrays are
-// {15 fps, x2 rate} / {30 fps, x1 rate}, so the effective emission is
-// rate * 30 per second in both modes.
 constexpr float kRateToPerSec = 30.0f;
-// Tiny floor only to avoid div-by-zero; retail lifetimes go as short as
-// 0.1 s (campfire flame flicker) and must not be clamped up.
+
 constexpr float kMinLife = 0.02f;
-// Stand-in downward accel (world u/s^2) for "falling" effects (water / dust),
-// approximating the attractors we don't simulate.
+
 constexpr float kFallGravity = 3.0f;
 
-// A "falling" effect (its particles should stream downward) inferred from the
-// effect name, since the real fall comes from attractors we don't model.
 bool name_is_faller(const std::string& n) {
     std::string s;
     for (char c : n) s.push_back((char)std::tolower((unsigned char)c));
@@ -36,17 +28,15 @@ std::string to_lower(std::string s) {
     return s;
 }
 
-// Coarse category from an effect name — fallback when an effect can't be
-// resolved against the bank (so unnamed / code-spawned FX still show up).
 struct Category {
     const char* tex_key;
-    float vy;              // upward velocity bias
+    float vy;
     float spread;
     float life;
-    float size;            // half-extent
-    float rate;            // particles/s
+    float size;
+    float rate;
     float r, g, b;
-    int   dst_blend;       // 2 = additive, 6 = alpha
+    int   dst_blend;
     bool  faller;
 };
 
@@ -75,25 +65,19 @@ const std::string* pick_texture(const Bank& bank, const char* key) {
     return nullptr;
 }
 
-// Game space (x,y horizontal; z up) -> render space (y up).
 inline void game_to_render(const float g[3], float r[3]) {
     r[0] = g[0]; r[1] = g[2]; r[2] = g[1];
 }
 
-// Engine BlendFactor enum -> D3D11_BLEND (== enum + 1 for 0..9). A value of
-// -1 means the material had no Src/DestBlendMode param; the engine defaults
-// are (One, InvSrcAlpha) — PREMULTIPLIED alpha (renderer ctor sub_8323FF48
-// stores 1/5 at +0x24/+0x28; the retail particle PS premultiplies vertex
-// alpha into rgb, matching the src=One factor).
 inline int map_blend(int e, int dflt) {
     return (e >= 0 && e <= 9) ? e + 1 : dflt;
 }
 void blend_from_material(const Visual& vis, int& src, int& dst) {
-    src = map_blend(vis.src_blend, 2 /*D3D11_BLEND_ONE*/);
-    dst = map_blend(vis.dst_blend, 6 /*D3D11_BLEND_INV_SRC_ALPHA*/);
+    src = map_blend(vis.src_blend, 2 );
+    dst = map_blend(vis.dst_blend, 6 );
 }
 
-}  // namespace
+}
 
 float System::frand() {
     rng_ = rng_ * 1664525u + 1013904223u;
@@ -115,11 +99,8 @@ void System::build(const Bank& bank, std::vector<Placement>& places) {
 
         const float sc = (p.scale > 0.0001f) ? p.scale : 1.0f;
         const float cy = std::cos(p.yaw), sy = std::sin(p.yaw);
-        (void)name_is_faller;   // fallback categories carry their own flag
+        (void)name_is_faller;
 
-        // Rotate a model-space offset into world game space exactly as the prop
-        // mesh is transformed: full euler matrix for tilted/wall props, else a
-        // yaw spin about the game up axis.
         auto rot_game = [&](const float v[3], float out[3]) {
             if (p.has_rot) {
                 out[0] = p.rot[0]*v[0] + p.rot[1]*v[1] + p.rot[2]*v[2];
@@ -143,7 +124,7 @@ void System::build(const Bank& bank, std::vector<Placement>& places) {
                 if (part.emitter < 0 ||
                     part.emitter >= (int)bank.emitters.size()) continue;
                 const Emitter& em = bank.emitters[part.emitter];
-                if (!em.has_motion) continue;   // lights/attractors don't billboard
+                if (!em.has_motion) continue;
 
                 EmitterRT rt;
                 rt.def = &em;
@@ -154,7 +135,6 @@ void System::build(const Bank& bank, std::vector<Placement>& places) {
                 if (p.has_rot)
                     std::memcpy(rt.rot_game, p.rot, sizeof(rt.rot_game));
 
-                // spawn origin = FX socket + rotated local emitter offset.
                 float lg[3];
                 if (p.has_rot) {
                     rot_game(em.pos.data(), lg);
@@ -168,25 +148,14 @@ void System::build(const Bank& bank, std::vector<Placement>& places) {
                                sock_z + lg[2] * sc };
                 game_to_render(g, rt.origin);
 
-                // Timelines 6/7/8 are WIND-RESPONSE gains, not acceleration:
-                // the XEX update (ParticleEmitter_ApplyWindAndUpdate,
-                // 0x83229DC0) combines them with g_WindDirectionVector and
-                // the gust vectors, scaled by dt^2. The preview simulates a
-                // calm scene, so they contribute nothing here; treating them
-                // as accelerations hurled authored FX (waterfall gain = 5.0)
-                // sideways.
                 rt.accel[0] = rt.accel[1] = rt.accel[2] = 0.0f;
 
-                // Resolved effects carry their motion in the authored
-                // timelines; the gravity stand-in is for name-category
-                // fallbacks only.
                 rt.gravity = 0.0f;
 
                 rt.size_scale = em.size.first_or(1.0f);
                 if (rt.size_scale <= 0.0f) rt.size_scale = 1.0f;
                 rt.spawn_radius = 0.12f * sc;
 
-                // appearance layers from the linked system (skip displacement).
                 if (part.system >= 0 && part.system < (int)bank.systems.size()) {
                     for (const auto& vis : bank.systems[part.system].visuals) {
                         if (vis.texture.empty() || vis.displacement) continue;
@@ -202,20 +171,14 @@ void System::build(const Bank& bank, std::vector<Placement>& places) {
                             v.color[1] = vis.color[1];
                             v.color[2] = vis.color[2];
                         }
-                        // Runtime material merge defaults alpha to 1
-                        // (XEX sub_83233268, record+16).
+
                         v.alpha = vis.has_alpha ? vis.alpha : 1.0f;
-                        // Authored roll (tag 0x200); absent => no spin.
+
                         v.has_rotation = vis.has_rotation;
                         v.rot_speed = vis.rot_speed;
                         v.rot_spread = vis.rot_spread;
                         v.rot_initial_random = vis.rot_initial_random;
-                        // World-aligned quad (tag 0x20000 AlignmentQuat):
-                        // base plane = game ground (X width, Y height),
-                        // rotated by the quat, then the placement rotation.
-                        // Identity => flat ground quad (pool ripples);
-                        // waterfall sheets carry a quat standing the plane
-                        // upright.
+
                         if (vis.has_align_quat) {
                             auto qrot = [&](const float q[4], const float in[3],
                                             float out[3]) {
@@ -244,10 +207,7 @@ void System::build(const Bank& bank, std::vector<Placement>& places) {
                         }
                         if (v.delay > rt.max_visual_delay)
                             rt.max_visual_delay = v.delay;
-                        // CMaterialParamSize "Dimensions" (tag 0x10) used directly
-                        // as the per-particle half-extent (matches the working
-                        // look; the IDA cull radius (sx^2+sy^2)/2 is edge-bound so
-                        // it doesn't force a /2).
+
                         float hx = vis.has_size ? vis.size_x : 0.5f;
                         float hy = vis.has_size ? vis.size_y : 0.5f;
                         if (hx <= 0.0f) hx = 0.5f;
@@ -257,7 +217,7 @@ void System::build(const Bank& bank, std::vector<Placement>& places) {
                         rt.visuals.push_back(std::move(v));
                     }
                 }
-                if (rt.visuals.empty()) continue;   // all-displacement/no sprite
+                if (rt.visuals.empty()) continue;
 
                 inst.emitters.push_back(std::move(rt));
             }
@@ -268,7 +228,7 @@ void System::build(const Bank& bank, std::vector<Placement>& places) {
             p.resolved = true;
             ++resolved_count_;
         } else {
-            // ---- category fallback ----
+
             Category cat = categorize(p.effect_name);
             if (!cat.tex_key) continue;
             inst.fallback = true;
@@ -303,15 +263,10 @@ void System::spawn_one(EmitterRT& rt) {
     const Emitter* d = rt.def;
     Particle pt{};
 
-    // spawn position: origin + small area jitter
     pt.pos[0] = rt.origin[0] + srand2() * rt.spawn_radius;
     pt.pos[1] = rt.origin[1] + srand2() * rt.spawn_radius * 0.3f;
     pt.pos[2] = rt.origin[2] + srand2() * rt.spawn_radius;
 
-    // velocity (game space), byte-faithful to PSE_ComputeInitialVelocity_dir:
-    //   vx = Eval(9)*cos(phi), vy = Eval(10)*sin(phi), vz = Eval(11)
-    // with phi = random azimuth over [0,2pi). The spread/cone is entirely the
-    // radial magnitude (idx9/10) — there is NO extra perturbation in the engine.
     float velx = d ? d->vel_x.eval(rt.age) : rt.fb_spread;
     float vely = d ? d->vel_y.eval(rt.age) : rt.fb_spread;
     float velz = d ? d->vel_z.eval(rt.age) : rt.fb_axial;
@@ -320,8 +275,6 @@ void System::spawn_one(EmitterRT& rt) {
     float gy = vely * std::sin(phi);
     float gz = velz;
 
-    // rotate into world game space (full placement rotation when present —
-    // yaw alone misdirects authored FX entities), scale, game -> render.
     float vg[3];
     if (rt.has_rot) {
         const float* m = rt.rot_game;
@@ -336,11 +289,7 @@ void System::spawn_one(EmitterRT& rt) {
     game_to_render(vg, pt.vel);
 
     pt.age = 0.0f;
-    // EXACT life law (PSE_SpawnParticle 0x8226A650):
-    //   life = Eval(idx4)@emitterAge + rand01 * Eval(idx5)@emitterAge
-    // No randomisation beyond the authored spread. life <= 0 (e.g. the
-    // waterfall sheet has no life keys) = long-lived in retail; stand in
-    // with the material timeline end so the fade cycle completes.
+
     float life0;
     if (d) {
         life0 = d->life.eval(rt.age) + frand() * d->life_spread.eval(rt.age);
@@ -353,21 +302,18 @@ void System::spawn_one(EmitterRT& rt) {
         life0 *= 0.85f + 0.3f * frand();
     }
     pt.life = std::max(kMinLife, life0);
-    // Roll comes from the material (tag 0x200 RotationAngle); no authored
-    // rotation param => the billboard does not spin (the old random spin
-    // visibly rotated waterfall sheets and ground ripples).
+
     const VisualRT* v0 = rt.visuals.empty() ? nullptr : &rt.visuals[0];
     if (v0 && v0->has_rotation) {
         pt.rot = v0->rot_initial_random ? frand() * 6.2831853f : 0.0f;
-        // Bank angular speeds are authored per 30 Hz frame (same convention
-        // as the emission rate).
+
         pt.spin = (v0->rot_speed + v0->rot_spread * srand2()) * 30.0f;
     } else {
         pt.rot = 0.0f;
         pt.spin = 0.0f;
     }
     pt.seed = frand();
-    pt.layer = 0;   // layer is chosen at render from the material timeline (age)
+    pt.layer = 0;
     rt.particles.push_back(std::move(pt));
 }
 
@@ -386,9 +332,8 @@ void System::update(float dt) {
         for (auto& rt : inst.emitters) {
             const Emitter* d = rt.def;
             if (inst.time < rt.start_delay) continue;
-            rt.age = inst.time - rt.start_delay;   // emitter age for timeline eval
+            rt.age = inst.time - rt.start_delay;
 
-            // one-shot initial burst
             if (!rt.emitted_initial) {
                 rt.emitted_initial = true;
                 int init = d ? int(std::max(0.0f, d->initial_num)) : 1;
@@ -396,14 +341,12 @@ void System::update(float dt) {
                 for (int i = 0; i < init; ++i) spawn_one(rt);
             }
 
-            // EXACT emission law (PSE_EmitterUpdate_EmissionRate 0x82271E28):
-            // acc += (Eval(2)@age + rand01*Eval(3)@age) * 30Hz * dt.
             float rate = d ? (d->rate.eval(rt.age) +
                               frand() * d->rate_spread.eval(rt.age)) *
                                  kRateToPerSec
                            : rt.fb_rate;
             float cap = d ? d->max_active : 500.0f;
-            if (!(cap > 0.0f) || cap != cap) cap = 500.0f;   // NaN => unlimited
+            if (!(cap > 0.0f) || cap != cap) cap = 500.0f;
             cap = std::min(cap, 2500.0f);
 
             rt.accum += std::max(rate, 0.0f) * dt;
@@ -414,7 +357,6 @@ void System::update(float dt) {
                 spawn_one(rt);
             }
 
-            // integrate: v += (accel - gravity)*dt ; pos += v*dt
             for (auto& pt : rt.particles) {
                 pt.age += dt;
                 pt.vel[0] += rt.accel[0] * dt;
@@ -450,26 +392,7 @@ void System::build_batches(const float cr[3], const float cu[3],
             const Emitter* d = rt.def;
             for (const auto& pt : rt.particles) {
                 if (rt.visuals.empty()) continue;
-                // MATERIAL TIMELINE (retail semantics): the system's material
-                // children are KEYFRAMES of one material over the particle's
-                // age, keyed by StartTime (delay). The retail pixel shaders
-                // (entries 244-259) cross-fade up to 4 node TEXTURES by a
-                // per-vertex age coordinate against per-node thresholds
-                // (ParticleParams_Blend c31/c46); scalar params merge through
-                // the runtime record (XEX sub_83233268 with defaults colour=1,
-                // alpha=1). Host: lerp colour/alpha/size across the node
-                // segment and cross-fade the two node textures with
-                // complementary quads (the exact per-node fade rate constant
-                // lives in the not-yet-located constant uploader; the
-                // full-segment lerp hits every node's authored value at its
-                // authored time).
-                // Material time base — EXACT (PSE_ParticleIntegrate_kernel
-                // 0x8321BF20): per-particle attributes lerp between
-                // consecutive material nodes by the particle's RAW age
-                // against the node time table (w = (age - t_i) * invSpan).
-                // Short-lived particles sample only the early ramp (the
-                // campfire flame's 0.1 s particles ride node 0's alpha
-                // ramp — that is the authored soft flicker).
+
                 const float t_life = pt.life > 0 ? pt.age / pt.life : 1.0f;
                 const float mat_t = pt.age;
                 int seg = 0;
@@ -490,8 +413,6 @@ void System::build_batches(const float cr[3], const float cu[3],
                 };
                 const float t = t_life;
 
-                // size over life: material half-extents (node-lerped)
-                // * motion idx-12 curve.
                 float sfac = rt.size_scale;
                 if (d && !d->size.empty()) sfac = d->size.eval(pt.age);
                 if (sfac <= 0.0f) sfac = 1.0f;
@@ -501,10 +422,6 @@ void System::build_batches(const float cr[3], const float cu[3],
                     (vb ? lerpf(va.half_y, vb->half_y, w) : va.half_y) * sfac;
                 if (hx <= 0.0f || hy <= 0.0f) continue;
 
-                // Colour/alpha = the node-lerped material values. With the
-                // lifetime-mapped material time the authored cycles land on 0
-                // alpha at death themselves (flame/flare/waterfall all key
-                // their last node to 0) — no host fade needed.
                 float col[3] = {
                     vb ? lerpf(va.color[0], vb->color[0], w) : va.color[0],
                     vb ? lerpf(va.color[1], vb->color[1], w) : va.color[1],
@@ -522,7 +439,6 @@ void System::build_batches(const float cr[3], const float cu[3],
                 float uz = -cr[2] * s + cu[2] * c;
                 float px = pt.pos[0], py = pt.pos[1], pz = pt.pos[2];
 
-                // Emit one textured quad for a material node.
                 auto emit_quad = [&](const VisualRT& vis, float node_a) {
                     if (vis.texture.empty() || node_a <= 0.003f) return;
                     const int cols = std::max(1, vis.cols);
@@ -530,11 +446,7 @@ void System::build_batches(const float cr[3], const float cu[3],
                     const int frames = cols * rows;
                     float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
                     if (frames > 1) {
-                        // Retail computes the frame in the PS from a
-                        // per-vertex frame float (entry 245: floor/frac by
-                        // divisions); host selects the frame CPU-side —
-                        // identical UV result. Frame speed is authored in
-                        // bank frame units (30 Hz), like the emission rate.
+
                         int f;
                         if (vis.frame_speed > 0.0f)
                             f = int(pt.age * vis.frame_speed * 30.0f);
@@ -548,8 +460,7 @@ void System::build_batches(const float cr[3], const float cu[3],
                     }
                     FxBatch& batch =
                         get_batch(vis.texture, vis.src_blend, vis.dst_blend);
-                    // World-aligned materials use their authored plane;
-                    // everything else is a camera-facing billboard with roll.
+
                     const float Rx = vis.aligned ? vis.axis_r[0] : rx;
                     const float Ry = vis.aligned ? vis.axis_r[1] : ry;
                     const float Rz = vis.aligned ? vis.axis_r[2] : rz;
@@ -575,9 +486,7 @@ void System::build_batches(const float cr[3], const float cu[3],
                 };
 
                 if (vb && vb->texture != va.texture) {
-                    // Texture cross-fade between material nodes: retail blends
-                    // the node textures inside one draw (PS entries 248-259);
-                    // host draws two complementary quads.
+
                     emit_quad(va, a * (1.0f - w));
                     emit_quad(*vb, a * w);
                 } else {
@@ -587,16 +496,12 @@ void System::build_batches(const float cr[3], const float cu[3],
         }
     }
 
-    // Back-to-front quad sort within each batch (retail: sub_83221FC8
-    // builds a distance-sorted index array before submitting when the
-    // emitter's SortParticles flag is set; sorting always is the safe host
-    // equivalent for alpha blending).
     for (auto& b : out) {
         const size_t quads = b.verts.size() / 6;
         if (quads < 2) continue;
         std::vector<std::pair<float, uint32_t>> order(quads);
         for (size_t q = 0; q < quads; ++q) {
-            // v00 and v11 are opposite corners: their midpoint = centre.
+
             const FxVertex& p0 = b.verts[q * 6 + 0];
             const FxVertex& p1 = b.verts[q * 6 + 1];
             const float cx = 0.5f * (p0.x + p1.x) - ce[0];
@@ -627,4 +532,4 @@ std::vector<std::string> System::textures() const {
     return out;
 }
 
-}  // namespace Fx
+}

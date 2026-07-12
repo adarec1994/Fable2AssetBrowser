@@ -3866,6 +3866,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
     };
 
     auto draw_one_with_edits = [&](const MPPerMesh& m, ID3D11BlendState* bs) {
+        if (m.edit_xform.deleted) return;
         const LevelEdit::EditXform* base =
             m.edit_xform.active() ? &m.edit_xform : nullptr;
         struct Seg {
@@ -3897,11 +3898,13 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
             if (s.start > cursor) {
                 draw_regular_range(m, cursor, s.start - cursor, bs);
             }
-            upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test,
-                               m.cloth_sim, s.ex);
-            draw_regular_range(m, s.start, s.count, bs);
-            upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test,
-                               m.cloth_sim, base);
+            if (!s.ex->deleted) {
+                upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test,
+                                   m.cloth_sim, s.ex);
+                draw_regular_range(m, s.start, s.count, bs);
+                upload_per_mesh_cb(m.highlight, m.is_cloth, m.alpha_test,
+                                   m.cloth_sim, base);
+            }
             if (s.start + s.count > cursor) cursor = s.start + s.count;
         }
         if (cursor < m.index_count) {
@@ -4173,6 +4176,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 auto it = mp.range_edit_xforms.find(pr.selection_id);
                 if (it != mp.range_edit_xforms.end()) ex = &it->second;
                 else if (m.edit_xform.active()) ex = &m.edit_xform;
+                if (ex && ex->deleted) continue;
                 upload_per_mesh_cb(true, false, false, false, ex);
                 draw_regular_range(m, pr.index_start, pr.index_count, bs);
                 ++dbg_matched;

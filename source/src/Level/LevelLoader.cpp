@@ -2305,7 +2305,7 @@ collect_streaming_model_candidates(const std::vector<std::string>& streaming_bnk
         const std::string mounted = resolve_streaming_bnk_path(vfs_path);
         if (mounted.empty()) continue;
         try {
-            BnkCache::Entry& bnk = BnkCache::get(mounted);
+            const BnkCache::Entry bnk = BnkCache::get(mounted);
             const auto& files = bnk.reader->list_files();
             auto add_candidate = [&](std::string hint,
                                       bool from_gmd,
@@ -5881,7 +5881,7 @@ bool Open(const FlatAssetEntry& entry)
 
                 for (const auto& bnk_path : candidate_bnks) {
                     try {
-                        BnkCache::Entry& bnk = BnkCache::get(bnk_path);
+                        const BnkCache::Entry bnk = BnkCache::get(bnk_path);
                         const auto& files = bnk.reader->list_files();
                         bool had_gmd = false;
                         for (size_t i = 0; i < files.size(); ++i) {
@@ -8093,7 +8093,7 @@ bool Open(const FlatAssetEntry& entry)
         }
 
         try {
-            BnkCache::Entry& bnk = BnkCache::get(mounted_path);
+            const BnkCache::Entry bnk = BnkCache::get(mounted_path);
             const auto& files = bnk.reader->list_files();
             size_t hkx_count = 0;
             size_t total_rb  = 0;

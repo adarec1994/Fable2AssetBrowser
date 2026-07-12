@@ -2179,7 +2179,7 @@ void process_pending_loads() {
                     g_pending_terrain_ghf_entry.file_index >= 0)
                 {
                     try {
-                        auto& bc = BnkCache::get(
+                        const auto bc = BnkCache::get(
                             g_pending_terrain_ghf_entry.bnk_path);
                         const auto& files = bc.reader->list_files();
                         const int idx =

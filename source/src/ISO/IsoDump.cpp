@@ -1587,7 +1587,7 @@ void dump_gdb_save_files() {
         for (const auto& bp : all_bnks) {
             if (S.cancel_requested.load() || S.exiting.load()) break;
             try {
-                auto& ce = ::BnkCache::get(bp);
+                const auto ce = ::BnkCache::get(bp);
                 const auto& files = ce.reader->list_files();
                 const std::string nested_prefix =
                     nested_asset_prefix_for_bnk(bp);

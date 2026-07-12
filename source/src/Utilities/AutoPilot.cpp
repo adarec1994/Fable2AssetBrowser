@@ -2,6 +2,7 @@
 #include "AutoPilot.h"
 
 #include "State.h"
+#include "../Level/LevelEdit.h"
 #include "../Level/LevelLoader.h"
 #include "../UI/ModelPreview.h"
 #include "../UI/UI_Panels.h"
@@ -86,6 +87,29 @@ void AutoPilot_Init() {
         else if (arg == "--vistaonly") g_vista_only = true;
         else if (arg == "--skyshot") g_sky_shot = true;
         else if (arg == "--terrainshot") g_terrain_shot = true;
+        else if (const char* v = value("--levprobe")) {
+            std::string msg;
+            const bool ok = LevelEdit::RunLevProbe(v, msg);
+            if (ok) OutputLog::success("autopilot: " + msg);
+            else    OutputLog::error("autopilot: " + msg);
+            std::fprintf(ok ? stdout : stderr, "%s\n", msg.c_str());
+            std::fflush(nullptr);
+            ExitProcess(ok ? 0 : 1);
+        }
+        else if (const char* v = value("--levprobefloat")) {
+            std::string msg;
+            const bool ok = LevelEdit::RunLevProbeMode(v, true, msg);
+            std::fprintf(ok ? stdout : stderr, "%s\n", msg.c_str());
+            std::fflush(nullptr);
+            ExitProcess(ok ? 0 : 1);
+        }
+        else if (const char* v = value("--fixstream")) {
+            std::string msg;
+            const bool ok = LevelEdit::RunStreamFix(v, msg);
+            std::fprintf(ok ? stdout : stderr, "%s\n", msg.c_str());
+            std::fflush(nullptr);
+            ExitProcess(ok ? 0 : 1);
+        }
     }
     if (!g_level_query.empty()) {
         g_stage = Stage::OpenRoot;

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
 #include <vector>
 
 namespace ISO {
@@ -339,6 +340,182 @@ bool IsoMount::write_at(const std::string& virtual_path,
         }
     }
     return got == n;
+}
+
+uint64_t IsoMount::iso_size() const {
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    if (!fp_) return 0;
+#ifdef _WIN32
+    _fseeki64(fp_, 0, SEEK_END);
+    const long long n = _ftelli64(fp_);
+#else
+    fseeko(fp_, 0, SEEK_END);
+    const long long n = (long long)ftello(fp_);
+#endif
+    return n > 0 ? (uint64_t)n : 0;
+}
+
+bool IsoMount::raw_read_abs(uint64_t abs, void* dst, size_t n) {
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    if (!fp_) return false;
+    if (!seek_abs(fp_, abs)) return false;
+    return std::fread(dst, 1, n, fp_) == n;
+}
+
+bool IsoMount::raw_write_abs(uint64_t abs, const void* src, size_t n) {
+    if (iso_path_.empty()) return false;
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    const std::string saved_iso_path = iso_path_;
+    if (fp_) { std::fclose(fp_); fp_ = nullptr; }
+    std::FILE* wf = nullptr;
+#ifdef _WIN32
+    fopen_s(&wf, saved_iso_path.c_str(), "r+b");
+#else
+    wf = std::fopen(saved_iso_path.c_str(), "r+b");
+#endif
+    bool ok = false;
+    if (wf) {
+#ifdef _WIN32
+        ok = _fseeki64(wf, (long long)abs, SEEK_SET) == 0;
+#else
+        ok = fseeko(wf, (off_t)abs, SEEK_SET) == 0;
+#endif
+        if (ok) ok = std::fwrite(src, 1, n, wf) == n;
+        std::fflush(wf);
+        std::fclose(wf);
+    }
+#ifdef _WIN32
+    fopen_s(&fp_, saved_iso_path.c_str(), "rb");
+#else
+    fp_ = std::fopen(saved_iso_path.c_str(), "rb");
+#endif
+    return ok;
+}
+
+namespace {
+bool scan_dir_for_entry(std::FILE* fp, uint64_t base,
+                        uint32_t dir_sector, uint32_t dir_size,
+                        const std::string& prefix_lower,
+                        const std::string& want_lower,
+                        uint64_t& out_entry_abs) {
+    std::vector<uint8_t> blob;
+    if (!read_dir_blob(fp, base, dir_sector, dir_size, blob)) return false;
+    const uint64_t blob_abs = base + (uint64_t)dir_sector * kSectorSize;
+
+    struct Sub { uint32_t sector; uint32_t size; std::string vlower; };
+    std::vector<Sub> subs;
+    std::vector<uint32_t> stack;
+    std::vector<bool> seen(blob.size() / 4 + 1, false);
+    stack.push_back(0);
+    while (!stack.empty()) {
+        const uint32_t off = stack.back();
+        stack.pop_back();
+        if ((size_t)off * 4u >= blob.size()) continue;
+        if (seen[off]) continue;
+        seen[off] = true;
+        DirEntry e;
+        if (!parse_entry(blob.data(), blob.size(), off * 4u, e)) continue;
+        if (e.name_len == 0 && e.left_off == 0 && e.right_off == 0 &&
+            e.start_sector == 0 && e.file_size == 0) continue;
+        if (e.left_off != 0 && e.left_off != 0xFFFF) {
+            stack.push_back(e.left_off);
+        }
+        if (e.right_off != 0 && e.right_off != 0xFFFF) {
+            stack.push_back(e.right_off);
+        }
+        const std::string vlower = prefix_lower.empty()
+            ? lower(e.name)
+            : prefix_lower + "/" + lower(e.name);
+        if (e.attrs & kAttrDirectory) {
+            if (want_lower.size() > vlower.size() &&
+                want_lower.compare(0, vlower.size(), vlower) == 0 &&
+                want_lower[vlower.size()] == '/') {
+                subs.push_back({e.start_sector, e.file_size, vlower});
+            }
+        } else if (vlower == want_lower) {
+            out_entry_abs = blob_abs + (uint64_t)off * 4u;
+            return true;
+        }
+    }
+    for (const auto& s : subs) {
+        if (scan_dir_for_entry(fp, base, s.sector, s.size, s.vlower,
+                               want_lower, out_entry_abs)) {
+            return true;
+        }
+    }
+    return false;
+}
+}
+
+bool IsoMount::locate_dirent(const std::string& virtual_path,
+                             uint64_t& sector_field_abs,
+                             uint64_t& size_field_abs) {
+    sector_field_abs = 0;
+    size_field_abs = 0;
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    if (!fp_) return false;
+    uint32_t root_sector = 0, root_size = 0;
+    uint64_t base = 0;
+    if (!detect_base_offset_and_root(fp_, base, root_sector, root_size)) {
+        return false;
+    }
+    uint64_t entry_abs = 0;
+    const std::string want = lower(virtual_path);
+    if (!scan_dir_for_entry(fp_, base, root_sector, root_size,
+                            std::string(), want, entry_abs) ||
+        entry_abs == 0) {
+        return false;
+    }
+    sector_field_abs = entry_abs + 4;
+    size_field_abs = entry_abs + 8;
+    return true;
+}
+
+bool IsoMount::repoint(const std::string& virtual_path,
+                       uint32_t new_sector, uint32_t new_size) {
+    uint64_t sector_abs = 0, size_abs = 0;
+    if (!locate_dirent(virtual_path, sector_abs, size_abs)) return false;
+    uint8_t buf[8];
+    buf[0] = uint8_t(new_sector);
+    buf[1] = uint8_t(new_sector >> 8);
+    buf[2] = uint8_t(new_sector >> 16);
+    buf[3] = uint8_t(new_sector >> 24);
+    buf[4] = uint8_t(new_size);
+    buf[5] = uint8_t(new_size >> 8);
+    buf[6] = uint8_t(new_size >> 16);
+    buf[7] = uint8_t(new_size >> 24);
+    if (!raw_write_abs(sector_abs, buf, 8)) return false;
+    {
+        std::lock_guard<std::mutex> lock(read_mutex_);
+        auto it = files_.find(lower(virtual_path));
+        if (it != files_.end()) {
+            it->second.sector = new_sector;
+            it->second.size = new_size;
+        }
+        const std::string key = lower(virtual_path);
+        auto cit = cache_index_.find(key);
+        if (cit != cache_index_.end()) {
+            cache_bytes_ -= cit->second->bytes.size();
+            cache_.erase(cit->second);
+            cache_index_.erase(cit);
+        }
+    }
+    return true;
+}
+
+bool IsoMount::truncate_to(uint64_t size) {
+    if (iso_path_.empty() || size == 0) return false;
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    const std::string saved_iso_path = iso_path_;
+    if (fp_) { std::fclose(fp_); fp_ = nullptr; }
+    std::error_code ec;
+    std::filesystem::resize_file(saved_iso_path, size, ec);
+#ifdef _WIN32
+    fopen_s(&fp_, saved_iso_path.c_str(), "rb");
+#else
+    fp_ = std::fopen(saved_iso_path.c_str(), "rb");
+#endif
+    return !ec;
 }
 
 std::string IsoMount::make_iso_path(const std::string& virtual_path) {

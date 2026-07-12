@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <fstream>
+#include <thread>
 #include <vector>
 #ifdef _WIN32
 #include <d3d11.h>
@@ -40,6 +41,17 @@
 ModelPreview g_mp;
 
 bool g_mp_initialized = false;
+
+struct LevelOpThread {
+    std::thread t;
+    ~LevelOpThread() {
+        if (t.joinable()) t.join();
+    }
+    void launch(std::thread&& nt) {
+        if (t.joinable()) t.join();
+        t = std::move(nt);
+    }
+};
 
 static void apply_tex_channel_mask(std::vector<uint8_t>& rgba) {
     if (S.tex_show_r && S.tex_show_g && S.tex_show_b && S.tex_show_a) return;
@@ -442,31 +454,57 @@ void draw_main(GLFWwindow* window) {
                 static bool s_confirm_restore = false;
                 const bool level_ready = LevelEdit::Available();
                 if (ImGui::BeginMenu("Level", level_ready)) {
+                    static LevelOpThread s_toggle_thread;
                     bool edit_on = LevelEdit::Enabled();
-                    if (ImGui::MenuItem("Edit Level", nullptr, &edit_on)) {
-                        std::string msg;
-                        if (!LevelEdit::SetEnabled(edit_on, msg)) {
-                            OutputLog::error("level edit: " + msg);
-                        } else {
+                    if (ImGui::MenuItem("Edit Level", nullptr, &edit_on,
+                                        !LevelEdit::Saving())) {
+                        if (!edit_on) {
+                            std::string msg;
+                            LevelEdit::SetEnabled(false, msg);
                             OutputLog::info("level edit: " + msg);
+                        } else {
+                            s_toggle_thread.launch(std::thread([] {
+                                progress_open(100,
+                                              "Backing up level files...");
+                                std::string msg;
+                                const bool ok =
+                                    LevelEdit::SetEnabled(true, msg);
+                                progress_done();
+                                if (ok) {
+                                    OutputLog::success("level edit: " +
+                                                       msg);
+                                } else {
+                                    OutputLog::error("level edit: " + msg);
+                                }
+                            }));
                         }
                     }
                     if (LevelEdit::Enabled()) {
+                        const bool saving = LevelEdit::Saving();
                         const std::string save_label =
-                            LevelEdit::Dirty()
-                                ? "Save Level*"
-                                : "Save Level";
+                            saving ? "Saving..."
+                                   : (LevelEdit::Dirty() ? "Save Level*"
+                                                         : "Save Level");
                         if (ImGui::MenuItem(save_label.c_str(), nullptr,
-                                            false, LevelEdit::Dirty())) {
-                            std::string msg;
-                            if (LevelEdit::Save(msg)) {
-                                OutputLog::success("level edit: " + msg);
-                            } else {
-                                OutputLog::error("level edit: " + msg);
-                            }
+                                            false,
+                                            LevelEdit::Dirty() && !saving)) {
+                            static LevelOpThread s_save_thread;
+                            s_save_thread.launch(std::thread([] {
+                                progress_open(100, "Saving level...");
+                                std::string msg;
+                                const bool ok = LevelEdit::Save(msg);
+                                progress_done();
+                                if (ok) {
+                                    OutputLog::success("level edit: " +
+                                                       msg);
+                                } else {
+                                    OutputLog::error("level edit: " + msg);
+                                }
+                            }));
                         }
                         ImGui::Separator();
-                        if (ImGui::MenuItem("Restore Defaults")) {
+                        if (ImGui::MenuItem("Restore Defaults", nullptr,
+                                            false, !saving)) {
                             s_confirm_restore = true;
                         }
                     }
@@ -486,12 +524,18 @@ void draw_main(GLFWwindow* window) {
                         "saved or unsaved edits are lost.");
                     ImGui::Spacing();
                     if (ImGui::Button("Restore", ImVec2(120, 0))) {
-                        std::string msg;
-                        if (LevelEdit::RestoreDefaults(msg)) {
-                            OutputLog::success("level edit: " + msg);
-                        } else {
-                            OutputLog::error("level edit: " + msg);
-                        }
+                        static LevelOpThread s_restore_thread;
+                        s_restore_thread.launch(std::thread([] {
+                            progress_open(100, "Restoring level files...");
+                            std::string msg;
+                            const bool ok = LevelEdit::RestoreDefaults(msg);
+                            progress_done();
+                            if (ok) {
+                                OutputLog::success("level edit: " + msg);
+                            } else {
+                                OutputLog::error("level edit: " + msg);
+                            }
+                        }));
                         ImGui::CloseCurrentPopup();
                     }
                     ImGui::SetItemDefaultFocus();

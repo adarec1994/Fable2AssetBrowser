@@ -922,6 +922,8 @@ int pick_level_mesh_at(const ImVec2& mouse,
                 float rd[3] = { dx, dy, dz };
                 float tscale = 1.0f;
                 auto eo = g_mp.range_edit_xforms.find(pr.selection_id);
+                if (eo != g_mp.range_edit_xforms.end() &&
+                    eo->second.deleted) continue;
                 if (eo != g_mp.range_edit_xforms.end()) {
                     const LevelEdit::EditXform& x = eo->second;
                     const float rel[3] = {
@@ -988,6 +990,7 @@ int pick_level_mesh_at(const ImVec2& mouse,
             continue;
         }
         if (m.name.rfind("engine_level:", 0) == 0) continue;
+        if (m.edit_xform.deleted) continue;
 
         float t = 0.0f;
         float ctr[3] = { m.center[0], m.center[1], m.center[2] };
@@ -1366,7 +1369,7 @@ void draw_model_in_panel(ID3D11Device* device) {
             }
             return ids;
         };
-        enum { kEditMove, kEditRotate };
+        enum { kEditMove, kEditRotate, kEditDelete };
         auto apply_group_edit = [&](int what, const float v[3]) {
             if (whole_mesh_sel) {
                 const float orig[3] = { sel_mesh.center[0],
@@ -1376,8 +1379,10 @@ void draw_model_in_panel(ID3D11Device* device) {
                 info.orig_pos = orig;
                 if (what == kEditMove) {
                     LevelEdit::AddMove(edit_key, v, info);
-                } else {
+                } else if (what == kEditRotate) {
                     LevelEdit::AddRotate(edit_key, v, info);
+                } else {
+                    LevelEdit::SetDeleted(edit_key, info);
                 }
                 return;
             }
@@ -1397,8 +1402,10 @@ void draw_model_in_panel(ID3D11Device* device) {
                     info.gdb_rot_off = pr.gdb_rot_off;
                     if (what == kEditMove) {
                         LevelEdit::AddMove(pr.selection_id, v, info);
-                    } else {
+                    } else if (what == kEditRotate) {
                         LevelEdit::AddRotate(pr.selection_id, v, info);
+                    } else {
+                        LevelEdit::SetDeleted(pr.selection_id, info);
                     }
                 }
             }
@@ -1407,6 +1414,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                                 std::isfinite(sel_pos[1]) &&
                                 std::isfinite(sel_pos[2]);
         const bool edit_active = LevelEdit::Enabled() &&
+                                 !LevelEdit::Saving() &&
                                  (whole_mesh_sel || sel_found) &&
                                  sel_finite;
 
@@ -1536,6 +1544,19 @@ void draw_model_in_panel(ID3D11Device* device) {
             LevelGizmo::CancelDrag();
         }
         if (dbg_sel_changed) DebugTrace::log("sel: gizmo done");
+
+        if (edit_active && !ImGui::GetIO().WantTextInput &&
+            ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+            DebugTrace::log("del: id=%u hash=%llu",
+                            ::g_selected_level_pick_id,
+                            (unsigned long long)::g_selected_level_hash);
+            LevelEdit::PushUndoSnapshot(collect_group_ids());
+            apply_group_edit(kEditDelete, nullptr);
+            ::g_selected_level_mesh_idx = -1;
+            ::g_selected_level_pick_id = 0;
+            ::g_selected_level_hash = 0;
+            LevelGizmo::CancelDrag();
+        }
     }
 
     if (g_mp.no_tilt && LevelEdit::Enabled() && hovered &&
@@ -1549,7 +1570,8 @@ void draw_model_in_panel(ID3D11Device* device) {
     }
 
     if (LevelEdit::Enabled() && !ImGui::GetIO().WantTextInput &&
-        ImGui::GetIO().KeyAlt && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+        (ImGui::GetIO().KeyAlt || ImGui::GetIO().KeyCtrl) &&
+        ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
         if (!LevelEdit::Undo()) {
             OutputLog::info("level edit: nothing to undo");
         }

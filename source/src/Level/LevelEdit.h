@@ -16,8 +16,9 @@ struct EditXform {
     float pivot[3] = {0, 0, 0};
     float scale = 1.0f;
     bool has_rs = false;
+    bool deleted = false;
     bool active() const {
-        return has_rs || off[0] != 0.0f || off[1] != 0.0f ||
+        return deleted || has_rs || off[0] != 0.0f || off[1] != 0.0f ||
                off[2] != 0.0f;
     }
 };
@@ -35,6 +36,7 @@ struct Addition {
     std::string model_path;
     float pos[3] = {0, 0, 0};
     float yaw_deg = 0.0f;
+    bool removed = false;
 };
 
 void OnLevelLoaded(const FlatAssetEntry& entry);
@@ -57,11 +59,13 @@ void AddMove(uint32_t selection_id, const float step[3],
              const InstInfo& info);
 void AddRotate(uint32_t selection_id, const float step_deg[3],
                const InstInfo& info);
+void SetDeleted(uint32_t selection_id, const InstInfo& info);
 
 int AddPlacement(const std::string& model_path, const float pos[3]);
 void GetAdditions(std::vector<Addition>& out);
 
 bool   Dirty();
+bool   Saving();
 size_t EditedCount();
 
 uint64_t Revision();
@@ -77,5 +81,12 @@ bool Save(std::string& msg);
 bool RestoreDefaults(std::string& msg);
 
 void ClearEdits();
+
+bool RunLevProbe(const std::string& bnk_path, std::string& msg);
+
+bool RunLevProbeMode(const std::string& bnk_path, bool float_only,
+                     std::string& msg);
+
+bool RunStreamFix(const std::string& streaming_path, std::string& msg);
 
 }

@@ -44,6 +44,21 @@ public:
     bool write_at(const std::string& virtual_path,
                   uint64_t off, const void* src, size_t n);
 
+    uint64_t base_offset() const { return base_offset_; }
+    uint64_t iso_size() const;
+
+    bool raw_read_abs(uint64_t abs, void* dst, size_t n);
+    bool raw_write_abs(uint64_t abs, const void* src, size_t n);
+
+    bool locate_dirent(const std::string& virtual_path,
+                       uint64_t& sector_field_abs,
+                       uint64_t& size_field_abs);
+
+    bool repoint(const std::string& virtual_path,
+                 uint32_t new_sector, uint32_t new_size);
+
+    bool truncate_to(uint64_t size);
+
     void clear_cache();
 
     static std::string make_iso_path(const std::string& virtual_path);

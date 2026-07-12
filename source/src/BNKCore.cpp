@@ -101,7 +101,7 @@ inline std::string normalize_path(const std::string& p) {
     return p;
 }
 
-inline Entry& get(const std::string& path) {
+inline Entry get(const std::string& path) {
     const std::string key = normalize_path(path);
     {
         std::lock_guard<std::mutex> lk(cache_mutex());
@@ -143,7 +143,7 @@ inline Entry& get(const std::string& path) {
 
 inline int find_index(const std::string& path, const std::string& name_lower) {
     try {
-        Entry& e = get(path);
+        const Entry e = get(path);
         auto it = e.index_map->find(name_lower);
         return (it == e.index_map->end()) ? -1 : it->second;
     } catch (...) {
@@ -152,7 +152,7 @@ inline int find_index(const std::string& path, const std::string& name_lower) {
 }
 
 inline std::vector<uint8_t> extract_bytes(const std::string& path, int index) {
-    Entry& e = get(path);
+    const Entry e = get(path);
     std::lock_guard<std::mutex> lk(*e.io_mutex);
     return e.reader->extract_index_bytes(index);
 }

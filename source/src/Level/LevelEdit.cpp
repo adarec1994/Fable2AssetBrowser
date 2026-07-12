@@ -1,6 +1,8 @@
 #include "LevelEdit.h"
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -11,9 +13,13 @@
 #include <unordered_set>
 #include <vector>
 
+#include <zlib.h>
+
 #include "../BNKCore.cpp"
 #include "../ISO/IsoMount.h"
 #include "../UI/OutputLog.h"
+#include "../Utilities/DebugTrace.h"
+#include "../Utilities/Progress.h"
 #include "../Utilities/State.h"
 #include "BnkWriter.h"
 #include "LevelLoader.h"
@@ -31,6 +37,7 @@ struct EditEntry {
     uint32_t gdb_off[3] = {0, 0, 0};
     uint32_t gdb_rot_off[3] = {0, 0, 0};
     bool registered = false;
+    bool deleted = false;
 
     bool moved() const {
         return delta[0] != 0.0f || delta[1] != 0.0f || delta[2] != 0.0f;
@@ -39,7 +46,7 @@ struct EditEntry {
         return rot_deg[0] != 0.0f || rot_deg[1] != 0.0f ||
                rot_deg[2] != 0.0f;
     }
-    bool changed() const { return moved() || rotated(); }
+    bool changed() const { return moved() || rotated() || deleted; }
 };
 
 struct FileTarget {
@@ -56,6 +63,7 @@ struct FileTarget {
 struct UndoState {
     float delta[3];
     float rot_deg[3];
+    bool deleted;
 };
 
 struct UndoStep {
@@ -66,6 +74,7 @@ struct ModuleState {
     bool available = false;
     bool enabled   = false;
     bool dirty     = false;
+    bool saving    = false;
     uint64_t revision = 0;
 
     FlatAssetEntry entry{};
@@ -95,7 +104,7 @@ void fill_bnk_target(FileTarget& t) {
     if (t.bnk_path.empty() || t.file_index < 0) return;
     t.in_iso = ISO::IsoMount::is_iso_path(t.bnk_path);
     try {
-        auto& bc = BnkCache::get(t.bnk_path);
+        const auto bc = BnkCache::get(t.bnk_path);
         const auto& files = bc.reader->list_files();
         if (t.file_index < (int)files.size()) {
             t.disk_offset = bc.reader->entry_disk_offset(t.file_index);
@@ -166,6 +175,60 @@ void put_f32_be(uint8_t* p, float v) {
     p[3] = uint8_t(bits);
 }
 
+bool copy_file_with_progress(const std::string& src,
+                             const std::string& dst,
+                             const std::string& what,
+                             std::string& msg,
+                             bool cancellable = true,
+                             bool remove_dst_on_fail = true) {
+    std::error_code ec;
+    const uint64_t total = std::filesystem::file_size(src, ec);
+    if (ec) {
+        msg = "cannot stat " + src;
+        return false;
+    }
+    std::ifstream in(src, std::ios::binary);
+    if (!in) {
+        msg = "cannot open " + src;
+        return false;
+    }
+    std::ofstream out(dst, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        msg = "cannot write " + dst;
+        return false;
+    }
+    const size_t kChunk = 8u << 20;
+    std::vector<char> buf(kChunk);
+    uint64_t done = 0;
+    const int total_mb = (int)(total >> 20) + 1;
+    auto fail = [&](const std::string& why) {
+        out.close();
+        if (remove_dst_on_fail) std::filesystem::remove(dst, ec);
+        msg = why;
+        return false;
+    };
+    while (done < total) {
+        if (cancellable && S.cancel_requested.load()) {
+            return fail("cancelled");
+        }
+        progress_update((int)(done >> 20), total_mb,
+                        what + " (" + std::to_string(done >> 20) + " / " +
+                        std::to_string(total_mb) + " MB)");
+        const size_t n =
+            (size_t)std::min<uint64_t>(kChunk, total - done);
+        in.read(buf.data(), (std::streamsize)n);
+        if ((size_t)in.gcount() != n) {
+            return fail("short read from " + src);
+        }
+        out.write(buf.data(), (std::streamsize)n);
+        if (!out) {
+            return fail("short write to " + dst);
+        }
+        done += n;
+    }
+    return true;
+}
+
 bool ensure_backup(const FileTarget& t, const char* tag,
                    std::unordered_set<std::string>& backed,
                    std::string& msg) {
@@ -175,11 +238,13 @@ bool ensure_backup(const FileTarget& t, const char* tag,
         if (!backed.insert(t.file_path).second) return true;
         const std::filesystem::path bak(t.file_path + ".bak");
         if (std::filesystem::exists(bak, ec)) return true;
-        std::filesystem::copy_file(t.file_path, bak,
-                                   std::filesystem::copy_options::none, ec);
-        if (ec) {
-            msg = "backup failed: " + ec.message() + " (" + bak.string() +
-                  ")";
+        std::string cerr;
+        if (!copy_file_with_progress(
+                t.file_path, bak.string(),
+                "Backing up " +
+                    std::filesystem::path(t.file_path).filename().string(),
+                cerr)) {
+            msg = "backup failed: " + cerr;
             return false;
         }
         OutputLog::success("level edit: backup written to " + bak.string());
@@ -189,11 +254,13 @@ bool ensure_backup(const FileTarget& t, const char* tag,
         if (!backed.insert(t.bnk_path).second) return true;
         const std::filesystem::path bak(t.bnk_path + ".bak");
         if (std::filesystem::exists(bak, ec)) return true;
-        std::filesystem::copy_file(t.bnk_path, bak,
-                                   std::filesystem::copy_options::none, ec);
-        if (ec) {
-            msg = "backup failed: " + ec.message() + " (" + bak.string() +
-                  ")";
+        std::string cerr;
+        if (!copy_file_with_progress(
+                t.bnk_path, bak.string(),
+                "Backing up " +
+                    std::filesystem::path(t.bnk_path).filename().string(),
+                cerr)) {
+            msg = "backup failed: " + cerr;
             return false;
         }
         OutputLog::success("level edit: backup written to " + bak.string());
@@ -235,10 +302,15 @@ bool restore_target(const FileTarget& t, const char* tag,
         if (!restored.insert(t.file_path).second) return true;
         const std::filesystem::path bak(t.file_path + ".bak");
         if (!std::filesystem::exists(bak, ec)) return true;
-        std::filesystem::copy_file(
-            bak, t.file_path,
-            std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec) { msg = "restore failed: " + ec.message(); return false; }
+        std::string cerr;
+        if (!copy_file_with_progress(
+                bak.string(), t.file_path,
+                "Restoring " +
+                    std::filesystem::path(t.file_path).filename().string(),
+                cerr, false, false)) {
+            msg = "restore failed: " + cerr;
+            return false;
+        }
         return true;
     }
     if (!t.in_iso) {
@@ -246,10 +318,15 @@ bool restore_target(const FileTarget& t, const char* tag,
         const std::filesystem::path bak(t.bnk_path + ".bak");
         if (!std::filesystem::exists(bak, ec)) return true;
         BnkCache::invalidate(t.bnk_path);
-        std::filesystem::copy_file(
-            bak, t.bnk_path,
-            std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec) { msg = "restore failed: " + ec.message(); return false; }
+        std::string cerr;
+        if (!copy_file_with_progress(
+                bak.string(), t.bnk_path,
+                "Restoring " +
+                    std::filesystem::path(t.bnk_path).filename().string(),
+                cerr, false, false)) {
+            msg = "restore failed: " + cerr;
+            return false;
+        }
         return true;
     }
     if (t.compressed) return true;
@@ -292,6 +369,80 @@ void put_u64_be(std::vector<uint8_t>& v, uint64_t x) {
     for (int i = 7; i >= 0; --i) v.push_back(uint8_t(x >> (i * 8)));
 }
 
+uint32_t get_u32_be2(const uint8_t* p) {
+    return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+           (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+}
+
+uint32_t fnv1_32(const std::string& s) {
+    uint32_t h = 0x811C9DC5u;
+    for (unsigned char c : s) {
+        h *= 0x01000193u;
+        h ^= c;
+    }
+    return h;
+}
+
+std::string lower_model_path(const std::string& p) {
+    std::string mp = p;
+    for (char& c : mp) {
+        if (c == '/') c = '\\';
+        else c = (char)std::tolower((unsigned char)c);
+    }
+    return mp;
+}
+
+uint64_t addition_instance_hash(const std::string& lowered, size_t ai) {
+    const uint32_t hi = fnv1_32(lowered);
+    const uint32_t lo = fnv1_32(lowered + "#placed" + std::to_string(ai));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+bool gzip_inflate(const std::vector<uint8_t>& in,
+                  std::vector<uint8_t>& out) {
+    z_stream z{};
+    if (inflateInit2(&z, 15 + 32) != Z_OK) return false;
+    z.next_in = const_cast<Bytef*>(in.data());
+    z.avail_in = (uInt)in.size();
+    out.clear();
+    std::vector<uint8_t> buf(1u << 16);
+    int ret = Z_OK;
+    while (ret != Z_STREAM_END) {
+        z.next_out = buf.data();
+        z.avail_out = (uInt)buf.size();
+        ret = inflate(&z, Z_NO_FLUSH);
+        if (ret != Z_OK && ret != Z_STREAM_END) {
+            inflateEnd(&z);
+            return false;
+        }
+        out.insert(out.end(), buf.data(),
+                   buf.data() + (buf.size() - z.avail_out));
+        if (ret != Z_STREAM_END && z.avail_in == 0) {
+            inflateEnd(&z);
+            return false;
+        }
+    }
+    inflateEnd(&z);
+    return true;
+}
+
+bool gzip_deflate(const std::vector<uint8_t>& in,
+                  std::vector<uint8_t>& out) {
+    z_stream z{};
+    if (deflateInit2(&z, Z_BEST_COMPRESSION, Z_DEFLATED, 15 + 16, 8,
+                     Z_DEFAULT_STRATEGY) != Z_OK) return false;
+    z.next_in = const_cast<Bytef*>(in.data());
+    z.avail_in = (uInt)in.size();
+    out.resize((size_t)deflateBound(&z, (uLong)in.size()) + 64);
+    z.next_out = out.data();
+    z.avail_out = (uInt)out.size();
+    const int ret = deflate(&z, Z_FINISH);
+    const bool ok = (ret == Z_STREAM_END);
+    out.resize(out.size() - z.avail_out);
+    deflateEnd(&z);
+    return ok;
+}
+
 void put_u32_be(std::vector<uint8_t>& v, uint32_t x) {
     for (int i = 3; i >= 0; --i) v.push_back(uint8_t(x >> (i * 8)));
 }
@@ -300,6 +451,54 @@ void put_f32_be_v(std::vector<uint8_t>& v, float f) {
     uint32_t bits;
     std::memcpy(&bits, &f, 4);
     put_u32_be(v, bits);
+}
+
+bool find_type2_template(const std::vector<uint8_t>& bytes,
+                         float out_vals[20]) {
+    static const char kMagic[] = "LevelGraphicsFile";
+    const size_t magic_len = sizeof(kMagic) - 1;
+    size_t pos = magic_len + 8;
+    auto rd32 = [&](size_t p, uint32_t& v) -> bool {
+        if (p + 4 > bytes.size()) return false;
+        v = (uint32_t(bytes[p]) << 24) | (uint32_t(bytes[p + 1]) << 16) |
+            (uint32_t(bytes[p + 2]) << 8) | uint32_t(bytes[p + 3]);
+        return true;
+    };
+    auto skip_cstr = [&](size_t& p) -> bool {
+        while (p < bytes.size() && bytes[p] != 0) ++p;
+        if (p >= bytes.size()) return false;
+        ++p;
+        return true;
+    };
+    for (int guard = 0; guard < 4096; ++guard) {
+        uint32_t t = 0;
+        if (!rd32(pos, t)) return false;
+        pos += 4;
+        if (t == 2) {
+            for (int k = 0; k < 4; ++k) {
+                if (!skip_cstr(pos)) return false;
+            }
+            uint32_t n = 0;
+            if (!rd32(pos, n) || n == 0 || n > 100000) return false;
+            pos += 4;
+            const size_t vals = pos + 3 + 8;
+            if (vals + 80 > bytes.size()) return false;
+            for (int k = 0; k < 20; ++k) {
+                uint32_t bits = 0;
+                rd32(vals + (size_t)k * 4, bits);
+                std::memcpy(&out_vals[k], &bits, 4);
+            }
+            return true;
+        } else if (t == 4) {
+            if (!skip_cstr(pos)) return false;
+            pos += 8;
+        } else if (t == 5 || t == 32) {
+            if (!skip_cstr(pos)) return false;
+        } else {
+            return false;
+        }
+    }
+    return false;
 }
 
 bool append_additions_to_level(std::vector<uint8_t>& bytes,
@@ -312,42 +511,345 @@ bool append_additions_to_level(std::vector<uint8_t>& bytes,
         err = "level payload magic mismatch";
         return false;
     }
+    uint32_t alive = 0;
+    for (const auto& a : adds) {
+        if (!a.removed) ++alive;
+    }
     const size_t count_off = magic_len + 4;
     uint32_t entry_count =
         (uint32_t(bytes[count_off]) << 24) |
         (uint32_t(bytes[count_off + 1]) << 16) |
         (uint32_t(bytes[count_off + 2]) << 8) |
         uint32_t(bytes[count_off + 3]);
-    entry_count += (uint32_t)adds.size();
+    entry_count += alive;
     bytes[count_off]     = uint8_t(entry_count >> 24);
     bytes[count_off + 1] = uint8_t(entry_count >> 16);
     bytes[count_off + 2] = uint8_t(entry_count >> 8);
     bytes[count_off + 3] = uint8_t(entry_count);
 
+    float tmpl[20] = { 0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1,
+                       1024.0f, 0.025f, 16.0f, 64.0f, 32.0f, 0.0f, 0.1f };
+    {
+        float scanned[20];
+        if (find_type2_template(bytes, scanned)) {
+            for (int k = 13; k < 20; ++k) tmpl[k] = scanned[k];
+        }
+    }
+
     std::vector<uint8_t> tail;
     for (size_t ai = 0; ai < adds.size(); ++ai) {
         const Addition& a = adds[ai];
+        if (a.removed) continue;
         put_u32_be(tail, 2);
-        tail.insert(tail.end(), a.model_path.begin(), a.model_path.end());
+        const std::string mp = lower_model_path(a.model_path);
+        tail.insert(tail.end(), mp.begin(), mp.end());
         tail.push_back(0);
         tail.push_back(0);
         tail.push_back(0);
         tail.push_back(0);
         put_u32_be(tail, 1);
+        tail.push_back(1);
         tail.push_back(0);
         tail.push_back(0);
-        tail.push_back(0);
-        put_u64_be(tail, 0xF2ED170000000000ull + ai);
-        float vals[20] = {};
+        put_u64_be(tail, addition_instance_hash(mp, ai));
+        float vals[20];
+        std::memcpy(vals, tmpl, sizeof(vals));
         vals[0] = a.pos[0];
         vals[1] = a.pos[1];
         vals[2] = a.pos[2];
+        vals[3] = 0.0f;
+        vals[4] = 0.0f;
+        vals[5] = 1.0f;
         const float yaw = a.yaw_deg * kDegToRad;
         vals[6] = std::sin(yaw);
         vals[7] = std::cos(yaw);
+        vals[8] = 0.0f;
+        vals[9] = vals[10] = vals[11] = vals[12] = 1.0f;
         for (int k = 0; k < 20; ++k) put_f32_be_v(tail, vals[k]);
     }
     bytes.insert(bytes.end(), tail.begin(), tail.end());
+    return true;
+}
+
+bool patch_engine_resource_list(std::vector<uint8_t>& bytes,
+                                const std::vector<uint32_t>& hashes,
+                                bool& changed,
+                                std::string& err) {
+    changed = false;
+    static const char kMagic[] = "EngineResourceList";
+    const size_t magic_len = sizeof(kMagic) - 1;
+    if (bytes.size() < magic_len + 9 ||
+        std::memcmp(bytes.data(), kMagic, magic_len) != 0) {
+        err = "engine_data magic mismatch";
+        return false;
+    }
+    if (get_u32_be2(bytes.data() + magic_len) != 3) {
+        err = "engine_data version != 3";
+        return false;
+    }
+    const size_t cnt_off = magic_len + 5;
+    uint32_t count = get_u32_be2(bytes.data() + cnt_off);
+    const size_t list_off = cnt_off + 4;
+    if (list_off + (uint64_t)count * 4 > bytes.size() ||
+        count > (1u << 24)) {
+        err = "engine_data resource list truncated";
+        return false;
+    }
+    std::unordered_set<uint32_t> have;
+    have.reserve(count * 2);
+    for (uint32_t i = 0; i < count; ++i) {
+        have.insert(get_u32_be2(bytes.data() + list_off + (size_t)i * 4));
+    }
+    std::vector<uint8_t> add;
+    for (uint32_t h : hashes) {
+        if (have.insert(h).second) put_u32_be(add, h);
+    }
+    if (add.empty()) return true;
+    bytes.insert(bytes.begin() + (list_off + (size_t)count * 4),
+                 add.begin(), add.end());
+    count += (uint32_t)(add.size() / 4);
+    bytes[cnt_off]     = uint8_t(count >> 24);
+    bytes[cnt_off + 1] = uint8_t(count >> 16);
+    bytes[cnt_off + 2] = uint8_t(count >> 8);
+    bytes[cnt_off + 3] = uint8_t(count);
+    changed = true;
+    return true;
+}
+
+std::string clean_name(const std::string& s) {
+    std::string n = s;
+    while (!n.empty() && n.back() == '\0') n.pop_back();
+    return n;
+}
+
+std::string norm_key(const std::string& s) {
+    std::string k = clean_name(s);
+    for (char& c : k) {
+        if (c == '\\') c = '/';
+        else c = (char)std::tolower((unsigned char)c);
+    }
+    return k;
+}
+
+bool nested_bank_has(BNKReader& nested, const std::string& want_key) {
+    for (const auto& fe : nested.list_files()) {
+        if (norm_key(fe.name) == want_key) return true;
+    }
+    return false;
+}
+
+bool find_in_nested_banks(const std::string& container_path,
+                          const std::string& nested_suffix,
+                          const std::string& want_key,
+                          std::string& out_name,
+                          std::vector<uint8_t>& out_payload) {
+    const auto bc = BnkCache::get(container_path);
+    const auto& files = bc.reader->list_files();
+    for (size_t i = 0; i < files.size(); ++i) {
+        const std::string key = norm_key(files[i].name);
+        if (key.size() < nested_suffix.size() ||
+            key.compare(key.size() - nested_suffix.size(),
+                        nested_suffix.size(), nested_suffix) != 0) {
+            continue;
+        }
+        std::vector<uint8_t> blob;
+        try {
+            blob = BnkCache::extract_bytes(container_path, (int)i);
+        } catch (...) {
+            continue;
+        }
+        try {
+            BNKReader nested(std::move(blob));
+            const auto& nf = nested.list_files();
+            for (size_t j = 0; j < nf.size(); ++j) {
+                if (norm_key(nf[j].name) == want_key) {
+                    out_payload = nested.extract_index_bytes((int)j);
+                    out_name = clean_name(nf[j].name);
+                    return true;
+                }
+            }
+        } catch (...) {
+            continue;
+        }
+    }
+    return false;
+}
+
+size_t collect_folder_from_nested_banks(
+    const std::string& container_path,
+    const std::string& nested_suffix,
+    const std::string& folder_key,
+    std::vector<BnkWriter::EntryAddition>& out) {
+    const auto bc = BnkCache::get(container_path);
+    const auto& files = bc.reader->list_files();
+    for (size_t i = 0; i < files.size(); ++i) {
+        const std::string key = norm_key(files[i].name);
+        if (key.size() < nested_suffix.size() ||
+            key.compare(key.size() - nested_suffix.size(),
+                        nested_suffix.size(), nested_suffix) != 0) {
+            continue;
+        }
+        std::vector<uint8_t> blob;
+        try {
+            blob = BnkCache::extract_bytes(container_path, (int)i);
+        } catch (...) {
+            continue;
+        }
+        try {
+            BNKReader nested(std::move(blob));
+            const auto& nf = nested.list_files();
+            size_t found = 0;
+            std::vector<BnkWriter::EntryAddition> local;
+            for (size_t j = 0; j < nf.size(); ++j) {
+                const std::string k = norm_key(nf[j].name);
+                if (k.compare(0, folder_key.size(), folder_key) != 0) {
+                    continue;
+                }
+                BnkWriter::EntryAddition a;
+                a.name = clean_name(nf[j].name);
+                a.payload = nested.extract_index_bytes((int)j);
+                local.push_back(std::move(a));
+                ++found;
+            }
+            if (found) {
+                for (auto& a : local) out.push_back(std::move(a));
+                return found;
+            }
+        } catch (...) {
+            continue;
+        }
+    }
+    return 0;
+}
+
+void collect_tex_refs(const std::vector<uint8_t>& mdl,
+                      std::vector<std::string>& out) {
+    size_t i = 0;
+    const size_t n = mdl.size();
+    while (i < n) {
+        if (mdl[i] < 32 || mdl[i] > 126) {
+            ++i;
+            continue;
+        }
+        size_t j = i;
+        while (j < n && mdl[j] >= 32 && mdl[j] <= 126) ++j;
+        if (j - i >= 8) {
+            std::string l = norm_key(
+                std::string((const char*)mdl.data() + i, j - i));
+            if (l.size() > 4 &&
+                l.compare(l.size() - 4, 4, ".tex") == 0) {
+                out.push_back(std::move(l));
+            }
+        }
+        i = j + 1;
+    }
+}
+
+bool patch_lmp_probes(std::vector<uint8_t>& gz,
+                      const std::vector<Addition>& adds,
+                      const std::vector<uint8_t>& lev_bytes,
+                      bool& changed,
+                      std::string& err) {
+    changed = false;
+    std::vector<uint8_t> raw;
+    if (!gzip_inflate(gz, raw)) {
+        err = "lmp gunzip failed";
+        return false;
+    }
+    static const char kMagic[] = "LightmapFile";
+    const size_t magic_len = sizeof(kMagic) - 1;
+    if (raw.size() < magic_len + 64 ||
+        std::memcmp(raw.data(), kMagic, magic_len) != 0) {
+        err = "lmp magic mismatch";
+        return false;
+    }
+    const size_t total = raw.size();
+    size_t n = 0;
+    for (size_t c = (total - 4) / 56; c >= 1; --c) {
+        const size_t pos = total - 56 * c - 4;
+        if (pos < magic_len + 4) continue;
+        if (get_u32_be2(raw.data() + pos) == (uint32_t)c) {
+            n = c;
+            break;
+        }
+    }
+    if (!n) {
+        err = "lmp probe section not found";
+        return false;
+    }
+    const size_t sec = total - 56 * n;
+
+    std::unordered_map<uint64_t, size_t> probe_off;
+    probe_off.reserve(n * 2);
+    for (size_t i = 0; i < n; ++i) {
+        uint64_t h = 0;
+        for (int k = 0; k < 8; ++k) {
+            h = (h << 8) | raw[sec + i * 56 + (size_t)k];
+        }
+        probe_off[h] = sec + i * 56;
+    }
+
+    struct Donor {
+        float p[3];
+        size_t off;
+    };
+    std::vector<Donor> donors;
+    Level::EngineLevelInfo info;
+    if (Level::ParseEngineLevel(lev_bytes, info)) {
+        for (const auto& b : info.prop_blocks) {
+            if (b.type != 2) continue;
+            for (const auto& inst : b.instances) {
+                auto it = probe_off.find(inst.hash);
+                if (it == probe_off.end()) continue;
+                Donor d;
+                d.p[0] = inst.values[0];
+                d.p[1] = inst.values[1];
+                d.p[2] = inst.values[2];
+                d.off = it->second;
+                donors.push_back(d);
+            }
+        }
+    }
+
+    std::vector<uint8_t> add;
+    for (size_t ai = 0; ai < adds.size(); ++ai) {
+        const Addition& a = adds[ai];
+        if (a.removed) continue;
+        const uint64_t h =
+            addition_instance_hash(lower_model_path(a.model_path), ai);
+        if (probe_off.count(h)) continue;
+        size_t donor_off = sec + (n - 1) * 56;
+        float best = 3.4e38f;
+        for (const auto& d : donors) {
+            const float dx = d.p[0] - a.pos[0];
+            const float dy = d.p[1] - a.pos[1];
+            const float dz = d.p[2] - a.pos[2];
+            const float dist = dx * dx + dy * dy + dz * dz;
+            if (dist < best) {
+                best = dist;
+                donor_off = d.off;
+            }
+        }
+        put_u64_be(add, h);
+        add.insert(add.end(), raw.begin() + donor_off + 8,
+                   raw.begin() + donor_off + 56);
+    }
+    if (add.empty()) return true;
+
+    raw.insert(raw.end(), add.begin(), add.end());
+    const uint32_t new_n = (uint32_t)(n + add.size() / 56);
+    raw[sec - 4] = uint8_t(new_n >> 24);
+    raw[sec - 3] = uint8_t(new_n >> 16);
+    raw[sec - 2] = uint8_t(new_n >> 8);
+    raw[sec - 1] = uint8_t(new_n);
+
+    std::vector<uint8_t> gz_out;
+    if (!gzip_deflate(raw, gz_out)) {
+        err = "lmp gzip failed";
+        return false;
+    }
+    gz.swap(gz_out);
+    changed = true;
     return true;
 }
 
@@ -383,6 +885,62 @@ std::filesystem::path additions_path() {
     return edited_levels_dir() / (leaf + ".additions.txt");
 }
 
+std::filesystem::path dirent_bak_path() {
+    std::string leaf = std::filesystem::path(st().entry.full_path)
+        .filename().string();
+    if (leaf.empty()) leaf = "level";
+    return edited_levels_dir() / (leaf + ".dirent.bak");
+}
+
+void record_dirent_bak(const std::string& vpath) {
+    const auto p = dirent_bak_path();
+    std::error_code ec;
+    if (std::filesystem::exists(p, ec)) return;
+    const ISO::MountedFile* mf = ISO::IsoMount::instance().find(vpath);
+    if (!mf) return;
+    std::filesystem::create_directories(p.parent_path(), ec);
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    f << vpath << '\t' << mf->sector << '\t' << mf->size << '\t'
+      << ISO::IsoMount::instance().iso_size() << '\n';
+    OutputLog::success("level edit: ISO dirent backup written to " +
+                       p.string());
+}
+
+void restore_dirent_bak() {
+    const auto p = dirent_bak_path();
+    std::ifstream f(p);
+    if (!f) return;
+    std::string line;
+    if (std::getline(f, line) && !line.empty()) {
+        const size_t p0 = line.find('\t');
+        if (p0 != std::string::npos) {
+            const std::string vp = line.substr(0, p0);
+            unsigned sec = 0, sz = 0;
+            unsigned long long orig_iso = 0;
+            const int got = std::sscanf(line.c_str() + p0 + 1,
+                                        "%u\t%u\t%llu",
+                                        &sec, &sz, &orig_iso);
+            if (got >= 2 && !vp.empty()) {
+                if (ISO::IsoMount::instance().repoint(vp, sec, sz)) {
+                    OutputLog::success(
+                        "level edit: ISO dirent restored for " + vp);
+                }
+                if (got >= 3 && orig_iso > 0) {
+                    if (ISO::IsoMount::instance().truncate_to(orig_iso)) {
+                        OutputLog::success(
+                            "level edit: ISO trimmed back to original "
+                            "size");
+                    }
+                }
+            }
+        }
+    }
+    f.close();
+    std::error_code ec;
+    std::filesystem::remove(p, ec);
+}
+
 void load_additions(ModuleState& s) {
     s.additions.clear();
     std::ifstream f(additions_path());
@@ -411,7 +969,11 @@ void load_additions(ModuleState& s) {
 bool write_additions(const ModuleState& s, std::string& msg) {
     const auto path = additions_path();
     std::error_code ec;
-    if (s.additions.empty()) {
+    size_t alive = 0;
+    for (const auto& a : s.additions) {
+        if (!a.removed) ++alive;
+    }
+    if (alive == 0) {
         std::filesystem::remove(path, ec);
         return true;
     }
@@ -422,6 +984,7 @@ bool write_additions(const ModuleState& s, std::string& msg) {
         return false;
     }
     for (const auto& a : s.additions) {
+        if (a.removed) continue;
         f << a.model_path << '\t' << a.pos[0] << '\t' << a.pos[1] << '\t'
           << a.pos[2] << '\t' << a.yaw_deg << '\n';
     }
@@ -520,6 +1083,11 @@ bool Dirty() {
     return st().dirty;
 }
 
+bool Saving() {
+    std::lock_guard<std::mutex> lk(mtx());
+    return st().saving;
+}
+
 size_t EditedCount() {
     std::lock_guard<std::mutex> lk(mtx());
     size_t n = 0;
@@ -535,22 +1103,52 @@ uint64_t Revision() {
 }
 
 bool SetEnabled(bool on, std::string& msg) {
-    std::lock_guard<std::mutex> lk(mtx());
-    auto& s = st();
-    if (!on) {
-        s.enabled = false;
-        msg = "level edit mode off";
-        return true;
+    FileTarget lev_t, gdb_t;
+    {
+        std::lock_guard<std::mutex> lk(mtx());
+        auto& s = st();
+        if (!on) {
+            s.enabled = false;
+            msg = "level edit mode off";
+            return true;
+        }
+        if (!s.available) {
+            msg = "no level loaded";
+            return false;
+        }
+        if (s.enabled) {
+            msg = "level edit mode on";
+            return true;
+        }
+        if (s.saving) {
+            msg = "busy";
+            return false;
+        }
+        s.saving = true;
+        lev_t = s.lev;
+        gdb_t = s.gdb;
     }
-    if (!s.available) {
-        msg = "no level loaded";
-        return false;
-    }
+
     std::unordered_set<std::string> backed;
-    if (!ensure_backup(s.lev, "lev", backed, msg)) return false;
-    if (!ensure_backup(s.gdb, "gdb", backed, msg)) return false;
-    s.enabled = true;
-    msg = "level edit mode on";
+    std::string berr;
+    const bool ok = ensure_backup(lev_t, "lev", backed, berr) &&
+                    ensure_backup(gdb_t, "gdb", backed, berr);
+
+    {
+        std::lock_guard<std::mutex> lk(mtx());
+        auto& s = st();
+        s.saving = false;
+        if (!ok) {
+            msg = berr;
+            return false;
+        }
+        if (!s.available) {
+            msg = "level changed during backup";
+            return false;
+        }
+        s.enabled = true;
+        msg = "level edit mode on";
+    }
     return true;
 }
 
@@ -578,6 +1176,7 @@ void AddMove(uint32_t selection_id, const float step[3],
              const InstInfo& info) {
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
+    if (s.saving) return;
     auto& e = s.edits[selection_id];
     register_entry(e, info);
     e.delta[0] += step[0];
@@ -591,6 +1190,7 @@ void AddRotate(uint32_t selection_id, const float step_deg[3],
                const InstInfo& info) {
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
+    if (s.saving) return;
     auto& e = s.edits[selection_id];
     register_entry(e, info);
     for (int i = 0; i < 3; ++i) {
@@ -602,10 +1202,21 @@ void AddRotate(uint32_t selection_id, const float step_deg[3],
     ++s.revision;
 }
 
+void SetDeleted(uint32_t selection_id, const InstInfo& info) {
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (s.saving) return;
+    auto& e = s.edits[selection_id];
+    register_entry(e, info);
+    e.deleted = true;
+    s.dirty = true;
+    ++s.revision;
+}
+
 int AddPlacement(const std::string& model_path, const float pos[3]) {
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
-    if (!s.available || model_path.empty()) return -1;
+    if (!s.available || s.saving || model_path.empty()) return -1;
     Addition a;
     a.model_path = model_path;
     a.pos[0] = pos[0];
@@ -640,6 +1251,7 @@ void CollectPreviewXforms(
             euler_engine_to_preview_quat(e.rot_deg, x.quat);
         }
         x.has_rs = e.rotated();
+        x.deleted = e.deleted;
         out[kv.first] = x;
     }
 }
@@ -647,11 +1259,12 @@ void CollectPreviewXforms(
 void PushUndoSnapshot(const std::vector<uint32_t>& ids) {
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
+    if (s.saving) return;
     UndoStep step;
     step.before.reserve(ids.size());
     for (uint32_t id : ids) {
         auto it = s.edits.find(id);
-        UndoState u{{0, 0, 0}, {0, 0, 0}};
+        UndoState u{{0, 0, 0}, {0, 0, 0}, false};
         if (it != s.edits.end()) {
             const EditEntry& e = it->second;
             u.delta[0] = e.delta[0];
@@ -660,6 +1273,7 @@ void PushUndoSnapshot(const std::vector<uint32_t>& ids) {
             u.rot_deg[0] = e.rot_deg[0];
             u.rot_deg[1] = e.rot_deg[1];
             u.rot_deg[2] = e.rot_deg[2];
+            u.deleted = e.deleted;
         }
         step.before.emplace_back(id, u);
     }
@@ -672,6 +1286,7 @@ void PushUndoSnapshot(const std::vector<uint32_t>& ids) {
 bool Undo() {
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
+    if (s.saving) return false;
     if (s.undo_stack.empty()) return false;
     UndoStep step = std::move(s.undo_stack.back());
     s.undo_stack.pop_back();
@@ -686,6 +1301,7 @@ bool Undo() {
         e.rot_deg[0] = u.rot_deg[0];
         e.rot_deg[1] = u.rot_deg[1];
         e.rot_deg[2] = u.rot_deg[2];
+        e.deleted = u.deleted;
     }
     s.dirty = true;
     ++s.revision;
@@ -695,10 +1311,37 @@ bool Undo() {
 bool Save(std::string& msg) {
     bool reload_needed = false;
     FlatAssetEntry reload_entry;
+    bool need_bake = false;
+    bool bake_iso = false;
+    std::string bake_bnk_path;
+    std::string bake_vpath;
+    int bake_index = -1;
+    size_t bake_count = 0;
+    std::vector<uint8_t> bake_bytes;
+    int bake_ed_index = -1;
+    std::vector<uint8_t> bake_ed_bytes;
+    int bake_lmp_index = -1;
+    std::vector<uint8_t> bake_lmp_bytes;
+    int bake_lvstream_index = -1;
+    std::vector<uint8_t> bake_lvstream_bytes;
+    std::string bake_streaming_path;
+    int bake_models_index = -1;
+    std::vector<uint8_t> bake_models_bytes;
+    std::vector<BnkWriter::EntryReplacement> bake_more;
     {
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
     if (!s.available) { msg = "no level loaded"; return false; }
+    if (s.saving) { msg = "a save is already in progress"; return false; }
+
+    DebugTrace::log("save: lev bnk='%s' idx=%d iso=%d comp=%d valid=%d "
+                    "gdb bnk='%s' additions=%zu edits=%zu",
+                    s.lev.bnk_path.c_str(), s.lev.file_index,
+                    s.lev.in_iso ? 1 : 0, s.lev.compressed ? 1 : 0,
+                    s.lev.valid ? 1 : 0, s.gdb.bnk_path.c_str(),
+                    s.additions.size(), s.edits.size());
+
+    progress_update(2, 100, "Writing level patches...");
 
     size_t lev_written = 0, gdb_written = 0, rs_written = 0;
     size_t skipped = 0, rs_visual = 0;
@@ -714,18 +1357,23 @@ bool Save(std::string& msg) {
         if (e.lev_kind == 5) {
             if (e.lev_off >= 1 && e.lev_off <= s.additions.size()) {
                 Addition& a = s.additions[e.lev_off - 1];
-                a.pos[0] = e.orig[0] + e.delta[0];
-                a.pos[1] = e.orig[1] + e.delta[1];
-                a.pos[2] = e.orig[2] + e.delta[2];
-                a.yaw_deg = e.orig_rot[2] + e.rot_deg[2];
+                if (e.deleted) {
+                    a.removed = true;
+                } else {
+                    a.pos[0] = e.orig[0] + e.delta[0];
+                    a.pos[1] = e.orig[1] + e.delta[1];
+                    a.pos[2] = e.orig[2] + e.delta[2];
+                    a.yaw_deg = e.orig_rot[2] + e.rot_deg[2];
+                }
                 ++adds_updated;
             }
             continue;
         }
-        if (e.moved()) {
+        if (e.moved() || e.deleted) {
             const float np[3] = { e.orig[0] + e.delta[0],
                                   e.orig[1] + e.delta[1],
-                                  e.orig[2] + e.delta[2] };
+                                  e.orig[2] + e.delta[2] -
+                                      (e.deleted ? 10000.0f : 0.0f) };
             if (e.lev_off != 0) {
                 lev_patches.push_back({ e.lev_off,
                                         { np[0], np[1], np[2] }, 3 });
@@ -739,7 +1387,7 @@ bool Save(std::string& msg) {
                 ++skipped;
             }
         }
-        if (e.rotated()) {
+        if (e.rotated() && !e.deleted) {
             if (e.lev_kind == 1 && e.lev_off != 0) {
                 const float yaw =
                     (e.orig_rot[2] + e.rot_deg[2]) * kDegToRad;
@@ -863,54 +1511,462 @@ bool Save(std::string& msg) {
 
     std::string bake_note;
     if (!s.additions.empty()) {
-        if (s.lev.valid && !s.lev.compressed && !s.lev.in_iso &&
-            s.lev.file_path.empty()) {
-            std::vector<uint8_t> lev_bytes;
+        const bool rewritable = s.lev.valid && !s.lev.compressed &&
+                                s.lev.file_path.empty();
+        if (rewritable) {
             try {
-                lev_bytes = BnkCache::extract_bytes(s.lev.bnk_path,
-                                                    s.lev.file_index);
+                bake_bytes = BnkCache::extract_bytes(s.lev.bnk_path,
+                                                     s.lev.file_index);
             } catch (...) {
-                lev_bytes.clear();
+                bake_bytes.clear();
             }
             std::string berr;
-            if (lev_bytes.empty()) {
+            if (bake_bytes.empty()) {
                 bake_note = "; bake skipped: level re-extract failed";
-            } else if (!append_additions_to_level(lev_bytes, s.additions,
+            } else if (!append_additions_to_level(bake_bytes, s.additions,
                                                   berr)) {
                 bake_note = "; bake skipped: " + berr;
+                bake_bytes.clear();
             } else {
-                BnkCache::invalidate(s.lev.bnk_path);
-                if (BnkWriter::RebuildWithReplacedEntry(
-                        s.lev.bnk_path, s.lev.file_index, lev_bytes,
-                        berr)) {
-                    bake_note = "; baked " +
-                                std::to_string(s.additions.size()) +
-                                " model(s) into the level BNK; reloading";
-                    s.additions.clear();
-                    s.edits.clear();
-                    s.undo_stack.clear();
-                    BnkCache::invalidate(s.lev.bnk_path);
-                    fill_bnk_target(s.lev);
-                    if (!s.gdb.bnk_path.empty()) fill_bnk_target(s.gdb);
-                    reload_needed = true;
-                    reload_entry = s.entry;
+                need_bake = true;
+                bake_iso = s.lev.in_iso;
+                bake_bnk_path = s.lev.bnk_path;
+                bake_index = s.lev.file_index;
+                bake_count = s.additions.size();
+                if (bake_iso) {
+                    bake_vpath =
+                        ISO::IsoMount::strip_iso_prefix(s.lev.bnk_path);
+                    record_dirent_bak(bake_vpath);
                 } else {
-                    bake_note = "; BAKE FAILED: " + berr +
-                                " (placements kept app-side)";
+                    std::vector<uint32_t> mdl_hashes;
+                    for (const auto& a : s.additions) {
+                        if (a.removed) continue;
+                        mdl_hashes.push_back(
+                            fnv1_32(lower_model_path(a.model_path)));
+                    }
+                    try {
+                        const auto bc = BnkCache::get(s.lev.bnk_path);
+                        std::string ed_name =
+                            bc.reader->list_files()
+                                [(size_t)s.lev.file_index].name;
+                        const std::string suffix = ".engine_level";
+                        std::string low = ed_name;
+                        for (char& c : low)
+                            c = (char)std::tolower((unsigned char)c);
+                        const size_t sp = low.rfind(suffix);
+                        if (sp != std::string::npos &&
+                            sp + suffix.size() == low.size()) {
+                            std::string stem = low.substr(0, sp);
+                            std::replace(stem.begin(), stem.end(), '\\',
+                                         '/');
+                            const std::string key =
+                                stem + ".engine_data";
+                            const int ed_idx = BnkCache::find_index(
+                                s.lev.bnk_path, key);
+                            if (ed_idx >= 0) {
+                                bake_ed_bytes = BnkCache::extract_bytes(
+                                    s.lev.bnk_path, ed_idx);
+                                bool changed = false;
+                                std::string perr;
+                                if (patch_engine_resource_list(
+                                        bake_ed_bytes, mdl_hashes,
+                                        changed, perr)) {
+                                    if (changed) {
+                                        bake_ed_index = ed_idx;
+                                        DebugTrace::log(
+                                            "save: engine_data idx=%d "
+                                            "resource list +%zu hash(es)",
+                                            ed_idx, mdl_hashes.size());
+                                    } else {
+                                        bake_ed_bytes.clear();
+                                        DebugTrace::log(
+                                            "save: engine_data already "
+                                            "lists all placed models");
+                                    }
+                                } else {
+                                    bake_ed_bytes.clear();
+                                    DebugTrace::log(
+                                        "save: engine_data patch "
+                                        "skipped: %s", perr.c_str());
+                                }
+                            } else {
+                                DebugTrace::log(
+                                    "save: engine_data entry not found "
+                                    "(%s)", key.c_str());
+                            }
+                            const std::string lmp_key = stem + ".lmp";
+                            const int lmp_idx = BnkCache::find_index(
+                                s.lev.bnk_path, lmp_key);
+                            if (lmp_idx >= 0) {
+                                bake_lmp_bytes = BnkCache::extract_bytes(
+                                    s.lev.bnk_path, lmp_idx);
+                                bool changed = false;
+                                std::string perr;
+                                if (patch_lmp_probes(bake_lmp_bytes,
+                                                     s.additions,
+                                                     bake_bytes, changed,
+                                                     perr)) {
+                                    if (changed) {
+                                        bake_lmp_index = lmp_idx;
+                                        DebugTrace::log(
+                                            "save: lmp idx=%d probe "
+                                            "record(s) appended",
+                                            lmp_idx);
+                                    } else {
+                                        bake_lmp_bytes.clear();
+                                        DebugTrace::log(
+                                            "save: lmp already has all "
+                                            "placed instances");
+                                    }
+                                } else {
+                                    bake_lmp_bytes.clear();
+                                    DebugTrace::log(
+                                        "save: lmp patch skipped: %s",
+                                        perr.c_str());
+                                }
+                            } else {
+                                DebugTrace::log(
+                                    "save: lmp entry not found (%s)",
+                                    lmp_key.c_str());
+                            }
+
+                            const std::filesystem::path data_dir =
+                                std::filesystem::path(s.lev.bnk_path)
+                                    .parent_path();
+                            const std::string streaming_path =
+                                (data_dir / "streaming.bnk").string();
+                            const std::string globals_path =
+                                (data_dir / "Globals" /
+                                 "globals_models.bnk").string();
+                            const std::string models_key =
+                                stem + "_models.bnk";
+                            std::vector<BnkWriter::EntryAddition>
+                                mdl_adds;
+                            std::vector<BnkWriter::EntryAddition>
+                                stream_adds;
+                            const int models_idx =
+                                std::filesystem::exists(streaming_path)
+                                    ? BnkCache::find_index(streaming_path,
+                                                           models_key)
+                                    : -1;
+                            std::vector<uint8_t> models_blob;
+                            if (models_idx >= 0) {
+                                models_blob = BnkCache::extract_bytes(
+                                    streaming_path, models_idx);
+                            }
+                            for (const auto& a : s.additions) {
+                                if (a.removed) continue;
+                                const std::string lp =
+                                    lower_model_path(a.model_path);
+                                const std::string want = norm_key(lp);
+                                bool have = false;
+                                if (!models_blob.empty()) {
+                                    try {
+                                        BNKReader lm(models_blob);
+                                        have = nested_bank_has(lm, want);
+                                    } catch (...) {}
+                                }
+                                if (!have &&
+                                    BnkCache::find_index(globals_path,
+                                                         want) >= 0) {
+                                    have = true;
+                                }
+                                bool queued = false;
+                                for (const auto& q : mdl_adds) {
+                                    if (norm_key(q.name) == want) {
+                                        queued = true;
+                                        break;
+                                    }
+                                }
+                                if (have || queued) continue;
+                                std::string src_name;
+                                std::vector<uint8_t> src_payload;
+                                if (models_idx < 0 ||
+                                    !find_in_nested_banks(
+                                        streaming_path, "_models.bnk",
+                                        want, src_name, src_payload)) {
+                                    DebugTrace::log(
+                                        "save: model body not found "
+                                        "anywhere: %s", want.c_str());
+                                    continue;
+                                }
+                                mdl_adds.push_back(
+                                    {src_name, std::move(src_payload)});
+                                const size_t slash = want.rfind('/');
+                                if (slash != std::string::npos) {
+                                    const std::string folder =
+                                        want.substr(0, slash + 1);
+                                    const size_t got =
+                                        collect_folder_from_nested_banks(
+                                            s.lev.bnk_path,
+                                            "_streaming.bnk", folder,
+                                            stream_adds);
+                                    DebugTrace::log(
+                                        "save: inject %s (+%zu streaming "
+                                        "file(s))", src_name.c_str(),
+                                        got);
+                                }
+                            }
+                            if (!mdl_adds.empty()) {
+                                const std::string scen_dir =
+                                    stem.substr(0, stem.rfind('/') + 1);
+                                const std::string hdrs_key =
+                                    stem + "_texture_headers.bnk";
+                                const std::string body_key =
+                                    scen_dir + "textures.bnk";
+                                const std::string mani_key =
+                                    body_key + ".manifest";
+                                const int hdrs_idx = BnkCache::find_index(
+                                    s.lev.bnk_path, hdrs_key);
+                                const int body_idx = BnkCache::find_index(
+                                    s.lev.bnk_path, body_key);
+                                const int mani_idx = BnkCache::find_index(
+                                    s.lev.bnk_path, mani_key);
+                                std::unordered_set<std::string> have_hdr;
+                                std::unordered_set<std::string> have_body;
+                                std::vector<uint8_t> hdrs_blob, body_blob;
+                                if (hdrs_idx >= 0) {
+                                    hdrs_blob = BnkCache::extract_bytes(
+                                        s.lev.bnk_path, hdrs_idx);
+                                    try {
+                                        BNKReader r(hdrs_blob);
+                                        for (const auto& fe :
+                                             r.list_files())
+                                            have_hdr.insert(
+                                                norm_key(fe.name));
+                                    } catch (...) {}
+                                }
+                                if (body_idx >= 0) {
+                                    body_blob = BnkCache::extract_bytes(
+                                        s.lev.bnk_path, body_idx);
+                                    try {
+                                        BNKReader r(body_blob);
+                                        for (const auto& fe :
+                                             r.list_files())
+                                            have_body.insert(
+                                                norm_key(fe.name));
+                                    } catch (...) {}
+                                }
+                                {
+                                    const int sh_idx =
+                                        BnkCache::find_index(
+                                            s.lev.bnk_path,
+                                            "worlds/albion/shared/"
+                                            "shared_6281.bnk");
+                                    if (sh_idx >= 0) {
+                                        try {
+                                            std::vector<uint8_t> sh =
+                                                BnkCache::extract_bytes(
+                                                    s.lev.bnk_path,
+                                                    sh_idx);
+                                            BNKReader r(sh);
+                                            for (const auto& fe :
+                                                 r.list_files())
+                                                have_body.insert(
+                                                    norm_key(fe.name));
+                                        } catch (...) {}
+                                    }
+                                }
+                                std::vector<BnkWriter::EntryAddition>
+                                    hdr_adds, body_adds;
+                                std::string mani_append;
+                                for (const auto& ma : mdl_adds) {
+                                    std::vector<std::string> texs;
+                                    collect_tex_refs(ma.payload, texs);
+                                    for (const auto& t : texs) {
+                                        if (!have_hdr.count(t)) {
+                                            std::string sn;
+                                            std::vector<uint8_t> sp;
+                                            if (find_in_nested_banks(
+                                                    s.lev.bnk_path,
+                                                    "_texture_headers"
+                                                    ".bnk",
+                                                    t, sn, sp)) {
+                                                hdr_adds.push_back(
+                                                    {sn,
+                                                     std::move(sp)});
+                                                have_hdr.insert(t);
+                                            } else {
+                                                DebugTrace::log(
+                                                    "save: tex header "
+                                                    "not found: %s",
+                                                    t.c_str());
+                                            }
+                                        }
+                                        if (!have_body.count(t)) {
+                                            std::string sn;
+                                            std::vector<uint8_t> sp;
+                                            if (find_in_nested_banks(
+                                                    s.lev.bnk_path,
+                                                    "/textures.bnk", t,
+                                                    sn, sp)) {
+                                                body_adds.push_back(
+                                                    {sn,
+                                                     std::move(sp)});
+                                                have_body.insert(t);
+                                                std::string tl = t;
+                                                std::replace(tl.begin(),
+                                                             tl.end(),
+                                                             '/', '\\');
+                                                mani_append +=
+                                                    "\"" + tl + "\" \"" +
+                                                    tl + "\" 0 0 3\r\n";
+                                            } else {
+                                                DebugTrace::log(
+                                                    "save: tex body not "
+                                                    "found: %s",
+                                                    t.c_str());
+                                            }
+                                        }
+                                    }
+                                }
+                                std::string terr;
+                                if (!hdr_adds.empty() &&
+                                    hdrs_idx >= 0 &&
+                                    BnkWriter::AddEntriesToBnkBytes(
+                                        hdrs_blob, hdr_adds, terr)) {
+                                    BnkWriter::EntryReplacement r;
+                                    r.file_index = hdrs_idx;
+                                    r.payload = std::move(hdrs_blob);
+                                    bake_more.push_back(std::move(r));
+                                    DebugTrace::log(
+                                        "save: +%zu texture header(s)",
+                                        hdr_adds.size());
+                                } else if (!hdr_adds.empty()) {
+                                    DebugTrace::log(
+                                        "save: tex header add failed: "
+                                        "%s", terr.c_str());
+                                }
+                                if (!body_adds.empty() &&
+                                    body_idx >= 0 &&
+                                    BnkWriter::AddEntriesToBnkBytes(
+                                        body_blob, body_adds, terr)) {
+                                    BnkWriter::EntryReplacement r;
+                                    r.file_index = body_idx;
+                                    r.payload = std::move(body_blob);
+                                    bake_more.push_back(std::move(r));
+                                    DebugTrace::log(
+                                        "save: +%zu texture bodies",
+                                        body_adds.size());
+                                    if (mani_idx >= 0 &&
+                                        !mani_append.empty()) {
+                                        std::vector<uint8_t> mani =
+                                            BnkCache::extract_bytes(
+                                                s.lev.bnk_path,
+                                                mani_idx);
+                                        const bool crlf =
+                                            std::find(mani.begin(),
+                                                      mani.end(),
+                                                      (uint8_t)'\r') !=
+                                            mani.end();
+                                        if (!crlf) {
+                                            std::string tmp;
+                                            for (char c : mani_append)
+                                                if (c != '\r')
+                                                    tmp.push_back(c);
+                                            mani_append = tmp;
+                                        }
+                                        mani.insert(mani.end(),
+                                                    mani_append.begin(),
+                                                    mani_append.end());
+                                        BnkWriter::EntryReplacement r2;
+                                        r2.file_index = mani_idx;
+                                        r2.payload = std::move(mani);
+                                        bake_more.push_back(
+                                            std::move(r2));
+                                    }
+                                } else if (!body_adds.empty()) {
+                                    DebugTrace::log(
+                                        "save: tex body add failed: %s",
+                                        terr.c_str());
+                                }
+                                std::string aerr;
+                                if (!BnkWriter::AddEntriesToBnkBytes(
+                                        models_blob, mdl_adds, aerr)) {
+                                    DebugTrace::log(
+                                        "save: models bank add failed: "
+                                        "%s", aerr.c_str());
+                                } else {
+                                    bake_models_index = models_idx;
+                                    bake_models_bytes =
+                                        std::move(models_blob);
+                                    bake_streaming_path = streaming_path;
+                                }
+                                if (bake_models_index >= 0 &&
+                                    !stream_adds.empty()) {
+                                    const std::string lvs_key =
+                                        stem + "_streaming.bnk";
+                                    const int lvs_idx =
+                                        BnkCache::find_index(
+                                            s.lev.bnk_path, lvs_key);
+                                    if (lvs_idx >= 0) {
+                                        std::vector<uint8_t> lvs =
+                                            BnkCache::extract_bytes(
+                                                s.lev.bnk_path, lvs_idx);
+                                        std::string serr;
+                                        std::vector<
+                                            BnkWriter::EntryAddition>
+                                            fresh;
+                                        try {
+                                            BNKReader lr(lvs);
+                                            for (auto& sa : stream_adds) {
+                                                if (!nested_bank_has(
+                                                        lr,
+                                                        norm_key(
+                                                            sa.name))) {
+                                                    fresh.push_back(
+                                                        std::move(sa));
+                                                }
+                                            }
+                                        } catch (...) {}
+                                        if (!fresh.empty() &&
+                                            BnkWriter::
+                                                AddEntriesToBnkBytes(
+                                                    lvs, fresh, serr)) {
+                                            bake_lvstream_index = lvs_idx;
+                                            bake_lvstream_bytes =
+                                                std::move(lvs);
+                                        } else if (!fresh.empty()) {
+                                            DebugTrace::log(
+                                                "save: level streaming "
+                                                "add failed: %s",
+                                                serr.c_str());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch (const std::exception& ex) {
+                        bake_ed_index = -1;
+                        bake_ed_bytes.clear();
+                        bake_lmp_index = -1;
+                        bake_lmp_bytes.clear();
+                        DebugTrace::log(
+                            "save: engine_data/lmp patch failed: %s",
+                            ex.what());
+                    } catch (...) {
+                        bake_ed_index = -1;
+                        bake_ed_bytes.clear();
+                        bake_lmp_index = -1;
+                        bake_lmp_bytes.clear();
+                    }
                 }
+                s.saving = true;
             }
         } else {
             bake_note = std::string("; placed model(s) kept app-side "
                                     "(level BNK not rewritable: ") +
-                        (s.lev.in_iso ? "ISO-hosted"
-                         : s.lev.compressed ? "chunk-compressed"
-                                            : "no locator") + ")";
+                        (s.lev.compressed ? "chunk-compressed"
+                                          : "no locator") + ")";
+        }
+        if (!need_bake) {
+            DebugTrace::log("save: bake not started:%s",
+                            bake_note.c_str());
         }
     }
 
     if (!write_additions(s, msg)) return false;
 
-    s.dirty = false;
     msg = "saved " + std::to_string(lev_written) +
           " level-file patch(es), " + std::to_string(gdb_written) +
           " gdb component(s)";
@@ -922,22 +1978,162 @@ bool Save(std::string& msg) {
                " visual-only edit(s) not saved)";
     }
     msg += bake_note;
+    if (!need_bake) {
+        s.dirty = false;
+    }
+    }
+
+    if (!need_bake) return true;
+
+    progress_update(10, 100, "Rebuilding level BNK...");
+    BnkCache::invalidate(bake_bnk_path);
+    std::string berr;
+    bool rebuilt;
+    if (bake_iso) {
+        rebuilt = BnkWriter::RebuildIsoLevelBnk(bake_vpath, bake_index,
+                                                bake_bytes, berr);
+    } else {
+        std::vector<BnkWriter::EntryReplacement> reps(1);
+        reps[0].file_index = bake_index;
+        reps[0].payload = std::move(bake_bytes);
+        if (bake_ed_index >= 0 && !bake_ed_bytes.empty()) {
+            BnkWriter::EntryReplacement r;
+            r.file_index = bake_ed_index;
+            r.payload = std::move(bake_ed_bytes);
+            reps.push_back(std::move(r));
+        }
+        if (bake_lmp_index >= 0 && !bake_lmp_bytes.empty()) {
+            BnkWriter::EntryReplacement r;
+            r.file_index = bake_lmp_index;
+            r.payload = std::move(bake_lmp_bytes);
+            reps.push_back(std::move(r));
+        }
+        if (bake_lvstream_index >= 0 && !bake_lvstream_bytes.empty()) {
+            BnkWriter::EntryReplacement r;
+            r.file_index = bake_lvstream_index;
+            r.payload = std::move(bake_lvstream_bytes);
+            reps.push_back(std::move(r));
+        }
+        for (auto& r : bake_more) reps.push_back(std::move(r));
+        rebuilt = BnkWriter::RebuildWithReplacedEntries(bake_bnk_path,
+                                                        reps, berr);
+        if (rebuilt && bake_models_index >= 0 &&
+            !bake_models_bytes.empty()) {
+            const std::string bak = bake_streaming_path + ".bak";
+            std::error_code ec;
+            if (!std::filesystem::exists(bak, ec)) {
+                progress_update(70, 100, "Backing up streaming.bnk...");
+                if (!copy_file_with_progress(bake_streaming_path, bak,
+                                             "streaming.bnk backup",
+                                             berr)) {
+                    DebugTrace::log(
+                        "save: streaming.bnk backup failed: %s",
+                        berr.c_str());
+                    rebuilt = false;
+                }
+            }
+            if (rebuilt) {
+                progress_update(75, 100, "Rebuilding streaming.bnk...");
+                BnkCache::invalidate(bake_streaming_path);
+                std::vector<BnkWriter::EntryReplacement> sreps(1);
+                sreps[0].file_index = bake_models_index;
+                sreps[0].payload = std::move(bake_models_bytes);
+                rebuilt = BnkWriter::RebuildWithReplacedEntries(
+                    bake_streaming_path, sreps, berr);
+                BnkCache::invalidate(bake_streaming_path);
+                DebugTrace::log(
+                    "save: streaming.bnk models inject %s %s",
+                    rebuilt ? "OK" : "FAILED", berr.c_str());
+            }
+        }
+    }
+    DebugTrace::log("save: bake %s (iso=%d target='%s') %s",
+                    rebuilt ? "OK" : "FAILED", bake_iso ? 1 : 0,
+                    bake_iso ? bake_vpath.c_str() : bake_bnk_path.c_str(),
+                    berr.c_str());
+
+    {
+        std::lock_guard<std::mutex> lk(mtx());
+        auto& s = st();
+        s.saving = false;
+        if (rebuilt) {
+            s.additions.clear();
+            s.edits.clear();
+            s.undo_stack.clear();
+            BnkCache::invalidate(s.lev.bnk_path);
+            if (!s.gdb.bnk_path.empty()) {
+                BnkCache::invalidate(s.gdb.bnk_path);
+            }
+            fill_bnk_target(s.lev);
+            if (!s.gdb.bnk_path.empty()) fill_bnk_target(s.gdb);
+            {
+                std::error_code ec;
+                std::filesystem::remove(additions_path(), ec);
+            }
+            s.dirty = false;
+            reload_needed = true;
+            reload_entry = s.entry;
+            msg += "; baked " + std::to_string(bake_count) +
+                   " model(s) into the level BNK; reloading";
+        } else {
+            msg += "; BAKE FAILED: " + berr +
+                   " (placements kept app-side)";
+        }
     }
     if (reload_needed) Level::OpenAsync(reload_entry);
-    return true;
+    return rebuilt;
 }
 
 bool RestoreDefaults(std::string& msg) {
     FlatAssetEntry reload_entry;
+    FileTarget lev_t, gdb_t;
     {
         std::lock_guard<std::mutex> lk(mtx());
         auto& s = st();
         if (!s.available) { msg = "no level loaded"; return false; }
+        if (s.saving) { msg = "a save is in progress"; return false; }
+        s.saving = true;
+        lev_t = s.lev;
+        gdb_t = s.gdb;
+    }
 
-        std::unordered_set<std::string> restored;
-        if (!restore_target(s.lev, "lev", restored, msg)) return false;
-        if (!restore_target(s.gdb, "gdb", restored, msg)) return false;
+    restore_dirent_bak();
 
+    std::unordered_set<std::string> restored;
+    std::string rerr;
+    bool ok = restore_target(lev_t, "lev", restored, rerr) &&
+              restore_target(gdb_t, "gdb", restored, rerr);
+    if (ok && !lev_t.bnk_path.empty() &&
+        !ISO::IsoMount::is_iso_path(lev_t.bnk_path)) {
+        const std::string streaming_path =
+            (std::filesystem::path(lev_t.bnk_path).parent_path() /
+             "streaming.bnk").string();
+        const std::string bak = streaming_path + ".bak";
+        std::error_code ec;
+        if (std::filesystem::exists(bak, ec)) {
+            progress_update(80, 100, "Restoring streaming.bnk...");
+            BnkCache::invalidate(streaming_path);
+            std::string cerr2;
+            if (copy_file_with_progress(bak, streaming_path,
+                                        "streaming.bnk restore", cerr2,
+                                        false)) {
+                std::filesystem::remove(bak, ec);
+            } else {
+                rerr = cerr2;
+                ok = false;
+            }
+            BnkCache::invalidate(streaming_path);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(mtx());
+        auto& s = st();
+        s.saving = false;
+        if (!ok) {
+            msg = rerr;
+            return false;
+        }
         if (!s.lev.bnk_path.empty()) BnkCache::invalidate(s.lev.bnk_path);
         if (!s.gdb.bnk_path.empty()) BnkCache::invalidate(s.gdb.bnk_path);
         s.edits.clear();
@@ -963,6 +2159,254 @@ void ClearEdits() {
     st().undo_stack.clear();
     st().dirty = false;
     ++st().revision;
+}
+
+bool RunStreamFix(const std::string& streaming_path, std::string& msg) {
+    const std::string bak = streaming_path + ".bak";
+    std::error_code ec;
+    if (!std::filesystem::exists(bak, ec)) {
+        msg = "streamfix: no backup at " + bak;
+        return false;
+    }
+    BnkCache::invalidate(streaming_path);
+    std::string cerr2;
+    if (!copy_file_with_progress(bak, streaming_path,
+                                 "streaming.bnk restore", cerr2, false)) {
+        msg = "streamfix: restore failed: " + cerr2;
+        return false;
+    }
+    BnkCache::invalidate(streaming_path);
+
+    const std::string models_key =
+        "worlds/albion/bwsslums/defaultscenario/"
+        "defaultscenario_models.bnk";
+    const int models_idx =
+        BnkCache::find_index(streaming_path, models_key);
+    if (models_idx < 0) {
+        msg = "streamfix: level models bank not found";
+        return false;
+    }
+    std::vector<uint8_t> blob =
+        BnkCache::extract_bytes(streaming_path, models_idx);
+
+    const std::string want =
+        "art/environment/regions/bower_lake/props/dotxsi/bl_lamp_post/"
+        "bl_lamp_post.mdl";
+    {
+        BNKReader lm(blob);
+        if (nested_bank_has(lm, want)) {
+            msg = "streamfix: lamp already present after restore?";
+            return false;
+        }
+    }
+    std::string src_name;
+    std::vector<uint8_t> src_payload;
+    if (!find_in_nested_banks(streaming_path, "_models.bnk", want,
+                              src_name, src_payload)) {
+        msg = "streamfix: lamp source not found";
+        return false;
+    }
+    std::vector<BnkWriter::EntryAddition> adds;
+    adds.push_back({src_name, std::move(src_payload)});
+    std::string aerr;
+    if (!BnkWriter::AddEntriesToBnkBytes(blob, adds, aerr)) {
+        msg = "streamfix: add failed: " + aerr;
+        return false;
+    }
+    BnkCache::invalidate(streaming_path);
+    std::vector<BnkWriter::EntryReplacement> reps(1);
+    reps[0].file_index = models_idx;
+    reps[0].payload = std::move(blob);
+    if (!BnkWriter::RebuildWithReplacedEntries(streaming_path, reps,
+                                               aerr)) {
+        msg = "streamfix: rebuild failed: " + aerr;
+        return false;
+    }
+    BnkCache::invalidate(streaming_path);
+    msg = "streamfix OK: restored + re-injected lamp with aligned "
+          "layout";
+    DebugTrace::log("%s", msg.c_str());
+    return true;
+}
+
+bool RunLevProbe(const std::string& bnk_path, std::string& msg) {
+    return RunLevProbeMode(bnk_path, false, msg);
+}
+
+bool RunLevProbeMode(const std::string& bnk_path, bool float_only,
+                     std::string& msg) {
+    const std::string lev_key =
+        "worlds/albion/bwsslums/defaultscenario/"
+        "defaultscenario.engine_level";
+    const std::string lmp_key =
+        "worlds/albion/bwsslums/defaultscenario/defaultscenario.lmp";
+    const int lev_idx = BnkCache::find_index(bnk_path, lev_key);
+    const int lmp_idx = BnkCache::find_index(bnk_path, lmp_key);
+    if (lev_idx < 0 || lmp_idx < 0) {
+        msg = "probe: entries not found in " + bnk_path;
+        return false;
+    }
+    std::vector<uint8_t> lev;
+    std::vector<uint8_t> lmp_gz;
+    try {
+        lev = BnkCache::extract_bytes(bnk_path, lev_idx);
+        lmp_gz = BnkCache::extract_bytes(bnk_path, lmp_idx);
+    } catch (const std::exception& ex) {
+        msg = std::string("probe: extract failed: ") + ex.what();
+        return false;
+    }
+
+    Level::EngineLevelInfo info;
+    if (!Level::ParseEngineLevel(lev, info)) {
+        msg = "probe: lev parse failed: " + info.error;
+        return false;
+    }
+    const Level::PropBlock* oak = nullptr;
+    for (const auto& b : info.prop_blocks) {
+        if (b.type == 2 &&
+            b.model_path.find("bs_snowyoak") != std::string::npos) {
+            oak = &b;
+            break;
+        }
+    }
+    if (!oak || oak->instances.empty()) {
+        msg = "probe: snowyoak block not found";
+        return false;
+    }
+    const Level::PropInstance& inst = oak->instances[0];
+    const size_t fo = inst.pos_file_offset;
+    const size_t rec_start = fo - 11;
+    const size_t cnt_off = rec_start - 4;
+    const uint32_t count = get_u32_be2(lev.data() + cnt_off);
+    if (count != oak->instances.size() || fo + 80 > lev.size()) {
+        msg = "probe: block layout mismatch";
+        return false;
+    }
+
+    float z = inst.values[2] + 8.0f;
+    uint32_t zb;
+    std::memcpy(&zb, &z, 4);
+    lev[fo + 8]  = uint8_t(zb >> 24);
+    lev[fo + 9]  = uint8_t(zb >> 16);
+    lev[fo + 10] = uint8_t(zb >> 8);
+    lev[fo + 11] = uint8_t(zb);
+
+    const uint64_t clone_hash =
+        ((uint64_t)fnv1_32(oak->model_path) << 32) |
+        fnv1_32(oak->model_path + "#probe_clone");
+    float vals[20];
+    std::memcpy(vals, inst.values, sizeof(vals));
+    if (!float_only) {
+        std::vector<uint8_t> rec;
+        rec.push_back(1);
+        rec.push_back(0);
+        rec.push_back(0);
+        put_u64_be(rec, clone_hash);
+        vals[0] += 4.0f;
+        for (int k = 0; k < 20; ++k) put_f32_be_v(rec, vals[k]);
+        const size_t insert_at = rec_start + (size_t)count * 91;
+        lev.insert(lev.begin() + insert_at, rec.begin(), rec.end());
+        const uint32_t nc = count + 1;
+        lev[cnt_off]     = uint8_t(nc >> 24);
+        lev[cnt_off + 1] = uint8_t(nc >> 16);
+        lev[cnt_off + 2] = uint8_t(nc >> 8);
+        lev[cnt_off + 3] = uint8_t(nc);
+    }
+
+    if (float_only) {
+        BnkCache::invalidate(bnk_path);
+        std::vector<BnkWriter::EntryReplacement> reps(1);
+        reps[0].file_index = lev_idx;
+        reps[0].payload = std::move(lev);
+        std::string berr;
+        if (!BnkWriter::RebuildWithReplacedEntries(bnk_path, reps,
+                                                   berr)) {
+            msg = "probe: rebuild failed: " + berr;
+            return false;
+        }
+        BnkCache::invalidate(bnk_path);
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+                      "probe OK (float only): oak raised to z=%.2f at "
+                      "(%.2f, %.2f)",
+                      z, inst.values[0], inst.values[1]);
+        msg = buf;
+        DebugTrace::log("%s", buf);
+        return true;
+    }
+
+    std::vector<uint8_t> raw;
+    if (!gzip_inflate(lmp_gz, raw)) {
+        msg = "probe: lmp gunzip failed";
+        return false;
+    }
+    const size_t total = raw.size();
+    size_t n = 0;
+    for (size_t c = (total - 4) / 56; c >= 1; --c) {
+        const size_t pos = total - 56 * c - 4;
+        if (pos < 32) continue;
+        if (get_u32_be2(raw.data() + pos) == (uint32_t)c) {
+            n = c;
+            break;
+        }
+    }
+    if (!n) {
+        msg = "probe: lmp probe section not found";
+        return false;
+    }
+    const size_t sec = total - 56 * n;
+    size_t donor = 0;
+    for (size_t i = 0; i < n; ++i) {
+        uint64_t h = 0;
+        for (int k = 0; k < 8; ++k) {
+            h = (h << 8) | raw[sec + i * 56 + (size_t)k];
+        }
+        if (h == inst.hash) {
+            donor = sec + i * 56;
+            break;
+        }
+    }
+    if (!donor) {
+        msg = "probe: snowyoak lmp record not found";
+        return false;
+    }
+    std::vector<uint8_t> lrec;
+    put_u64_be(lrec, clone_hash);
+    lrec.insert(lrec.end(), raw.begin() + donor + 8,
+                raw.begin() + donor + 56);
+    raw.insert(raw.end(), lrec.begin(), lrec.end());
+    const uint32_t nn = (uint32_t)(n + 1);
+    raw[sec - 4] = uint8_t(nn >> 24);
+    raw[sec - 3] = uint8_t(nn >> 16);
+    raw[sec - 2] = uint8_t(nn >> 8);
+    raw[sec - 1] = uint8_t(nn);
+    std::vector<uint8_t> lmp_out;
+    if (!gzip_deflate(raw, lmp_out)) {
+        msg = "probe: lmp gzip failed";
+        return false;
+    }
+
+    BnkCache::invalidate(bnk_path);
+    std::vector<BnkWriter::EntryReplacement> reps(2);
+    reps[0].file_index = lev_idx;
+    reps[0].payload = std::move(lev);
+    reps[1].file_index = lmp_idx;
+    reps[1].payload = std::move(lmp_out);
+    std::string berr;
+    if (!BnkWriter::RebuildWithReplacedEntries(bnk_path, reps, berr)) {
+        msg = "probe: rebuild failed: " + berr;
+        return false;
+    }
+    BnkCache::invalidate(bnk_path);
+    char buf[256];
+    std::snprintf(buf, sizeof(buf),
+                  "probe OK: oak raised to z=%.2f at (%.2f, %.2f); clone "
+                  "hash=%016llx at x=%.2f",
+                  z, inst.values[0], inst.values[1],
+                  (unsigned long long)clone_hash, vals[0]);
+    msg = buf;
+    DebugTrace::log("%s", buf);
+    return true;
 }
 
 }

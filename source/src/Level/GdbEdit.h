@@ -11,6 +11,7 @@ struct Field {
     uint32_t hash = 0;
     uint8_t  type = 0;
     uint32_t value = 0;
+    uint32_t decl = 0xFFFFFFFFu;
 };
 
 struct Record {
@@ -36,10 +37,11 @@ public:
                        uint32_t value);
 
     bool AddField(uint32_t rec_hash, uint32_t field_hash, uint8_t type,
-                  uint32_t value);
+                  uint32_t value, uint32_t decl = 0xFFFFFFFFu);
+    bool RemoveField(uint32_t rec_hash, uint32_t field_hash);
 
     bool AddRecord(uint32_t new_hash, std::vector<Field> fields,
-                   uint16_t meta);
+                   uint8_t schema_header_low);
 
     uint32_t AllocRecordHash();
 
@@ -53,6 +55,7 @@ public:
     size_t RecordCount() const { return records_.size(); }
     const Record& RecordAt(size_t i) const { return records_[i]; }
     uint16_t MetaOf(uint32_t rec_hash) const;
+    uint32_t SchemaHeaderLow(uint32_t rec_hash) const;
 
 private:
 
@@ -68,7 +71,7 @@ private:
     };
 
     uint32_t EnsureSchema(const std::vector<SchemaField>& fields,
-                          uint32_t header_low);
+                          uint32_t header_low, bool exact = true);
     const Schema* SchemaByRel(uint32_t rel) const;
     size_t schema_blob_size() const;
 

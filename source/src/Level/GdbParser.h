@@ -215,15 +215,20 @@ struct SpawnDonorInfo {
     uint32_t gen_comp_parent = 0;
     uint32_t gen_transform_field = 0;
     uint32_t gen_transform_parent = 0;
+    uint32_t gen_position_parent = 0;
+    uint32_t gen_rotation_parent = 0;
     uint32_t sp_template = 0;
     uint32_t sp_comp_field = 0;
     uint32_t sp_comp_parent = 0;
     uint32_t sp_transform_field = 0;
     uint32_t sp_transform_parent = 0;
+    uint32_t sp_position_parent = 0;
+    uint32_t sp_rotation_parent = 0;
     uint32_t spawn_list_parent = 0;
     bool valid() const {
         return gen_template && gen_comp_field && sp_template &&
-               sp_comp_field;
+               sp_comp_field && gen_transform_field &&
+               sp_transform_field;
     }
 };
 std::unordered_map<uint32_t, SpawnEntityInfo> CollectSpawnEntities(

@@ -316,6 +316,7 @@ bool GdbFile::Fields(int record_index, std::vector<Field>& out) const
         f.hash = s->fields[i].hash;
         f.type = s->fields[i].type;
         f.value = r.slots[i];
+        f.decl = s->fields[i].decl;
         out.push_back(f);
     }
     return true;
@@ -333,6 +334,14 @@ bool GdbFile::FindLocalField(uint32_t rec_hash, uint32_t field_hash,
         }
     }
     return false;
+}
+
+uint32_t GdbFile::SchemaHeaderLow(uint32_t rec_hash) const
+{
+    const int idx = FindRecord(rec_hash);
+    if (idx < 0) return 0xFFFFFFFFu;
+    const Schema* schema = SchemaByRel(records_[size_t(idx)].schema_rel);
+    return schema ? schema->header_low : 0xFFFFFFFFu;
 }
 
 bool GdbFile::SetFieldValue(uint32_t rec_hash, uint32_t field_hash,
@@ -353,14 +362,16 @@ bool GdbFile::SetFieldValue(uint32_t rec_hash, uint32_t field_hash,
 }
 
 uint32_t GdbFile::EnsureSchema(const std::vector<SchemaField>& fields,
-                               uint32_t header_low)
+                               uint32_t header_low, bool exact)
 {
     for (const Schema& s : schemas_) {
-        if (s.fields.size() != fields.size()) continue;
+        if ((exact && s.header_low != header_low) ||
+            s.fields.size() != fields.size()) continue;
         bool same = true;
         for (size_t i = 0; i < fields.size(); ++i) {
             if (s.fields[i].hash != fields[i].hash ||
-                s.fields[i].type != fields[i].type) {
+                s.fields[i].type != fields[i].type ||
+                (exact && s.fields[i].decl != fields[i].decl)) {
                 same = false;
                 break;
             }
@@ -384,7 +395,7 @@ size_t GdbFile::schema_blob_size() const
 }
 
 bool GdbFile::AddField(uint32_t rec_hash, uint32_t field_hash, uint8_t type,
-                       uint32_t value)
+                       uint32_t value, uint32_t decl)
 {
     const int idx = FindRecord(rec_hash);
     if (idx < 0) return false;
@@ -401,18 +412,46 @@ bool GdbFile::AddField(uint32_t rec_hash, uint32_t field_hash, uint8_t type,
     SchemaField nf;
     nf.hash = field_hash;
     nf.type = type;
-    nf.decl = uint32_t(fields.size());
+    nf.decl = decl == 0xFFFFFFFFu ? uint32_t(fields.size()) : decl;
     fields.insert(fields.begin() + pos, nf);
     r.schema_rel = EnsureSchema(fields, s->header_low);
     r.slots.insert(r.slots.begin() + pos, value);
     return true;
 }
 
+bool GdbFile::RemoveField(uint32_t rec_hash, uint32_t field_hash)
+{
+    const int idx = FindRecord(rec_hash);
+    if (idx < 0) return false;
+    Record& r = records_[size_t(idx)];
+    const Schema* schema = SchemaByRel(r.schema_rel);
+    if (!schema || schema->fields.size() != r.slots.size()) return false;
+
+    std::vector<SchemaField> fields = schema->fields;
+    const uint32_t header_low = schema->header_low;
+    size_t pos = 0;
+    while (pos < fields.size() && fields[pos].hash != field_hash) ++pos;
+    if (pos == fields.size()) return false;
+
+    fields.erase(fields.begin() + pos);
+    r.slots.erase(r.slots.begin() + pos);
+    r.schema_rel = EnsureSchema(fields, header_low);
+    return true;
+}
+
 bool GdbFile::AddRecord(uint32_t new_hash, std::vector<Field> fields,
-                        uint16_t meta)
+                        uint8_t schema_header_low)
 {
     if (record_index_by_hash_.count(new_hash)) return false;
     if (!records_.empty() && new_hash <= records_.back().hash) return false;
+    bool exact_schema = false;
+    for (size_t i = 0; i < fields.size(); ++i) {
+        if (fields[i].decl != 0xFFFFFFFFu) {
+            exact_schema = true;
+        } else {
+            fields[i].decl = uint32_t(i);
+        }
+    }
     std::sort(fields.begin(), fields.end(),
               [](const Field& a, const Field& b) { return a.hash < b.hash; });
     std::vector<SchemaField> sfields;
@@ -421,14 +460,14 @@ bool GdbFile::AddRecord(uint32_t new_hash, std::vector<Field> fields,
         SchemaField sf;
         sf.hash = fields[i].hash;
         sf.type = fields[i].type;
-        sf.decl = uint32_t(i);
+        sf.decl = fields[i].decl;
         sfields.push_back(sf);
     }
     Record r;
     r.hash = new_hash;
-    r.schema_rel = EnsureSchema(sfields, 0);
+    r.schema_rel = EnsureSchema(sfields, schema_header_low, exact_schema);
 
-    r.meta = meta;
+    r.meta = 0;
     r.slots.reserve(fields.size());
     for (const Field& f : fields) r.slots.push_back(f.value);
     record_index_by_hash_.emplace(new_hash, int(records_.size()));

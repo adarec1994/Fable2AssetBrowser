@@ -47,6 +47,7 @@ struct Addition {
     bool removed = false;
     AdditionEntityKind entity_kind = AdditionEntityKind::None;
     std::vector<uint32_t> chest_items;
+    int silver_keys_needed = 0;
 
     uint32_t entity_template = 0;
     uint32_t entity_comp_field = 0;
@@ -86,6 +87,7 @@ void SetDeleted(uint32_t selection_id, const InstInfo& info);
 
 int AddPlacement(const std::string& model_path, const float pos[3]);
 void GetAdditions(std::vector<Addition>& out);
+int SilverKeyChestRequirement(const std::string& model_path);
 
 void SetChestContents(uint32_t entity_hash,
                       const std::vector<uint32_t>& item_hashes);
@@ -99,6 +101,7 @@ void SetAdditionLootTable(int index, uint32_t loot_record);
 bool GetAdditionChestItems(int index, std::vector<uint32_t>& out);
 void SetAdditionChestItems(int index, const std::vector<uint32_t>& items);
 void MarkAdditionEntityKind(int index, AdditionEntityKind kind);
+void MarkAdditionAsSilverKeyChest(int index, int silver_keys_needed);
 
 void MarkAdditionAsPropEntity(int index,
                               uint32_t template_hash,
@@ -118,12 +121,14 @@ size_t TextEditCount();
 struct GeneratorAddition {
     float pos[3] = {0, 0, 0};
     std::string creature_name;
+    uint32_t creature_entity = 0;
     std::vector<std::array<float, 3>> spawn_points;
     std::vector<std::string> asset_models;
     bool removed = false;
 };
 
 int  AddGenerator(const float pos[3], const std::string& creature_name,
+                  uint32_t creature_entity,
                   const std::vector<std::string>& asset_models = {});
 void GetGenerators(std::vector<GeneratorAddition>& out);
 void MovePendingGenerator(int index, const float pos[3]);
@@ -134,6 +139,10 @@ void RemoveGeneratorSpawnPoint(int index, int sp_index);
 void AddSpawnPointToExisting(uint32_t generator_entity,
                              uint32_t spawn_points_record,
                              const float pos[3]);
+void RemoveSpawnPointFromExisting(uint32_t generator_entity,
+                                  uint32_t spawn_points_record,
+                                  uint32_t spawn_point_entity);
+bool SpawnPointRemovalPending(uint32_t spawn_point_entity);
 size_t PendingSpawnPointCount();
 
 struct PendingSpawnPoint {

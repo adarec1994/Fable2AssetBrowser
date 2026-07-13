@@ -97,6 +97,12 @@ struct ModuleState {
         float pos[3] = {0, 0, 0};
     };
     std::vector<SpawnPointAdd> spawn_point_adds;
+    struct SpawnPointDelete {
+        uint32_t generator_entity = 0;
+        uint32_t spawn_points_record = 0;
+        uint32_t spawn_point_entity = 0;
+    };
+    std::vector<SpawnPointDelete> spawn_point_deletes;
 };
 
 ModuleState& st() {
@@ -976,9 +982,12 @@ void load_additions(ModuleState& s) {
             a.entity_kind = AdditionEntityKind::Chest;
             const size_t ctpl = line.find("\tCTPL", chest_tag);
             const size_t loot = line.find("\tLOOT", chest_tag);
+            const size_t keys = line.find("\tKEYS", chest_tag);
             size_t stop = std::min(
                 ctpl == std::string::npos ? line.size() : ctpl,
                 loot == std::string::npos ? line.size() : loot);
+            stop = std::min(
+                stop, keys == std::string::npos ? line.size() : keys);
             size_t p = chest_tag + 6;
             while (p < line.size() && line[p] == '\t') {
                 if (p >= stop) break;
@@ -1005,6 +1014,13 @@ void load_additions(ModuleState& s) {
                 if (std::sscanf(line.c_str() + loot + 5, "\t%x",
                                 &lt) == 1) {
                     a.loot_table_record = lt;
+                }
+            }
+            if (keys != std::string::npos) {
+                int required = 0;
+                if (std::sscanf(line.c_str() + keys + 5, "\t%d",
+                                &required) == 1 && required > 0) {
+                    a.silver_keys_needed = required;
                 }
             }
         } else if (key_tag != std::string::npos) {
@@ -1044,6 +1060,11 @@ void load_additions(ModuleState& s) {
                 }
             }
         }
+        if (a.entity_kind == AdditionEntityKind::Chest &&
+            a.silver_keys_needed <= 0) {
+            a.silver_keys_needed =
+                SilverKeyChestRequirement(a.model_path);
+        }
         s.additions.push_back(std::move(a));
     }
     if (!s.additions.empty()) {
@@ -1081,6 +1102,9 @@ bool write_additions(const ModuleState& s, std::string& msg) {
             for (uint32_t h : a.chest_items) {
                 std::snprintf(buf, sizeof(buf), "%08X", h);
                 f << '\t' << buf;
+            }
+            if (a.silver_keys_needed > 0) {
+                f << "\tKEYS\t" << a.silver_keys_needed;
             }
             if (a.entity_template) {
                 std::snprintf(buf, sizeof(buf),
@@ -1146,6 +1170,33 @@ void euler_engine_to_preview_quat(const float rot_deg[3], float out[4]) {
     quat_mul(qz, t, out);
 }
 
+}
+
+int SilverKeyChestRequirement(const std::string& model_path)
+{
+    std::string leaf = model_path;
+    const size_t slash = leaf.find_last_of("/\\");
+    if (slash != std::string::npos) leaf.erase(0, slash + 1);
+
+    std::string compact;
+    compact.reserve(leaf.size());
+    for (unsigned char c : leaf) {
+        if (std::isalnum(c)) {
+            compact.push_back(char(std::tolower(c)));
+        }
+    }
+    constexpr const char* marker = "silverkeychest";
+    const size_t marker_pos = compact.find(marker);
+    if (marker_pos == std::string::npos) return 0;
+
+    size_t p = marker_pos + std::strlen(marker);
+    int required = 0;
+    while (p < compact.size() && std::isdigit(
+               static_cast<unsigned char>(compact[p]))) {
+        required = std::min(999, required * 10 + (compact[p] - '0'));
+        ++p;
+    }
+    return required > 0 ? required : 1;
 }
 
 void OnLevelLoaded(const FlatAssetEntry& entry) {
@@ -1321,7 +1372,21 @@ void MarkAdditionEntityKind(int index, AdditionEntityKind kind)
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
     if (index < 0 || size_t(index) >= s.additions.size()) return;
-    s.additions[size_t(index)].entity_kind = kind;
+    auto& a = s.additions[size_t(index)];
+    a.entity_kind = kind;
+    if (kind != AdditionEntityKind::Chest) a.silver_keys_needed = 0;
+    s.dirty = true;
+    ++s.revision;
+}
+
+void MarkAdditionAsSilverKeyChest(int index, int silver_keys_needed)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.additions.size()) return;
+    auto& a = s.additions[size_t(index)];
+    a.entity_kind = AdditionEntityKind::Chest;
+    a.silver_keys_needed = std::max(1, silver_keys_needed);
     s.dirty = true;
     ++s.revision;
 }
@@ -1404,6 +1469,7 @@ size_t TextEditCount()
 }
 
 int AddGenerator(const float pos[3], const std::string& creature_name,
+                 uint32_t creature_entity,
                  const std::vector<std::string>& asset_models)
 {
     std::lock_guard<std::mutex> lk(mtx());
@@ -1414,6 +1480,15 @@ int AddGenerator(const float pos[3], const std::string& creature_name,
     g.pos[1] = pos[1];
     g.pos[2] = pos[2];
     g.creature_name = creature_name;
+    g.creature_entity = creature_entity;
+    if (!g.creature_entity) {
+        for (const auto& creature : g_level_creature_catalog) {
+            if (creature.name == creature_name) {
+                g.creature_entity = creature.entity_hash;
+                break;
+            }
+        }
+    }
     g.asset_models = asset_models;
     g.spawn_points.push_back({pos[0] + 1.5f, pos[1], pos[2]});
     s.generators.push_back(std::move(g));
@@ -1492,6 +1567,37 @@ void AddSpawnPointToExisting(uint32_t generator_entity,
     ++s.revision;
 }
 
+void RemoveSpawnPointFromExisting(uint32_t generator_entity,
+                                  uint32_t spawn_points_record,
+                                  uint32_t spawn_point_entity)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (!s.available || s.saving || !spawn_points_record ||
+        !spawn_point_entity) {
+        return;
+    }
+    for (const auto& deletion : s.spawn_point_deletes) {
+        if (deletion.spawn_point_entity == spawn_point_entity) return;
+    }
+    ModuleState::SpawnPointDelete deletion;
+    deletion.generator_entity = generator_entity;
+    deletion.spawn_points_record = spawn_points_record;
+    deletion.spawn_point_entity = spawn_point_entity;
+    s.spawn_point_deletes.push_back(deletion);
+    s.dirty = true;
+    ++s.revision;
+}
+
+bool SpawnPointRemovalPending(uint32_t spawn_point_entity)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    for (const auto& deletion : st().spawn_point_deletes) {
+        if (deletion.spawn_point_entity == spawn_point_entity) return true;
+    }
+    return false;
+}
+
 size_t PendingSpawnPointCount()
 {
     std::lock_guard<std::mutex> lk(mtx());
@@ -1567,7 +1673,6 @@ void RemovePendingSpawnPoint(int id)
         }
         auto& sp = s.generators[gi].spawn_points;
         sp.erase(sp.begin() + si);
-        if (sp.empty()) s.generators[gi].removed = true;
     }
     s.dirty = true;
     ++s.revision;
@@ -1792,6 +1897,9 @@ bool apply_chest_contents(GdbEdit::GdbFile& g,
     constexpr uint32_t kInvCompA = 0x1C7D7B74u;
     constexpr uint32_t kInvCompB = 0x73AB8B6Au;
     constexpr uint32_t kInitialItems = 0x9C24A50Du;
+    constexpr uint32_t kChestInventoryBase = 0xB5E7A074u;
+    constexpr uint32_t kEmptyInitialItemsBase = 0xBE56F154u;
+    constexpr uint32_t kItemRepopulationBase = 0x088F64E7u;
 
     if (g.FindRecord(entity_hash) < 0) {
         err = "entity record not in level gdb";
@@ -1799,8 +1907,14 @@ bool apply_chest_contents(GdbEdit::GdbFile& g,
     }
 
     std::vector<GdbEdit::Field> fields;
-    fields.reserve(items.size());
+    fields.reserve(items.size() + 1);
     std::unordered_set<uint32_t> used{kParent};
+    GdbEdit::Field parent_field;
+    parent_field.hash = kParent;
+    parent_field.type = 6;
+    parent_field.value = kEmptyInitialItemsBase;
+    parent_field.decl = 0;
+    fields.push_back(parent_field);
     for (size_t i = 0; i < items.size(); ++i) {
         char name[32];
         std::snprintf(name, sizeof(name), "F2ABItem%zu", i);
@@ -1814,10 +1928,11 @@ bool apply_chest_contents(GdbEdit::GdbFile& g,
         f.hash = fh;
         f.type = 7;
         f.value = items[i];
+        f.decl = uint32_t(i + 1);
         fields.push_back(f);
     }
     const uint32_t list_hash = g.AllocRecordHash();
-    if (!g.AddRecord(list_hash, std::move(fields), 0)) {
+    if (!g.AddRecord(list_hash, std::move(fields), 1)) {
         err = "list record append failed";
         return false;
     }
@@ -1838,10 +1953,11 @@ bool apply_chest_contents(GdbEdit::GdbFile& g,
         inv_hash = f.value;
     } else {
 
-        const uint32_t inherit =
+        uint32_t inherit =
             (have_local_field && f.value != 0 && f.value != kNull)
                 ? f.value
                 : 0;
+        if (!inherit) inherit = kChestInventoryBase;
         inv_hash = g.AllocRecordHash();
         std::vector<GdbEdit::Field> fs;
         if (inherit) {
@@ -1849,9 +1965,10 @@ bool apply_chest_contents(GdbEdit::GdbFile& g,
             pf.hash = kParent;
             pf.type = 6;
             pf.value = inherit;
+            pf.decl = 0;
             fs.push_back(pf);
         }
-        if (!g.AddRecord(inv_hash, fs, 0)) {
+        if (!g.AddRecord(inv_hash, fs, 1)) {
             err = "inventory record append failed";
             return false;
         }
@@ -1860,7 +1977,7 @@ bool apply_chest_contents(GdbEdit::GdbFile& g,
                 err = "inventory field rewrite failed";
                 return false;
             }
-        } else if (!g.AddField(entity_hash, kInvCompA, 6, inv_hash)) {
+        } else if (!g.AddField(entity_hash, kInvCompA, 6, inv_hash, 1)) {
             err = "inventory field append failed";
             return false;
         }
@@ -1872,7 +1989,7 @@ bool apply_chest_contents(GdbEdit::GdbFile& g,
             err = "InitialItems rewrite failed";
             return false;
         }
-    } else if (!g.AddField(inv_hash, kInitialItems, 6, list_hash)) {
+    } else if (!g.AddField(inv_hash, kInitialItems, 6, list_hash, 1)) {
         err = "InitialItems append failed";
         return false;
     }
@@ -1884,16 +2001,23 @@ bool apply_chest_contents(GdbEdit::GdbFile& g,
         const uint32_t repop_hash = g.AllocRecordHash();
         std::vector<GdbEdit::Field> rf;
         GdbEdit::Field f2;
+        f2.hash = kParent;
+        f2.type = 6;
+        f2.value = kItemRepopulationBase;
+        f2.decl = 0;
+        rf.push_back(f2);
         f2.hash = kPotentialItems;
         f2.type = 6;
         f2.value = loot_table_record;
+        f2.decl = 1;
         rf.push_back(f2);
         f2.hash = kChanceOfRespawning;
         f2.type = 3;
+        f2.decl = 2;
         const float chance = 1.0f;
         std::memcpy(&f2.value, &chance, 4);
         rf.push_back(f2);
-        if (!g.AddRecord(repop_hash, rf, 0)) {
+        if (!g.AddRecord(repop_hash, rf, 1)) {
             err = "repopulation record append failed";
             return false;
         }
@@ -1905,7 +2029,7 @@ bool apply_chest_contents(GdbEdit::GdbFile& g,
                 return false;
             }
         } else if (!g.AddField(inv_hash, kItemRepopulationData, 6,
-                               repop_hash)) {
+                               repop_hash, 2)) {
             err = "ItemRepopulationData append failed";
             return false;
         }
@@ -1931,12 +2055,36 @@ uint32_t create_entity_addition(GdbEdit::GdbFile& g,
 
     constexpr uint32_t kChestTemplate = 0x8C13FB53u;
     constexpr uint32_t kChestTemplateKeyframed = 0x9AB9A90Cu;
+    constexpr uint32_t kChestPositionTemplate = 0x2CA65C69u;
+    constexpr uint32_t kChestRotationTemplate = 0xC10576FAu;
+    constexpr uint32_t kChestBaseTemplate = 0x3CABC379u;
+    constexpr uint32_t kChestGraphicBase = 0x8AAF44E3u;
+    constexpr uint32_t kChestComponentBase = 0x8DD05F71u;
+    constexpr uint32_t kChestSkeleton = 0xF94F44C0u;
+    constexpr uint32_t kGraphicAppearanceAnimatedMesh = 0x21D312CAu;
+    constexpr uint32_t kChestComponent = 0x379C25A9u;
+    constexpr uint32_t kObjectComponent = 0xF1A5EEB9u;
+    constexpr uint32_t kModelFile = 0x0C17DB4Eu;
+    constexpr uint32_t kSkeletonFile = 0xC3D06E3Au;
+    constexpr uint32_t kSilverKeysNeeded = 0xB208E419u;
+    constexpr uint32_t kObjectComponentBase = 0xA4EB5624u;
+    constexpr uint32_t kMaterial = 0x6D04D9A2u;
+    constexpr uint32_t kSilverChestMaterial = 0xE294B870u;
 
     constexpr uint32_t kSilverKeyTemplate = 0x4AB4C31Au;
     constexpr uint32_t kSilverKeyTemplateDynamic = 0xEA7C60E5u;
+    constexpr uint32_t kSilverKeyPositionTemplate = 0xEF585A66u;
+    constexpr uint32_t kSilverKeyRotationTemplate = 0x9BB57EABu;
 
     const bool is_key = a.entity_kind == AdditionEntityKind::SilverKey;
     const bool is_prop = a.entity_kind == AdditionEntityKind::GenericProp;
+    const bool is_silver_key_chest =
+        a.entity_kind == AdditionEntityKind::Chest &&
+        a.silver_keys_needed > 0;
+    // Always author a fresh silver-chest template.  Older editor builds may
+    // have left template-looking records with invalid component schemas in the
+    // level, so reusing a model-matched donor can perpetuate the bad record.
+    const bool author_silver_chest_graphics = is_silver_key_chest;
     uint32_t entity_template =
         is_key ? kSilverKeyTemplate : kChestTemplate;
     uint32_t comp_field = is_key ? kDynamic : kKeyframed;
@@ -1951,10 +2099,35 @@ uint32_t create_entity_addition(GdbEdit::GdbFile& g,
         comp_field = a.entity_comp_field;
         comp_template = a.entity_comp_template;
     } else if (a.entity_kind == AdditionEntityKind::Chest &&
+               !is_silver_key_chest &&
                a.entity_template && a.entity_comp_field) {
         entity_template = a.entity_template;
         comp_field = a.entity_comp_field;
         comp_template = a.entity_comp_template;
+    }
+    uint32_t position_template = 0;
+    uint32_t rotation_template = 0;
+    GdbEdit::Field template_field;
+    if (comp_template && comp_template != kNull) {
+        if (g.FindLocalField(comp_template, kPosition, template_field) &&
+            template_field.type == 6) {
+            position_template = template_field.value;
+        }
+        if (g.FindLocalField(comp_template, kRotation, template_field) &&
+            template_field.type == 6) {
+            rotation_template = template_field.value;
+        }
+    }
+    if (is_key) {
+        if (!position_template) {
+            position_template = kSilverKeyPositionTemplate;
+        }
+        if (!rotation_template) {
+            rotation_template = kSilverKeyRotationTemplate;
+        }
+    } else if (a.entity_kind == AdditionEntityKind::Chest) {
+        if (!position_template) position_template = kChestPositionTemplate;
+        if (!rotation_template) rotation_template = kChestRotationTemplate;
     }
 
     auto fbits = [](float f) {
@@ -1963,19 +2136,29 @@ uint32_t create_entity_addition(GdbEdit::GdbFile& g,
         return u;
     };
 
-    auto vec3_record = [&](float x, float y, float z) -> uint32_t {
+    auto vec3_record = [&](float x, float y, float z,
+                           uint32_t parent) -> uint32_t {
         const uint32_t h = g.AllocRecordHash();
         std::vector<GdbEdit::Field> fs;
         GdbEdit::Field f;
-        f.hash = kVecZ; f.type = 3; f.value = fbits(z); fs.push_back(f);
-        f.hash = kVecY; f.type = 3; f.value = fbits(y); fs.push_back(f);
-        f.hash = kVecX; f.type = 3; f.value = fbits(x); fs.push_back(f);
-        return g.AddRecord(h, fs, 0) ? h : 0;
+        f.hash = kVecZ; f.type = 3; f.value = fbits(z); f.decl = 3;
+        fs.push_back(f);
+        f.hash = kVecY; f.type = 3; f.value = fbits(y); f.decl = 2;
+        fs.push_back(f);
+        f.hash = kVecX; f.type = 3; f.value = fbits(x); f.decl = 1;
+        fs.push_back(f);
+        if (parent) {
+            f.hash = kParent; f.type = 6; f.value = parent; f.decl = 0;
+            fs.push_back(f);
+        }
+        return g.AddRecord(h, fs, 1) ? h : 0;
     };
 
-    const uint32_t pos_rec = vec3_record(a.pos[0], a.pos[1], a.pos[2]);
+    const uint32_t pos_rec = vec3_record(
+        a.pos[0], a.pos[1], a.pos[2], position_template);
     const float yaw = a.yaw_deg * 0.01745329252f;
-    const uint32_t rot_rec = vec3_record(yaw, 0.0f, 0.0f);
+    const uint32_t rot_rec = vec3_record(
+        yaw, 0.0f, 0.0f, rotation_template);
     if (!pos_rec || !rot_rec) {
         err = "transform record append failed";
         return 0;
@@ -1985,13 +2168,16 @@ uint32_t create_entity_addition(GdbEdit::GdbFile& g,
     {
         std::vector<GdbEdit::Field> fs;
         GdbEdit::Field f;
-        f.hash = kRotation; f.type = 6; f.value = rot_rec; fs.push_back(f);
+        f.hash = kRotation; f.type = 6; f.value = rot_rec; f.decl = 1;
+        fs.push_back(f);
         if (comp_template && comp_template != kNull) {
             f.hash = kParent; f.type = 6; f.value = comp_template;
+            f.decl = 2;
             fs.push_back(f);
         }
-        f.hash = kPosition; f.type = 6; f.value = pos_rec; fs.push_back(f);
-        if (!g.AddRecord(comp_rec, fs, 0)) {
+        f.hash = kPosition; f.type = 6; f.value = pos_rec; f.decl = 0;
+        fs.push_back(f);
+        if (!g.AddRecord(comp_rec, fs, 1)) {
             err = "transform component append failed";
             return 0;
         }
@@ -2010,11 +2196,95 @@ uint32_t create_entity_addition(GdbEdit::GdbFile& g,
         std::vector<GdbEdit::Field> fs;
         GdbEdit::Field f;
         f.hash = kTextTag; f.type = 4; f.value = text_tag;
+        f.decl = 0;
         fs.push_back(f);
-        if (!g.AddRecord(tags_rec, fs, 0)) {
+        if (!g.AddRecord(tags_rec, fs, 1)) {
             err = "readable component record append failed";
             return 0;
         }
+    }
+
+    uint32_t graphic_rec = 0;
+    if (author_silver_chest_graphics) {
+        const std::string model_path = lower_model_path(a.model_path);
+        const uint32_t model_hash = fnv1_32(model_path);
+        graphic_rec = g.AllocRecordHash();
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kModelFile; f.type = 4; f.value = model_hash; f.decl = 1;
+        fs.push_back(f);
+        f.hash = kParent; f.type = 6; f.value = kChestGraphicBase;
+        f.decl = 0;
+        fs.push_back(f);
+        f.hash = kSkeletonFile; f.type = 4; f.value = kChestSkeleton;
+        f.decl = 2;
+        fs.push_back(f);
+        if (!g.AddRecord(graphic_rec, fs, 1)) {
+            err = "silver-key chest graphics append failed";
+            return 0;
+        }
+        g.AddDictString(model_hash, model_path);
+    }
+
+    uint32_t chest_rec = 0;
+    if (author_silver_chest_graphics) {
+        chest_rec = g.AllocRecordHash();
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kParent; f.type = 6; f.value = kChestComponentBase;
+        f.decl = 0;
+        fs.push_back(f);
+        f.hash = kSilverKeysNeeded; f.type = 1;
+        f.value = uint32_t(a.silver_keys_needed);
+        f.decl = 1;
+        fs.push_back(f);
+        if (!g.AddRecord(chest_rec, fs, 1)) {
+            err = "silver-key chest lock append failed";
+            return 0;
+        }
+    }
+
+    uint32_t object_rec = 0;
+    if (author_silver_chest_graphics) {
+        object_rec = g.AllocRecordHash();
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kParent; f.type = 6; f.value = kObjectComponentBase;
+        f.decl = 0; fs.push_back(f);
+        f.hash = kMaterial; f.type = 7; f.value = kSilverChestMaterial;
+        f.decl = 1; fs.push_back(f);
+        if (!g.AddRecord(object_rec, fs, 1)) {
+            err = "silver-key chest object component append failed";
+            return 0;
+        }
+    }
+
+    // Native silver-key chests are a placed entity that inherits a separate
+    // chest template.  The template owns the graphics, lock and physics while
+    // the placed entity owns only its transform and inventory.  Putting these
+    // components directly on the placed entity reloads in the editor, but the
+    // game does not instantiate it as a chest.
+    if (author_silver_chest_graphics) {
+        const uint32_t silver_chest_template = g.AllocRecordHash();
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kGraphicAppearanceAnimatedMesh;
+        f.type = 6; f.value = graphic_rec; f.decl = 2; fs.push_back(f);
+        f.hash = kChestComponent;
+        f.type = 6; f.value = chest_rec; f.decl = 0; fs.push_back(f);
+        f.hash = kParent;
+        f.type = 6; f.value = kChestBaseTemplate; f.decl = 1;
+        fs.push_back(f);
+        f.hash = kKeyframed;
+        f.type = 6; f.value = kChestTemplateKeyframed; f.decl = 3;
+        fs.push_back(f);
+        f.hash = kObjectComponent;
+        f.type = 6; f.value = object_rec; f.decl = 4; fs.push_back(f);
+        if (!g.AddRecord(silver_chest_template, fs, 0)) {
+            err = "silver-key chest template append failed";
+            return 0;
+        }
+        entity_template = silver_chest_template;
     }
 
     const uint32_t entity_rec = g.AllocRecordHash();
@@ -2022,11 +2292,14 @@ uint32_t create_entity_addition(GdbEdit::GdbFile& g,
         std::vector<GdbEdit::Field> fs;
         GdbEdit::Field f;
         f.hash = kParent; f.type = 6; f.value = entity_template;
+        f.decl = 2;
         fs.push_back(f);
         f.hash = comp_field; f.type = 6; f.value = comp_rec;
+        f.decl = 0;
         fs.push_back(f);
         if (tags_rec) {
             f.hash = 0x89ABB47Eu; f.type = 6; f.value = tags_rec;
+            f.decl = 1;
             fs.push_back(f);
         }
         if (!g.AddRecord(entity_rec, fs, 0)) {
@@ -2046,10 +2319,10 @@ uint32_t create_entity_addition(GdbEdit::GdbFile& g,
     return entity_rec;
 }
 
-uint32_t create_spawn_point_entity(GdbEdit::GdbFile& g,
-                                   const Gdb::SpawnDonorInfo& d,
-                                   const float pos[3],
-                                   std::string& err)
+uint32_t create_spawn_point_transform(GdbEdit::GdbFile& g,
+                                      const Gdb::SpawnDonorInfo& d,
+                                      const float pos[3],
+                                      std::string& err)
 {
     constexpr uint32_t kParent = 0x5F6317D5u;
     constexpr uint32_t kVecX = 0x050C5D47u;
@@ -2057,22 +2330,37 @@ uint32_t create_spawn_point_entity(GdbEdit::GdbFile& g,
     constexpr uint32_t kVecZ = 0x050C5D45u;
     constexpr uint32_t kPosition = 0xBD7C27D4u;
     constexpr uint32_t kRotation = 0x21EBC83Bu;
+    constexpr uint32_t kDefaultTransformParent = 0x3E64FFF3u;
+    constexpr uint32_t kDefaultPositionParent = 0x4771F72Fu;
+    constexpr uint32_t kDefaultRotationParent = 0xEBB606E5u;
     auto fbits = [](float f) {
         uint32_t u;
         std::memcpy(&u, &f, 4);
         return u;
     };
-    auto vec3_record = [&](float x, float y, float z) -> uint32_t {
+    auto vec3_record = [&](float x, float y, float z,
+                           uint32_t parent) -> uint32_t {
         const uint32_t h = g.AllocRecordHash();
         std::vector<GdbEdit::Field> fs;
         GdbEdit::Field f;
-        f.hash = kVecZ; f.type = 3; f.value = fbits(z); fs.push_back(f);
-        f.hash = kVecY; f.type = 3; f.value = fbits(y); fs.push_back(f);
-        f.hash = kVecX; f.type = 3; f.value = fbits(x); fs.push_back(f);
-        return g.AddRecord(h, fs, 0) ? h : 0;
+        f.hash = kVecZ; f.type = 3; f.value = fbits(z); f.decl = 3;
+        fs.push_back(f);
+        f.hash = kVecY; f.type = 3; f.value = fbits(y); f.decl = 2;
+        fs.push_back(f);
+        f.hash = kVecX; f.type = 3; f.value = fbits(x); f.decl = 1;
+        fs.push_back(f);
+        f.hash = kParent; f.type = 6; f.value = parent; f.decl = 0;
+        fs.push_back(f);
+        return g.AddRecord(h, fs, 1) ? h : 0;
     };
-    const uint32_t pos_rec = vec3_record(pos[0], pos[1], pos[2]);
-    const uint32_t rot_rec = vec3_record(0, 0, 0);
+    const uint32_t pos_rec = vec3_record(
+        pos[0], pos[1], pos[2],
+        d.sp_position_parent ? d.sp_position_parent
+                             : kDefaultPositionParent);
+    const uint32_t rot_rec = vec3_record(
+        0, 0, 0,
+        d.sp_rotation_parent ? d.sp_rotation_parent
+                             : kDefaultRotationParent);
     if (!pos_rec || !rot_rec) {
         err = "spawn point transform append failed";
         return 0;
@@ -2082,25 +2370,43 @@ uint32_t create_spawn_point_entity(GdbEdit::GdbFile& g,
         std::vector<GdbEdit::Field> fs;
         GdbEdit::Field f;
         f.hash = kRotation; f.type = 6; f.value = rot_rec;
+        f.decl = 1;
         fs.push_back(f);
-        if (d.sp_comp_parent && d.sp_comp_parent != 0x811C9DC5u) {
-            f.hash = kParent; f.type = 6; f.value = d.sp_comp_parent;
-            fs.push_back(f);
-        }
+        f.hash = kParent; f.type = 6;
+        f.value = d.sp_transform_parent ? d.sp_transform_parent
+                                        : kDefaultTransformParent;
+        f.decl = 2;
+        fs.push_back(f);
         f.hash = kPosition; f.type = 6; f.value = pos_rec;
+        f.decl = 0;
         fs.push_back(f);
-        if (!g.AddRecord(comp_rec, fs, 0)) {
-            err = "spawn point comp append failed";
+        if (!g.AddRecord(comp_rec, fs, 1)) {
+            err = "spawn point transform append failed";
             return 0;
         }
     }
+    return comp_rec;
+}
+
+uint32_t create_spawn_point_entity(GdbEdit::GdbFile& g,
+                                   const Gdb::SpawnDonorInfo& d,
+                                   const float pos[3],
+                                   std::string& err)
+{
+    constexpr uint32_t kParent = 0x5F6317D5u;
+    const uint32_t comp_rec =
+        create_spawn_point_transform(g, d, pos, err);
+    if (!comp_rec) return 0;
+
     const uint32_t ent = g.AllocRecordHash();
     {
         std::vector<GdbEdit::Field> fs;
         GdbEdit::Field f;
         f.hash = kParent; f.type = 6; f.value = d.sp_template;
+        f.decl = 0;
         fs.push_back(f);
-        f.hash = d.sp_comp_field; f.type = 6; f.value = comp_rec;
+        f.hash = d.sp_transform_field; f.type = 6; f.value = comp_rec;
+        f.decl = 1;
         fs.push_back(f);
         if (!g.AddRecord(ent, fs, 0)) {
             err = "spawn point entity append failed";
@@ -2108,6 +2414,430 @@ uint32_t create_spawn_point_entity(GdbEdit::GdbFile& g,
         }
     }
     return ent;
+}
+
+bool legacy_spawn_point_position(const GdbEdit::GdbFile& g,
+                                 const Gdb::SpawnDonorInfo& d,
+                                 uint32_t entity_hash,
+                                 float out_pos[3])
+{
+    constexpr uint32_t kPosition = 0xBD7C27D4u;
+    constexpr uint32_t kRotation = 0x21EBC83Bu;
+    constexpr uint32_t kVec[3] = {
+        0x050C5D47u, 0x050C5D46u, 0x050C5D45u,
+    };
+    GdbEdit::Field field;
+    if (g.FindLocalField(entity_hash, d.sp_transform_field, field)) {
+        return false;
+    }
+    if (!g.FindLocalField(entity_hash, d.sp_comp_field, field) ||
+        field.type != 6) {
+        return false;
+    }
+    const uint32_t malformed_component = field.value;
+    GdbEdit::Field pos_field, rot_field;
+    if (!g.FindLocalField(malformed_component, kPosition, pos_field) ||
+        pos_field.type != 6 ||
+        !g.FindLocalField(malformed_component, kRotation, rot_field) ||
+        rot_field.type != 6) {
+        return false;
+    }
+    for (size_t i = 0; i < 3; ++i) {
+        GdbEdit::Field value;
+        if (!g.FindLocalField(pos_field.value, kVec[i], value) ||
+            value.type != 3) {
+            return false;
+        }
+        std::memcpy(&out_pos[i], &value.value, sizeof(float));
+    }
+    return true;
+}
+
+bool has_legacy_spawn_points(const GdbEdit::GdbFile& g,
+                             const Gdb::SpawnDonorInfo& d)
+{
+    if (!d.valid()) return false;
+    float pos[3];
+    for (size_t i = 0; i < g.RecordCount(); ++i) {
+        if (legacy_spawn_point_position(
+                g, d, g.RecordAt(i).hash, pos)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool repair_legacy_spawn_points(GdbEdit::GdbFile& g,
+                                const Gdb::SpawnDonorInfo& d,
+                                size_t& repaired,
+                                std::string& err)
+{
+    struct Candidate {
+        uint32_t entity = 0;
+        float pos[3] = {};
+    };
+    std::vector<Candidate> candidates;
+    const size_t original_count = g.RecordCount();
+    for (size_t i = 0; i < original_count; ++i) {
+        Candidate candidate;
+        candidate.entity = g.RecordAt(i).hash;
+        if (legacy_spawn_point_position(
+                g, d, candidate.entity, candidate.pos)) {
+            candidates.push_back(candidate);
+        }
+    }
+
+    for (const Candidate& candidate : candidates) {
+        const uint32_t transform = create_spawn_point_transform(
+            g, d, candidate.pos, err);
+        if (!transform) return false;
+        if (!g.AddField(candidate.entity, d.sp_transform_field, 6,
+                        transform, 1) ||
+            !g.RemoveField(candidate.entity, d.sp_comp_field)) {
+            err = "legacy spawn point component migration failed";
+            return false;
+        }
+        ++repaired;
+    }
+    return true;
+}
+
+uint32_t create_generator_transform(GdbEdit::GdbFile& g,
+                                    const Gdb::SpawnDonorInfo& d,
+                                    const float pos[3],
+                                    std::string& err)
+{
+    constexpr uint32_t kParent = 0x5F6317D5u;
+    constexpr uint32_t kVecX = 0x050C5D47u;
+    constexpr uint32_t kVecY = 0x050C5D46u;
+    constexpr uint32_t kVecZ = 0x050C5D45u;
+    constexpr uint32_t kPosition = 0xBD7C27D4u;
+    constexpr uint32_t kRotation = 0x21EBC83Bu;
+    constexpr uint32_t kDefaultTransformParent = 0xFD37C2F6u;
+    constexpr uint32_t kDefaultPositionParent = 0xFC1909D4u;
+    constexpr uint32_t kDefaultRotationParent = 0xB3E58682u;
+    auto fbits = [](float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return bits;
+    };
+    auto vec3_record = [&](float x, float y, float z,
+                           uint32_t parent) -> uint32_t {
+        const uint32_t hash = g.AllocRecordHash();
+        std::vector<GdbEdit::Field> fields;
+        GdbEdit::Field field;
+        field.hash = kVecZ; field.type = 3;
+        field.value = fbits(z); field.decl = 3;
+        fields.push_back(field);
+        field.hash = kVecY; field.value = fbits(y); field.decl = 2;
+        fields.push_back(field);
+        field.hash = kVecX; field.value = fbits(x); field.decl = 1;
+        fields.push_back(field);
+        field.hash = kParent; field.type = 6;
+        field.value = parent; field.decl = 0;
+        fields.push_back(field);
+        return g.AddRecord(hash, fields, 1) ? hash : 0;
+    };
+
+    const uint32_t pos_record = vec3_record(
+        pos[0], pos[1], pos[2],
+        d.gen_position_parent ? d.gen_position_parent
+                              : kDefaultPositionParent);
+    const uint32_t rot_record = vec3_record(
+        0, 0, 0,
+        d.gen_rotation_parent ? d.gen_rotation_parent
+                              : kDefaultRotationParent);
+    if (!pos_record || !rot_record) {
+        err = "generator transform append failed";
+        return 0;
+    }
+
+    const uint32_t transform = g.AllocRecordHash();
+    std::vector<GdbEdit::Field> fields;
+    GdbEdit::Field field;
+    field.hash = kRotation; field.type = 6;
+    field.value = rot_record; field.decl = 1;
+    fields.push_back(field);
+    field.hash = kParent;
+    field.value = d.gen_transform_parent ? d.gen_transform_parent
+                                         : kDefaultTransformParent;
+    field.decl = 2;
+    fields.push_back(field);
+    field.hash = kPosition;
+    field.value = pos_record; field.decl = 0;
+    fields.push_back(field);
+    if (!g.AddRecord(transform, fields, 1)) {
+        err = "generator transform comp append failed";
+        return 0;
+    }
+    return transform;
+}
+
+uint32_t create_generator_families(GdbEdit::GdbFile& g,
+                                   const std::string& creature_name,
+                                   uint32_t creature_entity,
+                                   std::string& err)
+{
+    constexpr uint32_t kParent = 0x5F6317D5u;
+    constexpr uint32_t kCreatures = 0xA1F7A17Du;
+    constexpr uint32_t kFamiliesBase = 0x54C2CFF7u;
+    constexpr uint32_t kFamilyBase = 0x751EBC11u;
+    constexpr uint32_t kCreaturesBase = 0x731AB342u;
+    if (!creature_entity || creature_name.empty()) {
+        err = "selected creature has no GDB entity definition";
+        return 0;
+    }
+
+    const uint32_t creature_field = fnv1_32(creature_name);
+    g.AddDictString(creature_field, creature_name);
+
+    const uint32_t creatures = g.AllocRecordHash();
+    {
+        std::vector<GdbEdit::Field> fields;
+        GdbEdit::Field field;
+        field.hash = kParent; field.type = 6;
+        field.value = kCreaturesBase; field.decl = 0;
+        fields.push_back(field);
+        field.hash = creature_field; field.type = 7;
+        field.value = creature_entity; field.decl = 1;
+        fields.push_back(field);
+        if (!g.AddRecord(creatures, fields, 1)) {
+            err = "generator creature list append failed";
+            return 0;
+        }
+    }
+
+    const uint32_t family = g.AllocRecordHash();
+    {
+        std::vector<GdbEdit::Field> fields;
+        GdbEdit::Field field;
+        field.hash = kParent; field.type = 6;
+        field.value = kFamilyBase; field.decl = 0;
+        fields.push_back(field);
+        field.hash = kCreatures; field.type = 6;
+        field.value = creatures; field.decl = 1;
+        fields.push_back(field);
+        if (!g.AddRecord(family, fields, 1)) {
+            err = "generator family append failed";
+            return 0;
+        }
+    }
+
+    const uint32_t families = g.AllocRecordHash();
+    {
+        std::vector<GdbEdit::Field> fields;
+        GdbEdit::Field field;
+        field.hash = kParent; field.type = 6;
+        field.value = kFamiliesBase; field.decl = 0;
+        fields.push_back(field);
+        field.hash = creature_field; field.type = 6;
+        field.value = family; field.decl = 1;
+        fields.push_back(field);
+        if (!g.AddRecord(families, fields, 1)) {
+            err = "generator families append failed";
+            return 0;
+        }
+    }
+    return families;
+}
+
+bool creature_catalog_entity(const std::string& name, uint32_t& entity_hash)
+{
+    for (const auto& creature : g_level_creature_catalog) {
+        if (creature.name == name && creature.entity_hash != 0) {
+            entity_hash = creature.entity_hash;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool legacy_generator_data(const GdbEdit::GdbFile& g,
+                           const Gdb::SpawnDonorInfo& d,
+                           uint32_t entity_hash,
+                           uint32_t& component_hash,
+                           uint32_t& list_hash,
+                           std::string& creature_name,
+                           uint32_t& creature_entity,
+                           float out_pos[3])
+{
+    constexpr uint32_t kNull = 0x811C9DC5u;
+    constexpr uint32_t kSpawnedCreatureName = 0x2A80DD7Bu;
+    constexpr uint32_t kSpawnPoints = 0x559B5DBFu;
+    constexpr uint32_t kFamilies = 0xF44CE155u;
+    constexpr uint32_t kPosition = 0xBD7C27D4u;
+    constexpr uint32_t kVec[3] = {
+        0x050C5D47u, 0x050C5D46u, 0x050C5D45u,
+    };
+    creature_name.clear();
+    creature_entity = 0;
+    GdbEdit::Field field;
+    if (!g.FindLocalField(entity_hash, d.gen_comp_field, field) ||
+        field.type != 6) {
+        return false;
+    }
+    component_hash = field.value;
+
+    GdbEdit::Field families;
+    const bool has_families =
+        g.FindLocalField(component_hash, kFamilies, families) &&
+        families.type == 6 && families.value != 0 &&
+        families.value != kNull;
+    GdbEdit::Field spawned_name;
+    if (g.FindLocalField(component_hash, kSpawnedCreatureName,
+                         spawned_name)) {
+        const auto it = g.Dict().find(spawned_name.value);
+        if (it != g.Dict().end()) {
+            uint32_t catalog_entity = 0;
+            if (creature_catalog_entity(it->second, catalog_entity)) {
+                creature_name = it->second;
+                creature_entity = catalog_entity;
+            }
+        }
+    }
+    const bool old_schema = g.SchemaHeaderLow(component_hash) == 0;
+    const bool missing_creature_family =
+        !has_families && creature_entity != 0;
+    if (!old_schema && !missing_creature_family) {
+        return false;
+    }
+
+    if (!g.FindLocalField(component_hash, kSpawnPoints, field) ||
+        field.type != 6) {
+        return false;
+    }
+    list_hash = field.value;
+    if (!g.FindLocalField(entity_hash, d.gen_transform_field, field) ||
+        field.type != 6) {
+        return false;
+    }
+    GdbEdit::Field position;
+    if (!g.FindLocalField(field.value, kPosition, position) ||
+        position.type != 6) {
+        return false;
+    }
+    for (size_t i = 0; i < 3; ++i) {
+        GdbEdit::Field value;
+        if (!g.FindLocalField(position.value, kVec[i], value) ||
+            value.type != 3) {
+            return false;
+        }
+        std::memcpy(&out_pos[i], &value.value, sizeof(float));
+    }
+    return true;
+}
+
+bool has_legacy_generators(const GdbEdit::GdbFile& g,
+                           const Gdb::SpawnDonorInfo& d)
+{
+    if (!d.valid()) return false;
+    uint32_t component = 0, list = 0;
+    uint32_t creature_entity = 0;
+    std::string creature_name;
+    float pos[3];
+    for (size_t i = 0; i < g.RecordCount(); ++i) {
+        if (legacy_generator_data(g, d, g.RecordAt(i).hash,
+                                  component, list, creature_name,
+                                  creature_entity, pos)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool repair_legacy_generators(GdbEdit::GdbFile& g,
+                              const Gdb::SpawnDonorInfo& d,
+                              size_t& repaired,
+                              std::string& err)
+{
+    constexpr uint32_t kParent = 0x5F6317D5u;
+    constexpr uint32_t kSpawnedCreatureName = 0x2A80DD7Bu;
+    constexpr uint32_t kSpawnPoints = 0x559B5DBFu;
+    constexpr uint32_t kFamilies = 0xF44CE155u;
+    struct Candidate {
+        uint32_t entity = 0;
+        uint32_t component = 0;
+        uint32_t list = 0;
+        std::string creature_name;
+        uint32_t creature_entity = 0;
+        float pos[3] = {};
+    };
+    std::vector<Candidate> candidates;
+    const size_t original_count = g.RecordCount();
+    for (size_t i = 0; i < original_count; ++i) {
+        Candidate candidate;
+        candidate.entity = g.RecordAt(i).hash;
+        if (legacy_generator_data(
+                g, d, candidate.entity, candidate.component,
+                candidate.list, candidate.creature_name,
+                candidate.creature_entity, candidate.pos)) {
+            candidates.push_back(candidate);
+        }
+    }
+
+    for (const Candidate& candidate : candidates) {
+        std::vector<GdbEdit::Field> list_fields;
+        std::vector<GdbEdit::Field> component_fields;
+        if (!g.Fields(g.FindRecord(candidate.list), list_fields) ||
+            !g.Fields(g.FindRecord(candidate.component), component_fields)) {
+            err = "legacy generator records are unreadable";
+            return false;
+        }
+        const uint32_t new_list = g.AllocRecordHash();
+        if (!g.AddRecord(new_list, list_fields, 1)) {
+            err = "legacy generator spawn list migration failed";
+            return false;
+        }
+        uint32_t families = 0;
+        if (candidate.creature_entity != 0) {
+            families = create_generator_families(
+                g, candidate.creature_name, candidate.creature_entity, err);
+            if (!families) return false;
+        }
+        bool found_families = false;
+        uint32_t next_decl = 4;
+        for (GdbEdit::Field& field : component_fields) {
+            if (field.hash == kParent) {
+                field.decl = 0;
+            } else if (field.hash == kSpawnPoints) {
+                field.value = new_list;
+                field.decl = 1;
+            } else if (field.hash == kSpawnedCreatureName) {
+                field.decl = 2;
+            } else if (field.hash == kFamilies) {
+                if (families) field.value = families;
+                field.decl = 3;
+                found_families = true;
+            } else {
+                field.decl = next_decl++;
+            }
+        }
+        if (!found_families && families) {
+            GdbEdit::Field family_field;
+            family_field.hash = kFamilies;
+            family_field.type = 6;
+            family_field.value = families;
+            family_field.decl = 3;
+            component_fields.push_back(family_field);
+        }
+        const uint32_t new_component = g.AllocRecordHash();
+        if (!g.AddRecord(new_component, component_fields, 1)) {
+            err = "legacy generator component migration failed";
+            return false;
+        }
+        const uint32_t new_transform = create_generator_transform(
+            g, d, candidate.pos, err);
+        if (!new_transform ||
+            !g.SetFieldValue(candidate.entity, d.gen_comp_field,
+                             new_component) ||
+            !g.SetFieldValue(candidate.entity, d.gen_transform_field,
+                             new_transform)) {
+            if (err.empty()) err = "legacy generator migration failed";
+            return false;
+        }
+        ++repaired;
+    }
+    return true;
 }
 
 uint32_t create_generator_entity(
@@ -2120,11 +2850,9 @@ uint32_t create_generator_entity(
     constexpr uint32_t kParent = 0x5F6317D5u;
     constexpr uint32_t kSpawnedCreatureName = 0x2A80DD7Bu;
     constexpr uint32_t kSpawnPoints = 0x559B5DBFu;
-    constexpr uint32_t kVecX = 0x050C5D47u;
-    constexpr uint32_t kVecY = 0x050C5D46u;
-    constexpr uint32_t kVecZ = 0x050C5D45u;
-    constexpr uint32_t kPosition = 0xBD7C27D4u;
-    constexpr uint32_t kRotation = 0x21EBC83Bu;
+    constexpr uint32_t kFamilies = 0xF44CE155u;
+    constexpr uint32_t kDefaultGeneratorCompParent = 0x9B6881DAu;
+    constexpr uint32_t kDefaultSpawnListParent = 0x2FAB69BFu;
 
     std::vector<uint32_t> sp_entities;
     for (const auto& p : ga.spawn_points) {
@@ -2148,19 +2876,23 @@ uint32_t create_generator_entity(
             f.hash = fnv1_32(fname);
             f.type = 7;
             f.value = sp_entities[i];
+            f.decl = uint32_t(i);
             fs.push_back(f);
         }
-        if (d.spawn_list_parent &&
-            d.spawn_list_parent != 0x811C9DC5u) {
-            f.hash = kParent; f.type = 6;
-            f.value = d.spawn_list_parent;
-            fs.push_back(f);
-        }
-        if (!g.AddRecord(list_rec, fs, 0)) {
+        f.hash = kParent; f.type = 6;
+        f.value = d.spawn_list_parent ? d.spawn_list_parent
+                                      : kDefaultSpawnListParent;
+        f.decl = uint32_t(sp_entities.size());
+        fs.push_back(f);
+        if (!g.AddRecord(list_rec, fs, 1)) {
             err = "spawn list append failed";
             return 0;
         }
     }
+
+    const uint32_t families_rec = create_generator_families(
+        g, ga.creature_name, ga.creature_entity, err);
+    if (!families_rec) return 0;
 
     const uint32_t comp_rec = g.AllocRecordHash();
     {
@@ -2168,76 +2900,44 @@ uint32_t create_generator_entity(
         GdbEdit::Field f;
         f.hash = kSpawnedCreatureName; f.type = 4;
         f.value = fnv1_32(ga.creature_name);
+        f.decl = 2;
         fs.push_back(f);
         f.hash = kSpawnPoints; f.type = 6; f.value = list_rec;
+        f.decl = 1;
         fs.push_back(f);
-        if (d.gen_comp_parent && d.gen_comp_parent != 0x811C9DC5u) {
-            f.hash = kParent; f.type = 6; f.value = d.gen_comp_parent;
-            fs.push_back(f);
-        }
-        if (!g.AddRecord(comp_rec, fs, 0)) {
+        f.hash = kParent; f.type = 6;
+        f.value = d.gen_comp_parent ? d.gen_comp_parent
+                                    : kDefaultGeneratorCompParent;
+        f.decl = 0;
+        fs.push_back(f);
+        f.hash = kFamilies; f.type = 6; f.value = families_rec;
+        f.decl = 3;
+        fs.push_back(f);
+        if (!g.AddRecord(comp_rec, fs, 1)) {
             err = "generator comp append failed";
             return 0;
         }
     }
+    g.AddDictString(fnv1_32(ga.creature_name), ga.creature_name);
 
-    uint32_t tf_rec = 0;
-    if (d.gen_transform_field &&
-        d.gen_transform_field != d.gen_comp_field) {
-        auto fbits = [](float f) {
-            uint32_t u;
-            std::memcpy(&u, &f, 4);
-            return u;
-        };
-        auto vec3_record = [&](float x, float y, float z) -> uint32_t {
-            const uint32_t h = g.AllocRecordHash();
-            std::vector<GdbEdit::Field> fs;
-            GdbEdit::Field f;
-            f.hash = kVecZ; f.type = 3; f.value = fbits(z);
-            fs.push_back(f);
-            f.hash = kVecY; f.type = 3; f.value = fbits(y);
-            fs.push_back(f);
-            f.hash = kVecX; f.type = 3; f.value = fbits(x);
-            fs.push_back(f);
-            return g.AddRecord(h, fs, 0) ? h : 0;
-        };
-        const uint32_t pos_rec =
-            vec3_record(ga.pos[0], ga.pos[1], ga.pos[2]);
-        const uint32_t rot_rec = vec3_record(0, 0, 0);
-        if (!pos_rec || !rot_rec) {
-            err = "generator transform append failed";
-            return 0;
-        }
-        tf_rec = g.AllocRecordHash();
-        std::vector<GdbEdit::Field> fs;
-        GdbEdit::Field f;
-        f.hash = kRotation; f.type = 6; f.value = rot_rec;
-        fs.push_back(f);
-        if (d.gen_transform_parent &&
-            d.gen_transform_parent != 0x811C9DC5u) {
-            f.hash = kParent; f.type = 6;
-            f.value = d.gen_transform_parent;
-            fs.push_back(f);
-        }
-        f.hash = kPosition; f.type = 6; f.value = pos_rec;
-        fs.push_back(f);
-        if (!g.AddRecord(tf_rec, fs, 0)) {
-            err = "generator transform comp append failed";
-            return 0;
-        }
-    }
+    const uint32_t tf_rec =
+        create_generator_transform(g, d, ga.pos, err);
+    if (!tf_rec) return 0;
 
     const uint32_t ent = g.AllocRecordHash();
     {
         std::vector<GdbEdit::Field> fs;
         GdbEdit::Field f;
         f.hash = kParent; f.type = 6; f.value = d.gen_template;
+        f.decl = 0;
         fs.push_back(f);
         f.hash = d.gen_comp_field; f.type = 6; f.value = comp_rec;
+        f.decl = 2;
         fs.push_back(f);
         if (tf_rec) {
             f.hash = d.gen_transform_field; f.type = 6;
             f.value = tf_rec;
+            f.decl = 1;
             fs.push_back(f);
         }
         if (!g.AddRecord(ent, fs, 0)) {
@@ -2250,6 +2950,102 @@ uint32_t create_generator_entity(
     g.AddNameMapping(nm, ent);
     new_save_entities.emplace_back(nm, ent);
     return ent;
+}
+
+bool remove_spawn_point_reference(
+    GdbEdit::GdbFile& g,
+    const Gdb::SpawnDonorInfo& donor,
+    const ModuleState::SpawnPointDelete& deletion,
+    std::string& err)
+{
+    constexpr uint32_t kSpawnPoints = 0x559B5DBFu;
+    uint32_t list_hash = deletion.spawn_points_record;
+
+    // Generator migration can replace the component and spawn-list records
+    // during this same Save. Resolve the current list from the generator so
+    // the removal is applied to the migrated graph, not its stale predecessor.
+    GdbEdit::Field component;
+    GdbEdit::Field points;
+    if (deletion.generator_entity && donor.gen_comp_field &&
+        g.FindLocalField(deletion.generator_entity,
+                         donor.gen_comp_field, component) &&
+        component.type == 6 &&
+        g.FindLocalField(component.value, kSpawnPoints, points) &&
+        points.type == 6) {
+        list_hash = points.value;
+    }
+
+    std::vector<GdbEdit::Field> fields;
+    if (!g.Fields(g.FindRecord(list_hash), fields)) {
+        err = "spawn point list is unreadable";
+        return false;
+    }
+    for (const auto& field : fields) {
+        if (field.type == 7 &&
+            field.value == deletion.spawn_point_entity) {
+            if (!g.RemoveField(list_hash, field.hash)) {
+                err = "spawn point list field removal failed";
+                return false;
+            }
+            return true;
+        }
+    }
+    err = "spawn point is no longer present in its generator";
+    return false;
+}
+
+size_t remove_save_entities(
+    std::vector<uint8_t>& xml_bytes,
+    const std::unordered_set<uint32_t>& entity_hashes)
+{
+    if (entity_hashes.empty()) return 0;
+    std::string xml(reinterpret_cast<const char*>(xml_bytes.data()),
+                    xml_bytes.size());
+    constexpr const char* kClose = "</Entity>";
+    constexpr size_t kCloseLen = 9;
+    size_t removed = 0;
+    size_t pos = 0;
+    while ((pos = xml.find("<Entity ", pos)) != std::string::npos) {
+        const size_t value_begin = xml.find('>', pos);
+        const size_t close = value_begin == std::string::npos
+                                 ? std::string::npos
+                                 : xml.find(kClose, value_begin + 1);
+        if (value_begin == std::string::npos || close == std::string::npos) {
+            break;
+        }
+        const std::string value =
+            xml.substr(value_begin + 1, close - value_begin - 1);
+        char* parse_end = nullptr;
+        const unsigned long parsed =
+            std::strtoul(value.c_str(), &parse_end, 0);
+        if (parse_end != value.c_str() &&
+            entity_hashes.count(uint32_t(parsed))) {
+            size_t erase_begin = xml.rfind('\n', pos);
+            erase_begin = erase_begin == std::string::npos
+                              ? 0
+                              : erase_begin + 1;
+            for (size_t i = erase_begin; i < pos; ++i) {
+                if (xml[i] != ' ' && xml[i] != '\t' && xml[i] != '\r') {
+                    erase_begin = pos;
+                    break;
+                }
+            }
+            size_t erase_end = close + kCloseLen;
+            if (erase_end < xml.size() && xml[erase_end] == '\r') {
+                ++erase_end;
+            }
+            if (erase_end < xml.size() && xml[erase_end] == '\n') {
+                ++erase_end;
+            }
+            xml.erase(erase_begin, erase_end - erase_begin);
+            pos = erase_begin;
+            ++removed;
+        } else {
+            pos = close + kCloseLen;
+        }
+    }
+    xml_bytes.assign(xml.begin(), xml.end());
+    return removed;
 }
 
 bool append_save_entities(
@@ -2515,6 +3311,10 @@ bool Save(std::string& msg) {
     std::string save_rewrite_bnk;
     size_t chest_entities_created = 0;
     size_t generators_created = 0;
+    size_t spawn_points_deleted = 0;
+    size_t save_entities_deleted = 0;
+    size_t spawn_points_repaired = 0;
+    size_t generators_repaired = 0;
     size_t save_physics_patched = 0;
     std::unordered_map<uint32_t, std::string> babel_edits;
     bool deferred_work = false;
@@ -2628,10 +3428,45 @@ bool Save(std::string& msg) {
         }
     }
     babel_edits = s.text_edits;
+    bool legacy_spawn_points_pending = false;
+    bool legacy_generators_pending = false;
+    if (g_level_spawn_donor.valid()) {
+        std::vector<uint8_t> probe_bytes;
+        if (!s.gdb.file_path.empty()) {
+            std::ifstream f(s.gdb.file_path, std::ios::binary);
+            if (f) {
+                f.seekg(0, std::ios::end);
+                probe_bytes.resize(size_t(f.tellg()));
+                f.seekg(0);
+                f.read(reinterpret_cast<char*>(probe_bytes.data()),
+                       std::streamsize(probe_bytes.size()));
+                if (!f) probe_bytes.clear();
+            }
+        } else if (s.gdb.valid) {
+            try {
+                probe_bytes = BnkCache::extract_bytes(
+                    s.gdb.bnk_path, s.gdb.file_index);
+            } catch (...) {
+                probe_bytes.clear();
+            }
+        }
+        if (!probe_bytes.empty()) {
+            GdbEdit::GdbFile probe;
+            std::string probe_err;
+            if (probe.Parse(probe_bytes, probe_err)) {
+                legacy_spawn_points_pending = has_legacy_spawn_points(
+                    probe, g_level_spawn_donor);
+                legacy_generators_pending = has_legacy_generators(
+                    probe, g_level_spawn_donor);
+            }
+        }
+    }
     if (lev_patches.empty() && gdb_patches.empty() && adds_updated == 0 &&
         s.additions.empty() && s.contents_edits.empty() &&
         save_physics_patches.empty() && babel_edits.empty() &&
-        s.generators.empty() && s.spawn_point_adds.empty()) {
+        s.generators.empty() && s.spawn_point_adds.empty() &&
+        s.spawn_point_deletes.empty() &&
+        !legacy_spawn_points_pending && !legacy_generators_pending) {
         msg = (skipped || rs_visual)
                   ? "no file-backed changes to save (visual-only edits "
                     "skipped)"
@@ -2735,8 +3570,10 @@ bool Save(std::string& msg) {
         }
     }
     if (!s.contents_edits.empty() || have_chest_adds ||
-        !s.generators.empty() || !s.spawn_point_adds.empty()) {
-        progress_update(6, 100, "Rewriting chest contents...");
+        !s.generators.empty() || !s.spawn_point_adds.empty() ||
+        !s.spawn_point_deletes.empty() ||
+        legacy_spawn_points_pending || legacy_generators_pending) {
+        progress_update(6, 100, "Rewriting entity data...");
         std::vector<uint8_t> gbytes;
         if (!s.gdb.file_path.empty()) {
             std::ifstream f(s.gdb.file_path, std::ios::binary);
@@ -2775,6 +3612,33 @@ bool Save(std::string& msg) {
             msg = "save failed: .gdb parse for contents edits: " + gerr;
             return false;
         }
+        if (legacy_spawn_points_pending) {
+            std::string repair_err;
+            if (!repair_legacy_spawn_points(
+                    g, g_level_spawn_donor, spawn_points_repaired,
+                    repair_err)) {
+                msg = "save failed: " + repair_err;
+                return false;
+            }
+        }
+        if (legacy_generators_pending) {
+            std::string repair_err;
+            if (!repair_legacy_generators(
+                    g, g_level_spawn_donor, generators_repaired,
+                    repair_err)) {
+                msg = "save failed: " + repair_err;
+                return false;
+            }
+        }
+        for (const auto& deletion : s.spawn_point_deletes) {
+            std::string deletion_err;
+            if (!remove_spawn_point_reference(
+                    g, g_level_spawn_donor, deletion, deletion_err)) {
+                msg = "save failed: " + deletion_err;
+                return false;
+            }
+            ++spawn_points_deleted;
+        }
         for (const auto& kv : s.contents_edits) {
             std::string aerr;
             if (apply_chest_contents(g, kv.first, kv.second, 0, aerr)) {
@@ -2798,7 +3662,9 @@ bool Save(std::string& msg) {
                 continue;
             }
             const char* name_fmt = "F2AB_Chest_%08X";
-            if (a.entity_kind == AdditionEntityKind::SilverKey) {
+            if (a.silver_keys_needed > 0) {
+                name_fmt = "F2AB_SilverKeyChest_%08X";
+            } else if (a.entity_kind == AdditionEntityKind::SilverKey) {
                 name_fmt = "F2AB_Key_%08X";
             } else if (a.entity_kind == AdditionEntityKind::GenericProp) {
                 name_fmt = "F2AB_Prop_%08X";
@@ -2832,7 +3698,6 @@ bool Save(std::string& msg) {
                             gerr2.c_str());
                     }
                 }
-                size_t spi = 0;
                 for (const auto& spa : s.spawn_point_adds) {
                     std::string serr2;
                     const uint32_t sp = create_spawn_point_entity(
@@ -2845,22 +3710,38 @@ bool Save(std::string& msg) {
                     }
                     char nm[32];
                     std::snprintf(nm, sizeof(nm), "F2AB_SP_%08X", sp);
-                    g.AddNameMapping(nm, sp);
-                    new_save_entities.emplace_back(nm, sp);
-                    const std::string fname =
-                        "SpawnPointF2AB" + std::to_string(++spi);
+                    std::string fname;
+                    for (size_t n = 1; n < 10000; ++n) {
+                        const std::string candidate =
+                            "SpawnPoint" + std::to_string(n);
+                        GdbEdit::Field existing;
+                        if (!g.FindLocalField(
+                                spa.spawn_points_record,
+                                fnv1_32(candidate), existing)) {
+                            fname = candidate;
+                            break;
+                        }
+                    }
+                    if (fname.empty()) {
+                        DebugTrace::log(
+                            "save: no free native spawn point field for "
+                            "0x%08X", spa.spawn_points_record);
+                        continue;
+                    }
                     if (!g.AddField(spa.spawn_points_record,
                                     fnv1_32(fname), 7, sp)) {
                         DebugTrace::log(
                             "save: spawn list append failed for "
                             "0x%08X", spa.spawn_points_record);
                     } else {
+                        g.AddNameMapping(nm, sp);
+                        new_save_entities.emplace_back(nm, sp);
                         ++generators_created;
                     }
                 }
             }
         }
-        if (!new_save_entities.empty()) {
+        if (!new_save_entities.empty() || !s.spawn_point_deletes.empty()) {
 
             const int save_idx = find_level_save_index(s.lev.bnk_path,
                                                        s.lev.file_index);
@@ -2876,11 +3757,19 @@ bool Save(std::string& msg) {
                 }
                 if (save_rewrite_bytes.empty()) {
                     serr = ".save extract failed";
-                } else if (append_save_entities(save_rewrite_bytes,
-                                                new_save_entities,
-                                                serr)) {
-                    save_rewrite_index = save_idx;
-                    save_rewrite_bnk = s.lev.bnk_path;
+                } else {
+                    std::unordered_set<uint32_t> deleted_entities;
+                    for (const auto& deletion : s.spawn_point_deletes) {
+                        deleted_entities.insert(
+                            deletion.spawn_point_entity);
+                    }
+                    save_entities_deleted = remove_save_entities(
+                        save_rewrite_bytes, deleted_entities);
+                    if (append_save_entities(save_rewrite_bytes,
+                                             new_save_entities, serr)) {
+                        save_rewrite_index = save_idx;
+                        save_rewrite_bnk = s.lev.bnk_path;
+                    }
                 }
             }
             if (save_rewrite_index < 0) {
@@ -2889,11 +3778,18 @@ bool Save(std::string& msg) {
                     serr.c_str());
                 save_rewrite_bytes.clear();
                 chest_entities_created = 0;
+                if (!s.spawn_point_deletes.empty()) {
+                    msg = "save failed: could not update spawn point "
+                          "registrations: " + serr;
+                    return false;
+                }
             }
         }
 
         if (contents_applied > 0 || chest_entities_created > 0 ||
-            generators_created > 0) {
+            generators_created > 0 || spawn_points_deleted > 0 ||
+            spawn_points_repaired > 0 ||
+            generators_repaired > 0) {
             gdb_rewrite_bytes = g.Serialize();
             if (!s.gdb.file_path.empty()) {
                 gdb_rewrite_loose = s.gdb.file_path;
@@ -2929,7 +3825,9 @@ bool Save(std::string& msg) {
                 "save: .save PhysicsData patched %zu of %zu entit(ies)",
                 save_physics_patched, save_physics_patches.size());
             if (save_physics_patched == 0 &&
-                chest_entities_created == 0) {
+                chest_entities_created == 0 &&
+                generators_created == 0 &&
+                save_entities_deleted == 0) {
                 save_rewrite_bytes.clear();
                 save_rewrite_index = -1;
                 save_rewrite_bnk.clear();
@@ -2990,6 +3888,11 @@ bool Save(std::string& msg) {
 
                         if (a.physics_file_hash) {
                             mdl_hashes.push_back(a.physics_file_hash);
+                        } else if (a.silver_keys_needed > 0) {
+                            // The authored silver-chest template uses the
+                            // standard chest collision resource through the
+                            // global keyframed component.
+                            mdl_hashes.push_back(0x9FF26AA5u);
                         }
                     }
                     for (const auto& mp : gen_asset_models) {
@@ -3609,10 +4512,12 @@ bool Save(std::string& msg) {
             gerr = "no .gdb target";
         }
         DebugTrace::log(
-            "save: gdb contents rewrite %s (%zu edit(s), %zu new chest(s)) "
-            "%s",
+            "save: gdb contents rewrite %s (%zu edit(s), %zu new "
+            "chest(s), %zu deleted spawn point(s), %zu repaired spawn "
+            "point(s), %zu repaired generator(s)) %s",
             contents_ok ? "OK" : "FAILED", contents_applied,
-            chest_entities_created, gerr.c_str());
+            chest_entities_created, spawn_points_deleted,
+            spawn_points_repaired, generators_repaired, gerr.c_str());
     }
 
     if (rebuilt && contents_ok && gdb_rewrite_bytes.empty() &&
@@ -3677,6 +4582,9 @@ bool Save(std::string& msg) {
                 s.generators.clear();
                 s.spawn_point_adds.clear();
             }
+            if (spawn_points_deleted > 0) {
+                s.spawn_point_deletes.clear();
+            }
             BnkCache::invalidate(s.lev.bnk_path);
             if (!s.gdb.bnk_path.empty()) {
                 BnkCache::invalidate(s.gdb.bnk_path);
@@ -3708,6 +4616,21 @@ bool Save(std::string& msg) {
                 msg += "; authored " +
                        std::to_string(generators_created) +
                        " generator/spawn point(s)";
+            }
+            if (spawn_points_deleted > 0) {
+                msg += "; deleted " +
+                       std::to_string(spawn_points_deleted) +
+                       " spawn point(s)";
+            }
+            if (spawn_points_repaired > 0) {
+                msg += "; repaired " +
+                       std::to_string(spawn_points_repaired) +
+                       " legacy spawn point(s)";
+            }
+            if (generators_repaired > 0) {
+                msg += "; repaired " +
+                       std::to_string(generators_repaired) +
+                       " legacy generator(s)";
             }
             if (text_written > 0) {
                 msg += "; wrote " + std::to_string(text_written) +

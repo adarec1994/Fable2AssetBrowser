@@ -797,6 +797,10 @@ static void draw_spawn_markers_overlay(const ImVec2& origin,
     float click_best = 12.0f * 12.0f;
     for (size_t mi = 0; mi < g_level_spawn_markers.size(); ++mi) {
         const auto& m = g_level_spawn_markers[mi];
+        if (m.kind == 2 &&
+            LevelEdit::SpawnPointRemovalPending(m.entity_hash)) {
+            continue;
+        }
         if (m.kind == 3 ? !S.show_ent_npcs : !S.show_spawn_markers) {
             continue;
         }
@@ -1491,8 +1495,10 @@ void draw_model_in_panel(ID3D11Device* device) {
         ImGui::EndChild();
         auto place_generator = [&](const std::string& creature) {
             std::vector<std::string> assets;
+            uint32_t creature_entity = 0;
             for (const auto& ce : g_level_creature_catalog) {
                 if (ce.name != creature) continue;
+                creature_entity = ce.entity_hash;
                 for (uint32_t mh : ce.model_hashes) {
                     for (const auto& mf : S.all_mdl_files) {
                         std::string lp = mf.full_path;
@@ -1513,7 +1519,8 @@ void draw_model_in_panel(ID3D11Device* device) {
                 break;
             }
             const int gi =
-                LevelEdit::AddGenerator(s_gen_pos, creature, assets);
+                LevelEdit::AddGenerator(s_gen_pos, creature,
+                                        creature_entity, assets);
             if (gi >= 0) {
                 OutputLog::success(
                     "level edit: generator for '" + creature +
@@ -1722,26 +1729,56 @@ void draw_model_in_panel(ID3D11Device* device) {
         (S.show_spawn_markers || S.show_ent_npcs)) {
         const auto& mk =
             g_level_spawn_markers[(size_t)g_sel_spawn_marker];
+        uint32_t spawn_owner_entity = 0;
+        uint32_t spawn_owner_list = 0;
+        if (mk.kind == 2) {
+            for (const auto& candidate : g_level_spawn_markers) {
+                if (candidate.kind != 1 ||
+                    !candidate.spawn_points_record) {
+                    continue;
+                }
+                if (std::find(candidate.spawn_point_entities.begin(),
+                              candidate.spawn_point_entities.end(),
+                              mk.entity_hash) !=
+                    candidate.spawn_point_entities.end()) {
+                    spawn_owner_entity = candidate.entity_hash;
+                    spawn_owner_list = candidate.spawn_points_record;
+                    break;
+                }
+            }
+        }
         const uint32_t edit_id = 0x70000000u |
                                  uint32_t(g_sel_spawn_marker);
         const bool editable = LevelEdit::Enabled() &&
                               !LevelEdit::Saving() &&
                               (mk.pos_off[0] || mk.pos_off[1] ||
                                mk.pos_off[2]);
+        const bool spawn_deletable =
+            LevelEdit::Enabled() && !LevelEdit::Saving() &&
+            mk.kind == 2 && spawn_owner_list != 0;
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             g_sel_spawn_marker = -1;
-        } else if (editable &&
-                   ImGui::IsKeyPressed(ImGuiKey_Delete)) {
-            LevelEdit::InstInfo info;
-            const float orig[3] = {mk.x, mk.y, mk.z};
-            info.orig_pos = orig;
-            info.gdb_off = mk.pos_off;
-            info.gdb_rot_off = mk.rot_off;
-            info.gdb_entity_hash = mk.entity_hash;
-            LevelEdit::SetDeleted(edit_id, info);
-            OutputLog::info(
-                "level edit: marker delete queued (entity sinks on "
-                "Save)");
+        } else if (!ImGui::GetIO().WantTextInput &&
+                   ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+            if (spawn_deletable) {
+                LevelEdit::RemoveSpawnPointFromExisting(
+                    spawn_owner_entity, spawn_owner_list,
+                    mk.entity_hash);
+                OutputLog::info(
+                    "level edit: spawn point deletion queued");
+                g_sel_spawn_marker = -1;
+            } else if (editable) {
+                LevelEdit::InstInfo info;
+                const float orig[3] = {mk.x, mk.y, mk.z};
+                info.orig_pos = orig;
+                info.gdb_off = mk.pos_off;
+                info.gdb_rot_off = mk.rot_off;
+                info.gdb_entity_hash = mk.entity_hash;
+                LevelEdit::SetDeleted(edit_id, info);
+                OutputLog::info(
+                    "level edit: marker delete queued (entity sinks on "
+                    "Save)");
+            }
         }
         const float kMarkerW = 220.0f;
         ImGui::SetNextWindowPos(
@@ -1815,7 +1852,19 @@ void draw_model_in_panel(ID3D11Device* device) {
                 ImGui::TextDisabled("spawns: %s",
                                     mk.creature_name.c_str());
             }
+            if (mk.kind == 2 && spawn_deletable &&
+                ImGui::Button("Delete spawn point")) {
+                LevelEdit::RemoveSpawnPointFromExisting(
+                    spawn_owner_entity, spawn_owner_list,
+                    mk.entity_hash);
+                OutputLog::info(
+                    "level edit: spawn point deletion queued");
+                g_sel_spawn_marker = -1;
+            }
             if (mk.kind == 1) {
+                const bool can_add_sp =
+                    LevelEdit::Enabled() && !LevelEdit::Saving() &&
+                    mk.spawn_points_record != 0;
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
                                    "Spawn points (%zu):",
@@ -1823,6 +1872,9 @@ void draw_model_in_panel(ID3D11Device* device) {
                 for (size_t si = 0;
                      si < mk.spawn_point_entities.size(); ++si) {
                     const uint32_t sph = mk.spawn_point_entities[si];
+                    if (LevelEdit::SpawnPointRemovalPending(sph)) {
+                        continue;
+                    }
                     int target = -1;
                     for (size_t mj = 0;
                          mj < g_level_spawn_markers.size(); ++mj) {
@@ -1841,11 +1893,22 @@ void draw_model_in_panel(ID3D11Device* device) {
                         target >= 0) {
                         g_sel_spawn_marker = target;
                     }
+                    if (can_add_sp) {
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Delete")) {
+                            LevelEdit::RemoveSpawnPointFromExisting(
+                                mk.entity_hash, mk.spawn_points_record,
+                                sph);
+                            if (target == g_sel_spawn_marker) {
+                                g_sel_spawn_marker = -1;
+                            }
+                            OutputLog::info(
+                                "level edit: spawn point deletion "
+                                "queued");
+                        }
+                    }
                     ImGui::PopID();
                 }
-                const bool can_add_sp =
-                    LevelEdit::Enabled() && !LevelEdit::Saving() &&
-                    mk.spawn_points_record != 0;
                 if (can_add_sp &&
                     ImGui::SmallButton("+ Add spawn point")) {
                     const float n =
@@ -1927,6 +1990,8 @@ void draw_model_in_panel(ID3D11Device* device) {
             } else if (sp_editable && !ImGui::GetIO().WantTextInput &&
                        ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
                 LevelEdit::RemovePendingSpawnPoint(sel_sp->id);
+                OutputLog::info(
+                    "level edit: pending spawn point removed");
                 g_sel_pending_sp = -1;
                 sel_sp = nullptr;
             }
@@ -1975,10 +2040,17 @@ void draw_model_in_panel(ID3D11Device* device) {
                 ImGui::TextColored(ImVec4(0.9f, 0.75f, 1.0f, 1.0f),
                                    "%s", sel_sp->label.c_str());
                 ImGui::TextDisabled("unsaved - authored on Save");
+                if (sp_editable &&
+                    ImGui::Button("Delete spawn point")) {
+                    LevelEdit::RemovePendingSpawnPoint(sel_sp->id);
+                    OutputLog::info(
+                        "level edit: pending spawn point removed");
+                    g_sel_pending_sp = -1;
+                }
             }
             ImGui::End();
 
-            if (sp_editable) {
+            if (sp_editable && g_sel_pending_sp >= 0) {
                 float gpos[3] = {sel_sp->pos[0], sel_sp->pos[1],
                                  sel_sp->pos[2]};
                 LevelGizmo::Result gz = LevelGizmo::DrawAndHandle(

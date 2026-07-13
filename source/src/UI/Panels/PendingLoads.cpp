@@ -1252,7 +1252,33 @@ bool spawn_level_model_at(ID3D11Device* device,
         const size_t sl = leaf.find_last_of("/\\");
         if (sl != std::string::npos) leaf = leaf.substr(sl + 1);
         std::transform(leaf.begin(), leaf.end(), leaf.begin(), ::tolower);
-        if (leaf.find("chest") == std::string::npos &&
+        const int silver_chest_keys =
+            LevelEdit::SilverKeyChestRequirement(model_path);
+        if (silver_chest_keys > 0) {
+            std::string mp2 = model_path;
+            std::transform(mp2.begin(), mp2.end(), mp2.begin(),
+                           ::tolower);
+            std::replace(mp2.begin(), mp2.end(), '/', '\\');
+            uint32_t mh2 = 0x811C9DC5u;
+            for (unsigned char c : mp2) {
+                mh2 *= 0x01000193u;
+                mh2 ^= uint32_t(c);
+            }
+            auto tit2 = g_level_prop_entity_templates.find(mh2);
+            if (tit2 != g_level_prop_entity_templates.end()) {
+                const auto& t2 = tit2->second;
+                LevelEdit::MarkAdditionAsPropEntity(
+                    add_idx, t2.template_hash, t2.comp_field_hash,
+                    t2.comp_template_hash, t2.physics_file_hash,
+                    t2.has_text_tags);
+            }
+            LevelEdit::MarkAdditionAsSilverKeyChest(
+                add_idx, silver_chest_keys);
+            OutputLog::info(
+                "level edit: placed as a REAL silver-key chest (" +
+                std::to_string(silver_chest_keys) +
+                " key lock; Save bakes it into the level)");
+        } else if (leaf.find("chest") == std::string::npos &&
             (leaf.find("silverkey") != std::string::npos ||
              leaf.find("silver_key") != std::string::npos)) {
             LevelEdit::MarkAdditionEntityKind(

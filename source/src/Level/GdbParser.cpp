@@ -2306,12 +2306,29 @@ std::unordered_map<uint32_t, PropTemplateInfo> BuildPropTemplateIndex(
         0xFC8A57C5u,
     };
     constexpr uint32_t kHashPhysicsFile = 0x92F5FEEEu;
+    constexpr uint32_t kInventoryComponents[] = {
+        0x1C7D7B74u,
+        0x73AB8B6Au,
+    };
 
     for (const GdbView* vw : views) {
         const GdbView& view = *vw;
         for (uint32_t i = 0; i < view.count; ++i) {
             if (i >= view.record_data_offsets.size()) break;
             const size_t rec = view.record_data_offsets[i];
+
+            // Placed entities can override graphics locally, but they are not
+            // reusable templates.  Treating one as a donor makes later
+            // placements inherit its inventory and world transform.
+            bool is_placed_entity = false;
+            for (uint32_t ic : kInventoryComponents) {
+                size_t slot = 0;
+                if (view.findLocal(rec, ic, 6, slot, nullptr)) {
+                    is_placed_entity = true;
+                    break;
+                }
+            }
+            if (is_placed_entity) continue;
 
             bool has_graphics = false;
             for (uint32_t gc : kGraphicsComponents) {
@@ -2835,6 +2852,8 @@ std::unordered_map<uint32_t, SpawnEntityInfo> CollectSpawnEntities(
                                  uint32_t& out_comp_parent,
                                  uint32_t& out_tf_field,
                                  uint32_t& out_tf_parent,
+                                 uint32_t& out_pos_parent,
+                                 uint32_t& out_rot_parent,
                                  uint32_t comp_field_hash) {
         size_t slot = 0;
         if (view.findLocal(rec, kHashParent, 6, slot, nullptr)) {
@@ -2876,6 +2895,25 @@ std::unordered_map<uint32_t, SpawnEntityInfo> CollectSpawnEntities(
             if (view.findLocal(crec, kHashParent, 6, ps2, nullptr)) {
                 out_tf_parent = ReadBeU32(view.bytes.data() + ps2);
             }
+            auto capture_vector_parent = [&](uint32_t field_hash,
+                                             uint32_t& out_parent) {
+                size_t fslot = 0, fowner = 0;
+                if (!view.findFieldOwner(crec, field_hash, 6, fslot,
+                                         fowner, nullptr)) {
+                    return;
+                }
+                const uint32_t vec_hash =
+                    ReadBeU32(view.bytes.data() + fslot);
+                size_t vec_rec = 0, vec_parent_slot = 0;
+                if (view.lookup(vec_hash, vec_rec) &&
+                    view.findLocal(vec_rec, kHashParent, 6,
+                                   vec_parent_slot, nullptr)) {
+                    out_parent = ReadBeU32(
+                        view.bytes.data() + vec_parent_slot);
+                }
+            };
+            capture_vector_parent(kHashPosition, out_pos_parent);
+            capture_vector_parent(kHashRotation, out_rot_parent);
             break;
         }
     };
@@ -2996,7 +3034,20 @@ std::unordered_map<uint32_t, SpawnEntityInfo> CollectSpawnEntities(
                                       out_donor->gen_comp_parent,
                                       out_donor->gen_transform_field,
                                       out_donor->gen_transform_parent,
+                                      out_donor->gen_position_parent,
+                                      out_donor->gen_rotation_parent,
                                       kCreatureGenerator);
+                    if (!out_donor->gen_template ||
+                        !out_donor->gen_comp_field ||
+                        !out_donor->gen_transform_field) {
+                        out_donor->gen_template = 0;
+                        out_donor->gen_comp_field = 0;
+                        out_donor->gen_comp_parent = 0;
+                        out_donor->gen_transform_field = 0;
+                        out_donor->gen_transform_parent = 0;
+                        out_donor->gen_position_parent = 0;
+                        out_donor->gen_rotation_parent = 0;
+                    }
                     if (info.spawn_points_record) {
                         size_t lrec = 0;
                         if (level_view->lookup(info.spawn_points_record,
@@ -3167,7 +3218,21 @@ std::unordered_map<uint32_t, SpawnEntityInfo> CollectSpawnEntities(
                                       out_donor->sp_comp_parent,
                                       out_donor->sp_transform_field,
                                       out_donor->sp_transform_parent,
+                                      out_donor->sp_position_parent,
+                                      out_donor->sp_rotation_parent,
                                       cf);
+                    if (!out_donor->sp_template ||
+                        !out_donor->sp_comp_field ||
+                        !out_donor->sp_transform_field) {
+                        out_donor->sp_template = 0;
+                        out_donor->sp_comp_field = 0;
+                        out_donor->sp_comp_parent = 0;
+                        out_donor->sp_transform_field = 0;
+                        out_donor->sp_transform_parent = 0;
+                        out_donor->sp_position_parent = 0;
+                        out_donor->sp_rotation_parent = 0;
+                        continue;
+                    }
                     break;
                 }
             }

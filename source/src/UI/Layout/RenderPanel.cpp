@@ -2426,7 +2426,13 @@ void draw_model_in_panel(ID3D11Device* device) {
                 for (size_t pi = 0; pi < s_text_bufs.size(); ++pi) {
                     ImGui::PushID(int(pi) + 0x2000);
                     if (s_text_bufs.size() > 1) {
-                        ImGui::TextDisabled("Page %d", int(pi) + 1);
+                        if (pi == 0) {
+                            ImGui::TextDisabled("Item Name");
+                        } else if (pi == 1) {
+                            ImGui::TextDisabled("Description");
+                        } else {
+                            ImGui::TextDisabled("Page %d", int(pi) + 1);
+                        }
                     }
                     if (text_editable) {
                         ImGui::InputTextMultiline(

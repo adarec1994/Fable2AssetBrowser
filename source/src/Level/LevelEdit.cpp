@@ -24,6 +24,7 @@
 #include "BnkWriter.h"
 #include "GdbEdit.h"
 #include "LevelLoader.h"
+#include "TextBank.h"
 
 namespace LevelEdit {
 namespace {
@@ -88,6 +89,14 @@ struct ModuleState {
     std::vector<Addition> additions;
 
     std::unordered_map<uint32_t, std::vector<uint32_t>> contents_edits;
+    std::unordered_map<uint32_t, std::string> text_edits;
+    std::vector<GeneratorAddition> generators;
+    struct SpawnPointAdd {
+        uint32_t generator_entity = 0;
+        uint32_t spawn_points_record = 0;
+        float pos[3] = {0, 0, 0};
+    };
+    std::vector<SpawnPointAdd> spawn_point_adds;
 };
 
 ModuleState& st() {
@@ -965,8 +974,14 @@ void load_additions(ModuleState& s) {
         const size_t key_tag = line.find("\tKEY");
         if (chest_tag != std::string::npos) {
             a.entity_kind = AdditionEntityKind::Chest;
+            const size_t ctpl = line.find("\tCTPL", chest_tag);
+            const size_t loot = line.find("\tLOOT", chest_tag);
+            size_t stop = std::min(
+                ctpl == std::string::npos ? line.size() : ctpl,
+                loot == std::string::npos ? line.size() : loot);
             size_t p = chest_tag + 6;
             while (p < line.size() && line[p] == '\t') {
+                if (p >= stop) break;
                 unsigned int h = 0;
                 if (std::sscanf(line.c_str() + p + 1, "%x", &h) == 1 && h) {
                     a.chest_items.push_back(h);
@@ -974,20 +989,58 @@ void load_additions(ModuleState& s) {
                 p = line.find('\t', p + 1);
                 if (p == std::string::npos) break;
             }
+            if (ctpl != std::string::npos) {
+                unsigned int tpl = 0, cf = 0, ct = 0, pf = 0;
+                if (std::sscanf(line.c_str() + ctpl + 5,
+                                "\t%x\t%x\t%x\t%x",
+                                &tpl, &cf, &ct, &pf) >= 2 && tpl && cf) {
+                    a.entity_template = tpl;
+                    a.entity_comp_field = cf;
+                    a.entity_comp_template = ct;
+                    a.physics_file_hash = pf;
+                }
+            }
+            if (loot != std::string::npos) {
+                unsigned int lt = 0;
+                if (std::sscanf(line.c_str() + loot + 5, "\t%x",
+                                &lt) == 1) {
+                    a.loot_table_record = lt;
+                }
+            }
         } else if (key_tag != std::string::npos) {
             a.entity_kind = AdditionEntityKind::SilverKey;
         } else {
             const size_t prop_tag = line.find("\tPROP");
             if (prop_tag != std::string::npos) {
-                unsigned int tpl = 0, cf = 0, ct = 0, pf = 0;
+                unsigned int tpl = 0, cf = 0, ct = 0, pf = 0, ht = 0;
                 if (std::sscanf(line.c_str() + prop_tag + 5,
-                                "\t%x\t%x\t%x\t%x",
-                                &tpl, &cf, &ct, &pf) >= 3 && tpl && cf) {
+                                "\t%x\t%x\t%x\t%x\t%u",
+                                &tpl, &cf, &ct, &pf, &ht) >= 3 &&
+                    tpl && cf) {
                     a.entity_kind = AdditionEntityKind::GenericProp;
                     a.entity_template = tpl;
                     a.entity_comp_field = cf;
                     a.entity_comp_template = ct;
                     a.physics_file_hash = pf;
+                    a.entity_has_text = ht != 0;
+                    const size_t tt = line.find("\tTEXT\t", prop_tag);
+                    if (tt != std::string::npos) {
+                        a.entity_has_text = true;
+                        const char* h = line.c_str() + tt + 6;
+                        auto nib = [](char c) -> int {
+                            if (c >= '0' && c <= '9') return c - '0';
+                            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                            return -1;
+                        };
+                        for (size_t k = 0; h[k] && h[k + 1]; k += 2) {
+                            const int hi = nib(h[k]);
+                            const int lo = nib(h[k + 1]);
+                            if (hi < 0 || lo < 0) break;
+                            a.readable_text.push_back(
+                                char((hi << 4) | lo));
+                        }
+                    }
                 }
             }
         }
@@ -1024,20 +1077,41 @@ bool write_additions(const ModuleState& s, std::string& msg) {
           << a.pos[2] << '\t' << a.yaw_deg;
         if (a.entity_kind == AdditionEntityKind::Chest) {
             f << "\tCHEST";
-            char buf[16];
+            char buf[80];
             for (uint32_t h : a.chest_items) {
                 std::snprintf(buf, sizeof(buf), "%08X", h);
                 f << '\t' << buf;
             }
+            if (a.entity_template) {
+                std::snprintf(buf, sizeof(buf),
+                              "\tCTPL\t%08X\t%08X\t%08X\t%08X",
+                              a.entity_template, a.entity_comp_field,
+                              a.entity_comp_template,
+                              a.physics_file_hash);
+                f << buf;
+            }
+            if (a.loot_table_record) {
+                std::snprintf(buf, sizeof(buf), "\tLOOT\t%08X",
+                              a.loot_table_record);
+                f << buf;
+            }
         } else if (a.entity_kind == AdditionEntityKind::SilverKey) {
             f << "\tKEY";
         } else if (a.entity_kind == AdditionEntityKind::GenericProp) {
-            char buf[64];
+            char buf[80];
             std::snprintf(buf, sizeof(buf),
-                          "\tPROP\t%08X\t%08X\t%08X\t%08X",
+                          "\tPROP\t%08X\t%08X\t%08X\t%08X\t%d",
                           a.entity_template, a.entity_comp_field,
-                          a.entity_comp_template, a.physics_file_hash);
+                          a.entity_comp_template, a.physics_file_hash,
+                          a.entity_has_text ? 1 : 0);
             f << buf;
+            if (a.entity_has_text && !a.readable_text.empty()) {
+                f << "\tTEXT\t";
+                static const char* hexd = "0123456789ABCDEF";
+                for (unsigned char c : a.readable_text) {
+                    f << hexd[c >> 4] << hexd[c & 15];
+                }
+            }
         }
         f << '\n';
     }
@@ -1199,6 +1273,25 @@ bool AdditionIsChest(int index)
                AdditionEntityKind::Chest;
 }
 
+uint32_t GetAdditionLootTable(int index)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.additions.size()) return 0;
+    return s.additions[size_t(index)].loot_table_record;
+}
+
+
+void SetAdditionLootTable(int index, uint32_t loot_record)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.additions.size()) return;
+    s.additions[size_t(index)].loot_table_record = loot_record;
+    s.dirty = true;
+    ++s.revision;
+}
+
 bool GetAdditionChestItems(int index, std::vector<uint32_t>& out)
 {
     std::lock_guard<std::mutex> lk(mtx());
@@ -1237,7 +1330,8 @@ void MarkAdditionAsPropEntity(int index,
                               uint32_t template_hash,
                               uint32_t comp_field_hash,
                               uint32_t comp_template_hash,
-                              uint32_t physics_file_hash)
+                              uint32_t physics_file_hash,
+                              bool has_text_tags)
 {
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
@@ -1248,6 +1342,233 @@ void MarkAdditionAsPropEntity(int index,
     a.entity_comp_field = comp_field_hash;
     a.entity_comp_template = comp_template_hash;
     a.physics_file_hash = physics_file_hash;
+    a.entity_has_text = has_text_tags;
+    s.dirty = true;
+    ++s.revision;
+}
+
+bool AdditionIsReadable(int index)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    return index >= 0 && size_t(index) < s.additions.size() &&
+           s.additions[size_t(index)].entity_has_text;
+}
+
+bool GetAdditionReadableText(int index, std::string& out)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.additions.size() ||
+        !s.additions[size_t(index)].entity_has_text) {
+        return false;
+    }
+    out = s.additions[size_t(index)].readable_text;
+    return true;
+}
+
+void SetAdditionReadableText(int index, const std::string& text)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.additions.size()) return;
+    s.additions[size_t(index)].readable_text = text;
+    s.dirty = true;
+    ++s.revision;
+}
+
+void SetEntityTextEdit(uint32_t tag_hash, const std::string& utf8)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (!s.available || tag_hash == 0) return;
+    s.text_edits[tag_hash] = utf8;
+    s.dirty = true;
+    ++s.revision;
+}
+
+bool GetEntityTextEdit(uint32_t tag_hash, std::string& out)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    auto it = s.text_edits.find(tag_hash);
+    if (it == s.text_edits.end()) return false;
+    out = it->second;
+    return true;
+}
+
+size_t TextEditCount()
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    return st().text_edits.size();
+}
+
+int AddGenerator(const float pos[3], const std::string& creature_name,
+                 const std::vector<std::string>& asset_models)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (!s.available || s.saving) return -1;
+    GeneratorAddition g;
+    g.pos[0] = pos[0];
+    g.pos[1] = pos[1];
+    g.pos[2] = pos[2];
+    g.creature_name = creature_name;
+    g.asset_models = asset_models;
+    g.spawn_points.push_back({pos[0] + 1.5f, pos[1], pos[2]});
+    s.generators.push_back(std::move(g));
+    s.dirty = true;
+    ++s.revision;
+    return int(s.generators.size()) - 1;
+}
+
+void GetGenerators(std::vector<GeneratorAddition>& out)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    out = st().generators;
+}
+
+void MovePendingGenerator(int index, const float pos[3])
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.generators.size()) return;
+    auto& g = s.generators[size_t(index)];
+    g.pos[0] = pos[0];
+    g.pos[1] = pos[1];
+    g.pos[2] = pos[2];
+    s.dirty = true;
+    ++s.revision;
+}
+
+void RemoveGenerator(int index)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.generators.size()) return;
+    s.generators[size_t(index)].removed = true;
+    s.dirty = true;
+    ++s.revision;
+}
+
+void AddGeneratorSpawnPoint(int index, const float pos[3])
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.generators.size()) return;
+    s.generators[size_t(index)].spawn_points.push_back(
+        {pos[0], pos[1], pos[2]});
+    s.dirty = true;
+    ++s.revision;
+}
+
+void RemoveGeneratorSpawnPoint(int index, int sp_index)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.generators.size()) return;
+    auto& sp = s.generators[size_t(index)].spawn_points;
+    if (sp_index < 0 || size_t(sp_index) >= sp.size()) return;
+    sp.erase(sp.begin() + sp_index);
+    s.dirty = true;
+    ++s.revision;
+}
+
+void AddSpawnPointToExisting(uint32_t generator_entity,
+                             uint32_t spawn_points_record,
+                             const float pos[3])
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (!s.available || s.saving || !spawn_points_record) return;
+    ModuleState::SpawnPointAdd a;
+    a.generator_entity = generator_entity;
+    a.spawn_points_record = spawn_points_record;
+    a.pos[0] = pos[0];
+    a.pos[1] = pos[1];
+    a.pos[2] = pos[2];
+    s.spawn_point_adds.push_back(a);
+    s.dirty = true;
+    ++s.revision;
+}
+
+size_t PendingSpawnPointCount()
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    return st().spawn_point_adds.size();
+}
+
+void GetPendingSpawnPoints(std::vector<PendingSpawnPoint>& out)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    out.clear();
+    for (size_t gi = 0; gi < s.generators.size(); ++gi) {
+        const auto& g = s.generators[gi];
+        if (g.removed) continue;
+        for (size_t si = 0; si < g.spawn_points.size(); ++si) {
+            PendingSpawnPoint p;
+            p.id = int((gi << 8) | si);
+            p.pos[0] = g.spawn_points[si][0];
+            p.pos[1] = g.spawn_points[si][1];
+            p.pos[2] = g.spawn_points[si][2];
+            p.label = "new spawn point (" + g.creature_name + ")";
+            out.push_back(std::move(p));
+        }
+    }
+    for (size_t i = 0; i < s.spawn_point_adds.size(); ++i) {
+        PendingSpawnPoint p;
+        p.id = 0x1000000 + int(i);
+        p.pos[0] = s.spawn_point_adds[i].pos[0];
+        p.pos[1] = s.spawn_point_adds[i].pos[1];
+        p.pos[2] = s.spawn_point_adds[i].pos[2];
+        p.label = "new spawn point";
+        out.push_back(std::move(p));
+    }
+}
+
+void MovePendingSpawnPoint(int id, const float pos[3])
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (id >= 0x1000000) {
+        const size_t i = size_t(id - 0x1000000);
+        if (i >= s.spawn_point_adds.size()) return;
+        s.spawn_point_adds[i].pos[0] = pos[0];
+        s.spawn_point_adds[i].pos[1] = pos[1];
+        s.spawn_point_adds[i].pos[2] = pos[2];
+    } else {
+        const size_t gi = size_t(id) >> 8;
+        const size_t si = size_t(id) & 0xFF;
+        if (gi >= s.generators.size() ||
+            si >= s.generators[gi].spawn_points.size()) {
+            return;
+        }
+        s.generators[gi].spawn_points[si] = {pos[0], pos[1], pos[2]};
+    }
+    s.dirty = true;
+    ++s.revision;
+}
+
+void RemovePendingSpawnPoint(int id)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (id >= 0x1000000) {
+        const size_t i = size_t(id - 0x1000000);
+        if (i >= s.spawn_point_adds.size()) return;
+        s.spawn_point_adds.erase(s.spawn_point_adds.begin() + i);
+    } else {
+        const size_t gi = size_t(id) >> 8;
+        const size_t si = size_t(id) & 0xFF;
+        if (gi >= s.generators.size() ||
+            si >= s.generators[gi].spawn_points.size()) {
+            return;
+        }
+        auto& sp = s.generators[gi].spawn_points;
+        sp.erase(sp.begin() + si);
+        if (sp.empty()) s.generators[gi].removed = true;
+    }
     s.dirty = true;
     ++s.revision;
 }
@@ -1463,6 +1784,7 @@ namespace {
 bool apply_chest_contents(GdbEdit::GdbFile& g,
                           uint32_t entity_hash,
                           const std::vector<uint32_t>& items,
+                          uint32_t loot_table_record,
                           std::string& err)
 {
     constexpr uint32_t kParent = 0x5F6317D5u;
@@ -1554,11 +1876,47 @@ bool apply_chest_contents(GdbEdit::GdbFile& g,
         err = "InitialItems append failed";
         return false;
     }
+
+    if (loot_table_record != 0) {
+        constexpr uint32_t kItemRepopulationData = 0xFDF2E63Au;
+        constexpr uint32_t kPotentialItems = 0x4FB47937u;
+        constexpr uint32_t kChanceOfRespawning = 0x993B9AA2u;
+        const uint32_t repop_hash = g.AllocRecordHash();
+        std::vector<GdbEdit::Field> rf;
+        GdbEdit::Field f2;
+        f2.hash = kPotentialItems;
+        f2.type = 6;
+        f2.value = loot_table_record;
+        rf.push_back(f2);
+        f2.hash = kChanceOfRespawning;
+        f2.type = 3;
+        const float chance = 1.0f;
+        std::memcpy(&f2.value, &chance, 4);
+        rf.push_back(f2);
+        if (!g.AddRecord(repop_hash, rf, 0)) {
+            err = "repopulation record append failed";
+            return false;
+        }
+        GdbEdit::Field rp;
+        if (g.FindLocalField(inv_hash, kItemRepopulationData, rp)) {
+            if (!g.SetFieldValue(inv_hash, kItemRepopulationData,
+                                 repop_hash)) {
+                err = "ItemRepopulationData rewrite failed";
+                return false;
+            }
+        } else if (!g.AddField(inv_hash, kItemRepopulationData, 6,
+                               repop_hash)) {
+            err = "ItemRepopulationData append failed";
+            return false;
+        }
+    }
     return true;
 }
 
 uint32_t create_entity_addition(GdbEdit::GdbFile& g,
                                 const Addition& a,
+                                std::unordered_map<uint32_t, std::string>&
+                                    babel_edits,
                                 std::string& err)
 {
     constexpr uint32_t kParent = 0x5F6317D5u;
@@ -1592,6 +1950,11 @@ uint32_t create_entity_addition(GdbEdit::GdbFile& g,
         entity_template = a.entity_template;
         comp_field = a.entity_comp_field;
         comp_template = a.entity_comp_template;
+    } else if (a.entity_kind == AdditionEntityKind::Chest &&
+               a.entity_template && a.entity_comp_field) {
+        entity_template = a.entity_template;
+        comp_field = a.entity_comp_field;
+        comp_template = a.entity_comp_template;
     }
 
     auto fbits = [](float f) {
@@ -1612,8 +1975,6 @@ uint32_t create_entity_addition(GdbEdit::GdbFile& g,
 
     const uint32_t pos_rec = vec3_record(a.pos[0], a.pos[1], a.pos[2]);
     const float yaw = a.yaw_deg * 0.01745329252f;
-    // GDB rotation vec3 convention: VecX = yaw (rotation about the up
-    // axis); VecY / VecZ carry the editor Y / X tilts.
     const uint32_t rot_rec = vec3_record(yaw, 0.0f, 0.0f);
     if (!pos_rec || !rot_rec) {
         err = "transform record append failed";
@@ -1636,6 +1997,26 @@ uint32_t create_entity_addition(GdbEdit::GdbFile& g,
         }
     }
 
+    uint32_t tags_rec = 0;
+    uint32_t text_tag = 0;
+    if (is_prop && a.entity_has_text && !a.readable_text.empty()) {
+        constexpr uint32_t kTextTag = 0xB8F45248u;
+        text_tag = TextBank::AllocTagHash(
+            lower_model_path(a.model_path) + "#f2ab_text");
+        while (babel_edits.count(text_tag) != 0 || text_tag == 0) {
+            ++text_tag;
+        }
+        tags_rec = g.AllocRecordHash();
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kTextTag; f.type = 4; f.value = text_tag;
+        fs.push_back(f);
+        if (!g.AddRecord(tags_rec, fs, 0)) {
+            err = "readable component record append failed";
+            return 0;
+        }
+    }
+
     const uint32_t entity_rec = g.AllocRecordHash();
     {
         std::vector<GdbEdit::Field> fs;
@@ -1644,17 +2025,231 @@ uint32_t create_entity_addition(GdbEdit::GdbFile& g,
         fs.push_back(f);
         f.hash = comp_field; f.type = 6; f.value = comp_rec;
         fs.push_back(f);
+        if (tags_rec) {
+            f.hash = 0x89ABB47Eu; f.type = 6; f.value = tags_rec;
+            fs.push_back(f);
+        }
         if (!g.AddRecord(entity_rec, fs, 0)) {
             err = "entity record append failed";
             return 0;
         }
     }
+    if (tags_rec && text_tag) {
+        babel_edits[text_tag] = a.readable_text;
+    }
 
     if (a.entity_kind == AdditionEntityKind::Chest &&
-        !apply_chest_contents(g, entity_rec, a.chest_items, err)) {
+        !apply_chest_contents(g, entity_rec, a.chest_items,
+                              a.loot_table_record, err)) {
         return 0;
     }
     return entity_rec;
+}
+
+uint32_t create_spawn_point_entity(GdbEdit::GdbFile& g,
+                                   const Gdb::SpawnDonorInfo& d,
+                                   const float pos[3],
+                                   std::string& err)
+{
+    constexpr uint32_t kParent = 0x5F6317D5u;
+    constexpr uint32_t kVecX = 0x050C5D47u;
+    constexpr uint32_t kVecY = 0x050C5D46u;
+    constexpr uint32_t kVecZ = 0x050C5D45u;
+    constexpr uint32_t kPosition = 0xBD7C27D4u;
+    constexpr uint32_t kRotation = 0x21EBC83Bu;
+    auto fbits = [](float f) {
+        uint32_t u;
+        std::memcpy(&u, &f, 4);
+        return u;
+    };
+    auto vec3_record = [&](float x, float y, float z) -> uint32_t {
+        const uint32_t h = g.AllocRecordHash();
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kVecZ; f.type = 3; f.value = fbits(z); fs.push_back(f);
+        f.hash = kVecY; f.type = 3; f.value = fbits(y); fs.push_back(f);
+        f.hash = kVecX; f.type = 3; f.value = fbits(x); fs.push_back(f);
+        return g.AddRecord(h, fs, 0) ? h : 0;
+    };
+    const uint32_t pos_rec = vec3_record(pos[0], pos[1], pos[2]);
+    const uint32_t rot_rec = vec3_record(0, 0, 0);
+    if (!pos_rec || !rot_rec) {
+        err = "spawn point transform append failed";
+        return 0;
+    }
+    const uint32_t comp_rec = g.AllocRecordHash();
+    {
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kRotation; f.type = 6; f.value = rot_rec;
+        fs.push_back(f);
+        if (d.sp_comp_parent && d.sp_comp_parent != 0x811C9DC5u) {
+            f.hash = kParent; f.type = 6; f.value = d.sp_comp_parent;
+            fs.push_back(f);
+        }
+        f.hash = kPosition; f.type = 6; f.value = pos_rec;
+        fs.push_back(f);
+        if (!g.AddRecord(comp_rec, fs, 0)) {
+            err = "spawn point comp append failed";
+            return 0;
+        }
+    }
+    const uint32_t ent = g.AllocRecordHash();
+    {
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kParent; f.type = 6; f.value = d.sp_template;
+        fs.push_back(f);
+        f.hash = d.sp_comp_field; f.type = 6; f.value = comp_rec;
+        fs.push_back(f);
+        if (!g.AddRecord(ent, fs, 0)) {
+            err = "spawn point entity append failed";
+            return 0;
+        }
+    }
+    return ent;
+}
+
+uint32_t create_generator_entity(
+    GdbEdit::GdbFile& g,
+    const Gdb::SpawnDonorInfo& d,
+    const GeneratorAddition& ga,
+    std::vector<std::pair<std::string, uint32_t>>& new_save_entities,
+    std::string& err)
+{
+    constexpr uint32_t kParent = 0x5F6317D5u;
+    constexpr uint32_t kSpawnedCreatureName = 0x2A80DD7Bu;
+    constexpr uint32_t kSpawnPoints = 0x559B5DBFu;
+    constexpr uint32_t kVecX = 0x050C5D47u;
+    constexpr uint32_t kVecY = 0x050C5D46u;
+    constexpr uint32_t kVecZ = 0x050C5D45u;
+    constexpr uint32_t kPosition = 0xBD7C27D4u;
+    constexpr uint32_t kRotation = 0x21EBC83Bu;
+
+    std::vector<uint32_t> sp_entities;
+    for (const auto& p : ga.spawn_points) {
+        const float pp[3] = {p[0], p[1], p[2]};
+        const uint32_t sp = create_spawn_point_entity(g, d, pp, err);
+        if (!sp) return 0;
+        char nm[32];
+        std::snprintf(nm, sizeof(nm), "F2AB_SP_%08X", sp);
+        g.AddNameMapping(nm, sp);
+        new_save_entities.emplace_back(nm, sp);
+        sp_entities.push_back(sp);
+    }
+
+    const uint32_t list_rec = g.AllocRecordHash();
+    {
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        for (size_t i = 0; i < sp_entities.size(); ++i) {
+            const std::string fname =
+                "SpawnPoint" + std::to_string(i + 1);
+            f.hash = fnv1_32(fname);
+            f.type = 7;
+            f.value = sp_entities[i];
+            fs.push_back(f);
+        }
+        if (d.spawn_list_parent &&
+            d.spawn_list_parent != 0x811C9DC5u) {
+            f.hash = kParent; f.type = 6;
+            f.value = d.spawn_list_parent;
+            fs.push_back(f);
+        }
+        if (!g.AddRecord(list_rec, fs, 0)) {
+            err = "spawn list append failed";
+            return 0;
+        }
+    }
+
+    const uint32_t comp_rec = g.AllocRecordHash();
+    {
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kSpawnedCreatureName; f.type = 4;
+        f.value = fnv1_32(ga.creature_name);
+        fs.push_back(f);
+        f.hash = kSpawnPoints; f.type = 6; f.value = list_rec;
+        fs.push_back(f);
+        if (d.gen_comp_parent && d.gen_comp_parent != 0x811C9DC5u) {
+            f.hash = kParent; f.type = 6; f.value = d.gen_comp_parent;
+            fs.push_back(f);
+        }
+        if (!g.AddRecord(comp_rec, fs, 0)) {
+            err = "generator comp append failed";
+            return 0;
+        }
+    }
+
+    uint32_t tf_rec = 0;
+    if (d.gen_transform_field &&
+        d.gen_transform_field != d.gen_comp_field) {
+        auto fbits = [](float f) {
+            uint32_t u;
+            std::memcpy(&u, &f, 4);
+            return u;
+        };
+        auto vec3_record = [&](float x, float y, float z) -> uint32_t {
+            const uint32_t h = g.AllocRecordHash();
+            std::vector<GdbEdit::Field> fs;
+            GdbEdit::Field f;
+            f.hash = kVecZ; f.type = 3; f.value = fbits(z);
+            fs.push_back(f);
+            f.hash = kVecY; f.type = 3; f.value = fbits(y);
+            fs.push_back(f);
+            f.hash = kVecX; f.type = 3; f.value = fbits(x);
+            fs.push_back(f);
+            return g.AddRecord(h, fs, 0) ? h : 0;
+        };
+        const uint32_t pos_rec =
+            vec3_record(ga.pos[0], ga.pos[1], ga.pos[2]);
+        const uint32_t rot_rec = vec3_record(0, 0, 0);
+        if (!pos_rec || !rot_rec) {
+            err = "generator transform append failed";
+            return 0;
+        }
+        tf_rec = g.AllocRecordHash();
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kRotation; f.type = 6; f.value = rot_rec;
+        fs.push_back(f);
+        if (d.gen_transform_parent &&
+            d.gen_transform_parent != 0x811C9DC5u) {
+            f.hash = kParent; f.type = 6;
+            f.value = d.gen_transform_parent;
+            fs.push_back(f);
+        }
+        f.hash = kPosition; f.type = 6; f.value = pos_rec;
+        fs.push_back(f);
+        if (!g.AddRecord(tf_rec, fs, 0)) {
+            err = "generator transform comp append failed";
+            return 0;
+        }
+    }
+
+    const uint32_t ent = g.AllocRecordHash();
+    {
+        std::vector<GdbEdit::Field> fs;
+        GdbEdit::Field f;
+        f.hash = kParent; f.type = 6; f.value = d.gen_template;
+        fs.push_back(f);
+        f.hash = d.gen_comp_field; f.type = 6; f.value = comp_rec;
+        fs.push_back(f);
+        if (tf_rec) {
+            f.hash = d.gen_transform_field; f.type = 6;
+            f.value = tf_rec;
+            fs.push_back(f);
+        }
+        if (!g.AddRecord(ent, fs, 0)) {
+            err = "generator entity append failed";
+            return 0;
+        }
+    }
+    char nm[32];
+    std::snprintf(nm, sizeof(nm), "F2AB_Gen_%08X", ent);
+    g.AddNameMapping(nm, ent);
+    new_save_entities.emplace_back(nm, ent);
+    return ent;
 }
 
 bool append_save_entities(
@@ -1740,10 +2335,6 @@ int find_level_save_index(const std::string& bnk_path, int lev_index) {
     }
 }
 
-// Rewrites <Position> (and optionally <Orientation>) inside the
-// <PhysicsData> block of matching .save entities. The game restores
-// entity physics transforms from the .save, so GDB patches alone are
-// not enough for entities that carry PhysicsData.
 size_t apply_save_physics_patches(std::vector<uint8_t>& xml_bytes,
                                   const std::vector<SavePhysPatch>& patches)
 {
@@ -1857,7 +2448,6 @@ size_t apply_save_physics_patches(std::vector<uint8_t>& xml_bytes,
                         size_t ori_end = xml.find("</Orientation>", ori);
                         if (ori_end != std::string::npos &&
                             ori_end < phys_end) {
-                            // Engine axes, Z up: q = qz(yaw)*qy(y)*qx(x)
                             const float hx =
                                 p.rot_deg[0] * kDegToRad * 0.5f;
                             const float hy =
@@ -1924,7 +2514,9 @@ bool Save(std::string& msg) {
     int save_rewrite_index = -1;
     std::string save_rewrite_bnk;
     size_t chest_entities_created = 0;
+    size_t generators_created = 0;
     size_t save_physics_patched = 0;
+    std::unordered_map<uint32_t, std::string> babel_edits;
     bool deferred_work = false;
     {
     std::lock_guard<std::mutex> lk(mtx());
@@ -2035,9 +2627,11 @@ bool Save(std::string& msg) {
             }
         }
     }
+    babel_edits = s.text_edits;
     if (lev_patches.empty() && gdb_patches.empty() && adds_updated == 0 &&
         s.additions.empty() && s.contents_edits.empty() &&
-        save_physics_patches.empty()) {
+        save_physics_patches.empty() && babel_edits.empty() &&
+        s.generators.empty() && s.spawn_point_adds.empty()) {
         msg = (skipped || rs_visual)
                   ? "no file-backed changes to save (visual-only edits "
                     "skipped)"
@@ -2140,7 +2734,8 @@ bool Save(std::string& msg) {
             break;
         }
     }
-    if (!s.contents_edits.empty() || have_chest_adds) {
+    if (!s.contents_edits.empty() || have_chest_adds ||
+        !s.generators.empty() || !s.spawn_point_adds.empty()) {
         progress_update(6, 100, "Rewriting chest contents...");
         std::vector<uint8_t> gbytes;
         if (!s.gdb.file_path.empty()) {
@@ -2182,7 +2777,7 @@ bool Save(std::string& msg) {
         }
         for (const auto& kv : s.contents_edits) {
             std::string aerr;
-            if (apply_chest_contents(g, kv.first, kv.second, aerr)) {
+            if (apply_chest_contents(g, kv.first, kv.second, 0, aerr)) {
                 ++contents_applied;
             } else {
                 DebugTrace::log(
@@ -2195,7 +2790,8 @@ bool Save(std::string& msg) {
         for (const auto& a : s.additions) {
             if (a.removed || !a.as_entity()) continue;
             std::string aerr;
-            const uint32_t eh = create_entity_addition(g, a, aerr);
+            const uint32_t eh =
+                create_entity_addition(g, a, babel_edits, aerr);
             if (!eh) {
                 DebugTrace::log("save: entity addition skipped: %s",
                                 aerr.c_str());
@@ -2212,6 +2808,57 @@ bool Save(std::string& msg) {
             g.AddNameMapping(name, eh);
             new_save_entities.emplace_back(name, eh);
             ++chest_entities_created;
+        }
+
+        if (!s.generators.empty() || !s.spawn_point_adds.empty()) {
+            const Gdb::SpawnDonorInfo& donor = g_level_spawn_donor;
+            if (!donor.valid()) {
+                DebugTrace::log(
+                    "save: generator author skipped: no donor "
+                    "generator/spawn point in this level");
+            } else {
+                for (const auto& ga : s.generators) {
+                    if (ga.removed || ga.creature_name.empty()) {
+                        continue;
+                    }
+                    std::string gerr2;
+                    if (create_generator_entity(g, donor, ga,
+                                                new_save_entities,
+                                                gerr2)) {
+                        ++generators_created;
+                    } else {
+                        DebugTrace::log(
+                            "save: generator author failed: %s",
+                            gerr2.c_str());
+                    }
+                }
+                size_t spi = 0;
+                for (const auto& spa : s.spawn_point_adds) {
+                    std::string serr2;
+                    const uint32_t sp = create_spawn_point_entity(
+                        g, donor, spa.pos, serr2);
+                    if (!sp) {
+                        DebugTrace::log(
+                            "save: spawn point author failed: %s",
+                            serr2.c_str());
+                        continue;
+                    }
+                    char nm[32];
+                    std::snprintf(nm, sizeof(nm), "F2AB_SP_%08X", sp);
+                    g.AddNameMapping(nm, sp);
+                    new_save_entities.emplace_back(nm, sp);
+                    const std::string fname =
+                        "SpawnPointF2AB" + std::to_string(++spi);
+                    if (!g.AddField(spa.spawn_points_record,
+                                    fnv1_32(fname), 7, sp)) {
+                        DebugTrace::log(
+                            "save: spawn list append failed for "
+                            "0x%08X", spa.spawn_points_record);
+                    } else {
+                        ++generators_created;
+                    }
+                }
+            }
         }
         if (!new_save_entities.empty()) {
 
@@ -2245,7 +2892,8 @@ bool Save(std::string& msg) {
             }
         }
 
-        if (contents_applied > 0 || chest_entities_created > 0) {
+        if (contents_applied > 0 || chest_entities_created > 0 ||
+            generators_created > 0) {
             gdb_rewrite_bytes = g.Serialize();
             if (!s.gdb.file_path.empty()) {
                 gdb_rewrite_loose = s.gdb.file_path;
@@ -2257,8 +2905,6 @@ bool Save(std::string& msg) {
         }
     }
 
-    // The game restores entity transforms from the .save PhysicsData
-    // blocks, so moved/rotated GDB entities must be patched there too.
     if (!save_physics_patches.empty()) {
         if (save_rewrite_bytes.empty()) {
             const int save_idx = find_level_save_index(s.lev.bnk_path,
@@ -2295,7 +2941,14 @@ bool Save(std::string& msg) {
     }
 
     std::string bake_note;
-    if (!s.additions.empty()) {
+    std::vector<std::string> gen_asset_models;
+    for (const auto& ga : s.generators) {
+        if (ga.removed) continue;
+        for (const auto& mp : ga.asset_models) {
+            gen_asset_models.push_back(mp);
+        }
+    }
+    if (!s.additions.empty() || !gen_asset_models.empty()) {
         const bool rewritable = s.lev.valid && !s.lev.compressed &&
                                 s.lev.file_path.empty();
         if (rewritable) {
@@ -2338,6 +2991,10 @@ bool Save(std::string& msg) {
                         if (a.physics_file_hash) {
                             mdl_hashes.push_back(a.physics_file_hash);
                         }
+                    }
+                    for (const auto& mp : gen_asset_models) {
+                        mdl_hashes.push_back(
+                            fnv1_32(lower_model_path(mp)));
                     }
                     try {
                         const auto bc = BnkCache::get(s.lev.bnk_path);
@@ -2449,10 +3106,17 @@ bool Save(std::string& msg) {
                                 models_blob = BnkCache::extract_bytes(
                                     streaming_path, models_idx);
                             }
+                            std::vector<std::string> inject_paths;
                             for (const auto& a : s.additions) {
                                 if (a.removed) continue;
+                                inject_paths.push_back(a.model_path);
+                            }
+                            for (const auto& mp : gen_asset_models) {
+                                inject_paths.push_back(mp);
+                            }
+                            for (const auto& inj_path : inject_paths) {
                                 const std::string lp =
-                                    lower_model_path(a.model_path);
+                                    lower_model_path(inj_path);
                                 const std::string want = norm_key(lp);
                                 bool have = false;
                                 if (!models_blob.empty()) {
@@ -2497,9 +3161,6 @@ bool Save(std::string& msg) {
                                             "_streaming.bnk", folder,
                                             stream_adds);
                                     if (got == 0) {
-                                        // model comes from another world:
-                                        // hunt its streaming files (physics
-                                        // .hkx etc.) across the other BNKs
                                         for (const auto& other :
                                              S.bnk_paths) {
                                             if (other == s.lev.bnk_path) {
@@ -2796,7 +3457,7 @@ bool Save(std::string& msg) {
     }
     msg += bake_note;
     deferred_work = need_bake || !gdb_rewrite_bytes.empty() ||
-                    save_rewrite_index >= 0;
+                    save_rewrite_index >= 0 || !babel_edits.empty();
     if (!deferred_work) {
         s.dirty = false;
         if (lev_written || gdb_written || rs_written) {
@@ -2974,11 +3635,34 @@ bool Save(std::string& msg) {
                         save_physics_patched, gerr.c_str());
     }
 
+    size_t text_written = 0;
+    if (rebuilt && contents_ok && !babel_edits.empty()) {
+        progress_update(92, 100, "Writing text banks...");
+        std::string root = S.root_dir;
+        {
+            std::error_code ec;
+            std::filesystem::path rp(root);
+            if (!root.empty() &&
+                std::filesystem::is_regular_file(rp, ec)) {
+                root = rp.parent_path().string();
+            }
+        }
+        std::string terr;
+        if (TextBank::ApplyEdits(root, babel_edits, terr)) {
+            text_written = babel_edits.size();
+        } else {
+            contents_ok = false;
+            OutputLog::error("level edit: text bank write failed: " +
+                             terr);
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lk(mtx());
         auto& s = st();
         s.saving = false;
         if (rebuilt && contents_ok) {
+            if (text_written > 0) s.text_edits.clear();
             if (need_bake) {
                 s.additions.clear();
                 s.edits.clear();
@@ -2989,6 +3673,10 @@ bool Save(std::string& msg) {
                 }
             }
             if (contents_applied > 0) s.contents_edits.clear();
+            if (generators_created > 0) {
+                s.generators.clear();
+                s.spawn_point_adds.clear();
+            }
             BnkCache::invalidate(s.lev.bnk_path);
             if (!s.gdb.bnk_path.empty()) {
                 BnkCache::invalidate(s.gdb.bnk_path);
@@ -3015,6 +3703,15 @@ bool Save(std::string& msg) {
                 msg += "; updated " +
                        std::to_string(save_physics_patched) +
                        " entity save transform(s)";
+            }
+            if (generators_created > 0) {
+                msg += "; authored " +
+                       std::to_string(generators_created) +
+                       " generator/spawn point(s)";
+            }
+            if (text_written > 0) {
+                msg += "; wrote " + std::to_string(text_written) +
+                       " text entr(ies)";
             }
             msg += "; reloading";
         } else if (!rebuilt) {

@@ -6,6 +6,7 @@
 
 #include "../../ISO/IsoDump.h"
 #include "../../Level/LevelLoader.h"
+#include "../../Level/TextBank.h"
 #include "../../Level/LevelExport.h"
 #include "../../animations/AnimDataFile.h"
 #include "../../animations/AnimPlayer.h"
@@ -32,7 +33,7 @@ extern ModelPreview g_mp;
 
 static const char* const kLeftPanelTabLabels[] = {
     "BNK List", "File Tree", "Levels", "Lua Scripts",
-    "Models", "Textures", "Audio", "Animations"
+    "Models", "Textures", "Audio", "Animations", "Items"
 };
 
 static float compute_tab_button_width() {
@@ -53,6 +54,50 @@ float left_panel_min_width() {
                   (float)(kRow2Count - 1) * kTabGap;
     row_w += st.WindowPadding.x * 2.0f;
     return row_w;
+}
+
+static const FlatAssetEntry* find_model_by_path_hash_left(uint32_t h) {
+    if (!h) return nullptr;
+    for (const auto& mf : S.all_mdl_files) {
+        std::string lp = mf.full_path;
+        std::transform(lp.begin(), lp.end(), lp.begin(), ::tolower);
+        std::replace(lp.begin(), lp.end(), '/', '\\');
+        uint32_t mh = 0x811C9DC5u;
+        for (unsigned char c : lp) {
+            mh *= 0x01000193u;
+            mh ^= uint32_t(c);
+        }
+        if (mh == h) return &mf;
+    }
+    return nullptr;
+}
+
+// resolve a model by its path string: exact lower-path match, then a
+// filename (leaf) match as a fallback for path-prefix differences
+static const FlatAssetEntry* find_model_by_path_left(
+    const std::string& path) {
+    if (path.empty()) return nullptr;
+    auto norm = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        std::replace(s.begin(), s.end(), '/', '\\');
+        return s;
+    };
+    const std::string want = norm(path);
+    const size_t ws = want.find_last_of('\\');
+    const std::string want_leaf =
+        ws == std::string::npos ? want : want.substr(ws + 1);
+    const FlatAssetEntry* leaf_hit = nullptr;
+    for (const auto& mf : S.all_mdl_files) {
+        const std::string full = norm(mf.full_path);
+        if (full == want) return &mf;
+        if (!leaf_hit) {
+            const size_t fs = full.find_last_of('\\');
+            const std::string leaf =
+                fs == std::string::npos ? full : full.substr(fs + 1);
+            if (leaf == want_leaf) leaf_hit = &mf;
+        }
+    }
+    return leaf_hit;
 }
 
 void load_flat_asset_entry(const FlatAssetEntry& e, int kind) {
@@ -350,6 +395,9 @@ void draw_left_panel() {
     if (tab_button("Audio",    s_active_tab == 4, kPurpleLabel)) s_active_tab = 4;
     ImGui::SameLine(0, 2);
     if (tab_button("Animations", s_active_tab == 5, kPurpleLabel)) s_active_tab = 5;
+
+    const ImU32 kItemsLabel = IM_COL32(255, 175, 90, 255);
+    if (tab_button("Items", s_active_tab == 8, kItemsLabel)) s_active_tab = 8;
 
     ImGui::Separator();
 
@@ -1370,6 +1418,82 @@ void draw_left_panel() {
             ImGui::EndChild();
         }
 
+        if (s_active_tab == 8) {
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##item_filter", "Filter",
+                                     &S.item_filter);
+            std::string flow = S.item_filter;
+            std::transform(flow.begin(), flow.end(), flow.begin(),
+                           ::tolower);
+            if (g_item_details.empty()) {
+                ImGui::TextDisabled("No items indexed yet.");
+                ImGui::TextDisabled(
+                    "Open (load) a level to populate the item list.");
+            } else {
+                std::vector<int> vis;
+                vis.reserve(g_item_details.size());
+                for (int i = 0; i < (int)g_item_details.size(); ++i) {
+                    // preset money amounts belong in the chest loot
+                    // picker, not the general item list
+                    if (g_item_details[i].is_money) continue;
+                    if (flow.empty()) { vis.push_back(i); continue; }
+                    std::string low = g_item_details[i].display_name;
+                    std::transform(low.begin(), low.end(), low.begin(),
+                                   ::tolower);
+                    if (low.find(flow) != std::string::npos) {
+                        vis.push_back(i);
+                    }
+                }
+                if (S.dev_mode) {
+                    ImGui::TextDisabled("%zu items (%zu shown)",
+                                        g_item_details.size(),
+                                        vis.size());
+                }
+                ImGui::BeginChild("items_list", ImVec2(0, 0), false);
+                ImGuiListClipper clipper;
+                clipper.Begin((int)vis.size());
+                while (clipper.Step()) {
+                    for (int r = clipper.DisplayStart;
+                         r < clipper.DisplayEnd; ++r) {
+                        const int idx = vis[r];
+                        const auto& it = g_item_details[idx];
+                        ImGui::PushID(idx);
+                        const bool sel = (S.selected_item == idx);
+                        const char* row_name =
+                            it.display_name.empty() ? it.label.c_str()
+                                                    : it.display_name
+                                                          .c_str();
+                        if (ImGui::Selectable(row_name, sel)) {
+                            extern std::atomic<bool> g_item_icon_dirty;
+                            S.selected_item = idx;
+                            S.show_item_details = true;
+                            g_item_icon_dirty = true;
+#ifdef _WIN32
+                            const FlatAssetEntry* hit = nullptr;
+                            if (!it.model_path.empty()) {
+                                hit = find_model_by_path_left(
+                                    it.model_path);
+                            }
+                            if (!hit && it.model_path_hash) {
+                                hit = find_model_by_path_hash_left(
+                                    it.model_path_hash);
+                            }
+                            if (hit) {
+                                extern std::atomic<bool>
+                                    g_pending_mdl_is_item;
+                                load_flat_asset_entry(*hit, 0);
+                                g_pending_mdl_is_item = true;
+                            }
+#endif
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                clipper.End();
+                ImGui::EndChild();
+            }
+        }
+
         if (s_active_tab == 6) {
             struct LvlMap {
                 const char* path;
@@ -1539,6 +1663,8 @@ void draw_left_panel() {
                                           ImGuiSelectableFlags_SpanAllColumns))
                     {
                         if (!level_edit_click_guard("Level loading")) {
+                            S.show_item_details = false;
+                            S.selected_item = -1;
                             Level::OpenAsync(e);
                         }
                     }

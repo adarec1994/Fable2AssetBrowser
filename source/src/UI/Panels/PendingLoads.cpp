@@ -49,6 +49,8 @@
 std::atomic<bool> g_pending_mdl_load{false};
 int g_pending_mdl_index = -1;
 std::string g_pending_mdl_full_path;
+std::atomic<bool> g_pending_mdl_is_item{false};
+std::atomic<bool> g_item_icon_dirty{false};
 
 std::atomic<bool> g_pending_tex_load{false};
 int g_pending_tex_index = -1;
@@ -1259,6 +1261,23 @@ bool spawn_level_model_at(ID3D11Device* device,
                 "level edit: placed as a REAL silver key pickup (Save "
                 "bakes it into the level)");
         } else if (leaf.find("chest") != std::string::npos) {
+            std::string mp2 = model_path;
+            std::transform(mp2.begin(), mp2.end(), mp2.begin(),
+                           ::tolower);
+            std::replace(mp2.begin(), mp2.end(), '/', '\\');
+            uint32_t mh2 = 0x811C9DC5u;
+            for (unsigned char c : mp2) {
+                mh2 *= 0x01000193u;
+                mh2 ^= uint32_t(c);
+            }
+            auto tit2 = g_level_prop_entity_templates.find(mh2);
+            if (tit2 != g_level_prop_entity_templates.end()) {
+                const auto& t2 = tit2->second;
+                LevelEdit::MarkAdditionAsPropEntity(
+                    add_idx, t2.template_hash, t2.comp_field_hash,
+                    t2.comp_template_hash, t2.physics_file_hash,
+                    t2.has_text_tags);
+            }
             LevelEdit::MarkAdditionEntityKind(
                 add_idx, LevelEdit::AdditionEntityKind::Chest);
             OutputLog::info(
@@ -1279,12 +1298,16 @@ bool spawn_level_model_at(ID3D11Device* device,
                 const auto& t = tit->second;
                 LevelEdit::MarkAdditionAsPropEntity(
                     add_idx, t.template_hash, t.comp_field_hash,
-                    t.comp_template_hash, t.physics_file_hash);
+                    t.comp_template_hash, t.physics_file_hash,
+                    t.has_text_tags);
                 OutputLog::info(
                     std::string("level edit: placed as a REAL prop entity") +
                     (t.physics_file_hash ? " with collision"
                                          : " (template has no physics "
-                                           "shape)"));
+                                           "shape)") +
+                    (t.has_text_tags ? " - readable: click it to edit "
+                                       "its text"
+                                     : ""));
             } else {
                 OutputLog::info(
                     "level edit: no object template for this model - "
@@ -1384,6 +1407,11 @@ void process_pending_loads() {
     }
     if (g_pending_mdl_load && g_pending_mdl_index >= 0 && g_pending_mdl_index < (int)S.files.size()) {
         g_pending_mdl_load = false;
+        S.item_model_active = g_pending_mdl_is_item.exchange(false);
+        if (!S.item_model_active) {
+            S.show_item_details = false;
+            S.selected_item = -1;
+        }
         auto item = S.files[(size_t)g_pending_mdl_index];
         auto name = item.name;
         std::string parse_path = g_pending_mdl_full_path.empty() ? name : g_pending_mdl_full_path;
@@ -1618,6 +1646,8 @@ void process_pending_loads() {
 
     if (g_pending_tex_load && g_pending_tex_index >= 0 && g_pending_tex_index < (int)S.files.size()) {
         g_pending_tex_load = false;
+        S.show_item_details = false;
+        S.selected_item = -1;
         auto item = S.files[(size_t)g_pending_tex_index];
         auto name = item.name;
         S.texture_window_name = name;

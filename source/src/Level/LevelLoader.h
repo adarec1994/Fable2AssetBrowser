@@ -69,6 +69,8 @@ bool Open(const FlatAssetEntry& entry);
 void OpenAsync(const FlatAssetEntry& entry);
 bool IsAsyncLoadInProgress();
 
+void BuildGlobalItemCatalog();
+
 bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                       EngineLevelInfo&            out);
 
@@ -210,6 +212,25 @@ extern std::unordered_map<uint32_t, Gdb::EntityContents>
     g_level_entity_contents;
 
 extern std::vector<Gdb::ItemCatalogEntry> g_level_item_catalog;
+extern std::vector<Gdb::ItemDetail> g_item_details;
 
 extern std::unordered_map<uint32_t, Gdb::PropTemplateInfo>
     g_level_prop_entity_templates;
+
+extern std::unordered_map<uint32_t, Gdb::EntityTextTags>
+    g_level_entity_text;
+
+struct LevelSpawnMarker {
+    float x = 0, y = 0, z = 0;
+    uint8_t kind = 0;
+    uint32_t entity_hash = 0;
+    uint32_t pos_off[3] = {0, 0, 0};
+    uint32_t rot_off[3] = {0, 0, 0};
+    uint32_t spawn_points_record = 0;
+    std::vector<uint32_t> spawn_point_entities;
+    std::string creature_name;
+    std::string name;
+};
+extern std::vector<LevelSpawnMarker> g_level_spawn_markers;
+extern Gdb::SpawnDonorInfo g_level_spawn_donor;
+extern std::vector<Gdb::CreatureCatalogEntry> g_level_creature_catalog;

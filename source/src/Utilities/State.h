@@ -132,10 +132,10 @@ struct State {
     std::vector<FlatAssetEntry> all_heightfield_files;
     bool terrain_mode = false;
     bool show_gdb_placements = false;
+    bool show_spawn_markers = false;
+    bool show_ent_npcs = false;
+    bool show_ent_text = false;
 
-    // level-edit click guard: previews that would tear down the loaded
-    // level are blocked while edit mode is on; first hit = modal, later
-    // hits = output-log line
     bool level_edit_guard_popup = false;
     bool level_edit_guard_seen = false;
     std::string level_edit_guard_message;
@@ -146,6 +146,10 @@ struct State {
     std::string anim_filter_files;
     std::string level_filter;
     std::string lua_filter;
+    std::string item_filter;
+    int  selected_item = -1;          // index into g_item_details
+    bool show_item_details = false;   // floating detail overlay
+    bool item_model_active = false;   // model came from the Items tab
 
     bool show_paths = true;
 

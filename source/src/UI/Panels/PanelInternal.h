@@ -56,9 +56,6 @@ extern std::atomic<bool>      g_cancel_search;
 extern std::string            g_last_global_search;
 extern int                    g_selected_global;
 
-// Returns true (and notifies the user) when an asset preview or level
-// switch must be blocked because level edit mode is active. First hit
-// shows a modal popup; later hits go to the output log.
 bool level_edit_click_guard(const char* what);
 
 bool open_audio_player_for_selected(int file_index);

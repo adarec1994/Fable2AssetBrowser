@@ -2010,6 +2010,7 @@ void ReadContentsItemInfo(const std::vector<const GdbView*>& views,
                 (tag_type == 4 || tag_type == 7) &&
                 tag_hash != 0 && tag_hash != kHashNull) {
                 item.name_tag = lookup_name(tag_hash);
+                item.name_tag_hash = tag_hash;
             }
         }
     }
@@ -2222,6 +2223,7 @@ std::unordered_map<uint32_t, EntityContents> ExtractEntityContents(
                                                &pot_type) &&
                             (pot_type == 6 || pot_type == 7) &&
                             pot_hash != 0 && pot_hash != kHashNull) {
+                            ec.potential_items_record = pot_hash;
                             read_loot_table(pot_hash, ec.potential_items);
                         }
                     }
@@ -2320,10 +2322,6 @@ std::unordered_map<uint32_t, PropTemplateInfo> BuildPropTemplateIndex(
                 }
             }
             if (!has_graphics) {
-                // derived templates inherit their graphics but override
-                // the physics component locally; accept those too, but
-                // reject placed instances (their transform component
-                // resolves to a world Position)
                 bool has_local_physics = false;
                 for (uint32_t pc : kPhysicsComponents) {
                     size_t slot = 0;
@@ -2385,6 +2383,22 @@ std::unordered_map<uint32_t, PropTemplateInfo> BuildPropTemplateIndex(
             }
             if (info.comp_field_hash == 0) continue;
 
+            {
+                constexpr uint32_t kHashTextTags = 0x709D872Bu;
+                constexpr uint32_t kHashReadableComponent = 0x89ABB47Eu;
+                MultiGdbCursor tt_owner;
+                uint32_t tt_hash = 0;
+                MultiGdbCursor cur2{vw, rec};
+                if ((MultiFindInherited(views, cur2,
+                                        kHashReadableComponent, 6,
+                                        tt_owner, tt_hash) ||
+                     MultiFindInherited(views, cur2, kHashTextTags, 6,
+                                        tt_owner, tt_hash)) &&
+                    tt_hash != 0 && tt_hash != kHashNull) {
+                    info.has_text_tags = true;
+                }
+            }
+
             for (uint32_t mh : model_hashes) {
                 auto it = out.find(mh);
                 if (it == out.end()) {
@@ -2395,6 +2409,786 @@ std::unordered_map<uint32_t, PropTemplateInfo> BuildPropTemplateIndex(
                 }
             }
         }
+    }
+    return out;
+}
+
+namespace {
+
+std::vector<uint32_t> ModelsForEntityMulti(
+    const std::vector<const GdbView*>& views, uint32_t entity_hash)
+{
+    std::vector<uint32_t> out_hashes;
+    MultiGdbCursor ent;
+    if (!MultiLookup(views, entity_hash, ent)) return out_hashes;
+    MultiGdbCursor cur = ent;
+    for (int depth = 0; depth < 16; ++depth) {
+        const auto hashes =
+            CollectModelPathHashesForRecord(*cur.view, cur.record);
+        if (!hashes.empty()) {
+            out_hashes.push_back(hashes.front());
+            return out_hashes;
+        }
+        size_t slot = 0;
+        if (!cur.view->findLocal(cur.record, kHashParent, 6, slot,
+                                 nullptr)) {
+            break;
+        }
+        const uint32_t ph = ReadBeU32(cur.view->bytes.data() + slot);
+        MultiGdbCursor nxt;
+        if (!MultiLookup(views, ph, nxt)) break;
+        cur = nxt;
+    }
+    constexpr uint32_t kMorphComponent = 0x0D4ADA1Au;
+    constexpr uint32_t kCompositeModelRecord = 0x7CFF5EE2u;
+    constexpr uint32_t kModel = 0x90347E14u;
+    constexpr uint32_t kPartFields[] = {
+        0x05294B89u,
+        0x547DDA3Eu,
+        0xD622E5ADu,
+    };
+    MultiGdbCursor mo;
+    uint32_t morph = 0;
+    if (!MultiFindInherited(views, ent, kMorphComponent, 6, mo, morph) ||
+        morph == 0 || morph == kHashNull) {
+        return out_hashes;
+    }
+    MultiGdbCursor mc;
+    if (!MultiLookup(views, morph, mc)) return out_hashes;
+    MultiGdbCursor co;
+    uint32_t comp_rec = 0;
+    uint8_t cty = 0;
+    if (!MultiFindInherited(views, mc, kCompositeModelRecord, 0xFF, co,
+                            comp_rec, &cty) ||
+        comp_rec == 0 || comp_rec == kHashNull) {
+        return out_hashes;
+    }
+    MultiGdbCursor comp;
+    if (!MultiLookup(views, comp_rec, comp)) return out_hashes;
+    for (uint32_t pf : kPartFields) {
+        MultiGdbCursor po;
+        uint32_t part = 0;
+        if (!MultiFindInherited(views, comp, pf, 6, po, part) ||
+            part == 0 || part == kHashNull) {
+            continue;
+        }
+        MultiGdbCursor prec;
+        if (!MultiLookup(views, part, prec)) continue;
+        MultiGdbCursor mo2;
+        uint32_t mh = 0;
+        uint8_t mty = 0;
+        if (MultiFindInherited(views, prec, kModel, 0xFF, mo2, mh,
+                               &mty) &&
+            (mty == 4 || mty == 7) && mh != 0 && mh != kHashNull) {
+            out_hashes.push_back(mh);
+        }
+    }
+    return out_hashes;
+}
+
+}
+
+std::vector<CreatureCatalogEntry> CollectCreatureNames(
+    const std::vector<const std::vector<uint8_t>*>& gdbs)
+{
+    std::vector<CreatureCatalogEntry> out;
+    constexpr uint32_t kCreatureComponent = 0xC3B90D4Fu;
+
+    std::vector<std::unique_ptr<GdbView>> owned;
+    std::vector<const GdbView*> views;
+    std::vector<std::unordered_map<uint32_t, std::string>> dicts;
+    for (const auto* g : gdbs) {
+        if (!g || g->empty()) continue;
+        auto v = std::make_unique<GdbView>(*g);
+        if (v->ok) {
+            views.push_back(v.get());
+            owned.push_back(std::move(v));
+            dicts.push_back(LoadEmbeddedDict(*g));
+        }
+    }
+    if (views.empty()) return out;
+
+    std::unordered_set<std::string> seen;
+    for (size_t vi = 0; vi < views.size(); ++vi) {
+        const GdbView* vw = views[vi];
+        const auto& dict = dicts[vi];
+        if (vw->bytes.size() < 0x18) continue;
+        const uint32_t pairs = ReadBeU32(vw->bytes.data() + 0x10);
+        const size_t meta_end =
+            vw->offset_base + size_t(vw->count) * 2;
+        const size_t name_base = (meta_end + 3) & ~size_t(3);
+        if (name_base + size_t(pairs) * 8 > vw->bytes.size()) continue;
+        for (uint32_t i = 0; i < pairs; ++i) {
+            const uint32_t a =
+                ReadBeU32(vw->bytes.data() + name_base + size_t(i) * 8);
+            const uint32_t b = ReadBeU32(vw->bytes.data() + name_base +
+                                         size_t(i) * 8 + 4);
+            const std::pair<uint32_t, uint32_t> combos[2] = {{a, b},
+                                                             {b, a}};
+            for (const auto& c : combos) {
+                auto dit = dict.find(c.first);
+                if (dit == dict.end()) continue;
+                MultiGdbCursor ent;
+                if (!MultiLookup(views, c.second, ent)) continue;
+                MultiGdbCursor owner;
+                uint32_t comp = 0;
+                if (!MultiFindInherited(views, ent,
+                                        kCreatureComponent, 6, owner,
+                                        comp) ||
+                    comp == 0 || comp == kHashNull) {
+                    continue;
+                }
+                if (seen.insert(dit->second).second) {
+                    CreatureCatalogEntry e;
+                    e.name = dit->second;
+                    e.entity_hash = c.second;
+                    e.model_hashes =
+                        ModelsForEntityMulti(views, c.second);
+                    out.push_back(std::move(e));
+                }
+                break;
+            }
+        }
+    }
+    std::sort(out.begin(), out.end(),
+              [](const CreatureCatalogEntry& a,
+                 const CreatureCatalogEntry& b) {
+                  return a.name < b.name;
+              });
+    return out;
+}
+
+std::unordered_map<uint32_t, EntityTextTags> ExtractEntityTextTags(
+    const std::vector<const std::vector<uint8_t>*>& gdbs,
+    const std::vector<std::pair<uint32_t, std::string>>& hash_to_name)
+{
+    std::unordered_map<uint32_t, EntityTextTags> out;
+    constexpr uint32_t kHashTextTags = 0x709D872Bu;
+    constexpr uint32_t kTagFields[5] = {
+        0x1D280BA4u,
+        0x1D280BA7u,
+        0x1D280BA6u,
+        0x1D280BA1u,
+        0x1D280BA0u,
+    };
+
+    std::vector<std::unique_ptr<GdbView>> owned;
+    std::vector<const GdbView*> views;
+    for (const auto* g : gdbs) {
+        if (!g || g->empty()) continue;
+        auto v = std::make_unique<GdbView>(*g);
+        if (v->ok) {
+            views.push_back(v.get());
+            owned.push_back(std::move(v));
+        }
+    }
+    if (views.empty() || hash_to_name.empty()) return out;
+    const GdbView* level_view = views.front();
+
+    constexpr uint32_t kHashReadableComponent = 0x89ABB47Eu;
+    constexpr uint32_t kHashTextTag = 0xB8F45248u;
+
+    for (const auto& kv : hash_to_name) {
+        const uint32_t entity_hash = kv.first;
+        MultiGdbCursor ent;
+        if (!MultiLookup(views, entity_hash, ent)) continue;
+
+        EntityTextTags et;
+
+        {
+            MultiGdbCursor rc_owner;
+            uint32_t rc_hash = 0;
+            if (MultiFindInherited(views, ent, kHashReadableComponent, 6,
+                                   rc_owner, rc_hash) &&
+                rc_hash != 0 && rc_hash != kHashNull) {
+                MultiGdbCursor rc;
+                if (MultiLookup(views, rc_hash, rc)) {
+                    MultiGdbCursor owner;
+                    uint32_t th = 0;
+                    uint8_t ty = 0;
+                    if (MultiFindInherited(views, rc, kHashTextTag, 0xFF,
+                                           owner, th, &ty) &&
+                        (ty == 4 || ty == 7) && th != 0 &&
+                        th != kHashNull) {
+                        et.tags_record_hash = rc_hash;
+                        et.tags_record_in_level_gdb =
+                            (rc.view == level_view);
+                        et.tag_hashes.push_back(th);
+                    }
+                }
+            }
+        }
+
+        if (et.tag_hashes.empty()) {
+            MultiGdbCursor tt_owner;
+            uint32_t tags_hash = 0;
+            if (MultiFindInherited(views, ent, kHashTextTags, 6,
+                                   tt_owner, tags_hash) &&
+                tags_hash != 0 && tags_hash != kHashNull) {
+                MultiGdbCursor tags;
+                if (MultiLookup(views, tags_hash, tags)) {
+                    et.tags_record_hash = tags_hash;
+                    et.tags_record_in_level_gdb =
+                        (tags.view == level_view);
+                    for (uint32_t tf : kTagFields) {
+                        MultiGdbCursor owner;
+                        uint32_t th = 0;
+                        uint8_t ty = 0;
+                        if (MultiFindInherited(views, tags, tf, 0xFF,
+                                               owner, th, &ty) &&
+                            (ty == 4 || ty == 7) && th != 0 &&
+                            th != kHashNull) {
+                            et.tag_hashes.push_back(th);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (et.tag_hashes.empty()) {
+            constexpr uint32_t kHashNameTag = 0x9555A6FCu;
+            constexpr uint32_t kHashDescriptionTag = 0xD823B12Bu;
+            constexpr uint32_t kHashInventoryItemComponent = 0xC3318103u;
+            constexpr uint32_t kHashCreatureComponent = 0xC3B90D4Fu;
+            MultiGdbCursor tag_scopes[3];
+            int n_scopes = 0;
+            tag_scopes[n_scopes++] = ent;
+            for (uint32_t cf : {kHashInventoryItemComponent,
+                                kHashCreatureComponent}) {
+                MultiGdbCursor owner;
+                uint32_t ch = 0;
+                if (MultiFindInherited(views, ent, cf, 6, owner, ch) &&
+                    ch != 0 && ch != kHashNull) {
+                    MultiGdbCursor comp;
+                    if (MultiLookup(views, ch, comp) && n_scopes < 3) {
+                        tag_scopes[n_scopes++] = comp;
+                    }
+                }
+            }
+            for (int si = 0; si < n_scopes && et.tag_hashes.empty();
+                 ++si) {
+                for (uint32_t tf : {kHashNameTag, kHashDescriptionTag}) {
+                    MultiGdbCursor owner;
+                    uint32_t th = 0;
+                    uint8_t ty = 0;
+                    if (MultiFindInherited(views, tag_scopes[si], tf,
+                                           0xFF, owner, th, &ty) &&
+                        (ty == 4 || ty == 7) && th != 0 &&
+                        th != kHashNull) {
+                        et.tag_hashes.push_back(th);
+                    }
+                }
+            }
+        }
+        if (!et.tag_hashes.empty()) {
+            float x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0;
+            bool hr = false;
+            if (ent.view &&
+                (TryComponentTransformRecord(*ent.view, ent.record, x, y,
+                                             z, rx, ry, rz, hr) ||
+                 TryTransformRecord(*ent.view, ent.record, x, y, z, rx,
+                                    ry, rz, hr))) {
+                et.has_pos = true;
+                et.x = x;
+                et.y = y;
+                et.z = z;
+            }
+            out.emplace(entity_hash, std::move(et));
+        }
+    }
+
+    for (uint32_t i = 0; i < level_view->count; ++i) {
+        if (i >= level_view->record_data_offsets.size()) break;
+        const uint32_t rh = ReadBeU32(level_view->bytes.data() +
+                                      level_view->hash_base +
+                                      size_t(i) * 4);
+        if (out.count(rh)) continue;
+        const size_t rec = level_view->record_data_offsets[i];
+
+        constexpr uint32_t kSimpleTransform = 0x619F96CFu;
+        float x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0;
+        bool hr = false;
+        const bool got_pos =
+            TryComponentTransformRecord(*level_view, rec, x, y, z, rx,
+                                        ry, rz, hr) ||
+            TryComponentTransformField(*level_view, rec,
+                                       kSimpleTransform, x, y, z, rx,
+                                       ry, rz, hr) ||
+            TryTransformRecord(*level_view, rec, x, y, z, rx, ry, rz,
+                               hr);
+
+        MultiGdbCursor cur{level_view, rec};
+        EntityTextTags et;
+        MultiGdbCursor rc_owner;
+        uint32_t rc_hash = 0;
+        if (MultiFindInherited(views, cur, kHashReadableComponent, 6,
+                               rc_owner, rc_hash) &&
+            rc_hash != 0 && rc_hash != kHashNull) {
+            MultiGdbCursor rc;
+            MultiGdbCursor owner;
+            uint32_t th = 0;
+            uint8_t ty = 0;
+            if (MultiLookup(views, rc_hash, rc) &&
+                MultiFindInherited(views, rc, kHashTextTag, 0xFF, owner,
+                                   th, &ty) &&
+                (ty == 4 || ty == 7) && th != 0 && th != kHashNull) {
+                et.tags_record_hash = rc_hash;
+                et.tag_hashes.push_back(th);
+            }
+        }
+        if (et.tag_hashes.empty()) {
+            constexpr uint32_t kHashInventoryItemComponent = 0xC3318103u;
+            constexpr uint32_t kHashNameTag = 0x9555A6FCu;
+            constexpr uint32_t kHashDescriptionTag = 0xD823B12Bu;
+            MultiGdbCursor io;
+            uint32_t ih = 0;
+            if (MultiFindInherited(views, cur,
+                                   kHashInventoryItemComponent, 6, io,
+                                   ih) &&
+                ih != 0 && ih != kHashNull) {
+                MultiGdbCursor item;
+                if (MultiLookup(views, ih, item)) {
+                    for (uint32_t tf : {kHashNameTag,
+                                        kHashDescriptionTag}) {
+                        MultiGdbCursor owner;
+                        uint32_t th = 0;
+                        uint8_t ty = 0;
+                        if (MultiFindInherited(views, item, tf, 0xFF,
+                                               owner, th, &ty) &&
+                            (ty == 4 || ty == 7) && th != 0 &&
+                            th != kHashNull) {
+                            et.tags_record_hash = ih;
+                            et.tag_hashes.push_back(th);
+                        }
+                    }
+                }
+            }
+        }
+        if (et.tag_hashes.empty()) continue;
+        et.tags_record_in_level_gdb = true;
+        et.has_pos = got_pos;
+        et.x = x;
+        et.y = y;
+        et.z = z;
+        out.emplace(rh, std::move(et));
+    }
+    return out;
+}
+
+std::unordered_map<uint32_t, SpawnEntityInfo> CollectSpawnEntities(
+    const std::vector<const std::vector<uint8_t>*>& gdbs,
+    const std::vector<std::pair<uint32_t, std::string>>& hash_to_name,
+    SpawnDonorInfo* out_donor)
+{
+    std::unordered_map<uint32_t, SpawnEntityInfo> out;
+    constexpr uint32_t kCreatureGenerator = 0xA2371C5Au;
+    constexpr uint32_t kCreatureGeneratorSpawnPoint = 0x110071ADu;
+    constexpr uint32_t kCreatureSpawnPoint = 0x1054A35Cu;
+    constexpr uint32_t kSimpleTransformComponent = 0x619F96CFu;
+
+    std::vector<std::unique_ptr<GdbView>> owned;
+    std::vector<const GdbView*> views;
+    for (const auto* g : gdbs) {
+        if (!g || g->empty()) continue;
+        auto v = std::make_unique<GdbView>(*g);
+        if (v->ok) {
+            views.push_back(v.get());
+            owned.push_back(std::move(v));
+        }
+    }
+    if (views.empty() || hash_to_name.empty()) return out;
+
+    constexpr uint32_t kCharNavComponent = 0xC5A11B7Au;
+    const GdbView* level_view = views.front();
+    auto resolve_pos = [&](const GdbView& view, size_t rec,
+                           SpawnEntityInfo& info) {
+        float x = 0, y = 0, z = 0;
+        float rx = 0, ry = 0, rz = 0;
+        bool hr = false;
+        size_t ps[3] = {0, 0, 0};
+        size_t rs[3] = {0, 0, 0};
+        if (TryComponentTransformRecord(view, rec, x, y, z, rx, ry, rz,
+                                        hr, ps, rs) ||
+            TryComponentTransformField(view, rec,
+                                       kSimpleTransformComponent, x, y,
+                                       z, rx, ry, rz, hr, ps, rs) ||
+            TryComponentTransformField(view, rec, kCharNavComponent, x,
+                                       y, z, rx, ry, rz, hr, ps, rs) ||
+            TryTransformRecord(view, rec, x, y, z, rx, ry, rz, hr, ps,
+                               rs)) {
+            info.has_pos = true;
+            info.x = x;
+            info.y = y;
+            info.z = z;
+            if (&view == level_view) {
+                for (int k = 0; k < 3; ++k) {
+                    info.pos_off[k] = uint32_t(ps[k]);
+                    info.rot_off[k] = uint32_t(rs[k]);
+                }
+            }
+        }
+    };
+
+    auto fill_donor_entity = [&](const GdbView& view, size_t rec,
+                                 uint32_t& out_template,
+                                 uint32_t& out_comp_field,
+                                 uint32_t& out_comp_parent,
+                                 uint32_t& out_tf_field,
+                                 uint32_t& out_tf_parent,
+                                 uint32_t comp_field_hash) {
+        size_t slot = 0;
+        if (view.findLocal(rec, kHashParent, 6, slot, nullptr)) {
+            out_template = ReadBeU32(view.bytes.data() + slot);
+        }
+        if (view.findLocal(rec, comp_field_hash, 6, slot, nullptr)) {
+            out_comp_field = comp_field_hash;
+            const uint32_t ch = ReadBeU32(view.bytes.data() + slot);
+            size_t crec = 0;
+            if (view.lookup(ch, crec)) {
+                size_t ps2 = 0;
+                if (view.findLocal(crec, kHashParent, 6, ps2, nullptr)) {
+                    out_comp_parent =
+                        ReadBeU32(view.bytes.data() + ps2);
+                }
+            }
+        }
+        const uint32_t tf_candidates[] = {
+            kHashTransformComponent,
+            kSimpleTransformComponent,
+            kHashPhysicsSimulationKeyframedComponent,
+            kHashPhysicsSimulationStaticComponent,
+            0xFC8A57C5u,
+            kCharNavComponent,
+        };
+        for (uint32_t tf : tf_candidates) {
+            size_t s2 = 0;
+            if (!view.findLocal(rec, tf, 6, s2, nullptr)) continue;
+            const uint32_t ch = ReadBeU32(view.bytes.data() + s2);
+            size_t crec = 0;
+            if (!view.lookup(ch, crec)) continue;
+            size_t pslot = 0, powner = 0;
+            if (!view.findFieldOwner(crec, kHashPosition, 6, pslot,
+                                     powner, nullptr)) {
+                continue;
+            }
+            out_tf_field = tf;
+            size_t ps2 = 0;
+            if (view.findLocal(crec, kHashParent, 6, ps2, nullptr)) {
+                out_tf_parent = ReadBeU32(view.bytes.data() + ps2);
+            }
+            break;
+        }
+    };
+
+    constexpr uint32_t kSpawnedCreatureName = 0x2A80DD7Bu;
+    constexpr uint32_t kSpawnedCreatureDefault = 0x9FFE461Eu;
+    constexpr uint32_t kCreatureComponent = 0xC3B90D4Fu;
+
+    std::unordered_map<uint32_t, uint32_t> name_fnv_to_entity;
+    name_fnv_to_entity.reserve(hash_to_name.size() * 2);
+    for (const auto& kv : hash_to_name) {
+        uint32_t h = 0x811C9DC5u;
+        for (unsigned char c : kv.second) {
+            h *= 0x01000193u;
+            h ^= c;
+        }
+        name_fnv_to_entity.emplace(h, kv.first);
+    }
+    for (const GdbView* vw : views) {
+        if (vw->bytes.size() < 0x18) continue;
+        const uint32_t pairs = ReadBeU32(vw->bytes.data() + 0x10);
+        const size_t meta_end =
+            vw->offset_base + size_t(vw->count) * 2;
+        const size_t name_base = (meta_end + 3) & ~size_t(3);
+        if (name_base + size_t(pairs) * 8 > vw->bytes.size()) continue;
+        for (uint32_t i = 0; i < pairs; ++i) {
+            const uint32_t a =
+                ReadBeU32(vw->bytes.data() + name_base + size_t(i) * 8);
+            const uint32_t b = ReadBeU32(vw->bytes.data() + name_base +
+                                         size_t(i) * 8 + 4);
+            name_fnv_to_entity.emplace(a, b);
+            name_fnv_to_entity.emplace(b, a);
+        }
+    }
+
+    auto models_for_entity = [&](uint32_t entity_hash) {
+        return ModelsForEntityMulti(views, entity_hash);
+    };
+
+    std::unordered_map<uint32_t, std::string> fnv_to_name;
+    fnv_to_name.reserve(hash_to_name.size() * 2);
+    for (const auto& kv : hash_to_name) {
+        uint32_t h = 0x811C9DC5u;
+        for (unsigned char c : kv.second) {
+            h *= 0x01000193u;
+            h ^= c;
+        }
+        fnv_to_name.emplace(h, kv.second);
+    }
+
+    for (const auto& kv : hash_to_name) {
+        const uint32_t entity_hash = kv.first;
+        MultiGdbCursor ent;
+        if (!MultiLookup(views, entity_hash, ent)) continue;
+        SpawnEntityInfo info;
+        MultiGdbCursor owner;
+        uint32_t comp = 0;
+        if (MultiFindInherited(views, ent, kCreatureGenerator, 6, owner,
+                               comp) &&
+            comp != 0 && comp != kHashNull) {
+            info.kind = 1;
+            MultiGdbCursor gen;
+            if (MultiLookup(views, comp, gen)) {
+                constexpr uint32_t kSpawnPointsField = 0x559B5DBFu;
+                {
+                    MultiGdbCursor spo;
+                    uint32_t sp_list = 0;
+                    if (MultiFindInherited(views, gen,
+                                           kSpawnPointsField, 6, spo,
+                                           sp_list) &&
+                        sp_list != 0 && sp_list != kHashNull) {
+                        info.spawn_points_record = sp_list;
+                        MultiGdbCursor sl;
+                        if (MultiLookup(views, sp_list, sl)) {
+                            for (int depth = 0; depth < 8; ++depth) {
+                                size_t sch = 0;
+                                uint32_t nf = 0;
+                                if (!sl.view->schema(sl.record, sch,
+                                                     nf)) {
+                                    break;
+                                }
+                                const size_t fh0 = sch + 4;
+                                for (uint32_t i2 = 0; i2 < nf; ++i2) {
+                                    const uint32_t fh = ReadBeU32(
+                                        sl.view->bytes.data() + fh0 +
+                                        size_t(i2) * 4);
+                                    if (fh == kHashParent) continue;
+                                    const uint32_t vh = ReadBeU32(
+                                        sl.view->bytes.data() +
+                                        sl.record + 4 +
+                                        size_t(i2) * 4);
+                                    if (vh && vh != kHashNull) {
+                                        info.spawn_point_entities
+                                            .push_back(vh);
+                                    }
+                                }
+                                size_t pslot = 0;
+                                if (!sl.view->findLocal(sl.record,
+                                                        kHashParent, 6,
+                                                        pslot,
+                                                        nullptr)) {
+                                    break;
+                                }
+                                const uint32_t ph = ReadBeU32(
+                                    sl.view->bytes.data() + pslot);
+                                MultiGdbCursor nxt;
+                                if (!MultiLookup(views, ph, nxt)) break;
+                                sl = nxt;
+                            }
+                        }
+                    }
+                }
+                if (out_donor && !out_donor->gen_template &&
+                    ent.view == level_view) {
+                    fill_donor_entity(*ent.view, ent.record,
+                                      out_donor->gen_template,
+                                      out_donor->gen_comp_field,
+                                      out_donor->gen_comp_parent,
+                                      out_donor->gen_transform_field,
+                                      out_donor->gen_transform_parent,
+                                      kCreatureGenerator);
+                    if (info.spawn_points_record) {
+                        size_t lrec = 0;
+                        if (level_view->lookup(info.spawn_points_record,
+                                               lrec)) {
+                            size_t ps2 = 0;
+                            if (level_view->findLocal(lrec, kHashParent,
+                                                      6, ps2,
+                                                      nullptr)) {
+                                out_donor->spawn_list_parent = ReadBeU32(
+                                    level_view->bytes.data() + ps2);
+                            }
+                        }
+                    }
+                }
+                MultiGdbCursor no;
+                uint32_t name_fnv = 0;
+                uint8_t ty = 0;
+                if (MultiFindInherited(views, gen, kSpawnedCreatureName,
+                                       0xFF, no, name_fnv, &ty) &&
+                    (ty == 4 || ty == 7) &&
+                    name_fnv != 0 && name_fnv != kHashNull &&
+                    name_fnv != kSpawnedCreatureDefault) {
+                    auto fit = fnv_to_name.find(name_fnv);
+                    if (fit != fnv_to_name.end()) {
+                        info.creature_name = fit->second;
+                    }
+                    auto nit = name_fnv_to_entity.find(name_fnv);
+                    if (nit != name_fnv_to_entity.end()) {
+                        info.model_hashes =
+                            models_for_entity(nit->second);
+                    }
+                }
+                if (info.model_hashes.empty()) {
+                    constexpr uint32_t kFamilies = 0xF44CE155u;
+                    constexpr uint32_t kCreatures = 0xA1F7A17Du;
+                    MultiGdbCursor fo;
+                    uint32_t fam_list = 0;
+                    if (MultiFindInherited(views, gen, kFamilies, 6, fo,
+                                           fam_list) &&
+                        fam_list != 0 && fam_list != kHashNull) {
+                        MultiGdbCursor fl;
+                        if (MultiLookup(views, fam_list, fl)) {
+                            for (const GdbView* fv = fl.view; fv;
+                                 fv = nullptr) {
+                                size_t sch = 0;
+                                uint32_t nf = 0;
+                                if (!fv->schema(fl.record, sch, nf)) {
+                                    break;
+                                }
+                                const size_t fhashes = sch + 4;
+                                const size_t descs =
+                                    fhashes + size_t(nf) * 4;
+                                for (uint32_t i = 0;
+                                     i < nf &&
+                                     info.model_hashes.empty();
+                                     ++i) {
+                                    const uint32_t fh = ReadBeU32(
+                                        fv->bytes.data() + fhashes +
+                                        size_t(i) * 4);
+                                    const uint8_t fty = uint8_t(
+                                        ReadBeU32(fv->bytes.data() +
+                                                  descs +
+                                                  size_t(i) * 4) >>
+                                        24);
+                                    if (fh == kHashParent || fty != 6) {
+                                        continue;
+                                    }
+                                    const uint32_t fam_hash = ReadBeU32(
+                                        fv->bytes.data() + fl.record +
+                                        4 + size_t(i) * 4);
+                                    MultiGdbCursor fam;
+                                    if (!MultiLookup(views, fam_hash,
+                                                     fam)) {
+                                        continue;
+                                    }
+                                    MultiGdbCursor co2;
+                                    uint32_t creatures = 0;
+                                    if (!MultiFindInherited(
+                                            views, fam, kCreatures, 6,
+                                            co2, creatures) ||
+                                        creatures == 0 ||
+                                        creatures == kHashNull) {
+                                        continue;
+                                    }
+                                    MultiGdbCursor cl;
+                                    if (!MultiLookup(views, creatures,
+                                                     cl)) {
+                                        continue;
+                                    }
+                                    for (const auto pr :
+                                         {uint8_t(7), uint8_t(4)}) {
+                                        size_t sch2 = 0;
+                                        uint32_t nf2 = 0;
+                                        if (!cl.view->schema(cl.record,
+                                                             sch2,
+                                                             nf2)) {
+                                            break;
+                                        }
+                                        const size_t h2 = sch2 + 4;
+                                        const size_t d2 =
+                                            h2 + size_t(nf2) * 4;
+                                        for (uint32_t j = 0; j < nf2;
+                                             ++j) {
+                                            const uint32_t cfh =
+                                                ReadBeU32(
+                                                    cl.view->bytes
+                                                        .data() +
+                                                    h2 +
+                                                    size_t(j) * 4);
+                                            const uint8_t cty2 =
+                                                uint8_t(ReadBeU32(
+                                                    cl.view->bytes
+                                                        .data() +
+                                                    d2 +
+                                                    size_t(j) * 4) >>
+                                                    24);
+                                            if (cfh == kHashParent ||
+                                                cty2 != pr) {
+                                                continue;
+                                            }
+                                            const uint32_t ch2 =
+                                                ReadBeU32(
+                                                    cl.view->bytes
+                                                        .data() +
+                                                    cl.record + 4 +
+                                                    size_t(j) * 4);
+                                            if (ch2 == 0 ||
+                                                ch2 == kHashNull) {
+                                                continue;
+                                            }
+                                            info.model_hashes =
+                                                models_for_entity(ch2);
+                                            if (!info.model_hashes
+                                                     .empty()) {
+                                                break;
+                                            }
+                                        }
+                                        if (!info.model_hashes
+                                                 .empty()) {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if ((MultiFindInherited(views, ent,
+                                       kCreatureGeneratorSpawnPoint, 6,
+                                       owner, comp) ||
+                    MultiFindInherited(views, ent, kCreatureSpawnPoint,
+                                       6, owner, comp)) &&
+                   comp != 0 && comp != kHashNull) {
+            info.kind = 2;
+            if (out_donor && !out_donor->sp_template &&
+                ent.view == level_view) {
+                for (uint32_t cf : {kCreatureGeneratorSpawnPoint,
+                                    kCreatureSpawnPoint}) {
+                    size_t s3 = 0;
+                    if (!ent.view->findLocal(ent.record, cf, 6, s3,
+                                             nullptr)) {
+                        continue;
+                    }
+                    fill_donor_entity(*ent.view, ent.record,
+                                      out_donor->sp_template,
+                                      out_donor->sp_comp_field,
+                                      out_donor->sp_comp_parent,
+                                      out_donor->sp_transform_field,
+                                      out_donor->sp_transform_parent,
+                                      cf);
+                    break;
+                }
+            }
+        } else {
+            MultiGdbCursor so;
+            uint32_t skel = 0;
+            uint8_t sty = 0;
+            if ((MultiFindInherited(views, ent, kHashSkeletonFile, 0xFF,
+                                    so, skel, &sty) &&
+                 (sty == 4 || sty == 7) && skel != 0 &&
+                 skel != kHashNull) ||
+                (MultiFindInherited(views, ent, kCreatureComponent, 6,
+                                    so, skel) &&
+                 skel != 0 && skel != kHashNull)) {
+                info.kind = 3;
+                info.model_hashes = models_for_entity(entity_hash);
+            }
+        }
+        if (!info.kind) continue;
+        resolve_pos(*ent.view, ent.record, info);
+        out.emplace(entity_hash, info);
     }
     return out;
 }
@@ -2527,6 +3321,369 @@ std::vector<ItemCatalogEntry> BuildItemCatalog(
                                      a.label == b.label;
                           }),
               out.end());
+    return out;
+}
+
+std::vector<ItemDetail> BuildItemDetails(
+    const std::vector<const std::vector<uint8_t>*>& gdbs)
+{
+    std::vector<ItemDetail> out;
+    constexpr uint32_t kNameTag = 0x9555A6FCu;
+    constexpr uint32_t kDescTag = 0xD823B12Bu;
+    constexpr uint32_t kIconGraphic = 0x46F0F9CEu;
+
+    std::vector<std::unique_ptr<GdbView>> owned;
+    std::vector<const GdbView*> views;
+    for (const auto* g : gdbs) {
+        if (!g || g->empty()) continue;
+        auto v = std::make_unique<GdbView>(*g);
+        if (v->ok) {
+            views.push_back(v.get());
+            owned.push_back(std::move(v));
+        }
+    }
+    if (views.empty()) return out;
+
+    std::unordered_map<uint32_t, std::string> dict;
+    for (const auto* g : gdbs) {
+        if (!g || g->empty()) continue;
+        auto d = LoadEmbeddedDict(*g);
+        dict.insert(d.begin(), d.end());
+    }
+    auto dict_name = [&](uint32_t h) -> std::string {
+        auto it = dict.find(h);
+        return it != dict.end() ? it->second : std::string();
+    };
+
+    auto is_stat_field = [&](const std::string& nm) {
+        static const char* kSkip[] = {
+            "GUIScreen", "Icon", "parent", "Component", "Tag",
+            "Offset", "Rotation", "Translation", "Mesh", "Model",
+            "Texture", "ScriptName", "SoundEvent", "Expression",
+        };
+        for (const char* s : kSkip) {
+            if (nm.find(s) != std::string::npos) return false;
+        }
+        return true;
+    };
+    constexpr uint32_t kAugmentable = 0x9DC93C5Bu;
+    constexpr uint32_t kAugSlots[] = {
+        0xFCF3EB8Eu, 0xFCF3EB8Du, 0xFCF3EB8Cu, 0xFCF3EB8Bu,
+        0xFCF3EB8Au, 0xFCF3EB89u, 0xFCF3EB88u, 0xFCF3EB87u,
+        0xFCF3EB86u,
+    };
+
+    std::unordered_set<uint32_t> seen;
+    for (const GdbView* vw : views) {
+        const GdbView& view = *vw;
+        for (uint32_t i = 0; i < view.count; ++i) {
+            if (i >= view.record_data_offsets.size()) break;
+            const size_t rec = view.record_data_offsets[i];
+
+            // an item entry: a record that locally names/describes/owns
+            // an item AND resolves an InventoryItemComponent through its
+            // chain. This catches base items (local component) and
+            // legendary variants (local name, inherited component).
+            // item if it locally owns an InventoryItemComponent, OR
+            // locally names an "INV_ITEM_*" tag (base items + named
+            // variants like The Chopper)
+            size_t name_slot = 0;
+            uint8_t name_ty = 0;
+            const bool has_local_comp = view.findLocal(
+                rec, kHashInventoryItemComponent, 6, name_slot, nullptr);
+            bool is_inv_named = false;
+            if (view.findLocal(rec, kNameTag, 0xFF, name_slot,
+                               &name_ty) &&
+                (name_ty == 4 || name_ty == 7)) {
+                const uint32_t nh =
+                    ReadBeU32(view.bytes.data() + name_slot);
+                const std::string ns = dict_name(nh);
+                is_inv_named = ns.compare(0, 9, "INV_ITEM_") == 0;
+            }
+            if (!has_local_comp && !is_inv_named) continue;
+
+            const uint32_t rec_hash =
+                ReadBeU32(view.bytes.data() + view.hash_base +
+                          size_t(i) * 4);
+            if (!seen.insert(rec_hash).second) continue;
+
+            ItemDetail d;
+            d.record_hash = rec_hash;
+
+            EntityContentsItem info;
+            ReadContentsItemInfo(views, rec_hash, info, &dict);
+            d.money = info.money;
+
+            // preset money-bag loot amounts carry a MoneyComponent but
+            // no item name; flag them so the UI can special-case them
+            {
+                constexpr uint32_t kMoneyComponent = 0xE21AB7A0u;
+                MultiGdbCursor mo;
+                uint32_t mh = 0;
+                MultiGdbCursor mc0{vw, rec};
+                if (MultiFindInherited(views, mc0, kMoneyComponent, 6,
+                                       mo, mh) &&
+                    mh != 0 && mh != kHashNull) {
+                    d.is_money = true;
+                }
+            }
+
+            MultiGdbCursor cur{vw, rec};
+            // the item's InventoryItemComponent (some items keep their
+            // NameTag/DescTag/Icon on the component, not the record)
+            MultiGdbCursor inv_comp;
+            bool have_inv_comp = false;
+            {
+                MultiGdbCursor io;
+                uint32_t ih = 0;
+                if (MultiFindInherited(views, cur,
+                                       kHashInventoryItemComponent, 6,
+                                       io, ih) &&
+                    ih != 0 && ih != kHashNull) {
+                    have_inv_comp = MultiLookup(views, ih, inv_comp);
+                }
+            }
+            // resolve a t4/t7 tag from the record chain, then the
+            // component chain
+            auto find_tag = [&](uint32_t field) -> uint32_t {
+                MultiGdbCursor o;
+                uint32_t v = 0;
+                uint8_t t = 0;
+                if (MultiFindInherited(views, cur, field, 0xFF, o, v,
+                                       &t) &&
+                    (t == 4 || t == 7) && v != kHashNull) {
+                    return v;
+                }
+                if (have_inv_comp &&
+                    MultiFindInherited(views, inv_comp, field, 0xFF, o,
+                                       v, &t) &&
+                    (t == 4 || t == 7) && v != kHashNull) {
+                    return v;
+                }
+                return 0;
+            };
+            d.name_tag = find_tag(kNameTag);
+            d.desc_tag = find_tag(kDescTag);
+            const uint32_t icon = find_tag(kIconGraphic);
+            if (icon) d.icon_tex = dict_name(icon);
+
+            // model: check the item record, then walk its parent chain
+            // across views (legendary variants share their base's mesh)
+            {
+                MultiGdbCursor mw{vw, rec};
+                for (int md = 0; md < 24 && !d.model_path_hash; ++md) {
+                    const auto mh = CollectModelPathHashesForRecord(
+                        *mw.view, mw.record);
+                    if (!mh.empty()) {
+                        d.model_path_hash = mh.front();
+                        d.model_path = dict_name(mh.front());
+                        break;
+                    }
+                    size_t pslot = 0;
+                    if (!mw.view->findLocal(mw.record, kHashParent, 6,
+                                            pslot, nullptr)) {
+                        break;
+                    }
+                    const uint32_t ph =
+                        ReadBeU32(mw.view->bytes.data() + pslot);
+                    MultiGdbCursor nxt;
+                    if (ph == 0 || ph == kHashNull ||
+                        !MultiLookup(views, ph, nxt)) {
+                        break;
+                    }
+                    mw = nxt;
+                }
+            }
+
+            // weapons keep no ModelFile in the GDB, but their meshes
+            // exist as art\inventory\weapons\<type>_<quality>.mdl named
+            // exactly after the item tag (KATANA_IRONBASE -> katana_iron,
+            // KATANA_LEGENDARY -> katana_legendary). Derive the leaf so
+            // the model resolver can find it.
+            if (d.model_path.empty() && d.name_tag) {
+                const std::string tag = dict_name(d.name_tag);
+                static const std::string kWp = "INV_ITEM_WEAPON_";
+                if (tag.compare(0, kWp.size(), kWp) == 0) {
+                    std::string core = tag.substr(kWp.size());
+                    const size_t np = core.rfind("_NAME");
+                    if (np != std::string::npos) core.resize(np);
+                    size_t bp;
+                    while ((bp = core.find("BASE")) !=
+                           std::string::npos) {
+                        core.erase(bp, 4);
+                    }
+                    for (char& c : core) {
+                        c = char(std::tolower((unsigned char)c));
+                    }
+                    // "katana" alone (generic base) has no mesh; only
+                    // qualified variants do
+                    if (core.find('_') != std::string::npos) {
+                        d.model_path = core + ".mdl";
+                    }
+                }
+            }
+
+            std::string raw = dict_name(d.name_tag);
+            if (raw.empty()) raw = dict_name(rec_hash);
+            if (raw.empty()) raw = info.name_tag;
+            if (!raw.empty()) {
+                d.label = PrettifyTagLabel(raw);
+            } else {
+                char buf[24];
+                std::snprintf(buf, sizeof(buf), "unnamed 0x%08X",
+                              rec_hash);
+                d.label = buf;
+                d.unnamed = true;
+            }
+
+            std::unordered_set<uint32_t> stat_seen;
+            // collect scalar fields (float/int/enum/bool) from a record
+            // and its parent chain, skipping component pointers
+            auto collect_scalars = [&](MultiGdbCursor start) {
+                MultiGdbCursor walk = start;
+                for (int depth = 0;
+                     depth < 24 && d.stats.size() < 40; ++depth) {
+                    size_t sch = 0;
+                    uint32_t nf = 0;
+                    if (!walk.view->schema(walk.record, sch, nf)) break;
+                    const size_t h0 = sch + 4;
+                    const size_t d0 = h0 + size_t(nf) * 4;
+                    for (uint32_t f = 0;
+                         f < nf && d.stats.size() < 40; ++f) {
+                        const uint32_t fh =
+                            ReadBeU32(walk.view->bytes.data() + h0 +
+                                      size_t(f) * 4);
+                        if (fh == kHashParent) continue;
+                        if (!stat_seen.insert(fh).second) continue;
+                        const uint32_t desc =
+                            ReadBeU32(walk.view->bytes.data() + d0 +
+                                      size_t(f) * 4);
+                        const uint8_t ft = uint8_t(desc >> 24);
+                        if (ft != 0 && ft != 1 && ft != 3 && ft != 5) {
+                            continue;
+                        }
+                        const std::string fn = dict_name(fh);
+                        if (fn.empty() || !is_stat_field(fn)) continue;
+                        const size_t vslot =
+                            walk.record + 4 + size_t(f) * 4;
+                        if (vslot + 4 > walk.view->body_end) continue;
+                        const uint8_t* vp =
+                            walk.view->bytes.data() + vslot;
+                        char vb[48];
+                        if (ft == 3) {
+                            std::snprintf(vb, sizeof(vb), "%.3g",
+                                          ReadBeF32(vp));
+                        } else if (ft == 0) {
+                            std::snprintf(vb, sizeof(vb), "%s",
+                                          ReadBeU32(vp) ? "yes" : "no");
+                        } else {
+                            std::snprintf(vb, sizeof(vb), "%u",
+                                          ReadBeU32(vp));
+                        }
+                        d.stats.emplace_back(fn, vb);
+                    }
+                    size_t pslot = 0;
+                    if (!walk.view->findLocal(walk.record, kHashParent,
+                                              6, pslot, nullptr)) {
+                        break;
+                    }
+                    const uint32_t ph =
+                        ReadBeU32(walk.view->bytes.data() + pslot);
+                    MultiGdbCursor nxt;
+                    if (ph == 0 || ph == kHashNull ||
+                        !MultiLookup(views, ph, nxt)) {
+                        break;
+                    }
+                    walk = nxt;
+                }
+            };
+
+            // top-level item scalars (Rating, Category, flags)
+            collect_scalars(cur);
+            // stat-bearing components (weapon damage, firearm, armour,
+            // money value, etc.)
+            constexpr uint32_t kStatComps[] = {
+                0x2C34431Eu,  // WeaponComponent
+                0x0A644D42u,  // FirearmComponent
+                0xE21AB7A0u,  // MoneyComponent
+                0x6D04D9A2u,  // Material (armour rating lives near here)
+            };
+            for (uint32_t sc_hash : kStatComps) {
+                MultiGdbCursor so;
+                uint32_t comp = 0;
+                if (MultiFindInherited(views, cur, sc_hash, 6, so,
+                                       comp) &&
+                    comp != 0 && comp != kHashNull) {
+                    MultiGdbCursor cc;
+                    if (MultiLookup(views, comp, cc)) {
+                        collect_scalars(cc);
+                    }
+                }
+            }
+
+            // pre-installed augments (AugmentableComponent slots)
+            {
+                MultiGdbCursor ao;
+                uint32_t aug_comp = 0;
+                if (MultiFindInherited(views, cur, kAugmentable, 6, ao,
+                                       aug_comp) &&
+                    aug_comp != 0 && aug_comp != kHashNull) {
+                    MultiGdbCursor ac;
+                    if (MultiLookup(views, aug_comp, ac)) {
+                        int an = 0;
+                        for (uint32_t asl : kAugSlots) {
+                            MultiGdbCursor so;
+                            uint32_t ah = 0;
+                            uint8_t aty = 0;
+                            if (!MultiFindInherited(views, ac, asl, 0xFF,
+                                                    so, ah, &aty) ||
+                                ah == 0 || ah == kHashNull) {
+                                continue;
+                            }
+                            std::string an_name = dict_name(ah);
+                            if (an_name.empty()) {
+                                MultiGdbCursor ar;
+                                if (MultiLookup(views, ah, ar)) {
+                                    MultiGdbCursor no;
+                                    uint32_t nt = 0;
+                                    uint8_t nty = 0;
+                                    if (MultiFindInherited(
+                                            views, ar, kNameTag, 0xFF,
+                                            no, nt, &nty) &&
+                                        (nty == 4 || nty == 7)) {
+                                        an_name = dict_name(nt);
+                                    }
+                                }
+                            }
+                            if (an_name.empty()) continue;
+                            char lbl[24];
+                            std::snprintf(lbl, sizeof(lbl),
+                                          "Augment %d", ++an);
+                            d.stats.emplace_back(
+                                lbl, PrettifyTagLabel(an_name));
+                        }
+                    }
+                }
+            }
+
+            out.push_back(std::move(d));
+        }
+    }
+
+    std::sort(out.begin(), out.end(),
+              [](const ItemDetail& a, const ItemDetail& b) {
+                  if (a.unnamed != b.unnamed) return b.unnamed;
+                  const size_t n =
+                      std::min(a.label.size(), b.label.size());
+                  for (size_t i = 0; i < n; ++i) {
+                      const int ca =
+                          std::tolower((unsigned char)a.label[i]);
+                      const int cb =
+                          std::tolower((unsigned char)b.label[i]);
+                      if (ca != cb) return ca < cb;
+                  }
+                  return a.label.size() < b.label.size();
+              });
     return out;
 }
 

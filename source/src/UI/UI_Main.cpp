@@ -217,7 +217,7 @@ static void handle_flycam_input(float dt) {
     bool e_pressed = keys_ok && ImGui::IsKeyDown(S.key_up);
     float mouse_dx = 0.0f;
     float mouse_dy = 0.0f;
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !io.KeyShift) {
         g_flycam.is_looking = true;
         g_flycam.saved_mouse_x = io.MousePos.x;
         g_flycam.saved_mouse_y = io.MousePos.y;

@@ -120,6 +120,8 @@ struct EntityContentsItem {
     uint32_t record_hash = 0;
     std::string entry_label;
     std::string name_tag;
+    uint32_t name_tag_hash = 0;   // NameTag hash for book.babel resolution
+    std::string display_name;     // localized name (resolved app-side)
     int money = -1;
     float weight = -1.0f;
     float min_chapter = -1.0f;
@@ -131,6 +133,7 @@ struct EntityContents {
     bool has_chest_component = false;
     int  silver_keys_needed = -1;
     float chance_of_respawning = -1.0f;
+    uint32_t potential_items_record = 0;
     std::vector<EntityContentsItem> initial_items;
     std::vector<EntityContentsItem> potential_items;
 };
@@ -150,6 +153,24 @@ struct ItemCatalogEntry {
 std::vector<ItemCatalogEntry> BuildItemCatalog(
     const std::vector<const std::vector<uint8_t>*>& gdbs);
 
+struct ItemDetail {
+    uint32_t record_hash = 0;
+    std::string label;          // tag-derived fallback label
+    std::string display_name;   // localized name (resolved app-side)
+    uint32_t name_tag = 0;
+    uint32_t desc_tag = 0;
+    uint32_t model_path_hash = 0;
+    std::string model_path;     // resolved .mdl path string when known
+    std::string icon_tex;
+    int money = -1;
+    bool unnamed = false;
+    bool is_money = false;       // a preset gold/money-bag loot amount
+    std::vector<std::pair<std::string, std::string>> stats;
+};
+
+std::vector<ItemDetail> BuildItemDetails(
+    const std::vector<const std::vector<uint8_t>*>& gdbs);
+
 std::unordered_map<uint32_t, std::string> LoadEmbeddedDict(
     const std::vector<uint8_t>& bytes);
 
@@ -158,9 +179,64 @@ struct PropTemplateInfo {
     uint32_t comp_field_hash = 0;
     uint32_t comp_template_hash = 0;
     uint32_t physics_file_hash = 0;
+    bool has_text_tags = false;
 };
 
 std::unordered_map<uint32_t, PropTemplateInfo> BuildPropTemplateIndex(
+    const std::vector<const std::vector<uint8_t>*>& gdbs);
+
+struct EntityTextTags {
+    uint32_t tags_record_hash = 0;
+    bool tags_record_in_level_gdb = false;
+    bool has_pos = false;
+    float x = 0, y = 0, z = 0;
+    std::vector<uint32_t> tag_hashes;
+};
+
+std::unordered_map<uint32_t, EntityTextTags> ExtractEntityTextTags(
+    const std::vector<const std::vector<uint8_t>*>& gdbs,
+    const std::vector<std::pair<uint32_t, std::string>>& hash_to_name);
+
+struct SpawnEntityInfo {
+    uint8_t kind = 0;
+    bool has_pos = false;
+    float x = 0, y = 0, z = 0;
+    std::vector<uint32_t> model_hashes;
+    uint32_t pos_off[3] = {0, 0, 0};
+    uint32_t rot_off[3] = {0, 0, 0};
+    uint32_t spawn_points_record = 0;
+    std::vector<uint32_t> spawn_point_entities;
+    std::string creature_name;
+};
+
+struct SpawnDonorInfo {
+    uint32_t gen_template = 0;
+    uint32_t gen_comp_field = 0;
+    uint32_t gen_comp_parent = 0;
+    uint32_t gen_transform_field = 0;
+    uint32_t gen_transform_parent = 0;
+    uint32_t sp_template = 0;
+    uint32_t sp_comp_field = 0;
+    uint32_t sp_comp_parent = 0;
+    uint32_t sp_transform_field = 0;
+    uint32_t sp_transform_parent = 0;
+    uint32_t spawn_list_parent = 0;
+    bool valid() const {
+        return gen_template && gen_comp_field && sp_template &&
+               sp_comp_field;
+    }
+};
+std::unordered_map<uint32_t, SpawnEntityInfo> CollectSpawnEntities(
+    const std::vector<const std::vector<uint8_t>*>& gdbs,
+    const std::vector<std::pair<uint32_t, std::string>>& hash_to_name,
+    SpawnDonorInfo* out_donor = nullptr);
+
+struct CreatureCatalogEntry {
+    std::string name;
+    uint32_t entity_hash = 0;
+    std::vector<uint32_t> model_hashes;
+};
+std::vector<CreatureCatalogEntry> CollectCreatureNames(
     const std::vector<const std::vector<uint8_t>*>& gdbs);
 
 }

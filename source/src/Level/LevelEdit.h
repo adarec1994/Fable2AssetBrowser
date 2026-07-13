@@ -53,6 +53,10 @@ struct Addition {
     uint32_t entity_comp_template = 0;
     uint32_t physics_file_hash = 0;
 
+    bool entity_has_text = false;
+    std::string readable_text;
+    uint32_t loot_table_record = 0;
+
     bool as_entity() const {
         return entity_kind != AdditionEntityKind::None;
     }
@@ -90,6 +94,8 @@ void ClearChestContents(uint32_t entity_hash);
 size_t ChestContentsEditCount();
 
 bool AdditionIsChest(int index);
+uint32_t GetAdditionLootTable(int index);
+void SetAdditionLootTable(int index, uint32_t loot_record);
 bool GetAdditionChestItems(int index, std::vector<uint32_t>& out);
 void SetAdditionChestItems(int index, const std::vector<uint32_t>& items);
 void MarkAdditionEntityKind(int index, AdditionEntityKind kind);
@@ -98,7 +104,46 @@ void MarkAdditionAsPropEntity(int index,
                               uint32_t template_hash,
                               uint32_t comp_field_hash,
                               uint32_t comp_template_hash,
-                              uint32_t physics_file_hash);
+                              uint32_t physics_file_hash,
+                              bool has_text_tags = false);
+
+bool AdditionIsReadable(int index);
+bool GetAdditionReadableText(int index, std::string& out);
+void SetAdditionReadableText(int index, const std::string& text);
+
+void SetEntityTextEdit(uint32_t tag_hash, const std::string& utf8);
+bool GetEntityTextEdit(uint32_t tag_hash, std::string& out);
+size_t TextEditCount();
+
+struct GeneratorAddition {
+    float pos[3] = {0, 0, 0};
+    std::string creature_name;
+    std::vector<std::array<float, 3>> spawn_points;
+    std::vector<std::string> asset_models;
+    bool removed = false;
+};
+
+int  AddGenerator(const float pos[3], const std::string& creature_name,
+                  const std::vector<std::string>& asset_models = {});
+void GetGenerators(std::vector<GeneratorAddition>& out);
+void MovePendingGenerator(int index, const float pos[3]);
+void RemoveGenerator(int index);
+void AddGeneratorSpawnPoint(int index, const float pos[3]);
+void RemoveGeneratorSpawnPoint(int index, int sp_index);
+
+void AddSpawnPointToExisting(uint32_t generator_entity,
+                             uint32_t spawn_points_record,
+                             const float pos[3]);
+size_t PendingSpawnPointCount();
+
+struct PendingSpawnPoint {
+    int id = 0;
+    float pos[3] = {0, 0, 0};
+    std::string label;
+};
+void GetPendingSpawnPoints(std::vector<PendingSpawnPoint>& out);
+void MovePendingSpawnPoint(int id, const float pos[3]);
+void RemovePendingSpawnPoint(int id);
 
 bool   Dirty();
 bool   Saving();

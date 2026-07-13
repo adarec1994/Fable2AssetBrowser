@@ -4,6 +4,7 @@
 #include "../../Utilities/Utils.h"
 #include "../../BNKCore.cpp"
 #include "../../ISO/IsoMount.h"
+#include "../../Level/LevelLoader.h"
 #include "imgui.h"
 #include <filesystem>
 #include <algorithm>
@@ -92,6 +93,12 @@ void start_tree_build_for_root(const std::string& root_dir,
                 S.anim_authored_cache.clear();
             } catch (...) {  }
             g_tree_done_units.fetch_add(1);
+        }
+
+        if (!root_snapshot.empty()) {
+            try {
+                Level::BuildGlobalItemCatalog();
+            } catch (...) {  }
         }
 
         g_tree_build_complete.store(true);

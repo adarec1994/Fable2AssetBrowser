@@ -128,6 +128,8 @@ set(APP_SOURCES
         src/Level/Skybox/XenosShaderBinary.h
         src/Level/WaterParser.cpp
         src/Level/WaterParser.h
+        src/Level/TextBank.cpp
+        src/Level/TextBank.h
         src/Level/ParticleBank.cpp
         src/Level/ParticleBank.h
         src/Level/ParticleFX.cpp

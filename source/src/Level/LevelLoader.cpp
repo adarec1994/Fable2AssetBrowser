@@ -8,6 +8,7 @@
 #include "VfsConfig.h"
 #include "GdbModelHashlist.h"
 #include "GdbParser.h"
+#include "TextBank.h"
 #include "ParticleBank.h"
 #include "ParticleFX.h"
 #include "../MDL/ModelParser.h"
@@ -86,8 +87,13 @@ std::vector<HavokCollisionMesh>    g_level_havok_collision;
 std::vector<GdbWorldPlacement>     g_level_gdb_placements;
 std::unordered_map<uint32_t, Gdb::EntityContents> g_level_entity_contents;
 std::vector<Gdb::ItemCatalogEntry> g_level_item_catalog;
+std::vector<Gdb::ItemDetail> g_item_details;
 std::unordered_map<uint32_t, Gdb::PropTemplateInfo>
     g_level_prop_entity_templates;
+std::unordered_map<uint32_t, Gdb::EntityTextTags> g_level_entity_text;
+std::vector<LevelSpawnMarker> g_level_spawn_markers;
+Gdb::SpawnDonorInfo g_level_spawn_donor;
+std::vector<Gdb::CreatureCatalogEntry> g_level_creature_catalog;
 static std::atomic<bool>      g_level_async_loading{false};
 
 namespace Level {
@@ -140,6 +146,8 @@ void OpenAsync(const FlatAssetEntry& entry)
             g_level_havok_collision.clear();
             g_level_gdb_placements.clear();
             g_level_entity_contents.clear();
+            g_level_entity_text.clear();
+            g_level_spawn_markers.clear();
             g_level_vfs_texture_body_bnks.clear();
             g_level_vfs_model_bnks.clear();
             g_level_vfs_streaming_bnks.clear();
@@ -156,6 +164,169 @@ void OpenAsync(const FlatAssetEntry& entry)
         }
         g_level_async_loading.store(false);
     }).detach();
+}
+
+static bool load_game_gdb_standalone(const std::string& rel_path,
+                                     std::vector<uint8_t>& out) {
+    out.clear();
+    std::string key = rel_path;
+    std::transform(key.begin(), key.end(), key.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    std::replace(key.begin(), key.end(), '\\', '/');
+
+    if (ISO::IsoMount::instance().is_mounted()) {
+        auto bytes = ISO::IsoMount::instance().read_file(key);
+        if (!bytes.empty()) {
+            out = std::move(bytes);
+            return true;
+        }
+    }
+    if (!S.root_dir.empty() &&
+        !ISO::IsoMount::is_iso_path(S.root_dir)) {
+        std::error_code ec;
+        std::filesystem::path root_p(S.root_dir);
+        if (std::filesystem::is_regular_file(root_p, ec)) {
+            root_p = root_p.parent_path();
+        }
+        std::string rp = rel_path;
+        std::replace(rp.begin(), rp.end(), '\\', '/');
+        std::filesystem::path fp = root_p / rp;
+        std::ifstream f(fp, std::ios::binary | std::ios::ate);
+        if (f) {
+            const std::streamoff sz = f.tellg();
+            if (sz > 0) {
+                out.resize(size_t(sz));
+                f.seekg(0);
+                f.read(reinterpret_cast<char*>(out.data()), sz);
+                if (f) return true;
+                out.clear();
+            }
+        }
+    }
+    const std::string leaf =
+        key.substr(key.find_last_of('/') + 1);
+    for (const auto& bnk_path : S.bnk_paths) {
+        int idx = BnkCache::find_index(bnk_path, key);
+        if (idx < 0) idx = BnkCache::find_index(bnk_path, leaf);
+        if (idx < 0) continue;
+        try {
+            auto v = BnkCache::extract_bytes(bnk_path, idx);
+            if (!v.empty()) {
+                out.assign(v.begin(), v.end());
+                return true;
+            }
+        } catch (...) {
+        }
+    }
+    return false;
+}
+
+void BuildGlobalItemCatalog() {
+    static const char* kGameGdbs[] = {
+        "data/Globals/Globals.gdb",
+        "data/Entity/Entity.gdb",
+        "data/InteractiveCutscenes/InteractiveCutscenes.gdb",
+        "data/EnvironmentThemes/EnvironmentThemes.gdb",
+    };
+    std::vector<std::vector<uint8_t>> owned;
+    std::vector<const std::vector<uint8_t>*> gdbs;
+    for (const char* p : kGameGdbs) {
+        std::vector<uint8_t> bytes;
+        if (load_game_gdb_standalone(p, bytes)) {
+            owned.push_back(std::move(bytes));
+        }
+    }
+    for (const auto& b : owned) gdbs.push_back(&b);
+    if (gdbs.empty()) return;
+
+    auto details = Gdb::BuildItemDetails(gdbs);
+    if (details.empty()) return;
+    TextBank::LoadForRoot(S.root_dir);
+    for (auto& d : details) {
+        if (d.is_money) {
+            d.display_name = "Money (" +
+                             std::to_string(d.money < 0 ? 0 : d.money) +
+                             " gold)";
+            continue;
+        }
+        std::string nm;
+        if (d.name_tag && TextBank::Lookup(d.name_tag, nm) &&
+            !nm.empty()) {
+            // strip a trailing NUL the babel strings carry
+            while (!nm.empty() && nm.back() == '\0') nm.pop_back();
+            d.display_name = nm;
+        } else {
+            d.display_name = d.label;
+        }
+    }
+    auto ci_less = [](const std::string& an, const std::string& bn) {
+        const size_t n = std::min(an.size(), bn.size());
+        for (size_t i = 0; i < n; ++i) {
+            const int ca = std::tolower((unsigned char)an[i]);
+            const int cb = std::tolower((unsigned char)bn[i]);
+            if (ca != cb) return ca < cb;
+        }
+        return an.size() < bn.size();
+    };
+    // money bags share a "Money (" name prefix; sort them by gold amount
+    // numerically instead of lexically so 15 comes before 1000
+    auto sort_key = [](const Gdb::ItemDetail& d) -> std::string {
+        if (d.is_money) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "money %010d",
+                          d.money < 0 ? 0 : d.money);
+            return buf;
+        }
+        return d.display_name;
+    };
+    std::sort(details.begin(), details.end(),
+              [&](const Gdb::ItemDetail& a, const Gdb::ItemDetail& b) {
+                  return ci_less(sort_key(a), sort_key(b));
+              });
+
+    // merge records that resolve to the same localized name (the game
+    // splits an item across a "database" record with the description
+    // and an "object" record with the 3D model) into one entry
+    auto ci_eq = [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (std::tolower((unsigned char)a[i]) !=
+                std::tolower((unsigned char)b[i])) {
+                return false;
+            }
+        }
+        return true;
+    };
+    std::vector<Gdb::ItemDetail> merged;
+    merged.reserve(details.size());
+    for (auto& d : details) {
+        if (!merged.empty() &&
+            !d.display_name.empty() &&
+            ci_eq(merged.back().display_name, d.display_name)) {
+            Gdb::ItemDetail& m = merged.back();
+            if (m.model_path.empty() && !d.model_path.empty()) {
+                m.model_path = d.model_path;
+            }
+            if (!m.model_path_hash) m.model_path_hash = d.model_path_hash;
+            if (!m.desc_tag) m.desc_tag = d.desc_tag;
+            if (m.icon_tex.empty()) m.icon_tex = d.icon_tex;
+            if (m.money < 0) m.money = d.money;
+            std::unordered_set<std::string> have;
+            for (auto& s : m.stats) have.insert(s.first);
+            for (auto& s : d.stats) {
+                if (have.insert(s.first).second) {
+                    m.stats.push_back(s);
+                }
+            }
+            continue;
+        }
+        merged.push_back(std::move(d));
+    }
+
+    g_item_details = std::move(merged);
+    OutputLog::info("items: indexed " +
+                    std::to_string(g_item_details.size()) +
+                    " item(s) from the game GDBs");
 }
 
 namespace {
@@ -3600,6 +3771,8 @@ bool Open(const FlatAssetEntry& entry)
     }
     g_level_gdb_placements.clear();
     g_level_entity_contents.clear();
+    g_level_entity_text.clear();
+    g_level_spawn_markers.clear();
     {
         std::vector<std::pair<uint32_t, std::string>> save_hash_to_name;
         struct SavePhysicsPlacement {
@@ -3805,15 +3978,16 @@ bool Open(const FlatAssetEntry& entry)
                         std::to_string(g_level_item_catalog.size()) +
                         " inventory item template(s)");
                 }
+                if (g_item_details.empty()) {
+                    g_item_details =
+                        Gdb::BuildItemDetails(contents_gdbs);
+                }
                 {
 
                     std::vector<const std::vector<uint8_t>*> template_gdbs;
                     for (const auto& db : supplemental_gdbs) {
                         template_gdbs.push_back(&db.bytes);
                     }
-                    // level-local object templates (e.g. region props like
-                    // esa_coffin_v2) live in the level's own gdb; keep it
-                    // last so game-wide templates win on ties
                     template_gdbs.push_back(&gdb_bytes);
                     g_level_prop_entity_templates =
                         Gdb::BuildPropTemplateIndex(template_gdbs);
@@ -3829,6 +4003,162 @@ bool Open(const FlatAssetEntry& entry)
                         std::to_string(with_phys) +
                         " with a physics shape) - placed models bake as "
                         "real entities");
+                }
+                {
+                    TextBank::LoadForRoot(S.root_dir);
+                    g_level_entity_text = Gdb::ExtractEntityTextTags(
+                        contents_gdbs, save_hash_to_name);
+                    if (!g_level_entity_text.empty()) {
+                        OutputLog::info(
+                            "gdb text: " +
+                            std::to_string(g_level_entity_text.size()) +
+                            " readable entit(ies) with text tags");
+                    }
+                }
+                {
+                    // resolve player-facing names for chest/loot contents so
+                    // the UI shows e.g. "The Daichi" instead of the raw
+                    // INV_ITEM_WEAPON_KATANA_LEGENDARY tag
+                    auto resolve_names =
+                        [&](std::vector<Gdb::EntityContentsItem>& items) {
+                            for (auto& it : items) {
+                                if (it.name_tag_hash) {
+                                    std::string nm;
+                                    if (TextBank::Lookup(it.name_tag_hash,
+                                                         nm)) {
+                                        while (!nm.empty() &&
+                                               nm.back() == '\0') {
+                                            nm.pop_back();
+                                        }
+                                        if (!nm.empty()) {
+                                            it.display_name = nm;
+                                            continue;
+                                        }
+                                    }
+                                }
+                                for (const auto& d : g_item_details) {
+                                    if (d.record_hash == it.record_hash &&
+                                        !d.display_name.empty()) {
+                                        it.display_name = d.display_name;
+                                        break;
+                                    }
+                                }
+                            }
+                        };
+                    for (auto& kv : g_level_entity_contents) {
+                        resolve_names(kv.second.initial_items);
+                        resolve_names(kv.second.potential_items);
+                    }
+                }
+                {
+                    g_level_spawn_donor = Gdb::SpawnDonorInfo{};
+                    g_level_creature_catalog =
+                        Gdb::CollectCreatureNames(contents_gdbs);
+                    if (!g_level_creature_catalog.empty()) {
+                        OutputLog::info(
+                            "gdb creatures: " +
+                            std::to_string(
+                                g_level_creature_catalog.size()) +
+                            " creature definition(s) available for "
+                            "generators");
+                    }
+                    auto spawn_ents = Gdb::CollectSpawnEntities(
+                        contents_gdbs, save_hash_to_name,
+                        &g_level_spawn_donor);
+                    size_t spawn_models = 0;
+                    for (const auto& kv : spawn_ents) {
+                        const auto& se = kv.second;
+                        if (!se.has_pos || se.model_hashes.empty()) {
+                            continue;
+                        }
+                        for (uint32_t mh : se.model_hashes) {
+                            Gdb::Placement pl{};
+                            pl.x = se.x;
+                            pl.y = se.y;
+                            pl.z = se.z;
+                            pl.scale = 1.0f;
+                            pl.hash_a = kv.first;
+                            pl.model_path_hash = mh;
+                            pl.model_path_hashes.push_back(mh);
+                            pl.indexed_record = true;
+                            pl.transform_from_indexed_record = true;
+                            info.placements.push_back(std::move(pl));
+                        }
+                        ++spawn_models;
+                    }
+                    if (spawn_models) {
+                        OutputLog::info(
+                            "gdb spawns: " +
+                            std::to_string(spawn_models) +
+                            " creature/NPC model placement(s) emitted");
+                    }
+                    std::unordered_map<uint32_t, std::string> nm;
+                    nm.reserve(save_hash_to_name.size());
+                    for (const auto& kv : save_hash_to_name) {
+                        nm.emplace(kv.first, kv.second);
+                    }
+                    g_level_spawn_markers.clear();
+                    std::unordered_set<uint32_t> emitted_spawns;
+                    for (const auto& kv : spawn_ents) {
+                        if (!kv.second.has_pos) continue;
+                        LevelSpawnMarker m;
+                        m.x = kv.second.x;
+                        m.y = kv.second.y;
+                        m.z = kv.second.z;
+                        m.kind = kv.second.kind;
+                        m.entity_hash = kv.first;
+                        for (int k = 0; k < 3; ++k) {
+                            m.pos_off[k] = kv.second.pos_off[k];
+                            m.rot_off[k] = kv.second.rot_off[k];
+                        }
+                        m.spawn_points_record =
+                            kv.second.spawn_points_record;
+                        m.spawn_point_entities =
+                            kv.second.spawn_point_entities;
+                        m.creature_name = kv.second.creature_name;
+                        auto nit = nm.find(kv.first);
+                        if (nit != nm.end()) m.name = nit->second;
+                        emitted_spawns.insert(kv.first);
+                        g_level_spawn_markers.push_back(std::move(m));
+                    }
+                    for (const auto& p : info.placements) {
+                        if (emitted_spawns.count(p.hash_a)) continue;
+                        uint8_t kind = 0;
+                        auto it = spawn_ents.find(p.hash_a);
+                        if (it != spawn_ents.end()) {
+                            kind = it->second.kind;
+                        } else if (p.skeleton_file_hash != 0 &&
+                                   p.model_path_hash == 0) {
+                            kind = 3;
+                        }
+                        if (!kind) continue;
+                        LevelSpawnMarker m;
+                        m.x = p.x;
+                        m.y = p.y;
+                        m.z = p.z;
+                        m.kind = kind;
+                        m.entity_hash = p.hash_a;
+                        auto nit = nm.find(p.hash_a);
+                        m.name = nit != nm.end() ? nit->second
+                                                 : p.entity_name;
+                        emitted_spawns.insert(p.hash_a);
+                        g_level_spawn_markers.push_back(std::move(m));
+                    }
+                    if (!g_level_spawn_markers.empty()) {
+                        size_t gen = 0, sp = 0, cre = 0;
+                        for (const auto& m : g_level_spawn_markers) {
+                            if (m.kind == 1) ++gen;
+                            else if (m.kind == 2) ++sp;
+                            else ++cre;
+                        }
+                        OutputLog::info(
+                            "gdb spawns: " +
+                            std::to_string(g_level_spawn_markers.size()) +
+                            " marker(s) (" + std::to_string(gen) +
+                            " generator(s), " + std::to_string(sp) +
+                            " spawn point(s), " + std::to_string(cre) +
+                            " creature(s)/NPC(s))");
+                    }
                 }
             }
             if (bail_if_cancelled("after contents extract")) return false;
@@ -5277,10 +5607,6 @@ bool Open(const FlatAssetEntry& entry)
 
             std::unordered_map<std::string, std::array<uint32_t, 6>>
                 gdb_dup_slot_offsets;
-            // Position-only fallback links: .lev/GDB transform value
-            // layouts rarely match exactly (sin/cos yaw vs full matrix),
-            // so buildings and their exterior/interior companions link
-            // to the GDB entity slots by model path + position instead.
             struct GdbSlotLink {
                 std::array<uint32_t, 6> slots{};
                 uint32_t entity_hash = 0;
@@ -6565,9 +6891,6 @@ bool Open(const FlatAssetEntry& entry)
                         samples.push_back(
                             gdb_shell_sample_text(p, authored_path));
                     }
-                    // remember this entity's GDB transform slots so the
-                    // authored .lev instance (and its exterior/interior
-                    // companions) can patch the real entity on save
                     record_gdb_pos_link(authored_path, p);
                     if (!shop_companion_exterior.empty()) {
                         record_gdb_pos_link(shop_companion_exterior, p);

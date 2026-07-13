@@ -180,6 +180,21 @@ void handle_dialog_pick() {
         return;
     }
 
+    // a .xex is the game executable: open the folder that contains it
+    if (!file_path.empty() && std::filesystem::is_regular_file(file_path)
+        && ends_with_lower(file_path, ".xex"))
+    {
+        std::filesystem::path parent =
+            std::filesystem::path(file_path).parent_path();
+        if (!parent.empty() && std::filesystem::is_directory(parent)) {
+            open_folder_logic(parent.string());
+            g_status_msg.clear();
+        } else {
+            g_status_msg = "Could not resolve the folder of the .xex.";
+        }
+        return;
+    }
+
     std::string folder;
     if (std::filesystem::is_directory(file_path)) folder = file_path;
     else if (!current.empty() && std::filesystem::is_directory(current)) folder = current;
@@ -213,8 +228,15 @@ void open_picker() {
                 ImGuiFileDialogFlags_HideColumnType |
                 ImGuiFileDialogFlags_OptionalFileName;
 
+    const ImVec4 gold(1.0f, 0.84f, 0.0f, 1.0f);
+    ImGuiFileDialog::Instance()->SetFileStyle(
+        IGFD_FileStyleByExtention, ".iso", gold, "");
+    ImGuiFileDialog::Instance()->SetFileStyle(
+        IGFD_FileStyleByExtention, ".xex", gold, "");
+
     ImGuiFileDialog::Instance()->OpenDialog("PickPath",
-        "Select Fable 2 folder or .iso", ".iso,((.*))", cfg);
+        "Select Fable 2 folder, .iso or .xex",
+        "Fable 2 (.iso .xex){.iso,.xex},((.*))", cfg);
 }
 
 }

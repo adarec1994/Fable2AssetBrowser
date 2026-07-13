@@ -7,6 +7,8 @@
 #include "../../Level/TerrainEdit.h"
 #include "../../Level/LevelEdit.h"
 #include "../../Level/LevelLoader.h"
+#include "../../Level/TextBank.h"
+#include "../../textures/TexParser.h"
 #include "../../Utilities/DebugTrace.h"
 #include "../LevelGizmo.h"
 #include "../../animations/AnimBank.h"
@@ -52,6 +54,7 @@ extern bool g_mp_initialized;
 extern FlyCam g_flycam;
 
 void render_panel_handle_flycam(float dt);
+extern std::atomic<bool> g_item_icon_dirty;
 #ifdef _WIN32
 bool spawn_level_model_at(ID3D11Device* device,
                           const std::string& model_path,
@@ -709,6 +712,271 @@ static void draw_gdb_placements_overlay(const ImVec2& origin,
                 IM_COL32(220, 220, 220, 200), buf);
 }
 
+static int g_sel_spawn_marker = -1;
+static int g_sel_pending_sp = -1;
+static int g_sel_pending_gen = -1;
+static bool g_marker_clear_selection = false;
+
+static void draw_spawn_markers_overlay(const ImVec2& origin,
+                                       const ImVec2& region)
+{
+    using namespace DirectX;
+    if (!S.show_spawn_markers && !S.show_ent_npcs && !S.show_ent_text) {
+        return;
+    }
+    if (g_level_spawn_markers.empty() && g_level_entity_text.empty()) {
+        return;
+    }
+    if (!g_mp.no_tilt) return;
+    if (g_sel_spawn_marker >= (int)g_level_spawn_markers.size()) {
+        g_sel_spawn_marker = -1;
+    }
+
+    float cy = cosf(g_flycam.yaw);
+    float sy = sinf(g_flycam.yaw);
+    float cp = cosf(g_flycam.pitch);
+    float sp = sinf(g_flycam.pitch);
+    XMVECTOR eye = XMVectorSet(g_flycam.pos[0], g_flycam.pos[1],
+                               g_flycam.pos[2], 1);
+    XMVECTOR at = XMVectorSet(g_flycam.pos[0] + sy * cp,
+                              g_flycam.pos[1] + sp,
+                              g_flycam.pos[2] + cy * cp, 1);
+    XMVECTOR up = XMVectorSet(0, 1, 0, 0);
+    XMMATRIX V = XMMatrixLookAtLH(eye, at, up);
+    float fov = XMConvertToRadians(60.0f);
+    float aspect = region.x / std::max(1.0f, region.y);
+    float far_plane = std::max(g_mp.radius * 100.0f, 1000.0f);
+    XMMATRIX P = XMMatrixPerspectiveFovLH(fov, aspect, 0.05f, far_plane);
+    XMMATRIX VP = V * P;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 kCol[4] = {
+        IM_COL32(255, 255, 255, 220),
+        IM_COL32(255, 90, 90, 235),
+        IM_COL32(255, 200, 80, 235),
+        IM_COL32(120, 255, 140, 235),
+    };
+
+    size_t text_drawn = 0;
+    for (const auto& kv : g_level_entity_text) {
+        if (!S.show_ent_text) break;
+        if (!kv.second.has_pos) continue;
+        XMVECTOR clip = XMVector4Transform(
+            XMVectorSet(kv.second.x, kv.second.z, kv.second.y, 1.0f),
+            VP);
+        const float w = XMVectorGetW(clip);
+        if (w <= 0.05f) continue;
+        const float ndcx = XMVectorGetX(clip) / w;
+        const float ndcy = XMVectorGetY(clip) / w;
+        if (ndcx < -1.1f || ndcx > 1.1f) continue;
+        if (ndcy < -1.1f || ndcy > 1.1f) continue;
+        ImVec2 pt;
+        pt.x = origin.x + (ndcx * 0.5f + 0.5f) * region.x;
+        pt.y = origin.y + (1.0f - (ndcy * 0.5f + 0.5f)) * region.y;
+        const float r = 4.5f;
+        dl->AddQuadFilled(ImVec2(pt.x, pt.y - r),
+                          ImVec2(pt.x + r, pt.y),
+                          ImVec2(pt.x, pt.y + r),
+                          ImVec2(pt.x - r, pt.y),
+                          IM_COL32(90, 170, 255, 235));
+        if (w < 30.0f) {
+            dl->AddText(ImVec2(pt.x + r + 3.0f, pt.y - 7.0f),
+                        IM_COL32(160, 210, 255, 235), "text");
+        }
+        ++text_drawn;
+    }
+    (void)text_drawn;
+
+    size_t drawn = 0;
+    const bool can_pick = LevelEdit::Enabled() &&
+                          !LevelEdit::Saving() &&
+                          !LevelGizmo::WantsMouse();
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const bool clicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    int click_hit = -1;
+    float click_best = 12.0f * 12.0f;
+    for (size_t mi = 0; mi < g_level_spawn_markers.size(); ++mi) {
+        const auto& m = g_level_spawn_markers[mi];
+        if (m.kind == 3 ? !S.show_ent_npcs : !S.show_spawn_markers) {
+            continue;
+        }
+        float ex = m.x, ey = m.y, ez = m.z;
+        {
+            float d_pos[3], d_rot[3];
+            if (LevelEdit::EditFor(0x70000000u | uint32_t(mi), d_pos,
+                                   d_rot)) {
+                ex += d_pos[0];
+                ey += d_pos[1];
+                ez += d_pos[2];
+            }
+        }
+        XMVECTOR clip = XMVector4Transform(
+            XMVectorSet(ex, ez, ey, 1.0f), VP);
+        const float w = XMVectorGetW(clip);
+        if (w <= 0.05f) continue;
+        const float ndcx = XMVectorGetX(clip) / w;
+        const float ndcy = XMVectorGetY(clip) / w;
+        if (ndcx < -1.1f || ndcx > 1.1f) continue;
+        if (ndcy < -1.1f || ndcy > 1.1f) continue;
+        ImVec2 pt;
+        pt.x = origin.x + (ndcx * 0.5f + 0.5f) * region.x;
+        pt.y = origin.y + (1.0f - (ndcy * 0.5f + 0.5f)) * region.y;
+        const ImU32 col = kCol[m.kind < 4 ? m.kind : 0];
+        const float r = m.kind == 1 ? 6.0f : 4.5f;
+        dl->AddQuadFilled(ImVec2(pt.x, pt.y - r),
+                          ImVec2(pt.x + r, pt.y),
+                          ImVec2(pt.x, pt.y + r),
+                          ImVec2(pt.x - r, pt.y), col);
+        const bool selected = (int(mi) == g_sel_spawn_marker);
+        dl->AddQuad(ImVec2(pt.x, pt.y - r - 1),
+                    ImVec2(pt.x + r + 1, pt.y),
+                    ImVec2(pt.x, pt.y + r + 1),
+                    ImVec2(pt.x - r - 1, pt.y),
+                    selected ? IM_COL32(255, 255, 255, 255)
+                             : IM_COL32(0, 0, 0, 200),
+                    selected ? 2.0f : 1.0f);
+        if ((w < 45.0f || selected) && !m.name.empty()) {
+            dl->AddText(ImVec2(pt.x + r + 3.0f, pt.y - 7.0f),
+                        IM_COL32(235, 235, 235, 235), m.name.c_str());
+        }
+        if (can_pick && clicked) {
+            const float dx = mouse.x - pt.x;
+            const float dy = mouse.y - pt.y;
+            const float d2 = dx * dx + dy * dy;
+            if (d2 < click_best) {
+                click_best = d2;
+                click_hit = int(mi);
+            }
+        }
+        ++drawn;
+    }
+    if (click_hit >= 0) {
+        g_sel_spawn_marker = click_hit;
+        g_marker_clear_selection = true;
+    }
+
+    if (S.show_spawn_markers) {
+        std::vector<LevelEdit::GeneratorAddition> pending;
+        LevelEdit::GetGenerators(pending);
+        int gen_click = -1;
+        float gen_best = 12.0f * 12.0f;
+        for (size_t gi = 0; gi < pending.size(); ++gi) {
+            const auto& pg = pending[gi];
+            if (pg.removed) continue;
+            XMVECTOR clip = XMVector4Transform(
+                XMVectorSet(pg.pos[0], pg.pos[2], pg.pos[1], 1.0f),
+                VP);
+            const float w = XMVectorGetW(clip);
+            if (w <= 0.05f) continue;
+            const float ndcx = XMVectorGetX(clip) / w;
+            const float ndcy = XMVectorGetY(clip) / w;
+            if (ndcx < -1.1f || ndcx > 1.1f) continue;
+            if (ndcy < -1.1f || ndcy > 1.1f) continue;
+            ImVec2 pt;
+            pt.x = origin.x + (ndcx * 0.5f + 0.5f) * region.x;
+            pt.y = origin.y +
+                   (1.0f - (ndcy * 0.5f + 0.5f)) * region.y;
+            const float r = 6.0f;
+            dl->AddQuadFilled(ImVec2(pt.x, pt.y - r),
+                              ImVec2(pt.x + r, pt.y),
+                              ImVec2(pt.x, pt.y + r),
+                              ImVec2(pt.x - r, pt.y),
+                              IM_COL32(200, 120, 255, 235));
+            const bool gsel = (int(gi) == g_sel_pending_gen);
+            dl->AddQuad(ImVec2(pt.x, pt.y - r - 1),
+                        ImVec2(pt.x + r + 1, pt.y),
+                        ImVec2(pt.x, pt.y + r + 1),
+                        ImVec2(pt.x - r - 1, pt.y),
+                        gsel ? IM_COL32(255, 255, 255, 255)
+                             : IM_COL32(0, 0, 0, 200),
+                        gsel ? 2.0f : 1.0f);
+            const std::string lbl = "new: " + pg.creature_name;
+            dl->AddText(ImVec2(pt.x + r + 3.0f, pt.y - 7.0f),
+                        IM_COL32(225, 190, 255, 235), lbl.c_str());
+            if (can_pick && clicked) {
+                const float dx = mouse.x - pt.x;
+                const float dy = mouse.y - pt.y;
+                const float d2 = dx * dx + dy * dy;
+                if (d2 < gen_best) {
+                    gen_best = d2;
+                    gen_click = int(gi);
+                }
+            }
+        }
+        if (gen_click >= 0) {
+            g_sel_pending_gen = gen_click;
+            g_sel_pending_sp = -1;
+            g_sel_spawn_marker = -1;
+            g_marker_clear_selection = true;
+        }
+
+        std::vector<LevelEdit::PendingSpawnPoint> psps;
+        LevelEdit::GetPendingSpawnPoints(psps);
+        int sp_click = -1;
+        float sp_best = 12.0f * 12.0f;
+        for (const auto& sp : psps) {
+            XMVECTOR clip = XMVector4Transform(
+                XMVectorSet(sp.pos[0], sp.pos[2], sp.pos[1], 1.0f),
+                VP);
+            const float w = XMVectorGetW(clip);
+            if (w <= 0.05f) continue;
+            const float ndcx = XMVectorGetX(clip) / w;
+            const float ndcy = XMVectorGetY(clip) / w;
+            if (ndcx < -1.1f || ndcx > 1.1f) continue;
+            if (ndcy < -1.1f || ndcy > 1.1f) continue;
+            ImVec2 pt;
+            pt.x = origin.x + (ndcx * 0.5f + 0.5f) * region.x;
+            pt.y = origin.y +
+                   (1.0f - (ndcy * 0.5f + 0.5f)) * region.y;
+            const float r = 4.5f;
+            dl->AddQuadFilled(ImVec2(pt.x, pt.y - r),
+                              ImVec2(pt.x + r, pt.y),
+                              ImVec2(pt.x, pt.y + r),
+                              ImVec2(pt.x - r, pt.y),
+                              IM_COL32(225, 160, 255, 235));
+            const bool spsel = (sp.id == g_sel_pending_sp);
+            dl->AddQuad(ImVec2(pt.x, pt.y - r - 1),
+                        ImVec2(pt.x + r + 1, pt.y),
+                        ImVec2(pt.x, pt.y + r + 1),
+                        ImVec2(pt.x - r - 1, pt.y),
+                        spsel ? IM_COL32(255, 255, 255, 255)
+                              : IM_COL32(0, 0, 0, 200),
+                        spsel ? 2.0f : 1.0f);
+            if (w < 30.0f || spsel) {
+                dl->AddText(ImVec2(pt.x + r + 3.0f, pt.y - 7.0f),
+                            IM_COL32(235, 205, 255, 235),
+                            sp.label.c_str());
+            }
+            if (can_pick && clicked) {
+                const float dx = mouse.x - pt.x;
+                const float dy = mouse.y - pt.y;
+                const float d2 = dx * dx + dy * dy;
+                if (d2 < sp_best) {
+                    sp_best = d2;
+                    sp_click = sp.id;
+                }
+            }
+        }
+        if (sp_click >= 0) {
+            g_sel_pending_sp = sp_click;
+            g_sel_pending_gen = -1;
+            g_sel_spawn_marker = -1;
+            g_marker_clear_selection = true;
+        } else if (click_hit >= 0) {
+            g_sel_pending_sp = -1;
+            g_sel_pending_gen = -1;
+        }
+    }
+    if (drawn) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf),
+                      "spawns: %zu shown / %zu total", drawn,
+                      g_level_spawn_markers.size());
+        dl->AddText(ImVec2(origin.x + 14, origin.y + region.y - 38),
+                    IM_COL32(220, 220, 220, 200), buf);
+    }
+}
+
 #endif
 
 void draw_skeleton_overlay(const ImVec2& origin, const ImVec2& region) {
@@ -1127,6 +1395,152 @@ void draw_model_in_panel(ID3D11Device* device) {
         }
         ImGui::EndDragDropTarget();
     }
+
+    static bool  s_gen_popup = false;
+    static float s_gen_pos[3] = {0, 0, 0};
+    if (g_mp.no_tilt && LevelEdit::Enabled() && !LevelEdit::Saving() &&
+        hovered && ImGui::GetIO().KeyShift &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        const ImVec2 mouse2 = ImGui::GetIO().MousePos;
+        const float fw = std::max(1.0f, region.x);
+        const float fh = std::max(1.0f, region.y);
+        const float fovd = 60.0f * 3.14159265f / 180.0f;
+        const float aspect = fw / fh;
+        const float tan_half = std::tan(0.5f * fovd);
+        const float mxp = mouse2.x - origin.x;
+        const float myp = mouse2.y - origin.y;
+        const float u_view = (2.0f * mxp / fw - 1.0f) * aspect * tan_half;
+        const float v_view = (1.0f - 2.0f * myp / fh) * tan_half;
+        const float cy2 = std::cos(g_flycam.yaw);
+        const float sy2 = std::sin(g_flycam.yaw);
+        const float cp2 = std::cos(g_flycam.pitch);
+        const float sp2 = std::sin(g_flycam.pitch);
+        float ddx = cy2 * u_view + (-sp2 * sy2) * v_view + sy2 * cp2;
+        float ddy = cp2 * v_view + sp2;
+        float ddz = (-sy2) * u_view + (-sp2 * cy2) * v_view + cy2 * cp2;
+        const float dlen = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+        if (dlen > 1e-6f) {
+            ddx /= dlen; ddy /= dlen; ddz /= dlen;
+            float hx = 0, hy = 0, hz = 0;
+            bool hit = TerrainEdit::Raycast(
+                g_flycam.pos[0], g_flycam.pos[1], g_flycam.pos[2],
+                ddx, ddy, ddz, hx, hy, hz);
+            if (!hit && std::fabs(ddy) > 1e-4f) {
+                const float plane_y = g_mp.center[1];
+                const float t = (plane_y - g_flycam.pos[1]) / ddy;
+                if (t > 0.0f) {
+                    hx = g_flycam.pos[0] + ddx * t;
+                    hy = plane_y;
+                    hz = g_flycam.pos[2] + ddz * t;
+                    hit = true;
+                }
+            }
+            if (!hit) {
+                hx = g_flycam.pos[0] + ddx * 10.0f;
+                hy = g_flycam.pos[1] + ddy * 10.0f;
+                hz = g_flycam.pos[2] + ddz * 10.0f;
+                hit = true;
+            }
+            if (hit) {
+                s_gen_pos[0] = hx;
+                s_gen_pos[1] = hz;
+                s_gen_pos[2] = hy;
+                s_gen_popup = true;
+            }
+        }
+    }
+    if (s_gen_popup) {
+        ImGui::OpenPopup("New generator");
+        s_gen_popup = false;
+    }
+    if (ImGui::BeginPopup("New generator")) {
+        ImGui::TextDisabled("(%.1f, %.1f, %.1f)", s_gen_pos[0],
+                            s_gen_pos[1], s_gen_pos[2]);
+        static char s_creature[64] = {};
+        ImGui::SetNextItemWidth(240.0f);
+        ImGui::InputTextWithHint("##gen_creature", "search...",
+                                 s_creature, sizeof(s_creature));
+        std::string filt = s_creature;
+        std::transform(filt.begin(), filt.end(), filt.begin(),
+                       ::tolower);
+        ImGui::BeginChild("##gen_creature_list", ImVec2(240.0f, 190.0f),
+                          true);
+        std::string chosen;
+        {
+            std::unordered_set<std::string> seen_names;
+            auto row = [&](const std::string& nm) {
+                if (nm.empty() || !seen_names.insert(nm).second) return;
+                if (!filt.empty()) {
+                    std::string low = nm;
+                    std::transform(low.begin(), low.end(), low.begin(),
+                                   ::tolower);
+                    if (low.find(filt) == std::string::npos) return;
+                }
+                if (ImGui::Selectable(nm.c_str())) {
+                    chosen = nm;
+                }
+            };
+            for (const auto& ce : g_level_creature_catalog) {
+                row(ce.name);
+            }
+            for (const auto& m : g_level_spawn_markers) {
+                if (m.kind == 2) continue;
+                row(m.kind == 1 ? m.creature_name : m.name);
+            }
+        }
+        ImGui::EndChild();
+        auto place_generator = [&](const std::string& creature) {
+            std::vector<std::string> assets;
+            for (const auto& ce : g_level_creature_catalog) {
+                if (ce.name != creature) continue;
+                for (uint32_t mh : ce.model_hashes) {
+                    for (const auto& mf : S.all_mdl_files) {
+                        std::string lp = mf.full_path;
+                        std::transform(lp.begin(), lp.end(), lp.begin(),
+                                       ::tolower);
+                        std::replace(lp.begin(), lp.end(), '/', '\\');
+                        uint32_t h = 0x811C9DC5u;
+                        for (unsigned char c : lp) {
+                            h *= 0x01000193u;
+                            h ^= uint32_t(c);
+                        }
+                        if (h == mh) {
+                            assets.push_back(mf.full_path);
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+            const int gi =
+                LevelEdit::AddGenerator(s_gen_pos, creature, assets);
+            if (gi >= 0) {
+                OutputLog::success(
+                    "level edit: generator for '" + creature +
+                    "' queued (" + std::to_string(assets.size()) +
+                    " creature model(s) will stream into this level "
+                    "on Save)");
+            }
+        };
+        if (!chosen.empty()) {
+            place_generator(chosen);
+            s_creature[0] = 0;
+            ImGui::CloseCurrentPopup();
+        }
+        const bool can_add = s_creature[0] != 0;
+        ImGui::BeginDisabled(!can_add);
+        if (ImGui::Button("Place generator", ImVec2(150, 0))) {
+            place_generator(s_creature);
+            s_creature[0] = 0;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(80, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
 #endif
 
     bool skel_visible = ::g_skel_overlay_show && (g_mp.bone_count > 0);
@@ -1295,6 +1709,413 @@ void draw_model_in_panel(ID3D11Device* device) {
     if (S.terrain_mode) {
         draw_gdb_placements_overlay(origin, region);
     }
+    draw_spawn_markers_overlay(origin, region);
+    if (g_marker_clear_selection) {
+        g_marker_clear_selection = false;
+        ::g_selected_level_pick_id = 0;
+        ::g_selected_level_mesh_idx = -1;
+        ::g_selected_level_hash = 0;
+    }
+
+    if (g_sel_spawn_marker >= 0 &&
+        g_sel_spawn_marker < (int)g_level_spawn_markers.size() &&
+        (S.show_spawn_markers || S.show_ent_npcs)) {
+        const auto& mk =
+            g_level_spawn_markers[(size_t)g_sel_spawn_marker];
+        const uint32_t edit_id = 0x70000000u |
+                                 uint32_t(g_sel_spawn_marker);
+        const bool editable = LevelEdit::Enabled() &&
+                              !LevelEdit::Saving() &&
+                              (mk.pos_off[0] || mk.pos_off[1] ||
+                               mk.pos_off[2]);
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            g_sel_spawn_marker = -1;
+        } else if (editable &&
+                   ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+            LevelEdit::InstInfo info;
+            const float orig[3] = {mk.x, mk.y, mk.z};
+            info.orig_pos = orig;
+            info.gdb_off = mk.pos_off;
+            info.gdb_rot_off = mk.rot_off;
+            info.gdb_entity_hash = mk.entity_hash;
+            LevelEdit::SetDeleted(edit_id, info);
+            OutputLog::info(
+                "level edit: marker delete queued (entity sinks on "
+                "Save)");
+        }
+        const float kMarkerW = 220.0f;
+        ImGui::SetNextWindowPos(
+            ImVec2(origin.x + region.x - kMarkerW - 8.0f,
+                   origin.y + 6.0f));
+        ImGui::SetNextWindowSize(ImVec2(kMarkerW, 0), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.78f);
+        ImGuiWindowFlags mfl = ImGuiWindowFlags_NoTitleBar |
+                               ImGuiWindowFlags_NoResize |
+                               ImGuiWindowFlags_NoMove |
+                               ImGuiWindowFlags_NoCollapse |
+                               ImGuiWindowFlags_NoSavedSettings |
+                               ImGuiWindowFlags_AlwaysAutoResize;
+        if (g_sel_spawn_marker >= 0 &&
+            ImGui::Begin("##spawn_marker_editor", nullptr, mfl)) {
+            float mpos[3] = {mk.x, mk.y, mk.z};
+            {
+                float d_pos[3], d_rot[3];
+                if (LevelEdit::EditFor(edit_id, d_pos, d_rot)) {
+                    mpos[0] += d_pos[0];
+                    mpos[1] += d_pos[1];
+                    mpos[2] += d_pos[2];
+                }
+            }
+            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                               "Position:");
+            static const char* kMAxis[3] = {"X##mpos", "Y##mpos",
+                                            "Z##mpos"};
+            float edit_pos[3] = {mpos[0], mpos[1], mpos[2]};
+            bool commit = false;
+            if (editable) {
+                for (int a = 0; a < 3; ++a) {
+                    ImGui::SetNextItemWidth(120.0f);
+                    ImGui::InputFloat(kMAxis[a], &edit_pos[a], 0.0f,
+                                      0.0f, "%.3f");
+                    if (ImGui::IsItemDeactivatedAfterEdit()) {
+                        commit = true;
+                    }
+                }
+            } else {
+                ImGui::Text("X: %.3f", mpos[0]);
+                ImGui::Text("Y: %.3f", mpos[1]);
+                ImGui::Text("Z: %.3f", mpos[2]);
+            }
+            if (commit) {
+                const float step[3] = {edit_pos[0] - mpos[0],
+                                       edit_pos[1] - mpos[1],
+                                       edit_pos[2] - mpos[2]};
+                if (step[0] != 0 || step[1] != 0 || step[2] != 0) {
+                    LevelEdit::InstInfo info;
+                    const float orig[3] = {mk.x, mk.y, mk.z};
+                    info.orig_pos = orig;
+                    info.gdb_off = mk.pos_off;
+                    info.gdb_rot_off = mk.rot_off;
+                    info.gdb_entity_hash = mk.entity_hash;
+                    LevelEdit::AddMove(edit_id, step, info);
+                }
+            }
+
+            ImGui::Spacing();
+            const char* kind_name =
+                mk.kind == 1 ? "Creature generator"
+                : mk.kind == 2 ? "Spawn point"
+                               : "NPC / creature";
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.55f, 1.0f), "%s",
+                               kind_name);
+            if (!mk.name.empty()) {
+                ImGui::TextUnformatted(mk.name.c_str());
+            }
+            if (mk.kind == 1 && !mk.creature_name.empty()) {
+                ImGui::TextDisabled("spawns: %s",
+                                    mk.creature_name.c_str());
+            }
+            if (mk.kind == 1) {
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                                   "Spawn points (%zu):",
+                                   mk.spawn_point_entities.size());
+                for (size_t si = 0;
+                     si < mk.spawn_point_entities.size(); ++si) {
+                    const uint32_t sph = mk.spawn_point_entities[si];
+                    int target = -1;
+                    for (size_t mj = 0;
+                         mj < g_level_spawn_markers.size(); ++mj) {
+                        if (g_level_spawn_markers[mj].entity_hash ==
+                            sph) {
+                            target = int(mj);
+                            break;
+                        }
+                    }
+                    ImGui::PushID(int(si) + 0x3000);
+                    char lbl[64];
+                    std::snprintf(lbl, sizeof(lbl), "0x%08X%s", sph,
+                                  target < 0 ? " (no marker)" : "");
+                    if (ImGui::Selectable(
+                            lbl, target == g_sel_spawn_marker) &&
+                        target >= 0) {
+                        g_sel_spawn_marker = target;
+                    }
+                    ImGui::PopID();
+                }
+                const bool can_add_sp =
+                    LevelEdit::Enabled() && !LevelEdit::Saving() &&
+                    mk.spawn_points_record != 0;
+                if (can_add_sp &&
+                    ImGui::SmallButton("+ Add spawn point")) {
+                    const float n =
+                        float(mk.spawn_point_entities.size() +
+                              LevelEdit::PendingSpawnPointCount());
+                    const float ang = n * 1.0471976f;
+                    const float rad = 1.5f + 0.3f * n;
+                    const float sp_pos[3] = {
+                        mpos[0] + std::cos(ang) * rad,
+                        mpos[1] + std::sin(ang) * rad,
+                        mpos[2]};
+                    LevelEdit::AddSpawnPointToExisting(
+                        mk.entity_hash, mk.spawn_points_record,
+                        sp_pos);
+                    OutputLog::success(
+                        "level edit: spawn point queued next to the "
+                        "generator (authored on Save; move it after "
+                        "reload)");
+                }
+                if (LevelEdit::PendingSpawnPointCount() > 0) {
+                    ImGui::TextDisabled(
+                        "%zu pending spawn point(s)",
+                        LevelEdit::PendingSpawnPointCount());
+                }
+            }
+            ImGui::End();
+        } else if (g_sel_spawn_marker >= 0) {
+            ImGui::End();
+        }
+
+        if (g_sel_spawn_marker >= 0 && editable) {
+            float gpos[3] = {mk.x, mk.y, mk.z};
+            {
+                float d_pos[3], d_rot[3];
+                if (LevelEdit::EditFor(edit_id, d_pos, d_rot)) {
+                    gpos[0] += d_pos[0];
+                    gpos[1] += d_pos[1];
+                    gpos[2] += d_pos[2];
+                }
+            }
+            LevelGizmo::Result gz = LevelGizmo::DrawAndHandle(
+                g_flycam, origin, region, gpos, true);
+            static bool s_mk_dragging = false;
+            if (gz.dragging && !s_mk_dragging) {
+                LevelEdit::PushUndoSnapshot({edit_id});
+            }
+            s_mk_dragging = gz.dragging;
+            if (gz.moved &&
+                (gz.step[0] != 0.0f || gz.step[1] != 0.0f ||
+                 gz.step[2] != 0.0f)) {
+                LevelEdit::InstInfo info;
+                const float orig[3] = {mk.x, mk.y, mk.z};
+                info.orig_pos = orig;
+                info.gdb_off = mk.pos_off;
+                info.gdb_rot_off = mk.rot_off;
+                info.gdb_entity_hash = mk.entity_hash;
+                LevelEdit::AddMove(edit_id, gz.step, info);
+            }
+        }
+    }
+
+    if (g_sel_pending_sp >= 0 && S.show_spawn_markers) {
+        std::vector<LevelEdit::PendingSpawnPoint> psps;
+        LevelEdit::GetPendingSpawnPoints(psps);
+        const LevelEdit::PendingSpawnPoint* sel_sp = nullptr;
+        for (const auto& sp : psps) {
+            if (sp.id == g_sel_pending_sp) {
+                sel_sp = &sp;
+                break;
+            }
+        }
+        if (!sel_sp) {
+            g_sel_pending_sp = -1;
+        } else {
+            const bool sp_editable =
+                LevelEdit::Enabled() && !LevelEdit::Saving();
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                g_sel_pending_sp = -1;
+            } else if (sp_editable && !ImGui::GetIO().WantTextInput &&
+                       ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+                LevelEdit::RemovePendingSpawnPoint(sel_sp->id);
+                g_sel_pending_sp = -1;
+                sel_sp = nullptr;
+            }
+        }
+        if (sel_sp) {
+            const float kSpW = 220.0f;
+            ImGui::SetNextWindowPos(
+                ImVec2(origin.x + region.x - kSpW - 8.0f,
+                       origin.y + 6.0f));
+            ImGui::SetNextWindowSize(ImVec2(kSpW, 0), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.78f);
+            ImGuiWindowFlags sfl = ImGuiWindowFlags_NoTitleBar |
+                                   ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoMove |
+                                   ImGuiWindowFlags_NoCollapse |
+                                   ImGuiWindowFlags_NoSavedSettings |
+                                   ImGuiWindowFlags_AlwaysAutoResize;
+            const bool sp_editable =
+                LevelEdit::Enabled() && !LevelEdit::Saving();
+            if (ImGui::Begin("##pending_sp_editor", nullptr, sfl)) {
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                                   "Position:");
+                float ep[3] = {sel_sp->pos[0], sel_sp->pos[1],
+                               sel_sp->pos[2]};
+                bool commit = false;
+                if (sp_editable) {
+                    static const char* kAx[3] = {"X##psp", "Y##psp",
+                                                 "Z##psp"};
+                    for (int a = 0; a < 3; ++a) {
+                        ImGui::SetNextItemWidth(120.0f);
+                        ImGui::InputFloat(kAx[a], &ep[a], 0.0f, 0.0f,
+                                          "%.3f");
+                        if (ImGui::IsItemDeactivatedAfterEdit()) {
+                            commit = true;
+                        }
+                    }
+                } else {
+                    ImGui::Text("X: %.3f", ep[0]);
+                    ImGui::Text("Y: %.3f", ep[1]);
+                    ImGui::Text("Z: %.3f", ep[2]);
+                }
+                if (commit) {
+                    LevelEdit::MovePendingSpawnPoint(sel_sp->id, ep);
+                }
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.9f, 0.75f, 1.0f, 1.0f),
+                                   "%s", sel_sp->label.c_str());
+                ImGui::TextDisabled("unsaved - authored on Save");
+            }
+            ImGui::End();
+
+            if (sp_editable) {
+                float gpos[3] = {sel_sp->pos[0], sel_sp->pos[1],
+                                 sel_sp->pos[2]};
+                LevelGizmo::Result gz = LevelGizmo::DrawAndHandle(
+                    g_flycam, origin, region, gpos, true);
+                if (gz.moved &&
+                    (gz.step[0] != 0.0f || gz.step[1] != 0.0f ||
+                     gz.step[2] != 0.0f)) {
+                    const float np[3] = {gpos[0] + gz.step[0],
+                                         gpos[1] + gz.step[1],
+                                         gpos[2] + gz.step[2]};
+                    LevelEdit::MovePendingSpawnPoint(sel_sp->id, np);
+                }
+            }
+        }
+    }
+
+    if (g_sel_pending_gen >= 0 && S.show_spawn_markers) {
+        std::vector<LevelEdit::GeneratorAddition> pgens;
+        LevelEdit::GetGenerators(pgens);
+        const bool gen_valid =
+            g_sel_pending_gen < (int)pgens.size() &&
+            !pgens[(size_t)g_sel_pending_gen].removed;
+        if (!gen_valid) {
+            g_sel_pending_gen = -1;
+        } else {
+            const auto& pg = pgens[(size_t)g_sel_pending_gen];
+            const bool gen_editable =
+                LevelEdit::Enabled() && !LevelEdit::Saving();
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                g_sel_pending_gen = -1;
+            } else if (gen_editable && !ImGui::GetIO().WantTextInput &&
+                       ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+                LevelEdit::RemoveGenerator(g_sel_pending_gen);
+                g_sel_pending_gen = -1;
+            }
+            if (g_sel_pending_gen >= 0) {
+                const float kGenW = 220.0f;
+                ImGui::SetNextWindowPos(
+                    ImVec2(origin.x + region.x - kGenW - 8.0f,
+                           origin.y + 6.0f));
+                ImGui::SetNextWindowSize(ImVec2(kGenW, 0),
+                                         ImGuiCond_Always);
+                ImGui::SetNextWindowBgAlpha(0.78f);
+                ImGuiWindowFlags gfl =
+                    ImGuiWindowFlags_NoTitleBar |
+                    ImGuiWindowFlags_NoResize |
+                    ImGuiWindowFlags_NoMove |
+                    ImGuiWindowFlags_NoCollapse |
+                    ImGuiWindowFlags_NoSavedSettings |
+                    ImGuiWindowFlags_AlwaysAutoResize;
+                if (ImGui::Begin("##pending_gen_editor", nullptr,
+                                 gfl)) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                                       "Position:");
+                    float ep[3] = {pg.pos[0], pg.pos[1], pg.pos[2]};
+                    bool commit = false;
+                    if (gen_editable) {
+                        static const char* kAx[3] = {
+                            "X##pgen", "Y##pgen", "Z##pgen"};
+                        for (int a = 0; a < 3; ++a) {
+                            ImGui::SetNextItemWidth(120.0f);
+                            ImGui::InputFloat(kAx[a], &ep[a], 0.0f,
+                                              0.0f, "%.3f");
+                            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                                commit = true;
+                            }
+                        }
+                    } else {
+                        ImGui::Text("X: %.3f", ep[0]);
+                        ImGui::Text("Y: %.3f", ep[1]);
+                        ImGui::Text("Z: %.3f", ep[2]);
+                    }
+                    if (commit) {
+                        LevelEdit::MovePendingGenerator(
+                            g_sel_pending_gen, ep);
+                    }
+                    ImGui::Spacing();
+                    ImGui::TextColored(
+                        ImVec4(1.0f, 0.75f, 0.55f, 1.0f),
+                        "Creature generator (unsaved)");
+                    ImGui::TextDisabled("spawns: %s",
+                                        pg.creature_name.c_str());
+                    ImGui::Separator();
+                    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                                       "Spawn points (%zu):",
+                                       pg.spawn_points.size());
+                    for (size_t si = 0; si < pg.spawn_points.size();
+                         ++si) {
+                        ImGui::PushID(int(si) + 0x4000);
+                        char lbl[48];
+                        std::snprintf(lbl, sizeof(lbl),
+                                      "#%zu (%.1f, %.1f, %.1f)",
+                                      si + 1, pg.spawn_points[si][0],
+                                      pg.spawn_points[si][1],
+                                      pg.spawn_points[si][2]);
+                        const int sp_id =
+                            (g_sel_pending_gen << 8) | int(si);
+                        if (ImGui::Selectable(
+                                lbl, g_sel_pending_sp == sp_id)) {
+                            g_sel_pending_sp = sp_id;
+                            g_sel_pending_gen = -1;
+                        }
+                        ImGui::PopID();
+                    }
+                    if (gen_editable &&
+                        ImGui::SmallButton("+ Add spawn point")) {
+                        const float n = float(pg.spawn_points.size());
+                        const float ang = n * 1.0471976f;
+                        const float rad = 1.5f + 0.3f * n;
+                        const float sp_pos[3] = {
+                            pg.pos[0] + std::cos(ang) * rad,
+                            pg.pos[1] + std::sin(ang) * rad,
+                            pg.pos[2]};
+                        LevelEdit::AddGeneratorSpawnPoint(
+                            g_sel_pending_gen, sp_pos);
+                    }
+                    ImGui::TextDisabled("unsaved - authored on Save");
+                }
+                ImGui::End();
+
+                if (gen_editable && g_sel_pending_gen >= 0) {
+                    float gpos[3] = {pg.pos[0], pg.pos[1], pg.pos[2]};
+                    LevelGizmo::Result gz = LevelGizmo::DrawAndHandle(
+                        g_flycam, origin, region, gpos, true);
+                    if (gz.moved &&
+                        (gz.step[0] != 0.0f || gz.step[1] != 0.0f ||
+                         gz.step[2] != 0.0f)) {
+                        const float np[3] = {gpos[0] + gz.step[0],
+                                             gpos[1] + gz.step[1],
+                                             gpos[2] + gz.step[2]};
+                        LevelEdit::MovePendingGenerator(
+                            g_sel_pending_gen, np);
+                    }
+                }
+            }
+        }
+    }
 #endif
 
     if (g_mp.no_tilt && ::g_selected_level_mesh_idx >= 0 &&
@@ -1306,9 +2127,11 @@ void draw_model_in_panel(ID3D11Device* device) {
         float sel_rot[3] = {0.0f, 0.0f, 0.0f};
         bool  sel_has_rot = false;
         bool  sel_found = false;
+        uint32_t sel_gdb_entity_hash = 0;
         if (::g_selected_level_pick_id != 0) {
             for (const auto& pr : sel_mesh.pick_ranges) {
                 if (pr.selection_id != ::g_selected_level_pick_id) continue;
+                sel_gdb_entity_hash = pr.gdb_entity_hash;
                 if (pr.has_transform) {
                     sel_pos[0] = pr.inst_pos[0];
                     sel_pos[1] = pr.inst_pos[1];
@@ -1449,15 +2272,49 @@ void draw_model_in_panel(ID3D11Device* device) {
         }
         constexpr uint64_t kAdditionHashBase = 0xADD0000000000000ull;
         int sel_chest_addition = -1;
+        int sel_readable_addition = -1;
         if (::g_selected_level_hash >= kAdditionHashBase) {
             const int add_idx =
                 int(::g_selected_level_hash - kAdditionHashBase);
             if (LevelEdit::AdditionIsChest(add_idx)) {
                 sel_chest_addition = add_idx;
             }
+            if (LevelEdit::AdditionIsReadable(add_idx)) {
+                sel_readable_addition = add_idx;
+            }
         }
-        const float kOverlayW = (sel_contents || sel_chest_addition >= 0)
-            ? 270.0f
+        const Gdb::EntityTextTags* sel_text = nullptr;
+        if (::g_selected_level_hash != 0 &&
+            ::g_selected_level_hash <= 0xFFFFFFFFull) {
+            auto tit = g_level_entity_text.find(
+                uint32_t(::g_selected_level_hash));
+            if (tit != g_level_entity_text.end()) {
+                sel_text = &tit->second;
+            }
+        }
+        if (!sel_text && sel_gdb_entity_hash != 0) {
+            auto tit = g_level_entity_text.find(sel_gdb_entity_hash);
+            if (tit != g_level_entity_text.end()) {
+                sel_text = &tit->second;
+            }
+        }
+        if (!sel_text && sel_found) {
+            float best = 3.0f * 3.0f;
+            for (const auto& kv : g_level_entity_text) {
+                if (!kv.second.has_pos) continue;
+                const float dx = kv.second.x - sel_pos[0];
+                const float dy = kv.second.y - sel_pos[1];
+                const float dz = kv.second.z - sel_pos[2];
+                const float d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 < best) {
+                    best = d2;
+                    sel_text = &kv.second;
+                }
+            }
+        }
+        const float kOverlayW = (sel_contents || sel_chest_addition >= 0 ||
+                                 sel_text || sel_readable_addition >= 0)
+            ? 290.0f
             : (LevelEdit::Enabled() ? 190.0f : 150.0f);
         ImGui::SetNextWindowPos(ImVec2(origin.x + region.x - kOverlayW - 8.0f,
                                        origin.y + 6.0f));
@@ -1478,6 +2335,13 @@ void draw_model_in_panel(ID3D11Device* device) {
                         ? "Rotate (E)"
                         : "Move (W)";
                 ImGui::TextDisabled("%s", mode_name);
+            }
+            if (S.dev_mode) {
+                ImGui::TextDisabled(
+                    "sel 0x%016llX link 0x%08X text %s(%zu)",
+                    (unsigned long long)::g_selected_level_hash,
+                    sel_gdb_entity_hash, sel_text ? "HIT" : "miss",
+                    g_level_entity_text.size());
             }
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Position:");
             if (edit_active) {
@@ -1537,6 +2401,84 @@ void draw_model_in_panel(ID3D11Device* device) {
             } else {
                 ImGui::TextDisabled("n/a");
             }
+            if (sel_text) {
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                                   "Text:");
+                static uint32_t s_text_sel = 0;
+                static std::vector<std::string> s_text_bufs;
+                const uint32_t text_key = sel_text->tag_hashes.front();
+                if (s_text_sel != text_key ||
+                    s_text_bufs.size() != sel_text->tag_hashes.size()) {
+                    s_text_sel = text_key;
+                    s_text_bufs.clear();
+                    for (uint32_t th : sel_text->tag_hashes) {
+                        std::string t;
+                        if (!LevelEdit::GetEntityTextEdit(th, t)) {
+                            TextBank::Lookup(th, t);
+                        }
+                        s_text_bufs.push_back(std::move(t));
+                    }
+                }
+                const bool text_editable =
+                    LevelEdit::Enabled() && !LevelEdit::Saving();
+                for (size_t pi = 0; pi < s_text_bufs.size(); ++pi) {
+                    ImGui::PushID(int(pi) + 0x2000);
+                    if (s_text_bufs.size() > 1) {
+                        ImGui::TextDisabled("Page %d", int(pi) + 1);
+                    }
+                    if (text_editable) {
+                        ImGui::InputTextMultiline(
+                            "##entity_text", &s_text_bufs[pi],
+                            ImVec2(268.0f, 110.0f));
+                        if (ImGui::IsItemDeactivatedAfterEdit()) {
+                            LevelEdit::SetEntityTextEdit(
+                                sel_text->tag_hashes[pi],
+                                s_text_bufs[pi]);
+                        }
+                    } else {
+                        std::string shown = s_text_bufs[pi];
+                        if (shown.size() > 1200) {
+                            shown.resize(1200);
+                            shown += " [...]";
+                        }
+                        ImGui::TextWrapped("%s", shown.c_str());
+                    }
+                    ImGui::PopID();
+                }
+                if (text_editable) {
+                    ImGui::TextDisabled(
+                        "Text is written to book.babel on Save");
+                }
+            }
+            if (sel_readable_addition >= 0) {
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.65f, 0.85f, 1.0f, 1.0f),
+                                   "New readable (unsaved)");
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                                   "Text:");
+                static int s_addtext_sel = -1;
+                static std::string s_addtext_buf;
+                if (s_addtext_sel != sel_readable_addition) {
+                    s_addtext_sel = sel_readable_addition;
+                    s_addtext_buf.clear();
+                    LevelEdit::GetAdditionReadableText(
+                        sel_readable_addition, s_addtext_buf);
+                }
+                const bool add_text_editable =
+                    LevelEdit::Enabled() && !LevelEdit::Saving();
+                ImGui::BeginDisabled(!add_text_editable);
+                ImGui::InputTextMultiline("##add_readable_text",
+                                          &s_addtext_buf,
+                                          ImVec2(268.0f, 110.0f));
+                if (ImGui::IsItemDeactivatedAfterEdit()) {
+                    LevelEdit::SetAdditionReadableText(
+                        sel_readable_addition, s_addtext_buf);
+                }
+                ImGui::EndDisabled();
+            }
             if (sel_contents) {
                 auto pretty_tag = [](std::string tag, int money) {
 
@@ -1579,6 +2521,12 @@ void draw_model_in_panel(ID3D11Device* device) {
                     return tag;
                 };
                 auto catalog_label = [&](uint32_t record_hash) {
+                    for (const auto& c : g_item_details) {
+                        if (c.record_hash == record_hash &&
+                            !c.display_name.empty()) {
+                            return c.display_name;
+                        }
+                    }
                     for (const auto& c : g_level_item_catalog) {
                         if (c.record_hash == record_hash) {
                             return pretty_tag(c.label, c.money);
@@ -1589,6 +2537,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                     return std::string(buf);
                 };
                 auto item_label = [&](const Gdb::EntityContentsItem& it) {
+                    if (!it.display_name.empty()) return it.display_name;
                     std::string tag = !it.name_tag.empty() ? it.name_tag
                                                            : it.entry_label;
                     if (tag.empty()) return catalog_label(it.record_hash);
@@ -1724,17 +2673,17 @@ void draw_model_in_panel(ID3D11Device* device) {
                             ImGui::BeginChild("##item_list",
                                               ImVec2(320.0f, 300.0f), true);
                             std::vector<int> rows;
-                            rows.reserve(g_level_item_catalog.size());
+                            rows.reserve(g_item_details.size());
                             for (int ci = 0;
-                                 ci < int(g_level_item_catalog.size());
+                                 ci < int(g_item_details.size());
                                  ++ci) {
                                 if (filter.empty()) {
                                     rows.push_back(ci);
                                     continue;
                                 }
-                                const auto& c =
-                                    g_level_item_catalog[size_t(ci)];
-                                std::string low = c.label;
+                                std::string low =
+                                    g_item_details[size_t(ci)]
+                                        .display_name;
                                 std::transform(low.begin(), low.end(),
                                                low.begin(), ::tolower);
                                 if (low.find(filter) !=
@@ -1747,11 +2696,12 @@ void draw_model_in_panel(ID3D11Device* device) {
                             while (clipper.Step()) {
                                 for (int ri = clipper.DisplayStart;
                                      ri < clipper.DisplayEnd; ++ri) {
-                                    const auto& c = g_level_item_catalog
+                                    const auto& c = g_item_details
                                         [size_t(rows[size_t(ri)])];
-                                    std::string pl =
-                                        pretty_tag(c.label, c.money);
-                                    if (c.from_level) pl += "  [level]";
+                                    const std::string& pl =
+                                        c.display_name.empty()
+                                            ? c.label
+                                            : c.display_name;
                                     ImGui::PushID(int(c.record_hash));
                                     if (ImGui::Selectable(pl.c_str())) {
                                         std::vector<uint32_t> next =
@@ -1856,6 +2806,12 @@ void draw_model_in_panel(ID3D11Device* device) {
                     return tag;
                 };
                 auto catalog_label2 = [&](uint32_t record_hash) {
+                    for (const auto& c : g_item_details) {
+                        if (c.record_hash == record_hash &&
+                            !c.display_name.empty()) {
+                            return c.display_name;
+                        }
+                    }
                     for (const auto& c : g_level_item_catalog) {
                         if (c.record_hash == record_hash) {
                             return pretty_tag2(c.label, c.money);
@@ -1899,17 +2855,81 @@ void draw_model_in_panel(ID3D11Device* device) {
                     }
                     ImGui::PopID();
                 }
-                if (add_items.empty()) {
-                    ImGui::TextDisabled("  (empty)");
-                }
                 if (add_editable) {
                     if (ImGui::SmallButton("+ Add item")) {
                         s_add_slot = int(add_items.size());
                         s_add_filter[0] = 0;
                         open_add_picker = true;
                     }
-                    ImGui::TextDisabled("Save bakes this chest into the "
-                                        "level");
+
+                    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                                       "Random loot:");
+                    const uint32_t cur_loot =
+                        LevelEdit::GetAdditionLootTable(
+                            sel_chest_addition);
+                    std::string cur_label = "None";
+                    if (cur_loot) {
+                        char lb[32];
+                        std::snprintf(lb, sizeof(lb), "table 0x%08X",
+                                      cur_loot);
+                        cur_label = lb;
+                        for (const auto& kv : g_level_entity_contents) {
+                            if (kv.second.potential_items_record ==
+                                    cur_loot &&
+                                !kv.second.entity_name.empty()) {
+                                cur_label =
+                                    "like " + kv.second.entity_name;
+                                break;
+                            }
+                        }
+                    }
+                    ImGui::SetNextItemWidth(240.0f);
+                    if (ImGui::BeginCombo("##rand_loot",
+                                          cur_label.c_str())) {
+                        if (ImGui::Selectable("None", cur_loot == 0)) {
+                            LevelEdit::SetAdditionLootTable(
+                                sel_chest_addition, 0);
+                        }
+                        std::unordered_set<uint32_t> seen_tables;
+                        for (const auto& kv : g_level_entity_contents) {
+                            const auto& ec = kv.second;
+                            if (!ec.potential_items_record ||
+                                ec.potential_items.empty()) {
+                                continue;
+                            }
+                            if (!seen_tables
+                                     .insert(ec.potential_items_record)
+                                     .second) {
+                                continue;
+                            }
+                            char lbl[128];
+                            std::snprintf(
+                                lbl, sizeof(lbl),
+                                "%s (%zu entr%s)##%08X",
+                                ec.entity_name.empty()
+                                    ? "<unnamed>"
+                                    : ec.entity_name.c_str(),
+                                ec.potential_items.size(),
+                                ec.potential_items.size() == 1 ? "y"
+                                                               : "ies",
+                                ec.potential_items_record);
+                            if (ImGui::Selectable(
+                                    lbl,
+                                    cur_loot ==
+                                        ec.potential_items_record)) {
+                                LevelEdit::SetAdditionLootTable(
+                                    sel_chest_addition,
+                                    ec.potential_items_record);
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "Give this chest a weighted random loot "
+                            "table borrowed from an existing container "
+                            "in this level.");
+                    }
                 }
                 if (remove_idx >= 0 &&
                     size_t(remove_idx) < add_items.size()) {
@@ -1932,15 +2952,15 @@ void draw_model_in_panel(ID3D11Device* device) {
                     ImGui::BeginChild("##add_item_list",
                                       ImVec2(320.0f, 300.0f), true);
                     std::vector<int> rows;
-                    rows.reserve(g_level_item_catalog.size());
+                    rows.reserve(g_item_details.size());
                     for (int ci = 0;
-                         ci < int(g_level_item_catalog.size()); ++ci) {
+                         ci < int(g_item_details.size()); ++ci) {
                         if (filter.empty()) {
                             rows.push_back(ci);
                             continue;
                         }
-                        const auto& c = g_level_item_catalog[size_t(ci)];
-                        std::string low = c.label;
+                        std::string low =
+                            g_item_details[size_t(ci)].display_name;
                         std::transform(low.begin(), low.end(),
                                        low.begin(), ::tolower);
                         if (low.find(filter) != std::string::npos) {
@@ -1952,10 +2972,11 @@ void draw_model_in_panel(ID3D11Device* device) {
                     while (clipper.Step()) {
                         for (int ri = clipper.DisplayStart;
                              ri < clipper.DisplayEnd; ++ri) {
-                            const auto& c = g_level_item_catalog
+                            const auto& c = g_item_details
                                 [size_t(rows[size_t(ri)])];
-                            std::string pl = pretty_tag2(c.label, c.money);
-                            if (c.from_level) pl += "  [level]";
+                            const std::string& pl =
+                                c.display_name.empty() ? c.label
+                                                       : c.display_name;
                             ImGui::PushID(int(c.record_hash));
                             if (ImGui::Selectable(pl.c_str())) {
                                 if (size_t(s_add_slot) <
@@ -2161,6 +3182,22 @@ void draw_model_in_panel(ID3D11Device* device) {
 
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Wireframe");
             ImGui::Checkbox("Show", &g_mp.wireframe);
+            if (g_mp.no_tilt && (!g_level_spawn_markers.empty() ||
+                                 !g_level_entity_text.empty())) {
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                                   "Entities");
+                ImGui::Checkbox("Generators / spawn points",
+                                &S.show_spawn_markers);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "Creature generators (red) and their spawn "
+                        "points (orange). In edit mode: click to "
+                        "select, Shift+Right-click ground to place a "
+                        "new generator.");
+                ImGui::Checkbox("NPCs / creatures", &S.show_ent_npcs);
+                ImGui::Checkbox("Text objects", &S.show_ent_text);
+            }
             if (S.terrain_mode) {
                 ImGui::Checkbox("Adjacent terrain", &S.show_adjacent_terrain);
                 if (ImGui::IsItemHovered())
@@ -3092,7 +4129,8 @@ void draw_model_in_panel(ID3D11Device* device) {
         }
     }
 
-    if (g_mp.has_model && g_mp.bone_count > 0 && !S.anim_clips.empty()) {
+    if (g_mp.has_model && g_mp.bone_count > 0 && !S.anim_clips.empty() &&
+        !S.item_model_active) {
         static float s_anim_alpha = 0.30f;
         const float kIdleAlpha   = 0.30f;
         const float kHoverAlpha  = 1.00f;
@@ -3500,6 +4538,136 @@ void draw_model_in_panel(ID3D11Device* device) {
             }
             clipper.End();
             ImGui::EndChild();
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
+    }
+
+    if (S.show_item_details && S.selected_item >= 0 &&
+        S.selected_item < (int)g_item_details.size() &&
+        !LevelEdit::Enabled()) {
+        const auto& it = g_item_details[(size_t)S.selected_item];
+
+        static ID3D11ShaderResourceView* s_icon_srv = nullptr;
+        static uint32_t s_icon_for = 0xFFFFFFFFu;
+        static int s_icon_w = 0, s_icon_h = 0;
+        if (g_item_icon_dirty.exchange(false) ||
+            s_icon_for != it.record_hash) {
+            s_icon_for = it.record_hash;
+            if (s_icon_srv) { s_icon_srv->Release(); s_icon_srv = nullptr; }
+            s_icon_w = s_icon_h = 0;
+            if (!it.icon_tex.empty()) {
+                std::vector<unsigned char> tex_buf;
+                if (build_any_tex_buffer_for_name(it.icon_tex, tex_buf,
+                                                  std::string())) {
+                    std::vector<uint8_t> rgba;
+                    int w = 0, h = 0;
+                    bool has_a = false;
+                    if (decode_tex_to_rgba(tex_buf, rgba, w, h, &has_a,
+                                           -1) &&
+                        w > 0 && h > 0) {
+                        s_icon_srv = create_srv_from_rgba(device, w, h,
+                                                          rgba);
+                        s_icon_w = w;
+                        s_icon_h = h;
+                    }
+                }
+            }
+        }
+
+        static float s_item_alpha = 0.30f;
+        const float kIdleAlpha  = 0.30f;
+        const float kHoverAlpha = 1.00f;
+        const float kItemW  = 300.0f;
+        const float kItemPad = 6.0f;
+        ImGui::SetNextWindowPos(
+            ImVec2(origin.x + region.x - kItemW - kItemPad,
+                   origin.y + kItemPad));
+        // fixed width, auto height (only as tall as its content, capped
+        // to the render area)
+        ImGui::SetNextWindowSizeConstraints(
+            ImVec2(kItemW, 0.0f),
+            ImVec2(kItemW, std::max(200.0f, region.y - 2 * kItemPad)));
+        ImGui::SetNextWindowBgAlpha(s_item_alpha * 0.78f);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, s_item_alpha);
+        ImGuiWindowFlags ifl = ImGuiWindowFlags_NoTitleBar |
+                               ImGuiWindowFlags_NoResize |
+                               ImGuiWindowFlags_NoMove |
+                               ImGuiWindowFlags_NoCollapse |
+                               ImGuiWindowFlags_NoSavedSettings |
+                               ImGuiWindowFlags_AlwaysAutoResize;
+        if (ImGui::Begin("##item_details_overlay", nullptr, ifl)) {
+            ImVec2 wp = ImGui::GetWindowPos();
+            ImVec2 ws = ImGui::GetWindowSize();
+            ImVec2 mp = ImGui::GetIO().MousePos;
+            bool hovering = mp.x >= wp.x && mp.x < wp.x + ws.x &&
+                            mp.y >= wp.y && mp.y < wp.y + ws.y;
+            static bool s_was_hovering = false;
+            if (!hovering && s_was_hovering &&
+                ImGui::GetIO().MouseDown[0]) {
+                hovering = true;
+            }
+            s_was_hovering = hovering;
+            const float target = hovering ? kHoverAlpha : kIdleAlpha;
+            s_item_alpha += (target - s_item_alpha) * 0.18f;
+            if (std::fabs(s_item_alpha - target) < 0.005f) {
+                s_item_alpha = target;
+            }
+
+            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                               "Item Details");
+            ImGui::Separator();
+
+            std::string disp_name;
+            if (it.name_tag) TextBank::Lookup(it.name_tag, disp_name);
+            if (disp_name.empty()) disp_name = it.label;
+            ImGui::TextColored(ImVec4(0.65f, 0.85f, 1.0f, 1.0f), "%s",
+                               disp_name.c_str());
+            if (s_icon_srv) {
+                float iw = float(s_icon_w), ih = float(s_icon_h);
+                const float maxdim = 80.0f;
+                if (iw > maxdim || ih > maxdim) {
+                    const float s = maxdim / std::max(iw, ih);
+                    iw *= s; ih *= s;
+                }
+                ImGui::Image((ImTextureID)s_icon_srv, ImVec2(iw, ih));
+            }
+            if (it.money >= 0) {
+                ImGui::Text("Value: %d gold", it.money);
+            }
+
+            std::string desc;
+            if (it.desc_tag) TextBank::Lookup(it.desc_tag, desc);
+            if (!desc.empty()) {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.65f, 0.85f, 1.0f, 1.0f),
+                                   "Description");
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextUnformatted(desc.c_str());
+                ImGui::PopTextWrapPos();
+            }
+
+            if (!it.stats.empty()) {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.65f, 0.85f, 1.0f, 1.0f),
+                                   "Stats");
+                if (ImGui::BeginTable("##item_stats", 2,
+                                      ImGuiTableFlags_BordersInnerV |
+                                      ImGuiTableFlags_RowBg)) {
+                    ImGui::TableSetupColumn("Field");
+                    ImGui::TableSetupColumn(
+                        "Value", ImGuiTableColumnFlags_WidthFixed,
+                        84.0f);
+                    for (const auto& kv : it.stats) {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextUnformatted(kv.first.c_str());
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::TextUnformatted(kv.second.c_str());
+                    }
+                    ImGui::EndTable();
+                }
+            }
         }
         ImGui::End();
         ImGui::PopStyleVar();

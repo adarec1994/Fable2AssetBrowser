@@ -4344,22 +4344,28 @@ static unsigned int load_tex_from_name(const std::string& name, bool* out_has_al
     }
     return 0;
 }
-bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp) {
-    for (auto& m : mp.meshes) mp_release_mesh_gl(m);
-    mp.meshes.clear();
+bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp, bool append) {
+    if (!append) {
+        for (auto& m : mp.meshes) mp_release_mesh_gl(m);
+        mp.meshes.clear();
+        mp.lod_count = 1;
+        mp.selected_lod = -1;
+    }
     float minx = 1e9f, miny = 1e9f, minz = 1e9f, maxx = -1e9f, maxy = -1e9f, maxz = -1e9f;
-    for (const auto& g : geoms) {
+    if (!append) for (const auto& g : geoms) {
         for (size_t i = 0; i + 2 < g.positions.size(); i += 3) {
             float x = g.positions[i], y = g.positions[i + 1], z = g.positions[i + 2];
             if (x < minx) minx = x; if (y < miny) miny = y; if (z < minz) minz = z;
             if (x > maxx) maxx = x; if (y > maxy) maxy = y; if (z > maxz) maxz = z;
         }
     }
+    if (!append) {
     if (!(minx < maxx)) { minx = -1; maxx = 1; miny = -1; maxy = 1; minz = -1; maxz = 1; }
     mp.center[0] = (minx + maxx) * 0.5f; mp.center[1] = (miny + maxy) * 0.5f; mp.center[2] = (minz + maxz) * 0.5f;
     mp.radius = std::max(std::max(maxx - minx, maxy - miny), maxz - minz) * 0.5f;
     if (mp.radius < 0.0001f) mp.radius = 1.0f;
     FlyCam_Reset(g_flycam, mp.center[0], mp.center[1], mp.center[2], mp.radius);
+    }
     for (size_t i = 0; i < geoms.size(); ++i) {
         const auto& g = geoms[i];
         size_t vcount = g.positions.size() / 3;
@@ -4416,6 +4422,41 @@ bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelP
         m.isolated  = false;
         m.is_cloth  = g.is_cloth;
         m.is_entity_model = g.is_entity_model;
+        m.is_terrain = g.is_terrain;
+        m.is_water = g.is_water;
+        m.alpha_test = g.alpha_test;
+        m.source_mesh_idx = (uint32_t)i;
+        {
+            const size_t lod = m.name.rfind("|lod");
+            if (lod != std::string::npos) {
+                const char* p = m.name.c_str() + lod + 4;
+                if (*p >= '0' && *p <= '9') {
+                    m.lod_index = (uint32_t)std::strtoul(p, nullptr, 10);
+                    m.name.resize(lod);
+                    mp.lod_count = std::max(mp.lod_count, m.lod_index + 1);
+                }
+            }
+        }
+        m.pick_ranges.reserve(g.pick_ranges.size());
+        for (const auto& pr : g.pick_ranges) {
+            MPPerMesh::PickRange out;
+            out.selection_id = pr.selection_id;
+            out.index_start = pr.index_start; out.index_count = pr.index_count;
+            std::copy(pr.center, pr.center + 3, out.center);
+            out.radius = pr.radius;
+            std::copy(pr.inst_pos, pr.inst_pos + 3, out.inst_pos);
+            std::copy(pr.inst_rot_deg, pr.inst_rot_deg + 3, out.inst_rot_deg);
+            out.has_transform = pr.has_transform; out.inst_hash = pr.inst_hash;
+            out.pos_file_offset = pr.pos_file_offset;
+            std::copy(pr.gdb_pos_off, pr.gdb_pos_off + 3, out.gdb_pos_off);
+            std::copy(pr.gdb_rot_off, pr.gdb_rot_off + 3, out.gdb_rot_off);
+            out.gdb_entity_hash = pr.gdb_entity_hash;
+            out.lev_rec_kind = pr.lev_rec_kind;
+            m.pick_ranges.push_back(out);
+        }
+        if (!m.pick_ranges.empty()) {
+            m.pick_positions = g.positions; m.pick_indices = g.indices;
+        }
         if (!g.diffuse_tex_name.empty())  { m.tex_diffuse  = load_tex_from_name(g.diffuse_tex_name,  &hasA); }
         if (!g.normal_tex_name.empty())   { m.tex_normal   = load_tex_from_name(g.normal_tex_name,   nullptr); }
         if (!g.specular_tex_name.empty()) { m.tex_specular = load_tex_from_name(g.specular_tex_name, nullptr); }

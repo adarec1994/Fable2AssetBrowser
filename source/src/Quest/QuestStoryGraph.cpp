@@ -5,6 +5,7 @@
 #include <deque>
 #include <iomanip>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <regex>
 #include <set>
@@ -794,10 +795,21 @@ GraphNode compose_story_step(const GraphNode& source,
     return node;
 }
 
+// Must stay in sync with kMaxVisibleNodeDetails in QuestNodeView.cpp: the
+// renderer collapses everything past that many detail lines into one
+// "+N more" line.
+constexpr std::size_t kVisibleDetailLimit = 12;
+
 float estimated_node_height(const GraphNode& node) {
     float lines = 3.5f;
+    std::size_t counted = 0;
     for (const std::string& detail : node.details) {
+        if (counted == kVisibleDetailLimit) {
+            lines += 1.0f;
+            break;
+        }
         lines += float(std::max<std::size_t>(1, (detail.size() + 54) / 55));
+        ++counted;
     }
     return lines * 22.0f + 30.0f;
 }
@@ -853,6 +865,10 @@ void layout_branching_story(Graph& graph, int root_story,
     for (auto& entry : forward) {
         std::sort(entry.second.begin(), entry.second.end());
         if (entry.second.size() < 2) continue;
+        // A fan-out from the quest-start node is parallel setup/threads,
+        // not a player-facing branch; leave those links unlabelled.
+        const GraphNode* source_node = find_node(graph, entry.first);
+        if (source_node && source_node->kind == NodeKind::Quest) continue;
         const bool decision = is_decision(graph, entry.first);
         for (std::size_t i = 0; i < entry.second.size(); ++i) {
             for (GraphLink& link : graph.links) {
@@ -904,74 +920,202 @@ void layout_branching_story(Graph& graph, int root_story,
             topological.push_back(id);
         }
     }
+    std::unordered_map<int, std::size_t> topo_index;
+    for (std::size_t i = 0; i < topological.size(); ++i) {
+        topo_index[topological[i]] = i;
+    }
 
-    std::unordered_set<int> reachable;
-    if (root_story > 0 && nodes.count(root_story)) {
-        std::deque<int> queue{root_story};
+    // Undirected connected components ("No" edges included so condition
+    // loops stay with their flow). Each component is laid out on its own
+    // and stacked below the previous one.
+    std::unordered_map<int, std::vector<int>> neighbours;
+    for (const GraphLink& link : graph.links) {
+        if (!nodes.count(link.from_node) || !nodes.count(link.to_node) ||
+            link.from_node == link.to_node) {
+            continue;
+        }
+        neighbours[link.from_node].push_back(link.to_node);
+        neighbours[link.to_node].push_back(link.from_node);
+    }
+    std::unordered_map<int, int> component_of;
+    std::vector<std::vector<int>> components;
+    for (int id : topological) {
+        if (component_of.count(id)) continue;
+        std::vector<int> component;
+        std::deque<int> queue{id};
+        component_of[id] = int(components.size());
         while (!queue.empty()) {
             const int current = queue.front();
             queue.pop_front();
-            if (!reachable.insert(current).second) continue;
-            for (int target : forward[current]) queue.push_back(target);
-        }
-    }
-    int max_reachable_depth = 0;
-    for (int id : reachable) {
-        max_reachable_depth = std::max(max_reachable_depth, depth[id]);
-    }
-    std::vector<int> disconnected;
-    for (const auto& entry : nodes) {
-        if (!reachable.count(entry.first)) disconnected.push_back(entry.first);
-    }
-    std::sort(disconnected.begin(), disconnected.end());
-    for (int id : disconnected) depth[id] = ++max_reachable_depth;
-
-    int max_depth = 0;
-    for (const auto& entry : depth) max_depth = std::max(max_depth, entry.second);
-    std::vector<float> level_height(size_t(max_depth + 1), 0.0f);
-    for (const auto& entry : nodes) {
-        level_height[size_t(depth[entry.first])] = std::max(
-            level_height[size_t(depth[entry.first])],
-            estimated_node_height(*entry.second));
-    }
-    std::vector<float> level_y(size_t(max_depth + 1), 0.0f);
-    for (int level = 1; level <= max_depth; ++level) {
-        level_y[size_t(level)] = level_y[size_t(level - 1)] +
-            level_height[size_t(level - 1)] + 150.0f;
-    }
-
-    std::unordered_map<int, float> lane_x;
-    for (const auto& entry : nodes) lane_x[entry.first] = 0.0f;
-    std::sort(topological.begin(), topological.end(),
-              [&](int a, int b) {
-                  if (depth[a] != depth[b]) return depth[a] < depth[b];
-                  return a < b;
-              });
-    constexpr float kBranchSpacing = 760.0f;
-    for (int source : topological) {
-        const std::vector<int>& targets = forward[source];
-        if (targets.size() < 2) continue;
-        const float centre = (float(targets.size()) - 1.0f) * 0.5f;
-        for (std::size_t i = 0; i < targets.size(); ++i) {
-            const float branch_x = lane_x[source] +
-                (float(i) - centre) * kBranchSpacing;
-            int current = targets[i];
-            lane_x[current] = branch_x;
-            while (forward[current].size() == 1) {
-                const int next = forward[current].front();
-                if (indegree[next] > 1) break;
-                lane_x[next] = branch_x;
-                current = next;
+            component.push_back(current);
+            for (int next : neighbours[current]) {
+                if (component_of.count(next)) continue;
+                component_of[next] = int(components.size());
+                queue.push_back(next);
             }
         }
+        components.push_back(std::move(component));
+    }
+    std::vector<std::size_t> component_order(components.size());
+    for (std::size_t i = 0; i < components.size(); ++i) component_order[i] = i;
+    if (root_story > 0 && component_of.count(root_story)) {
+        const std::size_t root_component =
+            std::size_t(component_of[root_story]);
+        std::stable_partition(component_order.begin(), component_order.end(),
+                              [&](std::size_t component) {
+                                  return component == root_component;
+                              });
     }
 
+    // Left-to-right layered layout: depth selects the column, nodes in a
+    // column are ordered to sit near their parents (barycenter sweeps) and
+    // stacked without overlaps.
+    constexpr float kColumnSpacing = 700.0f;
+    constexpr float kRowGap = 70.0f;
+    constexpr float kComponentGap = 260.0f;
     layout_order.clear();
-    for (int id : topological) {
-        GraphNode* node = nodes[id];
-        node->x = lane_x[id];
-        node->y = level_y[size_t(depth[id])];
-        if (id != root_story) layout_order.push_back(id);
+    float component_base_y = 0.0f;
+    for (std::size_t component_index : component_order) {
+        const std::vector<int>& component = components[component_index];
+        int min_depth = std::numeric_limits<int>::max();
+        int max_depth = 0;
+        for (int id : component) {
+            min_depth = std::min(min_depth, depth[id]);
+            max_depth = std::max(max_depth, depth[id]);
+        }
+        std::vector<std::vector<int>> columns(
+            std::size_t(max_depth - min_depth) + 1);
+        for (int id : component) {
+            columns[std::size_t(depth[id] - min_depth)].push_back(id);
+        }
+        for (std::vector<int>& column : columns) {
+            std::sort(column.begin(), column.end(), [&](int a, int b) {
+                return topo_index[a] < topo_index[b];
+            });
+        }
+
+        std::unordered_map<int, float> order_position;
+        auto refresh_positions = [&]() {
+            for (const std::vector<int>& column : columns) {
+                for (std::size_t i = 0; i < column.size(); ++i) {
+                    order_position[column[i]] = float(i);
+                }
+            }
+        };
+        refresh_positions();
+        auto barycenter_sort = [&](std::vector<int>& column,
+                                   const std::unordered_map<
+                                       int, std::vector<int>>& relatives) {
+            std::stable_sort(column.begin(), column.end(),
+                             [&](int a, int b) {
+                                 auto mean = [&](int id) {
+                                     const auto found = relatives.find(id);
+                                     if (found == relatives.end() ||
+                                         found->second.empty()) {
+                                         return order_position[id];
+                                     }
+                                     float total = 0.0f;
+                                     for (int other : found->second) {
+                                         total += order_position[other];
+                                     }
+                                     return total / float(found->second.size());
+                                 };
+                                 return mean(a) < mean(b);
+                             });
+        };
+        std::unordered_map<int, std::vector<int>> parents;
+        for (const auto& entry : forward) {
+            for (int target : entry.second) {
+                parents[target].push_back(entry.first);
+            }
+        }
+        for (int sweep = 0; sweep < 3; ++sweep) {
+            for (std::size_t c = 1; c < columns.size(); ++c) {
+                barycenter_sort(columns[c], parents);
+                refresh_positions();
+            }
+            for (std::size_t c = columns.size(); c-- > 1;) {
+                barycenter_sort(columns[c - 1], forward);
+                refresh_positions();
+            }
+        }
+
+        // Vertical placement: children aim for the average of their
+        // parents' centres, pushed apart so nothing overlaps.
+        std::unordered_map<int, float> node_y;
+        std::unordered_map<int, float> node_height;
+        for (int id : component) {
+            node_height[id] = estimated_node_height(*nodes[id]);
+        }
+        for (std::size_t c = 0; c < columns.size(); ++c) {
+            const std::vector<int>& column = columns[c];
+            std::vector<float> desired(column.size(), 0.0f);
+            for (std::size_t i = 0; i < column.size(); ++i) {
+                const auto found = parents.find(column[i]);
+                float centre_total = 0.0f;
+                std::size_t centre_count = 0;
+                if (found != parents.end()) {
+                    for (int parent : found->second) {
+                        if (!node_y.count(parent)) continue;
+                        centre_total += node_y[parent] +
+                            node_height[parent] * 0.5f;
+                        ++centre_count;
+                    }
+                }
+                desired[i] = centre_count > 0
+                    ? centre_total / float(centre_count) -
+                          node_height[column[i]] * 0.5f
+                    : (i > 0 ? node_y[column[i - 1]] +
+                                   node_height[column[i - 1]] + kRowGap
+                             : 0.0f);
+            }
+            float cursor = -std::numeric_limits<float>::max();
+            std::vector<float> placed(column.size(), 0.0f);
+            for (std::size_t i = 0; i < column.size(); ++i) {
+                placed[i] = std::max(desired[i], cursor);
+                cursor = placed[i] + node_height[column[i]] + kRowGap;
+            }
+            // Recentre the column on its desired positions so a collision
+            // push does not drag the whole column downwards.
+            if (!column.empty()) {
+                float shift_total = 0.0f;
+                for (std::size_t i = 0; i < column.size(); ++i) {
+                    shift_total += placed[i] - desired[i];
+                }
+                const float shift = shift_total / float(column.size());
+                for (std::size_t i = 0; i < column.size(); ++i) {
+                    node_y[column[i]] = placed[i] - shift;
+                }
+            }
+        }
+
+        float component_min_y = 0.0f;
+        bool first = true;
+        for (int id : component) {
+            if (first || node_y[id] < component_min_y) {
+                component_min_y = node_y[id];
+                first = false;
+            }
+        }
+        float component_max_y = component_base_y;
+        for (int id : component) {
+            GraphNode* node = nodes[id];
+            node->x = float(depth[id] - min_depth) * kColumnSpacing;
+            node->y = component_base_y + node_y[id] - component_min_y;
+            component_max_y = std::max(component_max_y,
+                                       node->y + node_height[id]);
+        }
+        component_base_y = component_max_y + kComponentGap;
+
+        std::vector<int> ordered = component;
+        std::sort(ordered.begin(), ordered.end(), [&](int a, int b) {
+            if (depth[a] != depth[b]) return depth[a] < depth[b];
+            if (nodes[a]->y != nodes[b]->y) return nodes[a]->y < nodes[b]->y;
+            return a < b;
+        });
+        for (int id : ordered) {
+            if (id != root_story) layout_order.push_back(id);
+        }
     }
 }
 
@@ -2316,9 +2460,22 @@ Graph BuildStoryGraph(const std::string& title,
     const Graph technical = BuildGraph(title, decompiled_lua, references);
     const bool frankenbride = contains_ci(title, "frankenbride") &&
         decompiled_lua.find("QO570_FrankenBride") != std::string::npos;
+    auto relayout = [](Graph& graph) {
+        int root = 0;
+        for (const GraphNode& node : graph.nodes) {
+            if (node.kind == NodeKind::Quest) {
+                root = node.id;
+                break;
+            }
+        }
+        if (!root && !graph.nodes.empty()) root = graph.nodes.front().id;
+        std::vector<int> order;
+        layout_branching_story(graph, root, order);
+    };
     if (frankenbride) {
         Graph graph = build_frankenbride_timeline(technical, references);
         attach_completion_rewards(graph, technical, references);
+        relayout(graph);
         return graph;
     }
     const bool childhood = contains_ci(title, "childhood") &&
@@ -2329,6 +2486,7 @@ Graph BuildStoryGraph(const std::string& title,
         if (primary.size() >= 30) {
             Graph graph = build_childhood_timeline(technical, primary);
             attach_completion_rewards(graph, technical, references);
+            relayout(graph);
             return graph;
         }
     }

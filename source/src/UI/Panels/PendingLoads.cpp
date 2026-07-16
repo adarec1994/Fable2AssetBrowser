@@ -2198,7 +2198,7 @@ void process_pending_loads() {
             return;
         }
         progress_update(72, 100, "Uploading terrain...");
-        const Level::TerrainMesh& tm = g_pending_terrain_mesh;
+        Level::TerrainMesh& tm = g_pending_terrain_mesh;
         if (!tm.ok || tm.indices.empty()) {
             OutputLog::error("pending terrain mesh is empty - skipped");
         } else {
@@ -3081,16 +3081,15 @@ void process_pending_loads() {
             TerrainSplat::Clear();
             TerrainEdit::Clear();
 
+            const uint32_t terrain_width = tm.width;
+            const uint32_t terrain_height = tm.height;
+            const size_t terrain_vertex_count = tm.positions.size() / 3;
+            const size_t terrain_index_count = tm.indices.size();
             MDLMeshGeom g;
-            g.positions = tm.positions;
-            g.normals = tm.normals;
-            g.uvs = tm.uvs;
-            g.indices = tm.indices;
-            g.bone_ids.assign(tm.positions.size() / 3 * 4, 0);
-            g.bone_weights.assign(tm.positions.size() / 3 * 4, 0.f);
-            for (size_t v = 0; v < tm.positions.size() / 3; ++v) {
-                g.bone_weights[v * 4 + 0] = 1.0f;
-            }
+            g.positions = std::move(tm.positions);
+            g.normals = std::move(tm.normals);
+            g.uvs = std::move(tm.uvs);
+            g.indices = std::move(tm.indices);
             g.name = "terrain";
             g.is_terrain = true;
 
@@ -3101,8 +3100,8 @@ void process_pending_loads() {
             mi.MaterialCount = 0;
             info.Meshes.push_back(mi);
             MDLMeshBufferInfo mb;
-            mb.VertexCount = (uint32_t)(tm.positions.size() / 3);
-            mb.FaceCount = (uint32_t)tm.indices.size();
+            mb.VertexCount = (uint32_t)terrain_vertex_count;
+            mb.FaceCount = (uint32_t)terrain_index_count;
             mb.SubMeshCount = 1;
             info.MeshBuffers.push_back(mb);
 
@@ -3128,8 +3127,12 @@ void process_pending_loads() {
                 uv_scale = 1.0f;
             } else if (Level::DecodeEhfTerrainAlbedoFromBytes(
                     g_pending_terrain_ehf_bytes,
-                    g_pending_terrain_mesh.width,
-                    g_pending_terrain_mesh.height,
+                    g_pending_terrain_ghf_width > 0
+                        ? (uint32_t)g_pending_terrain_ghf_width
+                        : g_pending_terrain_mesh.width,
+                    g_pending_terrain_ghf_height > 0
+                        ? (uint32_t)g_pending_terrain_ghf_height
+                        : g_pending_terrain_mesh.height,
                     picked_rgba, picked_w, picked_h)) {
                 picked_label = "ehf_baked_albedo";
                 uv_scale = 1.0f;
@@ -3169,7 +3172,7 @@ void process_pending_loads() {
                 picked_label == "ehf_embedded_tile_albedo" ||
                 picked_label == "ehf_baked_albedo";
             if (terrain_space_texture) {
-                normalize_grid_uvs(g, tm.width, tm.height);
+                normalize_grid_uvs(g, terrain_width, terrain_height);
             } else if (uv_scale != 1.0f) {
                 for (float& uv : g.uvs) uv *= uv_scale;
             }
@@ -3186,11 +3189,6 @@ void process_pending_loads() {
                 ag.indices = am.indices;
                 if (!adj.preserve_mesh_uvs) {
                     normalize_grid_uvs(ag, am.width, am.height);
-                }
-                ag.bone_ids.assign(am.positions.size() / 3 * 4, 0);
-                ag.bone_weights.assign(am.positions.size() / 3 * 4, 0.f);
-                for (size_t v = 0; v < am.positions.size() / 3; ++v) {
-                    ag.bone_weights[v * 4 + 0] = 1.0f;
                 }
                 ag.name = adj.label.empty()
                     ? std::string("adjacent terrain")

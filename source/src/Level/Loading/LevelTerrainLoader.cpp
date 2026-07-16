@@ -1164,7 +1164,7 @@ bool BuildEhfVistaPatchGeoms(
     return build_ehf_vista_patch_geoms(ehf, out_geoms, out_stats);
 }
 
-bool Level::BakeEhfVistaPageComposite(const std::vector<uint8_t>& ehf,
+bool BakeEhfVistaPageComposite(const std::vector<uint8_t>& ehf,
                                       std::vector<uint8_t>& out_rgba,
                                       int&                  out_w,
                                       int&                  out_h,

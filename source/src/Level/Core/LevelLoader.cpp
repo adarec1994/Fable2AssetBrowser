@@ -115,6 +115,53 @@ std::unordered_map<uint32_t, std::vector<uint32_t>>
     g_global_entity_model_hashes;
 uint64_t g_global_entity_catalog_revision = 0;
 
+#ifndef _WIN32
+static Level::GhfHeights make_linux_preview_heightfield(
+    const Level::GhfHeights& source, size_t max_vertices)
+{
+    const size_t source_vertices =
+        size_t(source.width) * size_t(source.height);
+    if (source_vertices <= max_vertices || max_vertices < 4)
+        return source;
+
+    const double ratio =
+        std::sqrt(double(source_vertices) / double(max_vertices));
+    const uint32_t step =
+        std::max<uint32_t>(2, uint32_t(std::ceil(ratio)));
+    const uint32_t preview_w = (source.width - 1 + step - 1) / step + 1;
+    const uint32_t preview_h = (source.height - 1 + step - 1) / step + 1;
+
+    Level::GhfHeights preview;
+    preview.ok = true;
+    preview.width = preview_w;
+    preview.height = preview_h;
+    preview.tile_size = source.tile_size * float(step);
+    preview.min_height = std::numeric_limits<float>::infinity();
+    preview.max_height = -std::numeric_limits<float>::infinity();
+    preview.heights.resize(size_t(preview_w) * size_t(preview_h));
+
+    for (uint32_t y = 0; y < preview_h; ++y) {
+        const uint32_t sy = std::min(y * step, source.height - 1);
+        for (uint32_t x = 0; x < preview_w; ++x) {
+            const uint32_t sx = std::min(x * step, source.width - 1);
+            const float height =
+                source.heights[size_t(sy) * source.width + sx];
+            preview.heights[size_t(y) * preview_w + x] = height;
+            preview.min_height = std::min(preview.min_height, height);
+            preview.max_height = std::max(preview.max_height, height);
+        }
+    }
+
+    OutputLog::info(
+        "Linux low-memory terrain preview: " +
+        std::to_string(source.width) + "x" + std::to_string(source.height) +
+        " -> " + std::to_string(preview.width) + "x" +
+        std::to_string(preview.height) + " (sample step " +
+        std::to_string(step) + ")");
+    return preview;
+}
+#endif
+
 const FlatAssetEntry* FindGlobalModelAssetByPathHash(uint32_t path_hash)
 {
     if (path_hash == 0 || S.all_mdl_files.empty()) return nullptr;
@@ -964,7 +1011,23 @@ bool Open(const FlatAssetEntry& entry)
                         OutputLog::warn("level load cancelled before terrain mesh build");
                         return false;
                     }
-                    if (!BuildTerrainMesh(hg, mesh)) {
+#ifdef _WIN32
+                    const bool terrain_built = BuildTerrainMesh(hg, mesh);
+#else
+                    constexpr size_t kLinuxTerrainPreviewVertices = 262144;
+                    const size_t full_vertex_count =
+                        size_t(hg.width) * size_t(hg.height);
+                    Level::GhfHeights preview_hg;
+                    const Level::GhfHeights* render_hg = &hg;
+                    if (full_vertex_count > kLinuxTerrainPreviewVertices) {
+                        preview_hg = make_linux_preview_heightfield(
+                            hg, kLinuxTerrainPreviewVertices);
+                        render_hg = &preview_hg;
+                    }
+                    const bool terrain_built =
+                        BuildTerrainMesh(*render_hg, mesh);
+#endif
+                    if (!terrain_built) {
                         OutputLog::error("  terrain mesh build failed");
                     } else {
                         const size_t tri_count = mesh.indices.size() / 3;
@@ -1409,7 +1472,32 @@ bool Open(const FlatAssetEntry& entry)
                                                  std::isfinite(ehf_tile))
                                                     ? ehf_tile : hg.tile_size;
                                         }
-                                        if (!BuildTerrainMesh(adj_hg, adj_mesh)) {
+#ifdef _WIN32
+                                        const bool adjacent_built =
+                                            BuildTerrainMesh(adj_hg, adj_mesh);
+#else
+                                        constexpr size_t
+                                            kLinuxAdjacentPreviewVertices =
+                                                65536;
+                                        const size_t adjacent_vertex_count =
+                                            size_t(adj_hg.width) *
+                                            size_t(adj_hg.height);
+                                        Level::GhfHeights preview_adj_hg;
+                                        const Level::GhfHeights* render_adj_hg =
+                                            &adj_hg;
+                                        if (adjacent_vertex_count >
+                                            kLinuxAdjacentPreviewVertices) {
+                                            preview_adj_hg =
+                                                make_linux_preview_heightfield(
+                                                    adj_hg,
+                                                    kLinuxAdjacentPreviewVertices);
+                                            render_adj_hg = &preview_adj_hg;
+                                        }
+                                        const bool adjacent_built =
+                                            BuildTerrainMesh(*render_adj_hg,
+                                                             adj_mesh);
+#endif
+                                        if (!adjacent_built) {
                                             OutputLog::warn("adjacent terrain mesh build failed: " +
                                                             adj_ehf_path);
                                         }
@@ -1483,7 +1571,8 @@ bool Open(const FlatAssetEntry& entry)
                         }
 
                         g_pending_terrain_ghf_payload   = hf.ghf_bytes_raw;
-                        g_pending_terrain_ghf_heights   = hg.heights;
+                        g_pending_terrain_ghf_heights =
+                            std::move(hg.heights);
                         g_pending_terrain_ghf_tile_size = hg.tile_size;
                         g_pending_terrain_ghf_width     = (int)hg.width;
                         g_pending_terrain_ghf_height    = (int)hg.height;

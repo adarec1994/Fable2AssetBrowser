@@ -207,9 +207,6 @@ struct ModelPreview {
 
     std::unordered_map<int, ID3D11BlendState*> fx_blend_states;
     std::unordered_map<std::string, ID3D11ShaderResourceView*> fx_tex_srv;
-    Fx::System          fx_system;
-    float               fx_last_time = 0.0f;
-    bool                fx_show = true;
 #else
     unsigned int fbo = 0;
     unsigned int color_tex = 0;
@@ -225,7 +222,11 @@ struct ModelPreview {
     int tex_specular_loc = -1;
     int tex_metallic_loc = -1;
     int tex_extra_loc = -1;
+    std::unordered_map<std::string, unsigned int> fx_tex_srv;
 #endif
+    Fx::System fx_system;
+    float fx_last_time = 0.0f;
+    bool fx_show = true;
     int width = 1024;
     int height = 768;
     float center[3] = {0,0,0};
@@ -328,7 +329,7 @@ void MP_Resize(ID3D11Device* dev, ModelPreview& mp, int w, int h);
 #else
 bool MP_Init(ModelPreview& mp, int w, int h);
 void MP_Release(ModelPreview& mp);
-bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp);
+bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp, bool append = false);
 void MP_Render(ModelPreview& mp, const FlyCam& cam);
 void MP_Resize(ModelPreview& mp, int w, int h);
 unsigned int MP_GetTexture(ModelPreview& mp);

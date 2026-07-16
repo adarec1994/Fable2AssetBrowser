@@ -11,6 +11,12 @@ option(FABLE_ENABLE_RECONSTRUCTED_CLOUD_PREVIEW
 option(FABLE_ENABLE_RECONSTRUCTED_SKY_PREVIEW
        "Enable the non-authoritative handwritten D3D11 sky preview"
        OFF)
+option(FABLE_BUILD_TESTS
+       "Build the project test executables"
+       OFF)
+option(FABLE_BUILD_TOOLS
+       "Build optional command-line tools"
+       OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -217,8 +223,10 @@ target_compile_definitions(Fable_2_Asset_Browser PRIVATE
         FABLE_ENABLE_RECONSTRUCTED_SKY_PREVIEW=$<BOOL:${FABLE_ENABLE_RECONSTRUCTED_SKY_PREVIEW}>
 )
 
-include(CTest)
-if(BUILD_TESTING)
+if(FABLE_BUILD_TESTS)
+    include(CTest)
+endif()
+if(FABLE_BUILD_TESTS)
     add_executable(cloud_runtime_tests
             tests/CloudRuntimeTests.cpp
             src/Level/Skybox/CloudRuntime.cpp
@@ -318,7 +326,7 @@ if(NOT ZLIB_FOUND)
 endif()
 target_link_libraries(Fable_2_Asset_Browser PRIVATE ZLIB::ZLIB)
 
-if(BUILD_TESTING)
+if(FABLE_BUILD_TESTS)
     add_executable(texture_atlas_decoder_tests
             tests/TextureAtlasDecoderTests.cpp
             src/Level/Terrain/TextureAtlasDecoder.cpp
@@ -380,7 +388,8 @@ if(BUILD_TESTING)
 
 endif()
 
-add_executable(shader_bank_extract
+if(FABLE_BUILD_TOOLS)
+    add_executable(shader_bank_extract
         tools/ShaderBankExtract.cpp
         src/Level/Rendering/ShaderBankFile.cpp
         src/Level/Skybox/CloudShaderBank.cpp
@@ -406,6 +415,7 @@ target_include_directories(quest_script_probe PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_link_libraries(quest_script_probe PRIVATE ZLIB::ZLIB)
+endif()
 
 include(FetchContent)
 FetchContent_Declare(
@@ -577,7 +587,7 @@ if(MINGW)
     target_link_libraries(Fable_2_Asset_Browser PRIVATE -lwinpthread)
 endif()
 
-if(BUILD_TESTING)
+if(FABLE_BUILD_TESTS)
     add_executable(bnk_writer_tests
             tests/BnkWriterTests.cpp
             src/Level/IO/BnkWriter.cpp

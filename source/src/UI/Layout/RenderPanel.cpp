@@ -134,6 +134,46 @@ static void draw_entity_gameplay_details(
     bool show_entity_name = true);
 static void draw_property_details(const Gdb::PropertyDetails& details);
 
+#ifndef _WIN32
+static void draw_entity_gameplay_details(
+    const Gdb::EntityGameplayDetails& details,
+    bool show_entity_name)
+{
+    ImGui::Spacing();
+    ImGui::Separator();
+    if (show_entity_name && !details.entity_name.empty()) {
+        ImGui::TextColored(ImVec4(0.65f, 0.85f, 1.0f, 1.0f), "%s",
+                           details.entity_name.c_str());
+    }
+    ImGui::TextColored(ImVec4(0.55f, 0.9f, 1.0f, 1.0f),
+                       "Entity gameplay");
+    if (!details.faction_name.empty()) {
+        ImGui::Text("Faction / allegiance: %s",
+                    details.faction_name.c_str());
+    }
+    if (!details.combat_profile_name.empty()) {
+        ImGui::TextWrapped("Combat profile: %s",
+                           details.combat_profile_name.c_str());
+    }
+    if (!details.core_fields.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                           "Core stats:");
+        for (const auto& field : details.core_fields) {
+            ImGui::Text("%s: %s", field.label.c_str(),
+                        field.value.c_str());
+        }
+    }
+    if (!details.combat_fields.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                           "Combat:");
+        for (const auto& field : details.combat_fields) {
+            ImGui::Text("%s: %s", field.label.c_str(),
+                        field.value.c_str());
+        }
+    }
+}
+#endif
+
 void draw_placeholder() {
 
     ImVec2 region = ImGui::GetContentRegionAvail();
@@ -802,6 +842,10 @@ static void draw_gdb_placements_overlay(const ImVec2& origin,
         dl->AddCircleFilled(sp_screen, r, col);
         if (fixed) {
             dl->AddCircle(sp_screen, r + 1.0f, IM_COL32(0, 0, 0, 200), 12, 1.0f);
+        }
+        if (fixed) {
+            dl->AddText(ImVec2(sp_screen.x + r + 4.0f, sp_screen.y - 7.0f),
+                        IM_COL32(255, 150, 150, 235), "Player start");
         }
         ++drawn;
     }
@@ -6856,6 +6900,68 @@ void draw_materials_overlay_gl(const ImVec2& origin,
     ImGui::PopStyleVar();
 }
 
+void draw_gdb_placements_overlay_gl(const ImVec2& origin, const ImVec2& region) {
+    if (g_level_gdb_placements.empty() || !S.show_gdb_placements ||
+        !g_mp.no_tilt) return;
+
+    const float fx = std::sin(g_flycam.yaw) * std::cos(g_flycam.pitch);
+    const float fy = std::sin(g_flycam.pitch);
+    const float fz = std::cos(g_flycam.yaw) * std::cos(g_flycam.pitch);
+    const float rx = fz, ry = 0.0f, rz = -fx;
+    const float ux = fy * rz;
+    const float uy = fz * rx - fx * rz;
+    const float uz = fx * ry - fy * rx;
+    const float tan_half_fov = std::tan(3.1415926535f / 6.0f);
+    const float aspect = region.x / std::max(1.0f, region.y);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    const int gw = g_pending_terrain_ghf_width;
+    const int gh = g_pending_terrain_ghf_height;
+    const float tile = g_pending_terrain_ghf_tile_size > 0.0f
+        ? g_pending_terrain_ghf_tile_size : 0.5f;
+    const auto& heights = g_pending_terrain_ghf_heights;
+    const bool have_terrain = gw > 0 && gh > 0 &&
+        heights.size() == size_t(gw) * size_t(gh);
+    auto sample_height = [&](float x, float z) {
+        if (!have_terrain) return 0.0f;
+        int ix = std::clamp(int(x / tile), 0, gw - 1);
+        int iz = std::clamp(int(z / tile), 0, gh - 1);
+        return heights[size_t(iz) * size_t(gw) + size_t(ix)];
+    };
+
+    for (const auto& placement : g_level_gdb_placements) {
+        const float wx = placement.x;
+        const float wy = sample_height(placement.x, placement.y) + 1.0f;
+        const float wz = placement.y;
+        const float dx = wx - g_flycam.pos[0];
+        const float dy = wy - g_flycam.pos[1];
+        const float dz = wz - g_flycam.pos[2];
+        const float view_x = dx * rx + dy * ry + dz * rz;
+        const float view_y = dx * ux + dy * uy + dz * uz;
+        const float view_z = dx * fx + dy * fy + dz * fz;
+        if (view_z <= 0.05f) continue;
+        const float ndc_x = view_x / (view_z * tan_half_fov * aspect);
+        const float ndc_y = view_y / (view_z * tan_half_fov);
+        if (ndc_x < -1.2f || ndc_x > 1.2f ||
+            ndc_y < -1.2f || ndc_y > 1.2f) continue;
+        ImVec2 point(origin.x + (ndc_x * 0.5f + 0.5f) * region.x,
+                     origin.y + (1.0f - (ndc_y * 0.5f + 0.5f)) * region.y);
+        const bool player_start = placement.marker == 0x00004B40u;
+        const float radius = player_start ? 4.0f : 2.5f;
+        dl->AddCircleFilled(point, radius,
+            player_start ? IM_COL32(255, 80, 80, 230)
+                         : IM_COL32(120, 220, 255, 180));
+        if (player_start) {
+            dl->AddCircle(point, radius + 1.0f,
+                          IM_COL32(0, 0, 0, 200), 12, 1.0f);
+            dl->AddText(ImVec2(point.x + radius + 4.0f, point.y - 7.0f),
+                        IM_COL32(255, 150, 150, 235), "Player start");
+        }
+    }
+}
+
+void draw_details_overlays_gl(const ImVec2& origin, const ImVec2& region);
+
 void draw_model_in_panel_gl() {
     ImVec2 region = ImGui::GetContentRegionAvail();
     ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -6942,7 +7048,279 @@ void draw_model_in_panel_gl() {
     ImGui::SetCursorScreenPos(ImVec2(origin.x + 14, origin.y + 46));
     ImGui::TextDisabled(S.terrain_mode ? "WASD/QE  move" : "Wheel  zoom  /  ESC  close");
 
+    if (S.terrain_mode) draw_gdb_placements_overlay_gl(origin, region);
     draw_materials_overlay_gl(origin, region, origin.y + 76.0f);
+    draw_details_overlays_gl(origin, region);
+}
+
+void draw_details_overlays_gl(const ImVec2& origin, const ImVec2& region) {
+    if (S.show_item_details && S.selected_item >= 0 &&
+        S.selected_item < (int)g_item_details.size() &&
+        !LevelEdit::Enabled()) {
+        const auto& it = g_item_details[(size_t)S.selected_item];
+        static unsigned int icon_tex = 0;
+        static uint32_t icon_for = 0xFFFFFFFFu;
+        static int icon_w = 0, icon_h = 0;
+        if (g_item_icon_dirty.exchange(false) || icon_for != it.record_hash) {
+            icon_for = it.record_hash;
+            if (icon_tex) glDeleteTextures(1, &icon_tex);
+            icon_tex = 0; icon_w = icon_h = 0;
+            std::vector<unsigned char> tex_buf;
+            std::vector<uint8_t> rgba;
+            bool has_alpha = false;
+            if (!it.icon_tex.empty() &&
+                build_any_tex_buffer_for_name(it.icon_tex, tex_buf, {}) &&
+                decode_tex_to_rgba(tex_buf, rgba, icon_w, icon_h,
+                                   &has_alpha, -1) && icon_w > 0 && icon_h > 0) {
+                icon_tex = create_gl_texture_from_rgba(
+                    icon_w, icon_h, rgba.data());
+            }
+        }
+        static float alpha = 0.30f;
+        constexpr float width = 300.0f, pad = 6.0f;
+        ImGui::SetNextWindowPos(
+            ImVec2(origin.x + region.x - width - pad, origin.y + pad));
+        ImGui::SetNextWindowSizeConstraints(
+            ImVec2(width, 0), ImVec2(width, std::max(200.0f, region.y - 12.0f)));
+        ImGui::SetNextWindowBgAlpha(alpha * 0.78f);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_AlwaysAutoResize;
+        if (ImGui::Begin("##item_details_overlay", nullptr, flags)) {
+            const ImVec2 wp = ImGui::GetWindowPos();
+            const ImVec2 ws = ImGui::GetWindowSize();
+            const ImVec2 mouse = ImGui::GetIO().MousePos;
+            bool hovered = mouse.x >= wp.x && mouse.x < wp.x + ws.x &&
+                           mouse.y >= wp.y && mouse.y < wp.y + ws.y;
+            static bool was_hovered = false;
+            if (!hovered && was_hovered && ImGui::GetIO().MouseDown[0])
+                hovered = true;
+            was_hovered = hovered;
+            const float target = hovered ? 1.0f : 0.30f;
+            alpha += (target - alpha) * 0.18f;
+            if (std::fabs(alpha - target) < 0.005f) alpha = target;
+            ImGui::TextColored(ImVec4(1, .9f, .5f, 1), "Item Details");
+            ImGui::Separator();
+            std::string name;
+            if (it.name_tag) TextBank::Lookup(it.name_tag, name);
+            if (name.empty()) name = it.label;
+            ImGui::TextColored(ImVec4(.65f, .85f, 1, 1), "%s", name.c_str());
+            if (icon_tex) {
+                float w = (float)icon_w, h = (float)icon_h;
+                if (std::max(w, h) > 80.0f) {
+                    float s = 80.0f / std::max(w, h); w *= s; h *= s;
+                }
+                ImGui::Image((ImTextureID)(intptr_t)icon_tex, ImVec2(w, h));
+            }
+            if (it.money >= 0) ImGui::Text("Value: %d gold", it.money);
+            std::string desc;
+            if (it.desc_tag) TextBank::Lookup(it.desc_tag, desc);
+            if (!desc.empty()) {
+                ImGui::Spacing(); ImGui::TextColored(
+                    ImVec4(.65f, .85f, 1, 1), "Description");
+                ImGui::PushTextWrapPos(0); ImGui::TextUnformatted(desc.c_str());
+                ImGui::PopTextWrapPos();
+            }
+            if (!it.stats.empty()) {
+                ImGui::Spacing(); ImGui::TextColored(
+                    ImVec4(.65f, .85f, 1, 1), "Stats");
+                if (ImGui::BeginTable("##item_stats", 2,
+                        ImGuiTableFlags_BordersInnerV |
+                        ImGuiTableFlags_RowBg)) {
+                    ImGui::TableSetupColumn("Field");
+                    ImGui::TableSetupColumn(
+                        "Value", ImGuiTableColumnFlags_WidthFixed, 84.0f);
+                    for (const auto& value : it.stats) {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextUnformatted(value.first.c_str());
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::TextUnformatted(value.second.c_str());
+                    }
+                    ImGui::EndTable();
+                }
+            }
+        }
+        ImGui::End(); ImGui::PopStyleVar();
+    }
+
+    if (S.show_entity_details && S.selected_entity >= 0 &&
+        S.selected_entity < (int)g_global_entity_catalog.size() &&
+        !LevelEdit::Enabled() &&
+        ContentTabs::ActiveKind() == ContentTabs::Kind::Entity) {
+        const auto& entity = g_global_entity_catalog[(size_t)S.selected_entity];
+        static float alpha = 0.30f;
+        constexpr float width = 350.0f, pad = 6.0f;
+        const float height = std::min(620.0f, std::max(180.0f, region.y - 12.0f));
+        ImGui::SetNextWindowPos(
+            ImVec2(origin.x + region.x - width - pad, origin.y + pad));
+        ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(alpha * 0.78f);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoScrollbar;
+        if (ImGui::Begin("##entity_details_overlay", nullptr, flags)) {
+            const ImVec2 wp = ImGui::GetWindowPos();
+            const ImVec2 ws = ImGui::GetWindowSize();
+            const ImVec2 mouse = ImGui::GetIO().MousePos;
+            bool hovered = mouse.x >= wp.x && mouse.x < wp.x + ws.x &&
+                           mouse.y >= wp.y && mouse.y < wp.y + ws.y;
+            static bool was_hovered = false;
+            if (!hovered && was_hovered && ImGui::GetIO().MouseDown[0])
+                hovered = true;
+            was_hovered = hovered;
+            const float target = hovered ? 1.0f : 0.30f;
+            alpha += (target - alpha) * 0.18f;
+            if (std::fabs(alpha - target) < 0.005f) alpha = target;
+            ImGui::TextColored(ImVec4(1, .9f, .5f, 1), "Entity Details");
+            ImGui::Separator();
+            ImGui::BeginChild("##entity_details_scroll");
+            const std::string& name = entity.display_name.empty()
+                ? entity.name : entity.display_name;
+            ImGui::TextColored(ImVec4(.65f, .85f, 1, 1), "%s", name.c_str());
+            if (S.dev_mode) {
+                if (!entity.display_name.empty() &&
+                    entity.display_name != entity.name)
+                    ImGui::TextDisabled("Internal: %s", entity.name.c_str());
+                ImGui::TextDisabled("Entity 0x%08X", entity.entity_hash);
+            }
+
+            static uint32_t cached_entity = 0;
+            static uint64_t cached_bindings = 0;
+            static uint64_t cached_catalog = 0;
+            static size_t cached_clips = 0;
+            static std::string anim_filter;
+            static std::vector<std::pair<size_t, std::string>> animations;
+            const uint64_t bindings = Anim::model_animation_binding_revision();
+            if (cached_entity != entity.entity_hash ||
+                cached_bindings != bindings ||
+                cached_catalog != g_global_entity_catalog_revision ||
+                cached_clips != S.anim_clips.size()) {
+                animations.clear();
+                anim_filter.clear();
+                std::unordered_set<size_t> seen;
+                const std::unordered_set<uint32_t> models(
+                    entity.model_hashes.begin(), entity.model_hashes.end());
+                for (const auto& binding : Anim::model_animation_bindings()) {
+                    if (!models.count(binding.model_path_hash) ||
+                        binding.clip_index >= S.anim_clips.size() ||
+                        !seen.insert(binding.clip_index).second)
+                        continue;
+                    std::string anim_name = binding.animation_name.empty()
+                        ? binding.source_name : binding.animation_name;
+                    if (anim_name.empty())
+                        anim_name = S.anim_clips[binding.clip_index].name;
+                    animations.emplace_back(
+                        binding.clip_index, std::move(anim_name));
+                }
+                cached_entity = entity.entity_hash;
+                cached_bindings = bindings;
+                cached_catalog = g_global_entity_catalog_revision;
+                cached_clips = S.anim_clips.size();
+            }
+
+            ImGui::Spacing(); ImGui::Separator();
+            ImGui::TextColored(ImVec4(.55f, .9f, 1, 1),
+                               "Animations (%zu)", animations.size());
+            if (animations.empty()) {
+                ImGui::TextDisabled("None indexed");
+            } else {
+                ImGui::SetNextItemWidth(-1.0f);
+                ImGui::InputTextWithHint("##entity_animation_filter",
+                    "Filter animations...", &anim_filter);
+                std::string needle = anim_filter;
+                std::transform(needle.begin(), needle.end(),
+                               needle.begin(), ::tolower);
+                std::vector<size_t> visible;
+                for (size_t i = 0; i < animations.size(); ++i) {
+                    std::string candidate = animations[i].second;
+                    std::transform(candidate.begin(), candidate.end(),
+                                   candidate.begin(), ::tolower);
+                    if (needle.empty() ||
+                        candidate.find(needle) != std::string::npos)
+                        visible.push_back(i);
+                }
+                auto& player = Anim::global_player();
+                const Anim::AnimClip* current = player.clip();
+                if (current) {
+                    const bool playing =
+                        player.state() == Anim::AnimPlayer::State::Playing;
+                    const bool paused =
+                        player.state() == Anim::AnimPlayer::State::Paused;
+                    if (UI::icon_button("##entity_anim_stop", ICON_FA_STOP,
+                                        26.0f, false))
+                        player.stop();
+                    ImGui::SameLine();
+                    if (UI::icon_button("##entity_anim_play",
+                            playing ? ICON_FA_PAUSE : ICON_FA_PLAY,
+                            30.0f, true)) {
+                        if (playing) player.pause();
+                        else if (paused) player.resume();
+                        else player.play(current, player.is_loop());
+                    }
+                    ImGui::SameLine();
+                    if (UI::icon_button("##entity_anim_loop", ICON_FA_REPEAT,
+                            26.0f, false, player.is_loop()))
+                        player.set_loop(!player.is_loop());
+                    float time = player.time();
+                    ImGui::SetNextItemWidth(-1.0f);
+                    if (ImGui::SliderFloat("##entity_anim_time", &time, 0.0f,
+                            std::max(Anim::clip_duration_seconds(*current),
+                                     0.001f), "%.2fs"))
+                        player.seek(time);
+                } else {
+                    ImGui::TextDisabled("Select an animation to play it");
+                }
+                const float list_h = std::min(
+                    240.0f, std::max(100.0f,
+                                     ImGui::GetContentRegionAvail().y));
+                ImGui::BeginChild("##entity_animation_list",
+                                  ImVec2(0.0f, list_h), false);
+                ImGuiListClipper clipper;
+                clipper.Begin((int)visible.size());
+                while (clipper.Step()) {
+                    for (int row = clipper.DisplayStart;
+                         row < clipper.DisplayEnd; ++row) {
+                        const auto& animation =
+                            animations[visible[(size_t)row]];
+                        char label[192];
+                        std::snprintf(label, sizeof(label), "%s  (%.2fs)",
+                            animation.second.c_str(),
+                            Anim::clip_duration_seconds(
+                                S.anim_clips[animation.first]));
+                        ImGui::PushID(row);
+                        if (ImGui::Selectable(label,
+                                S.anim_selected_clip ==
+                                    (int)animation.first)) {
+                            S.anim_selected_clip = (int)animation.first;
+                            player.play(&S.anim_clips[animation.first],
+                                        player.is_loop());
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                clipper.End();
+                ImGui::EndChild();
+            }
+            ImGui::Spacing(); ImGui::Separator();
+            ImGui::TextColored(ImVec4(.55f, .9f, 1, 1), "Model parts");
+            if (entity.model_hashes.empty()) ImGui::TextDisabled("None");
+            for (uint32_t hash : entity.model_hashes) {
+                const FlatAssetEntry* match = FindGlobalModelAssetByPathHash(hash);
+                if (match) ImGui::BulletText("%s", match->full_path.c_str());
+                else ImGui::BulletText("Unresolved model 0x%08X", hash);
+            }
+            const auto gameplay = g_global_entity_gameplay.find(entity.entity_hash);
+            if (gameplay != g_global_entity_gameplay.end())
+                draw_entity_gameplay_details(gameplay->second, false);
+            ImGui::EndChild();
+        }
+        ImGui::End(); ImGui::PopStyleVar();
+    }
 }
 
 void draw_texture_popout_gl() {

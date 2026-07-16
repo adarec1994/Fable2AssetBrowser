@@ -73,6 +73,10 @@ char g_npc_creation_filter[128]{};
 char g_npc_instance_filter[128]{};
 
 constexpr float kNodeContentWidth = 500.0f;
+// Detail lines rendered on the node itself; the rest collapse into a
+// "+N more" line (the inspector shows everything). Keep in sync with
+// kVisibleDetailLimit in QuestStoryGraph.cpp so layout heights match.
+constexpr std::size_t kMaxVisibleNodeDetails = 12;
 
 Quest::AuthoredQuest* active_authored_quest() {
     if (g_active_authored_quest < 0 ||
@@ -171,8 +175,8 @@ void ensure_editor() {
     config.CanvasSizeMode = ed::CanvasSizeMode::CenterOnly;
     g_editor = ed::CreateEditor(&config);
     ed::SetCurrentEditor(g_editor);
-    ed::GetStyle().SourceDirection = ImVec2(0.0f, 1.0f);
-    ed::GetStyle().TargetDirection = ImVec2(0.0f, -1.0f);
+    ed::GetStyle().SourceDirection = ImVec2(1.0f, 0.0f);
+    ed::GetStyle().TargetDirection = ImVec2(-1.0f, 0.0f);
     ed::SetCurrentEditor(nullptr);
 }
 
@@ -188,6 +192,41 @@ void reset_editor() {
     g_focus_quest_requested = !g_initial_view_all;
 }
 
+// UE5-style exec pin: a right-pointing triangle on the node's header row,
+// input on the left edge, output on the right edge.
+void draw_exec_pin_triangle(bool hovered) {
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    const ImU32 colour = hovered ? IM_COL32(255, 210, 95, 255)
+                                 : IM_COL32(205, 225, 240, 255);
+    ImGui::GetWindowDrawList()->AddTriangleFilled(
+        ImVec2(min.x + 4.0f, min.y + 3.0f),
+        ImVec2(max.x - 3.0f, (min.y + max.y) * 0.5f),
+        ImVec2(min.x + 4.0f, max.y - 3.0f),
+        colour);
+}
+
+constexpr float kExecPinSize = 18.0f;
+
+void draw_input_pin(int id, float content_x) {
+    ImGui::SetCursorPosX(content_x);
+    ed::BeginPin(input_pin_id(id), ed::PinKind::Input);
+    ed::PinPivotAlignment(ImVec2(0.0f, 0.5f));
+    ImGui::InvisibleButton("##exec_input", ImVec2(kExecPinSize, kExecPinSize));
+    draw_exec_pin_triangle(ImGui::IsItemHovered());
+    ed::EndPin();
+}
+
+void draw_output_pin(int id, float content_x) {
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(content_x + kNodeContentWidth - kExecPinSize);
+    ed::BeginPin(output_pin_id(id), ed::PinKind::Output);
+    ed::PinPivotAlignment(ImVec2(1.0f, 0.5f));
+    ImGui::InvisibleButton("##exec_output", ImVec2(kExecPinSize, kExecPinSize));
+    draw_exec_pin_triangle(ImGui::IsItemHovered());
+    ed::EndPin();
+}
+
 void draw_node(const Quest::GraphNode& node) {
     const ed::NodeId id = node_id(node.id);
     ed::PushStyleColor(ed::StyleColor_NodeBg, node_color(node.kind));
@@ -197,23 +236,28 @@ void draw_node(const Quest::GraphNode& node) {
     ImGui::PushID(node.id);
 
     const float content_x = ImGui::GetCursorPosX();
-    ImGui::SetCursorPosX(content_x + kNodeContentWidth * 0.5f - 4.0f);
-    ed::BeginPin(input_pin_id(node.id), ed::PinKind::Input);
-    ed::PinPivotAlignment(ImVec2(0.5f, 0.0f));
-    ImGui::Dummy(ImVec2(8.0f, 4.0f));
-    ed::EndPin();
-    ImGui::SetCursorPosX(content_x);
+    draw_input_pin(node.id, content_x);
+    ImGui::SameLine();
     ImGui::TextColored(ImVec4(0.76f, 0.82f, 0.92f, 1.0f), "%s",
                        node.badge.empty() ? Quest::NodeKindName(node.kind)
                                           : node.badge.c_str());
+    draw_output_pin(node.id, content_x);
 
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + kNodeContentWidth);
+    ImGui::SetCursorPosX(content_x);
+    ImGui::PushTextWrapPos(content_x + kNodeContentWidth);
     ImGui::TextUnformatted(node.title.c_str());
     if (!node.subtitle.empty()) {
         ImGui::TextDisabled("%s", node.subtitle.c_str());
     }
     ImGui::Separator();
+    std::size_t shown = 0;
     for (const std::string& detail : node.details) {
+        if (shown == kMaxVisibleNodeDetails) {
+            ImGui::TextDisabled(
+                "+ %zu more - select the node to view everything",
+                node.details.size() - shown);
+            break;
+        }
         const bool indented = detail.rfind("   ", 0) == 0 ||
                               detail.rfind("  ", 0) == 0;
         const bool dialogue = indented &&
@@ -228,18 +272,12 @@ void draw_node(const Quest::GraphNode& node) {
         } else {
             ImGui::TextWrapped("%s", detail.c_str());
         }
+        ++shown;
     }
     ImGui::PopTextWrapPos();
 
-
-
     ImGui::SetCursorPosX(content_x);
     ImGui::Dummy(ImVec2(kNodeContentWidth, 1.0f));
-    ImGui::SetCursorPosX(content_x + kNodeContentWidth * 0.5f - 4.0f);
-    ed::BeginPin(output_pin_id(node.id), ed::PinKind::Output);
-    ed::PinPivotAlignment(ImVec2(0.5f, 1.0f));
-    ImGui::Dummy(ImVec2(8.0f, 4.0f));
-    ed::EndPin();
 
     ImGui::PopID();
     ed::EndNode();
@@ -248,47 +286,6 @@ void draw_node(const Quest::GraphNode& node) {
     if (g_apply_layout) {
         ed::SetNodePosition(id, ImVec2(node.x, node.y));
     }
-}
-
-void draw_input_pin(int id, float content_x) {
-    constexpr float pin_width = 26.0f;
-    constexpr float pin_height = 18.0f;
-    ImGui::SetCursorPosX(content_x + kNodeContentWidth * 0.5f -
-                         pin_width * 0.5f);
-    ed::BeginPin(input_pin_id(id), ed::PinKind::Input);
-    ed::PinPivotAlignment(ImVec2(0.5f, 0.0f));
-    ImGui::InvisibleButton("##exec_input", ImVec2(pin_width, pin_height));
-    const ImVec2 min = ImGui::GetItemRectMin();
-    const bool hovered = ImGui::IsItemHovered();
-    const ImU32 colour = hovered ? IM_COL32(255, 210, 95, 255)
-                                 : IM_COL32(205, 225, 240, 255);
-    ImGui::GetWindowDrawList()->AddTriangleFilled(
-        ImVec2(min.x + 7.0f, min.y + 4.0f),
-        ImVec2(min.x + pin_width - 7.0f, min.y + 4.0f),
-        ImVec2(min.x + pin_width * 0.5f, min.y + pin_height - 3.0f),
-        colour);
-    ed::EndPin();
-    ImGui::SetCursorPosX(content_x);
-}
-
-void draw_output_pin(int id, float content_x) {
-    constexpr float pin_width = 26.0f;
-    constexpr float pin_height = 18.0f;
-    ImGui::SetCursorPosX(content_x + kNodeContentWidth * 0.5f -
-                         pin_width * 0.5f);
-    ed::BeginPin(output_pin_id(id), ed::PinKind::Output);
-    ed::PinPivotAlignment(ImVec2(0.5f, 1.0f));
-    ImGui::InvisibleButton("##exec_output", ImVec2(pin_width, pin_height));
-    const ImVec2 min = ImGui::GetItemRectMin();
-    const bool hovered = ImGui::IsItemHovered();
-    const ImU32 colour = hovered ? IM_COL32(255, 210, 95, 255)
-                                 : IM_COL32(205, 225, 240, 255);
-    ImGui::GetWindowDrawList()->AddTriangleFilled(
-        ImVec2(min.x + 7.0f, min.y + 3.0f),
-        ImVec2(min.x + pin_width - 7.0f, min.y + 3.0f),
-        ImVec2(min.x + pin_width * 0.5f, min.y + pin_height - 4.0f),
-        colour);
-    ed::EndPin();
 }
 
 std::string story_milestone_display_name(
@@ -838,8 +835,13 @@ void draw_authored_node(const Quest::AuthoredQuest& quest,
     ImGui::PushID(node.id);
     const float content_x = ImGui::GetCursorPosX();
     draw_input_pin(node.id, content_x);
+    ImGui::SameLine();
     ImGui::TextColored(ImVec4(0.76f, 0.82f, 0.92f, 1.0f), "%s",
                        authored_node_badge(node.kind));
+    if (node.kind != Quest::AuthoredNodeKind::CompleteQuest) {
+        draw_output_pin(node.id, content_x);
+    }
+    ImGui::SetCursorPosX(content_x);
     ImGui::TextUnformatted(
         node.kind == Quest::AuthoredNodeKind::QuestStart
             ? quest.quest_title.c_str()
@@ -852,9 +854,6 @@ void draw_authored_node(const Quest::AuthoredQuest& quest,
     }
     ImGui::SetCursorPosX(content_x);
     ImGui::Dummy(ImVec2(kNodeContentWidth, 1.0f));
-    if (node.kind != Quest::AuthoredNodeKind::CompleteQuest) {
-        draw_output_pin(node.id, content_x);
-    }
     ImGui::PopID();
     ed::EndNode();
     ed::PopStyleColor(2);
@@ -3003,9 +3002,9 @@ void DrawNodeView() {
             const ImVec2 from_size = ed::GetNodeSize(node_id(source->id));
             const ImVec2 to_size = ed::GetNodeSize(node_id(target->id));
             const ImVec2 canvas(
-                (from.x + from_size.x * 0.5f +
-                 to.x + to_size.x * 0.5f) * 0.5f,
-                (from.y + from_size.y + to.y) * 0.5f);
+                (from.x + from_size.x + to.x) * 0.5f,
+                (from.y + from_size.y * 0.5f +
+                 to.y + to_size.y * 0.5f) * 0.5f);
             const ImVec2 screen = ed::CanvasToScreen(canvas);
             const ImVec2 size = ImGui::CalcTextSize(label.text.c_str());
             const ImU32 fill = ImGui::ColorConvertFloat4ToU32(
@@ -3046,8 +3045,8 @@ void DrawNodeView() {
             std::sort(opening.begin(), opening.end(),
                       [](const Quest::GraphNode* a,
                          const Quest::GraphNode* b) {
-                          if (a->y != b->y) return a->y < b->y;
-                          return a->x < b->x;
+                          if (a->x != b->x) return a->x < b->x;
+                          return a->y < b->y;
                       });
         }
         ed::ClearSelection();

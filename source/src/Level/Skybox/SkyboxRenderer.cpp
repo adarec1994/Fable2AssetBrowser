@@ -2078,4 +2078,10 @@ void DrawClouds(ID3D11DeviceContext* context,
 
 }
 
+#else
+
+namespace Skybox {
+void DebugLog(const char*) {}
+}
+
 #endif

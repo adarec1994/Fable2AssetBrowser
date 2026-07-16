@@ -527,11 +527,11 @@ end
     assert(has_link(gender_story, male_branch->id, gender_continue->id));
     assert(has_link(gender_story, female_branch->id, gender_continue->id));
     assert(!has_link(gender_story, male_branch->id, female_branch->id));
-    assert(female_branch->x - male_branch->x >= 700.0f);
-    assert(male_branch->y == female_branch->y);
+    assert(male_branch->x == female_branch->x);
+    assert(female_branch->y > male_branch->y);
     assert(gender_continue->x > male_branch->x);
-    assert(gender_continue->x < female_branch->x);
     assert(gender_continue->y > male_branch->y);
+    assert(gender_continue->y < female_branch->y);
 
     const char* choice_source = R"LUA(
 QuestManager.NewQuestThread("QChoice")
@@ -577,13 +577,13 @@ end
     assert(choice && kind_path && cruel_path && after_choice);
     assert(has_link_label(choice_story, choice->id, kind_path->id, "Path 1"));
     assert(has_link_label(choice_story, choice->id, cruel_path->id, "Path 2"));
-    assert(kind_path->y == cruel_path->y);
-    assert(cruel_path->x - kind_path->x >= 700.0f);
+    assert(kind_path->x == cruel_path->x);
+    assert(cruel_path->y > kind_path->y);
     assert(has_link(choice_story, kind_path->id, after_choice->id));
     assert(has_link(choice_story, cruel_path->id, after_choice->id));
     assert(after_choice->x > kind_path->x);
-    assert(after_choice->x < cruel_path->x);
     assert(after_choice->y > kind_path->y);
+    assert(after_choice->y < cruel_path->y);
 
     const char* frankenbride_source = R"LUA(
 QuestManager.NewQuestThread("QO570_FrankenBride")
@@ -634,8 +634,9 @@ end
     assert(timer_male && timer_female);
     assert(has_detail(*timer_male, "Please leave."));
     assert(has_detail(*timer_female, "Please go."));
-    assert(good_ending->x < ending_choice->x);
+    assert(good_ending->x > ending_choice->x);
     assert(evil_ending->x > ending_choice->x);
+    assert(good_ending->y != evil_ending->y);
     assert(has_link_label(frankenbride_story, ending_choice->id,
                           ending_choice->id + 1, "Yes - leave"));
     assert(has_link_label(frankenbride_story, ending_choice->id,

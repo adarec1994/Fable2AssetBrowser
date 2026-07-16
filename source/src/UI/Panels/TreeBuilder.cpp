@@ -4,7 +4,7 @@
 #include "../../Utilities/Utils.h"
 #include "../../BNKCore.cpp"
 #include "../../ISO/IsoMount.h"
-#include "../../Level/LevelLoader.h"
+#include "../../Level/Core/LevelLoader.h"
 #include "imgui.h"
 #include <filesystem>
 #include <algorithm>
@@ -69,6 +69,7 @@ void start_tree_build_for_root(const std::string& root_dir,
     g_tree_build_start_time = (float)ImGui::GetTime();
     g_tree_root.children.clear();
     g_tree_done_units.store(0);
+    S.selected_quest = -1;
 
     const int anim_name_units = S.anim_clips.empty() ? 0 : 1;
     g_tree_total_units.store((int)bnk_paths.size() + anim_name_units);
@@ -98,6 +99,9 @@ void start_tree_build_for_root(const std::string& root_dir,
         if (!root_snapshot.empty()) {
             try {
                 Level::BuildGlobalItemCatalog();
+            } catch (...) {  }
+            try {
+                Level::BuildGlobalEntityCatalog();
             } catch (...) {  }
         }
 
@@ -145,9 +149,14 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
     S.all_mdl_files.clear();
     S.all_tex_files.clear();
     S.all_wav_files.clear();
+    S.all_gdb_files.clear();
+    S.all_save_files.clear();
     S.all_anim_files.clear();
     S.all_level_files.clear();
     S.all_heightfield_files.clear();
+    S.all_quest_files.clear();
+
+    std::unordered_map<std::string, size_t> quest_by_path;
 
     auto is_header_bnk = [](const std::string& bnk_path) -> bool {
         std::string lower_path = bnk_path;
@@ -175,12 +184,59 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
         return true;
     };
 
-    auto add_to_tree = [&root, &ends_with_ci](const std::string& path, const std::string& bnk_source,
+    auto quest_source_rank = [](std::string bnk_path) -> int {
+        std::replace(bnk_path.begin(), bnk_path.end(), '\\', '/');
+        const size_t slash = bnk_path.find_last_of('/');
+        if (slash != std::string::npos) bnk_path.erase(0, slash + 1);
+        std::transform(bnk_path.begin(), bnk_path.end(), bnk_path.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        if (bnk_path == "gamescripts.bnk") return 3;
+        if (bnk_path == "gamescripts_r.bnk") return 2;
+        return 1;
+    };
+
+    auto add_to_tree = [&root, &ends_with_ci, &quest_by_path,
+                        &quest_source_rank](const std::string& path, const std::string& bnk_source,
                                int bnk_index, uint32_t file_size, bool is_nested = false) {
 
         std::string leaf;
         size_t slash = path.find_last_of("/\\");
         leaf = (slash == std::string::npos) ? path : path.substr(slash + 1);
+
+        if (ends_with_ci(leaf, ".lua")) {
+            std::string normalized = path;
+            std::replace(normalized.begin(), normalized.end(), '\\', '/');
+            std::transform(normalized.begin(), normalized.end(),
+                           normalized.begin(),
+                           [](unsigned char c) {
+                               return char(std::tolower(c));
+                           });
+            const bool is_quest =
+                normalized.rfind("scripts/quests/", 0) == 0 ||
+                normalized.find("/scripts/quests/") != std::string::npos;
+            if (is_quest) {
+                FlatAssetEntry candidate;
+                candidate.name = leaf;
+                candidate.full_path = path;
+                candidate.bnk_path = bnk_source;
+                candidate.file_index = bnk_index;
+                candidate.size = file_size;
+                candidate.from_nested = is_nested;
+
+                auto [it, inserted] = quest_by_path.emplace(
+                    normalized, S.all_quest_files.size());
+                if (inserted) {
+                    S.all_quest_files.push_back(std::move(candidate));
+                } else {
+                    FlatAssetEntry& current = S.all_quest_files[it->second];
+                    if (quest_source_rank(candidate.bnk_path) >
+                        quest_source_rank(current.bnk_path)) {
+                        current = std::move(candidate);
+                    }
+                }
+            }
+        }
+
         if (ends_with_ci(leaf, ".mdl")) {
             FlatAssetEntry e;
             e.name = leaf;
@@ -208,6 +264,24 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
             e.size = file_size;
             e.from_nested = is_nested;
             S.all_wav_files.push_back(std::move(e));
+        } else if (ends_with_ci(leaf, ".gdb")) {
+            FlatAssetEntry e;
+            e.name = leaf;
+            e.full_path = path;
+            e.bnk_path = bnk_source;
+            e.file_index = bnk_index;
+            e.size = file_size;
+            e.from_nested = is_nested;
+            S.all_gdb_files.push_back(std::move(e));
+        } else if (ends_with_ci(leaf, ".save")) {
+            FlatAssetEntry e;
+            e.name = leaf;
+            e.full_path = path;
+            e.bnk_path = bnk_source;
+            e.file_index = bnk_index;
+            e.size = file_size;
+            e.from_nested = is_nested;
+            S.all_save_files.push_back(std::move(e));
         } else if (ends_with_ci(leaf, ".anim")) {
             FlatAssetEntry e;
             e.name = leaf;
@@ -403,7 +477,24 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
     std::sort(S.all_mdl_files.begin(), S.all_mdl_files.end(), cmp_ci);
     std::sort(S.all_tex_files.begin(), S.all_tex_files.end(), cmp_ci);
     std::sort(S.all_wav_files.begin(), S.all_wav_files.end(), cmp_ci);
+    std::sort(S.all_gdb_files.begin(), S.all_gdb_files.end(), cmp_ci);
+    std::sort(S.all_save_files.begin(), S.all_save_files.end(), cmp_ci);
     std::sort(S.all_anim_files.begin(), S.all_anim_files.end(), cmp_ci);
+    std::sort(S.all_quest_files.begin(), S.all_quest_files.end(),
+              [](const FlatAssetEntry& a, const FlatAssetEntry& b) {
+                  std::string x = a.name;
+                  std::string y = b.name;
+                  std::transform(x.begin(), x.end(), x.begin(),
+                                 [](unsigned char c) {
+                                     return char(std::tolower(c));
+                                 });
+                  std::transform(y.begin(), y.end(), y.begin(),
+                                 [](unsigned char c) {
+                                     return char(std::tolower(c));
+                                 });
+                  if (x != y) return x < y;
+                  return a.full_path < b.full_path;
+              });
 
     {
         std::ostringstream os;
@@ -412,7 +503,10 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
            << S.all_mdl_files.size() << " mdl, "
            << S.all_tex_files.size() << " tex, "
            << S.all_wav_files.size() << " wav, "
-           << S.all_anim_files.size() << " anim";
+           << S.all_gdb_files.size() << " gdb, "
+           << S.all_save_files.size() << " save, "
+           << S.all_anim_files.size() << " anim, "
+           << S.all_quest_files.size() << " quest scripts";
         OutputLog::info(os.str());
     }
 

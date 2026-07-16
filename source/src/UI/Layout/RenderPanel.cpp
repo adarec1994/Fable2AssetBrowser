@@ -1,13 +1,15 @@
 #include "RenderPanel.h"
 #include "../../Utilities/State.h"
 #include "../ModelPreview.h"
+#include "../EntityModelResolver.h"
+#include "../ContentTabs.h"
 #include "../../textures/export/TextureExport.h"
-#include "../../Level/TerrainTextureRegistry.h"
-#include "../../Level/EhfLodThumbnails.h"
-#include "../../Level/TerrainEdit.h"
-#include "../../Level/LevelEdit.h"
-#include "../../Level/LevelLoader.h"
-#include "../../Level/TextBank.h"
+#include "../../Level/Terrain/TerrainTextureRegistry.h"
+#include "../../Level/Terrain/EhfLodThumbnails.h"
+#include "../../Level/Terrain/TerrainEdit.h"
+#include "../../Level/Editing/LevelEdit.h"
+#include "../../Level/Core/LevelLoader.h"
+#include "../../Level/Database/TextBank.h"
 #include "../../textures/TexParser.h"
 #include "../../Utilities/DebugTrace.h"
 #include "../LevelGizmo.h"
@@ -18,6 +20,7 @@
 #include "../IconButton.h"
 #include "IconsFontAwesome6.h"
 #include "../OutputLog.h"
+#include "../Quest/QuestNodeView.h"
 
 #include "imgui.h"
 #include "imgui_stdlib.h"
@@ -38,6 +41,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <unordered_map>
 #include <unordered_set>
 
 #ifdef _WIN32
@@ -59,6 +63,16 @@ extern std::atomic<bool> g_item_icon_dirty;
 bool spawn_level_model_at(ID3D11Device* device,
                           const std::string& model_path,
                           const float engine_pos[3]);
+bool append_level_entity_model_at(
+    ID3D11Device* device,
+    const std::vector<uint32_t>& model_hashes,
+    size_t marker_index,
+    const float engine_pos[3]);
+int spawn_level_container_at(
+    ID3D11Device* device,
+    const std::string& model_path,
+    const float engine_pos[3],
+    const LevelEdit::ContainerTemplateInfo& info);
 #endif
 
 bool g_skel_overlay_show = false;
@@ -115,6 +129,11 @@ namespace UI {
 
     namespace {
 
+static void draw_entity_gameplay_details(
+    const Gdb::EntityGameplayDetails& details,
+    bool show_entity_name = true);
+static void draw_property_details(const Gdb::PropertyDetails& details);
+
 void draw_placeholder() {
 
     ImVec2 region = ImGui::GetContentRegionAvail();
@@ -124,6 +143,78 @@ void draw_placeholder() {
                       ImVec2(origin.x + region.x, origin.y + region.y),
                       IM_COL32(20, 22, 28, 255));
     ImGui::Dummy(region);
+}
+
+void draw_item_tab_content() {
+    ImVec2 region = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddRectFilled(
+        origin, ImVec2(origin.x + region.x, origin.y + region.y),
+        IM_COL32(20, 22, 28, 255));
+
+    ImGui::BeginChild("##item_tab_content", region, false);
+    if (S.selected_item < 0 ||
+        S.selected_item >= static_cast<int>(g_item_details.size())) {
+        ImGui::TextDisabled("Item data is no longer available.");
+        ImGui::EndChild();
+        return;
+    }
+    const Gdb::ItemDetail& item =
+        g_item_details[static_cast<std::size_t>(S.selected_item)];
+    std::string name;
+    if (item.name_tag) TextBank::Lookup(item.name_tag, name);
+    if (name.empty()) {
+        name = item.display_name.empty() ? item.label : item.display_name;
+    }
+    ImGui::TextColored(ImVec4(0.65f, 0.85f, 1.0f, 1.0f), "%s",
+                       name.c_str());
+    if (item.money >= 0) ImGui::Text("Value: %d gold", item.money);
+
+    std::string description;
+    if (item.desc_tag) TextBank::Lookup(item.desc_tag, description);
+    if (!description.empty()) {
+        ImGui::Spacing();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(description.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    if (!item.stats.empty()) {
+        ImGui::Spacing();
+        ImGui::SeparatorText("Stats");
+        for (const auto& stat : item.stats) {
+            ImGui::Text("%s: %s", stat.first.c_str(), stat.second.c_str());
+        }
+    }
+    ImGui::EndChild();
+}
+
+void draw_entity_tab_content() {
+    ImVec2 region = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddRectFilled(
+        origin, ImVec2(origin.x + region.x, origin.y + region.y),
+        IM_COL32(20, 22, 28, 255));
+
+    ImGui::BeginChild("##entity_tab_content", region, false);
+    if (S.selected_entity < 0 ||
+        S.selected_entity >=
+            static_cast<int>(g_global_entity_catalog.size())) {
+        ImGui::TextDisabled("Entity data is no longer available.");
+        ImGui::EndChild();
+        return;
+    }
+    const auto& entity =
+        g_global_entity_catalog[static_cast<std::size_t>(S.selected_entity)];
+    ImGui::TextColored(ImVec4(0.65f, 0.85f, 1.0f, 1.0f), "%s",
+                       (entity.display_name.empty() ? entity.name
+                                                    : entity.display_name)
+                           .c_str());
+    ImGui::TextDisabled("No renderable model was found for this entity.");
+    const auto gameplay = g_global_entity_gameplay.find(entity.entity_hash);
+    if (gameplay != g_global_entity_gameplay.end()) {
+        draw_entity_gameplay_details(gameplay->second);
+    }
+    ImGui::EndChild();
 }
 
 bool is_adjacent_terrain_mesh_name(const std::string& name)
@@ -183,42 +274,7 @@ std::string clean_level_material_name(std::string name)
     return name.empty() ? std::string("(unnamed)") : name;
 }
 
-void draw_lua_in_panel() {
-    ImVec2 region = ImGui::GetContentRegionAvail();
-    ImVec2 origin = ImGui::GetCursorScreenPos();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(origin,
-                      ImVec2(origin.x + region.x, origin.y + region.y),
-                      IM_COL32(18, 18, 22, 255));
-
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.92f, 0.70f, 1.0f));
-    ImGui::TextUnformatted(S.lua_preview_title.empty()
-                               ? "(no script)"
-                               : S.lua_preview_title.c_str());
-    ImGui::PopStyleColor();
-
-    {
-        const float pad      = ImGui::GetStyle().FramePadding.x * 2.0f;
-        const float copy_w   = ImGui::CalcTextSize("Copy").x  + pad + 8.0f;
-        const float close_w  = ImGui::CalcTextSize("Close").x + pad + 8.0f;
-        const float gap      = 6.0f;
-        const float total_w  = copy_w + close_w + gap;
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x +
-                        ImGui::GetCursorPosX() - total_w);
-        const bool can_copy = !S.lua_preview_loading &&
-                              !S.lua_preview_content.empty();
-        ImGui::BeginDisabled(!can_copy);
-        if (ImGui::SmallButton("Copy##lua_render")) {
-            ImGui::SetClipboardText(S.lua_preview_content.c_str());
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine(0.0f, gap);
-        if (ImGui::SmallButton("Close##lua_render")) {
-            S.show_lua_render = false;
-        }
-    }
-    ImGui::Separator();
-
+void draw_lua_source() {
     if (S.lua_preview_loading) {
         ImGui::TextDisabled("Decompiling...");
         return;
@@ -240,6 +296,51 @@ void draw_lua_in_panel() {
         sz,
         ImGuiInputTextFlags_ReadOnly);
     ImGui::PopStyleColor(4);
+}
+
+void draw_lua_in_panel() {
+    ImVec2 region = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(origin,
+                      ImVec2(origin.x + region.x, origin.y + region.y),
+                      IM_COL32(18, 18, 22, 255));
+
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.92f, 0.70f, 1.0f));
+    ImGui::TextUnformatted(S.lua_preview_title.empty()
+                               ? "(no script)"
+                               : S.lua_preview_title.c_str());
+    ImGui::PopStyleColor();
+
+    ImGui::Separator();
+
+    if (!S.lua_preview_is_quest) {
+        draw_lua_source();
+        return;
+    }
+
+    if (ImGui::BeginTabBar("##quest_preview_tabs")) {
+        const bool authored = QuestUI::IsAuthoredQuestActive();
+        const ImGuiTabItemFlags node_flags =
+            S.quest_preview_select_nodes
+                ? ImGuiTabItemFlags_SetSelected
+                : ImGuiTabItemFlags_None;
+        if (ImGui::BeginTabItem(authored ? "Quest Flow" : "Node View",
+                                nullptr, node_flags)) {
+            if (S.lua_preview_loading) {
+                ImGui::TextDisabled("Decompiling and building quest graph...");
+            } else {
+                QuestUI::DrawNodeView();
+            }
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Lua Script")) {
+            draw_lua_source();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    S.quest_preview_select_nodes = false;
 }
 
 void draw_gdb_in_panel() {
@@ -558,6 +659,7 @@ void draw_texture_in_panel(ID3D11Device* device) {
 
 void apply_orbit_to_flycam() {
     float r = std::max(g_mp.radius, 0.5f) * std::max(S.cam_dist, 0.1f);
+    const float target_y = g_mp.center[1] + S.cam_target_offset_y;
     float yaw   = S.cam_yaw;
     float pitch = S.cam_pitch;
     float cy = cosf(pitch);
@@ -566,7 +668,7 @@ void apply_orbit_to_flycam() {
     float sx = sinf(yaw);
 
     g_flycam.pos[0] = g_mp.center[0] + r * cy * sx;
-    g_flycam.pos[1] = g_mp.center[1] + r * sy;
+    g_flycam.pos[1] = target_y + r * sy;
     g_flycam.pos[2] = g_mp.center[2] + r * cy * cx;
 
     g_flycam.yaw   = yaw + 3.14159265f;
@@ -716,19 +818,752 @@ static int g_sel_spawn_marker = -1;
 static int g_sel_pending_sp = -1;
 static int g_sel_pending_gen = -1;
 static bool g_marker_clear_selection = false;
+static bool g_add_menu_requested = false;
+static float g_add_menu_requested_pos[3] = {0, 0, 0};
 
-static void draw_spawn_markers_overlay(const ImVec2& origin,
-                                       const ImVec2& region)
+static bool level_marker_visible(const LevelSpawnMarker& marker)
 {
-    using namespace DirectX;
-    if (!S.show_spawn_markers && !S.show_ent_npcs && !S.show_ent_text) {
+    if (marker.kind == 0) return false;
+    if (marker.kind == 4) return S.show_dig_spots;
+    if (marker.is_container && S.show_containers) return true;
+    if (marker.kind == 3) return S.show_ent_npcs;
+    if (marker.kind == 5) return false;
+    return S.show_spawn_markers;
+}
+
+static std::string pretty_container_item_tag(std::string tag, int money)
+{
+    for (const char* pfx : {"INV_ITEM_", "OBJECT_", "TEXT_"}) {
+        const size_t n = std::strlen(pfx);
+        if (tag.size() > n && tag.compare(0, n, pfx) == 0) {
+            tag = tag.substr(n);
+            break;
+        }
+    }
+    if (tag.size() > 5 &&
+        tag.compare(tag.size() - 5, 5, "_NAME") == 0) {
+        tag.resize(tag.size() - 5);
+    }
+    if (tag.find('_') != std::string::npos ||
+        std::none_of(tag.begin(), tag.end(), [](unsigned char c) {
+            return std::islower(c);
+        })) {
+        bool word_start = true;
+        for (char& c : tag) {
+            if (c == '_') {
+                c = ' ';
+                word_start = true;
+            } else {
+                c = word_start
+                    ? char(std::toupper(static_cast<unsigned char>(c)))
+                    : char(std::tolower(static_cast<unsigned char>(c)));
+                word_start = false;
+            }
+        }
+    }
+    if (money >= 0) {
+        tag += " (" + std::to_string(money) + " gold)";
+    }
+    return tag;
+}
+
+static std::string container_catalog_label(uint32_t record_hash)
+{
+    for (const auto& item : g_item_details) {
+        if (item.record_hash == record_hash && !item.display_name.empty()) {
+            return item.display_name;
+        }
+    }
+    for (const auto& item : g_level_item_catalog) {
+        if (item.record_hash == record_hash) {
+            return pretty_container_item_tag(item.label, item.money);
+        }
+    }
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "0x%08X", record_hash);
+    return buf;
+}
+
+static std::string container_item_label(const Gdb::EntityContentsItem& item)
+{
+    if (!item.display_name.empty()) return item.display_name;
+    std::string tag = !item.name_tag.empty() ? item.name_tag
+                                             : item.entry_label;
+    if (tag.empty()) return container_catalog_label(item.record_hash);
+    return pretty_container_item_tag(std::move(tag), item.money);
+}
+
+static const char* container_yes_no_unknown(int value)
+{
+    if (value < 0) return "Not authored";
+    return value != 0 ? "Yes" : "No";
+}
+
+static void draw_container_authored_rules(
+    const Gdb::EntityContents& contents)
+{
+    const char* kind = "Inventory container";
+    if (contents.is_dig_spot) kind = "Dig spot";
+    else if (contents.has_chest_component) kind = "Chest";
+    ImGui::TextColored(ImVec4(0.55f, 0.9f, 1.0f, 1.0f), "%s", kind);
+
+    if (contents.has_chest_component &&
+        contents.silver_keys_needed > 0) {
+        ImGui::Text("Silver keys required: %d",
+                    contents.silver_keys_needed);
+    }
+
+    if (contents.item_repopulation_record != 0) {
+        ImGui::Text("Can be stolen from: %s",
+                    container_yes_no_unknown(
+                        contents.can_be_stolen_from));
+        const char* mode = "Never";
+        if (contents.can_respawn_items_repeatedly > 0) {
+            mode = "Repeatedly";
+        } else if (contents.can_respawn_items_once > 0) {
+            mode = "Once";
+        } else if (contents.can_respawn_items_repeatedly < 0 &&
+                   contents.can_respawn_items_once < 0) {
+            mode = "Not authored";
+        }
+        ImGui::Text("Loot repopulation: %s", mode);
+        if (contents.chance_of_respawning >= 0.0f) {
+            ImGui::Text("Authored repopulation chance: %.1f%%",
+                        contents.chance_of_respawning);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "The game applies its global item-respawn multiplier "
+                    "and any active context multiplier at runtime.");
+            }
+        }
+    } else {
+        ImGui::Text("Loot repopulation: Not configured");
+    }
+
+    if (contents.is_dig_spot) {
+        ImGui::Text("Dog can lead to: %s",
+                    contents.dog_can_lead_to ? "Yes" : "No");
+        if (contents.dog_lead_radius >= 0.0f) {
+            ImGui::Text("Dog search radius: %.1f",
+                        contents.dog_lead_radius);
+        }
+        if (contents.dog_lead_priority >= 0) {
+            ImGui::Text("Dog lead priority: %d",
+                        contents.dog_lead_priority);
+        }
+    }
+
+}
+
+static void draw_container_potential_items(
+    const Gdb::EntityContents& contents,
+    size_t max_rows = 12)
+{
+    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                       "Potential items:");
+    if (contents.potential_items.empty()) {
+        ImGui::TextDisabled("  (none)");
         return;
     }
-    if (g_level_spawn_markers.empty() && g_level_entity_text.empty()) {
+
+    const bool scroll = contents.potential_items.size() > max_rows;
+    if (scroll) {
+        ImGui::BeginChild("##potential_items_scroll",
+                          ImVec2(0.0f, 240.0f), true);
+    }
+    const size_t count = contents.potential_items.size();
+    for (size_t i = 0; i < count; ++i) {
+        const auto& item = contents.potential_items[i];
+        ImGui::PushID(int(i) + 0x5A00);
+        ImGui::BulletText("%s", container_item_label(item).c_str());
+        ImGui::PopID();
+    }
+    if (scroll) ImGui::EndChild();
+}
+
+static void draw_container_loot_table_editor(
+    uint32_t entity_hash,
+    const Gdb::EntityContents& contents)
+{
+    uint32_t current = contents.potential_items_record;
+    const bool staged =
+        LevelEdit::GetContainerLootTable(entity_hash, current);
+    std::string current_label = "None";
+    const Gdb::EntityContents* current_source = nullptr;
+    if (current != 0) {
+        for (const auto& [hash, candidate] : g_level_entity_contents) {
+            (void)hash;
+            if (candidate.potential_items_record != current) continue;
+            current_source = &candidate;
+            current_label = candidate.entity_name.empty()
+                ? "Authored loot table" : candidate.entity_name;
+            break;
+        }
+        if (!current_source) current_label = "Unknown authored table";
+    }
+
+    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                       staged ? "Random loot (edited):" : "Random loot:");
+    const bool editable = LevelEdit::Enabled() && !LevelEdit::Saving();
+    ImGui::BeginDisabled(!editable);
+    ImGui::SetNextItemWidth(260.0f);
+    if (ImGui::BeginCombo("##container_random_loot",
+                          current_label.c_str())) {
+        if (ImGui::Selectable("None", current == 0)) {
+            LevelEdit::SetContainerLootTable(entity_hash, 0);
+        }
+        std::unordered_set<uint32_t> seen;
+        for (const auto& [hash, candidate] : g_level_entity_contents) {
+            (void)hash;
+            if (!candidate.potential_items_record ||
+                !seen.insert(candidate.potential_items_record).second) {
+                continue;
+            }
+            std::string label = candidate.entity_name.empty()
+                ? "Authored loot table" : candidate.entity_name;
+            label += "##" + std::to_string(
+                candidate.potential_items_record);
+            if (ImGui::Selectable(
+                    label.c_str(),
+                    current == candidate.potential_items_record)) {
+                LevelEdit::SetContainerLootTable(
+                    entity_hash, candidate.potential_items_record);
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if (staged && editable) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Revert##container_loot")) {
+            LevelEdit::ClearContainerLootTable(entity_hash);
+        }
+    }
+    if (current_source) {
+        draw_container_potential_items(*current_source);
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                           "Potential items:");
+        ImGui::TextDisabled("  (none)");
+    }
+}
+
+static void draw_entity_gameplay_details(
+    const Gdb::EntityGameplayDetails& details,
+    bool show_entity_name)
+{
+    ImGui::Spacing();
+    ImGui::Separator();
+    if (show_entity_name && !details.entity_name.empty()) {
+        ImGui::TextColored(ImVec4(0.65f, 0.85f, 1.0f, 1.0f), "%s",
+                           details.entity_name.c_str());
+    }
+    ImGui::TextColored(ImVec4(0.55f, 0.9f, 1.0f, 1.0f),
+                       "Entity gameplay");
+    if (!details.faction_name.empty()) {
+        ImGui::Text("Faction / allegiance: %s",
+                    details.faction_name.c_str());
+    }
+    if (!details.combat_profile_name.empty()) {
+        ImGui::TextWrapped("Combat profile: %s",
+                           details.combat_profile_name.c_str());
+    }
+
+    if (!details.core_fields.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                           "Core stats:");
+        for (const auto& field : details.core_fields) {
+            ImGui::Text("%s: %s", field.label.c_str(),
+                        field.value.c_str());
+        }
+    }
+    if (!details.combat_fields.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                           "Combat:");
+        for (const auto& field : details.combat_fields) {
+            ImGui::Text("%s: %s", field.label.c_str(),
+                        field.value.c_str());
+        }
+    }
+
+}
+
+static void draw_property_details(const Gdb::PropertyDetails& details)
+{
+    ImGui::Spacing();
+    ImGui::Separator();
+    const std::string& title = !details.display_name.empty()
+        ? details.display_name : details.building_entity_name;
+    if (!title.empty()) {
+        ImGui::TextColored(ImVec4(0.45f, 1.0f, 0.55f, 1.0f), "%s",
+                           title.c_str());
+    }
+    ImGui::TextColored(ImVec4(0.55f, 0.9f, 1.0f, 1.0f),
+                       "Property");
+    if (!details.building_entity_name.empty() &&
+        details.building_entity_name != title) {
+        ImGui::TextWrapped("Level instance: %s",
+                           details.building_entity_name.c_str());
+    }
+    if (!details.building_type_name.empty()) {
+        ImGui::Text("Type: %s", details.building_type_name.c_str());
+    }
+    if (!details.address.empty()) {
+        ImGui::TextWrapped("Address: %s", details.address.c_str());
+    }
+    if (details.basic_sale_price >= 0) {
+        ImGui::Text("Base sale price: %d gold",
+                    details.basic_sale_price);
+    }
+    if (details.can_rent >= 0) {
+        ImGui::Text("Can rent: %s", details.can_rent ? "Yes" : "No");
+    }
+    if (!details.has_building_record) {
+        ImGui::TextDisabled(
+            "The linked building data is not loaded in this scenario.");
+        return;
+    }
+    const bool has_more =
+        (!details.benefits.empty() &&
+         details.benefits != "BUILDING_BENEFITS_NONE") ||
+        (!details.anecdotes.empty() &&
+         details.anecdotes != "BUILDING_ANECDOTES_NONE") ||
+        !details.fields.empty();
+    if (has_more) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.55f, 0.9f, 1.0f, 1.0f),
+                           "Property Data:");
+        if (!details.benefits.empty() &&
+            details.benefits != "BUILDING_BENEFITS_NONE") {
+            ImGui::TextWrapped("Benefits: %s", details.benefits.c_str());
+        }
+        if (!details.anecdotes.empty() &&
+            details.anecdotes != "BUILDING_ANECDOTES_NONE") {
+            ImGui::TextWrapped("Details: %s", details.anecdotes.c_str());
+        }
+        for (const auto& field : details.fields) {
+            ImGui::TextWrapped("%s: %s", field.label.c_str(),
+                               field.value.c_str());
+        }
+    }
+}
+
+static void draw_level_container_details(uint32_t entity_hash)
+{
+    auto found = g_level_entity_contents.find(entity_hash);
+    if (found == g_level_entity_contents.end()) return;
+    const Gdb::EntityContents& contents = found->second;
+
+    ImGui::Separator();
+    draw_container_authored_rules(contents);
+
+    std::vector<uint32_t> staged_items;
+    const bool staged =
+        LevelEdit::GetChestContents(entity_hash, staged_items);
+    if (staged || !contents.initial_items.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                           staged ? "Initial items (edited):"
+                                  : "Initial items:");
+        const size_t item_count = staged ? staged_items.size()
+                                         : contents.initial_items.size();
+        for (size_t i = 0; i < item_count; ++i) {
+            const std::string label = staged
+                ? container_catalog_label(staged_items[i])
+                : container_item_label(contents.initial_items[i]);
+            ImGui::BulletText("%s", label.c_str());
+        }
+        if (item_count == 0) ImGui::TextDisabled("  (empty)");
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                           "Initial items:");
+        ImGui::TextDisabled("  (none)");
+    }
+    draw_container_loot_table_editor(entity_hash, contents);
+}
+
+static void draw_addition_container_details(int addition_index)
+{
+    const bool editable = LevelEdit::Enabled() && !LevelEdit::Saving();
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.65f, 0.85f, 1.0f, 1.0f), "%s",
+                       LevelEdit::AdditionIsDigSpot(addition_index)
+                           ? "New dig spot (unsaved)"
+                           : "New container (unsaved)");
+    std::vector<uint32_t> items;
+    LevelEdit::GetAdditionChestItems(addition_index, items);
+    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                       "Initial items:");
+    int remove_index = -1;
+    for (size_t i = 0; i < items.size(); ++i) {
+        ImGui::PushID(int(i) + 0x7300);
+        if (editable) {
+            if (ImGui::SmallButton("x")) remove_index = int(i);
+            ImGui::SameLine();
+        } else {
+            ImGui::Bullet();
+            ImGui::SameLine();
+        }
+        ImGui::TextUnformatted(container_catalog_label(items[i]).c_str());
+        ImGui::PopID();
+    }
+    if (items.empty()) ImGui::TextDisabled("  (empty)");
+    if (remove_index >= 0 && size_t(remove_index) < items.size()) {
+        items.erase(items.begin() + remove_index);
+        LevelEdit::SetAdditionChestItems(addition_index, items);
+    }
+
+    static int s_addition_picker = -1;
+    static char s_addition_filter[64] = {};
+    if (editable && ImGui::SmallButton("+ Add item")) {
+        s_addition_picker = addition_index;
+        s_addition_filter[0] = 0;
+        ImGui::OpenPopup("##marker_container_item_picker");
+    }
+    if (ImGui::BeginPopup("##marker_container_item_picker")) {
+        if (s_addition_picker != addition_index) {
+            ImGui::CloseCurrentPopup();
+        } else {
+            ImGui::SetNextItemWidth(260.0f);
+            ImGui::InputTextWithHint("##marker_item_filter",
+                                     "Search items...",
+                                     s_addition_filter,
+                                     sizeof(s_addition_filter));
+            std::string filter = s_addition_filter;
+            std::transform(filter.begin(), filter.end(), filter.begin(),
+                           ::tolower);
+            ImGui::BeginChild("##marker_item_rows",
+                              ImVec2(300.0f, 260.0f), true);
+            for (const auto& item : g_item_details) {
+                const std::string label = item.display_name.empty()
+                    ? item.label : item.display_name;
+                std::string low = label;
+                std::transform(low.begin(), low.end(), low.begin(),
+                               ::tolower);
+                if (!filter.empty() &&
+                    low.find(filter) == std::string::npos) {
+                    continue;
+                }
+                ImGui::PushID(int(item.record_hash));
+                if (ImGui::Selectable(label.c_str())) {
+                    items.push_back(item.record_hash);
+                    LevelEdit::SetAdditionChestItems(addition_index, items);
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                       "Random loot:");
+    const uint32_t current =
+        LevelEdit::GetAdditionLootTable(addition_index);
+    std::string current_label = "None";
+    for (const auto& [hash, contents] : g_level_entity_contents) {
+        (void)hash;
+        if (contents.potential_items_record == current && current != 0) {
+            current_label = contents.entity_name.empty()
+                ? "Authored loot table" : contents.entity_name;
+            break;
+        }
+    }
+    ImGui::BeginDisabled(!editable);
+    if (ImGui::BeginCombo("##marker_random_loot", current_label.c_str())) {
+        if (ImGui::Selectable("None", current == 0)) {
+            LevelEdit::SetAdditionLootTable(addition_index, 0);
+        }
+        std::unordered_set<uint32_t> seen_tables;
+        for (const auto& [hash, contents] : g_level_entity_contents) {
+            (void)hash;
+            if (!contents.potential_items_record ||
+                !seen_tables.insert(contents.potential_items_record).second) {
+                continue;
+            }
+            const std::string label = contents.entity_name.empty()
+                ? "Authored loot table" : contents.entity_name;
+            if (ImGui::Selectable(
+                    label.c_str(), current == contents.potential_items_record)) {
+                LevelEdit::SetAdditionLootTable(
+                    addition_index, contents.potential_items_record);
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    ImGui::TextDisabled("authored into the level GDB on Save");
+}
+
+struct ContainerSpawnChoice {
+    std::string label;
+    std::string model_path;
+    LevelEdit::ContainerTemplateInfo info;
+};
+
+static uint32_t level_model_path_hash(const std::string& path)
+{
+    uint32_t hash = 0x811C9DC5u;
+    for (unsigned char c : path) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<unsigned char>(c - 'A' + 'a');
+        }
+        if (c == '/') c = '\\';
+        hash *= 0x01000193u;
+        hash ^= uint32_t(c);
+    }
+    return hash;
+}
+
+static std::string container_spawn_label(std::string value)
+{
+    const size_t slash = value.find_last_of("/\\");
+    if (slash != std::string::npos) value.erase(0, slash + 1);
+    const size_t dot = value.rfind('.');
+    if (dot != std::string::npos) value.resize(dot);
+    for (char& c : value) {
+        if (c == '_' || c == '-') c = ' ';
+    }
+    if (value.empty()) value = "Unnamed container";
+    return value;
+}
+
+static std::vector<ContainerSpawnChoice> build_container_spawn_choices()
+{
+    static std::string cached_level;
+    static size_t cached_contents = size_t(-1);
+    static size_t cached_models = size_t(-1);
+    static std::vector<ContainerSpawnChoice> cached;
+    if (cached_level == g_pending_terrain_label &&
+        cached_contents == g_level_entity_contents.size() &&
+        cached_models == S.all_mdl_files.size()) {
+        return cached;
+    }
+    std::unordered_map<uint32_t, std::string> models_by_hash;
+    models_by_hash.reserve(S.all_mdl_files.size() * 2);
+    for (const auto& model : S.all_mdl_files) {
+        models_by_hash.emplace(level_model_path_hash(model.full_path),
+                               model.full_path);
+    }
+    std::unordered_map<uint32_t, uint32_t> placement_models;
+    for (const auto& placement : g_level_gdb_placements) {
+        if (placement.hash && placement.model_path_hash) {
+            placement_models.emplace(placement.hash,
+                                     placement.model_path_hash);
+        }
+    }
+
+    std::vector<ContainerSpawnChoice> out;
+    std::unordered_set<std::string> seen;
+    for (const auto& [entity_hash, contents] : g_level_entity_contents) {
+        if (!contents.is_dig_spot &&
+            g_level_entity_gameplay.count(entity_hash)) {
+            continue;
+        }
+        if (!contents.is_dig_spot && !contents.has_inventory_component &&
+            !contents.has_chest_component) {
+            continue;
+        }
+
+        uint32_t model_hash = contents.model_path_hash;
+        if (!model_hash) {
+            const auto placed = placement_models.find(entity_hash);
+            if (placed != placement_models.end()) model_hash = placed->second;
+        }
+        ContainerSpawnChoice choice;
+        choice.info.entity_name = contents.entity_name;
+        choice.info.is_dig_spot = contents.is_dig_spot;
+        choice.info.silver_keys_needed =
+            std::max(0, contents.silver_keys_needed);
+        choice.info.entity_template = contents.entity_template;
+        choice.info.transform_component_field =
+            contents.transform_component_field;
+        choice.info.transform_component_template =
+            contents.transform_component_template;
+        choice.info.physics_file_hash = contents.physics_file_hash;
+        choice.info.potential_items_record =
+            contents.potential_items_record;
+        for (const auto& item : contents.initial_items) {
+            choice.info.initial_items.push_back(item.record_hash);
+        }
+        if (model_hash) {
+            const auto model = models_by_hash.find(model_hash);
+            if (model != models_by_hash.end()) {
+                choice.model_path = model->second;
+            }
+            const auto prop =
+                g_level_prop_entity_templates.find(model_hash);
+            if (prop != g_level_prop_entity_templates.end()) {
+                const auto& donor = prop->second;
+                if (!choice.info.entity_template) {
+                    choice.info.entity_template = donor.template_hash;
+                }
+                if (!choice.info.transform_component_field) {
+                    choice.info.transform_component_field =
+                        donor.comp_field_hash;
+                }
+                if (!choice.info.transform_component_template) {
+                    choice.info.transform_component_template =
+                        donor.comp_template_hash;
+                }
+                if (!choice.info.physics_file_hash) {
+                    choice.info.physics_file_hash = donor.physics_file_hash;
+                }
+            }
+        }
+        if (!choice.info.entity_template ||
+            !choice.info.transform_component_field) {
+            continue;
+        }
+        choice.label = container_spawn_label(
+            !choice.model_path.empty() ? choice.model_path
+                                       : choice.info.entity_name);
+        char key[96];
+        std::snprintf(key, sizeof(key), "%d:%08X:%08X",
+                      choice.info.is_dig_spot ? 1 : 0,
+                      choice.info.entity_template, model_hash);
+        if (!seen.insert(key).second) continue;
+        out.push_back(std::move(choice));
+    }
+    std::sort(out.begin(), out.end(),
+              [](const auto& a, const auto& b) {
+                  if (a.info.is_dig_spot != b.info.is_dig_spot) {
+                      return !a.info.is_dig_spot;
+                  }
+                  return a.label < b.label;
+              });
+    cached_level = g_pending_terrain_label;
+    cached_contents = g_level_entity_contents.size();
+    cached_models = S.all_mdl_files.size();
+    cached = out;
+    return cached;
+}
+
+static std::string quest_level_id_from_path(std::string path)
+{
+    std::replace(path.begin(), path.end(), '/', '\\');
+    std::string lower = path;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    const std::string root = "worlds\\albion\\";
+    const size_t root_pos = lower.find(root);
+    if (root_pos != std::string::npos) {
+        path.erase(0, root_pos + root.size());
+        lower.erase(0, root_pos + root.size());
+    }
+    const std::string suffix =
+        "\\defaultscenario\\defaultscenario.engine_level";
+    const size_t suffix_pos = lower.rfind(suffix);
+    if (suffix_pos != std::string::npos) path.resize(suffix_pos);
+    if (path.empty()) path = g_pending_terrain_label;
+    return path;
+}
+
+static bool build_quest_level_reference(
+    const LevelSpawnMarker& marker,
+    size_t marker_index,
+    QuestUI::LevelReferenceCandidate& candidate)
+{
+    candidate = QuestUI::LevelReferenceCandidate{};
+    candidate.is_npc = marker.kind == 3;
+    candidate.is_container = marker.is_container;
+    candidate.level_path = g_pending_terrain_level_entry.full_path;
+    candidate.level_id = quest_level_id_from_path(candidate.level_path);
+    candidate.entity_name = marker.name;
+    candidate.entity_hash = marker.entity_hash;
+    candidate.x = marker.x;
+    candidate.y = marker.y;
+    candidate.z = marker.z;
+    float position_delta[3] = {};
+    float rotation_delta[3] = {};
+    if (LevelEdit::EditFor(0x70000000u | uint32_t(marker_index),
+                           position_delta, rotation_delta)) {
+        candidate.x += position_delta[0];
+        candidate.y += position_delta[1];
+        candidate.z += position_delta[2];
+    }
+    candidate.model_hashes = marker.model_hashes;
+    candidate.authored_instance = marker.pending_addition_index >= 0 &&
+        marker.kind == 3 &&
+        LevelEdit::AdditionIsNpc(marker.pending_addition_index);
+    if (candidate.entity_name.empty()) {
+        const auto contents =
+            g_level_entity_contents.find(candidate.entity_hash);
+        if (contents != g_level_entity_contents.end()) {
+            candidate.entity_name = contents->second.entity_name;
+        }
+    }
+    return !candidate.level_id.empty() &&
+           !candidate.entity_name.empty() &&
+           (candidate.entity_hash != 0 || candidate.authored_instance);
+}
+
+static int selected_level_spawn_marker_index()
+{
+    if (g_sel_spawn_marker >= 0 &&
+        g_sel_spawn_marker < int(g_level_spawn_markers.size())) {
+        return g_sel_spawn_marker;
+    }
+    if ((::g_selected_level_pick_id & 0xF0000000u) != 0x70000000u) {
+        return -1;
+    }
+    const size_t marker_index =
+        size_t(::g_selected_level_pick_id & 0x0FFFFFFFu);
+    return marker_index < g_level_spawn_markers.size()
+        ? int(marker_index) : -1;
+}
+
+static void add_quest_item_to_container(uint32_t entity_hash,
+                                        uint32_t item_hash)
+{
+    if (!entity_hash || !item_hash) return;
+    std::vector<uint32_t> items;
+    if (!LevelEdit::GetChestContents(entity_hash, items)) {
+        const auto existing = g_level_entity_contents.find(entity_hash);
+        if (existing != g_level_entity_contents.end()) {
+            for (const Gdb::EntityContentsItem& item :
+                 existing->second.initial_items) {
+                items.push_back(item.record_hash);
+            }
+        }
+    }
+    if (std::find(items.begin(), items.end(), item_hash) == items.end()) {
+        items.push_back(item_hash);
+        LevelEdit::SetChestContents(entity_hash, items);
+    }
+}
+
+static void draw_spawn_markers_overlay(const ImVec2& origin,
+                                       const ImVec2& region,
+                                       bool viewport_hovered)
+{
+    using namespace DirectX;
+    if (!S.show_spawn_markers && !S.show_ent_npcs &&
+        !S.show_dig_spots && !S.show_containers && !S.show_ent_text) {
         return;
     }
     if (!g_mp.no_tilt) return;
     if (g_sel_spawn_marker >= (int)g_level_spawn_markers.size()) {
+        g_sel_spawn_marker = -1;
+    }
+    std::unordered_set<uint32_t> generator_spawn_points_pending_removal;
+    for (const auto& marker : g_level_spawn_markers) {
+        if (marker.kind == 1 &&
+            LevelEdit::EntityRemovalPending(marker.entity_hash)) {
+            generator_spawn_points_pending_removal.insert(
+                marker.spawn_point_entities.begin(),
+                marker.spawn_point_entities.end());
+        }
+    }
+    if (g_sel_spawn_marker >= 0 &&
+        (LevelEdit::EntityRemovalPending(
+             g_level_spawn_markers[(size_t)g_sel_spawn_marker]
+                 .entity_hash) ||
+         generator_spawn_points_pending_removal.count(
+             g_level_spawn_markers[(size_t)g_sel_spawn_marker]
+                 .entity_hash))) {
         g_sel_spawn_marker = -1;
     }
 
@@ -750,11 +1585,13 @@ static void draw_spawn_markers_overlay(const ImVec2& origin,
     XMMATRIX VP = V * P;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImU32 kCol[4] = {
+    const ImU32 kCol[6] = {
         IM_COL32(255, 255, 255, 220),
         IM_COL32(255, 90, 90, 235),
         IM_COL32(255, 200, 80, 235),
         IM_COL32(120, 255, 140, 235),
+        IM_COL32(85, 210, 255, 235),
+        IM_COL32(220, 125, 255, 235),
     };
 
     size_t text_drawn = 0;
@@ -788,22 +1625,39 @@ static void draw_spawn_markers_overlay(const ImVec2& origin,
     (void)text_drawn;
 
     size_t drawn = 0;
-    const bool can_pick = LevelEdit::Enabled() &&
-                          !LevelEdit::Saving() &&
+    const bool can_pick = viewport_hovered && !LevelEdit::Saving() &&
                           !LevelGizmo::WantsMouse();
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     const bool clicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const bool context_clicked =
+        ImGui::IsMouseClicked(ImGuiMouseButton_Right);
     int click_hit = -1;
+    bool overlay_click_hit = false;
     float click_best = 12.0f * 12.0f;
+    uint32_t selected_model_entity_hash = 0;
+    if (::g_selected_level_pick_id != 0) {
+        for (const MPPerMesh& mesh : g_mp.meshes) {
+            if (!mesh.is_entity_model) continue;
+            for (const auto& range : mesh.pick_ranges) {
+                if (range.selection_id == ::g_selected_level_pick_id) {
+                    selected_model_entity_hash = range.gdb_entity_hash;
+                    break;
+                }
+            }
+            if (selected_model_entity_hash != 0) break;
+        }
+    }
     for (size_t mi = 0; mi < g_level_spawn_markers.size(); ++mi) {
         const auto& m = g_level_spawn_markers[mi];
+        if (LevelEdit::EntityRemovalPending(m.entity_hash) ||
+            generator_spawn_points_pending_removal.count(m.entity_hash)) {
+            continue;
+        }
         if (m.kind == 2 &&
             LevelEdit::SpawnPointRemovalPending(m.entity_hash)) {
             continue;
         }
-        if (m.kind == 3 ? !S.show_ent_npcs : !S.show_spawn_markers) {
-            continue;
-        }
+        if (!level_marker_visible(m)) continue;
         float ex = m.x, ey = m.y, ez = m.z;
         {
             float d_pos[3], d_rot[3];
@@ -825,13 +1679,23 @@ static void draw_spawn_markers_overlay(const ImVec2& origin,
         ImVec2 pt;
         pt.x = origin.x + (ndcx * 0.5f + 0.5f) * region.x;
         pt.y = origin.y + (1.0f - (ndcy * 0.5f + 0.5f)) * region.y;
-        const ImU32 col = kCol[m.kind < 4 ? m.kind : 0];
-        const float r = m.kind == 1 ? 6.0f : 4.5f;
+        const ImU32 col = m.is_container && m.kind != 4
+            ? kCol[5]
+            : kCol[m.kind < 5 ? m.kind : 0];
+        const float r = m.kind == 1 ? 6.0f
+                                     : (m.is_container ? 5.5f : 4.5f);
         dl->AddQuadFilled(ImVec2(pt.x, pt.y - r),
                           ImVec2(pt.x + r, pt.y),
                           ImVec2(pt.x, pt.y + r),
                           ImVec2(pt.x - r, pt.y), col);
-        const bool selected = (int(mi) == g_sel_spawn_marker);
+        const bool model_owns_selection =
+            (m.kind == 2 || m.kind == 3) && !m.model_hashes.empty();
+        const bool selected = model_owns_selection
+            ? (::g_selected_level_pick_id ==
+                   (0x70000000u | uint32_t(mi)) ||
+               (selected_model_entity_hash != 0 &&
+                selected_model_entity_hash == m.entity_hash))
+            : (int(mi) == g_sel_spawn_marker);
         dl->AddQuad(ImVec2(pt.x, pt.y - r - 1),
                     ImVec2(pt.x + r + 1, pt.y),
                     ImVec2(pt.x, pt.y + r + 1),
@@ -843,7 +1707,10 @@ static void draw_spawn_markers_overlay(const ImVec2& origin,
             dl->AddText(ImVec2(pt.x + r + 3.0f, pt.y - 7.0f),
                         IM_COL32(235, 235, 235, 235), m.name.c_str());
         }
-        if (can_pick && clicked) {
+
+
+        if (!model_owns_selection && can_pick &&
+            (clicked || context_clicked)) {
             const float dx = mouse.x - pt.x;
             const float dy = mouse.y - pt.y;
             const float d2 = dx * dx + dy * dy;
@@ -855,6 +1722,7 @@ static void draw_spawn_markers_overlay(const ImVec2& origin,
         ++drawn;
     }
     if (click_hit >= 0) {
+        overlay_click_hit = true;
         g_sel_spawn_marker = click_hit;
         g_marker_clear_selection = true;
     }
@@ -908,6 +1776,7 @@ static void draw_spawn_markers_overlay(const ImVec2& origin,
             }
         }
         if (gen_click >= 0) {
+            overlay_click_hit = true;
             g_sel_pending_gen = gen_click;
             g_sel_pending_sp = -1;
             g_sel_spawn_marker = -1;
@@ -962,6 +1831,7 @@ static void draw_spawn_markers_overlay(const ImVec2& origin,
             }
         }
         if (sp_click >= 0) {
+            overlay_click_hit = true;
             g_sel_pending_sp = sp_click;
             g_sel_pending_gen = -1;
             g_sel_spawn_marker = -1;
@@ -971,10 +1841,15 @@ static void draw_spawn_markers_overlay(const ImVec2& origin,
             g_sel_pending_gen = -1;
         }
     }
+    if (can_pick && (clicked || context_clicked) && !overlay_click_hit) {
+        g_sel_spawn_marker = -1;
+        g_sel_pending_sp = -1;
+        g_sel_pending_gen = -1;
+    }
     if (drawn) {
         char buf[96];
         std::snprintf(buf, sizeof(buf),
-                      "spawns: %zu shown / %zu total", drawn,
+                      "entity markers: %zu shown / %zu total", drawn,
                       g_level_spawn_markers.size());
         dl->AddText(ImVec2(origin.x + 14, origin.y + region.y - 38),
                     IM_COL32(220, 220, 220, 200), buf);
@@ -1077,46 +1952,68 @@ static void rp_quat_rot_inv(const float q[4], const float v[3], float o[3]) {
     rp_quat_rot(qc, v, o);
 }
 
-int pick_level_mesh_at(const ImVec2& mouse,
-                       const ImVec2& origin,
-                       const ImVec2& region,
-                       uint32_t* out_pick_id = nullptr,
-                       uint64_t* out_pick_hash = nullptr) {
-    if (out_pick_id) *out_pick_id = 0;
-    if (out_pick_hash) *out_pick_hash = 0;
-    if (!g_mp.has_model || !g_mp.no_tilt || g_mp.meshes.empty()) return -1;
+static bool level_view_ray(const ImVec2& mouse,
+                           const ImVec2& origin,
+                           const ImVec2& region,
+                           float out_origin[3],
+                           float out_direction[3]) {
     const float fw = std::max(1.0f, region.x);
     const float fh = std::max(1.0f, region.y);
-
     const float mx = mouse.x - origin.x;
     const float my = mouse.y - origin.y;
-    if (mx < 0.0f || my < 0.0f || mx > fw || my > fh) return -1;
+    if (mx < 0.0f || my < 0.0f || mx > fw || my > fh) return false;
 
-    const float fov         = 60.0f * 3.14159265f / 180.0f;
-    const float aspect      = fw / fh;
-    const float tan_half    = std::tan(0.5f * fov);
-    const float u_view      = (2.0f * mx / fw - 1.0f) * aspect * tan_half;
-    const float v_view      = (1.0f - 2.0f * my / fh) * tan_half;
+    const float fov      = 60.0f * 3.14159265f / 180.0f;
+    const float aspect   = fw / fh;
+    const float tan_half = std::tan(0.5f * fov);
+    const float u_view   = (2.0f * mx / fw - 1.0f) * aspect * tan_half;
+    const float v_view   = (1.0f - 2.0f * my / fh) * tan_half;
 
     const float cy = std::cos(g_flycam.yaw);
     const float sy = std::sin(g_flycam.yaw);
     const float cp = std::cos(g_flycam.pitch);
     const float sp = std::sin(g_flycam.pitch);
-
-    const float fx = sy * cp, fy = sp, fz = cy * cp;
-    const float rx = cy,      ry = 0.0f, rz = -sy;
-    const float ux = -sp * sy, uy = cp, uz = -sp * cy;
+    const float fx = sy * cp,  fy = sp,  fz = cy * cp;
+    const float rx = cy,       ry = 0.0f, rz = -sy;
+    const float ux = -sp * sy, uy = cp,   uz = -sp * cy;
 
     float dx = rx * u_view + ux * v_view + fx;
     float dy = ry * u_view + uy * v_view + fy;
     float dz = rz * u_view + uz * v_view + fz;
-    const float dlen = std::sqrt(dx*dx + dy*dy + dz*dz);
-    if (dlen <= 1e-6f) return -1;
-    dx /= dlen; dy /= dlen; dz /= dlen;
+    const float dlen = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (dlen <= 1e-6f) return false;
 
-    const float ox = g_flycam.pos[0];
-    const float oy = g_flycam.pos[1];
-    const float oz = g_flycam.pos[2];
+    out_origin[0] = g_flycam.pos[0];
+    out_origin[1] = g_flycam.pos[1];
+    out_origin[2] = g_flycam.pos[2];
+    out_direction[0] = dx / dlen;
+    out_direction[1] = dy / dlen;
+    out_direction[2] = dz / dlen;
+    return true;
+}
+
+int pick_level_mesh_at(const ImVec2& mouse,
+                       const ImVec2& origin,
+                       const ImVec2& region,
+                       uint32_t* out_pick_id = nullptr,
+                       uint64_t* out_pick_hash = nullptr,
+                       float* out_surface_distance = nullptr) {
+    if (out_pick_id) *out_pick_id = 0;
+    if (out_pick_hash) *out_pick_hash = 0;
+    if (out_surface_distance) {
+        *out_surface_distance = std::numeric_limits<float>::infinity();
+    }
+    if (!g_mp.has_model || !g_mp.no_tilt || g_mp.meshes.empty()) return -1;
+    float ray_origin[3] = {};
+    float ray_direction[3] = {};
+    if (!level_view_ray(mouse, origin, region,
+                        ray_origin, ray_direction)) return -1;
+    const float ox = ray_origin[0];
+    const float oy = ray_origin[1];
+    const float oz = ray_origin[2];
+    const float dx = ray_direction[0];
+    const float dy = ray_direction[1];
+    const float dz = ray_direction[2];
 
     auto hit_sphere = [&](const float center[3], float radius,
                           const float o[3], const float dv[3],
@@ -1181,6 +2078,7 @@ int pick_level_mesh_at(const ImVec2& mouse,
     for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
         const auto& m = g_mp.meshes[i];
         if (m.index_count == 0 || m.radius <= 0.0f) continue;
+        if (m.is_entity_model && !S.show_entity_models) continue;
         if (g_mp.selected_lod >= 0 &&
             m.lod_index != (uint32_t)g_mp.selected_lod) continue;
         if (m.is_terrain) continue;
@@ -1294,9 +2192,72 @@ int pick_level_mesh_at(const ImVec2& mouse,
         best_id = 0;
         best_hash = 0;
     }
+    if (out_surface_distance && std::isfinite(best_t)) {
+        *out_surface_distance = best_t;
+    }
     if (out_pick_id) *out_pick_id = best_id;
     if (out_pick_hash) *out_pick_hash = best_hash;
     return best;
+}
+
+static bool level_placement_surface_at(const ImVec2& mouse,
+                                       const ImVec2& origin,
+                                       const ImVec2& region,
+                                       bool allow_forward_fallback,
+                                       float out_engine_pos[3]) {
+    float ray_origin[3] = {};
+    float ray_direction[3] = {};
+    if (!level_view_ray(mouse, origin, region,
+                        ray_origin, ray_direction)) return false;
+
+
+
+    float object_t = std::numeric_limits<float>::infinity();
+    pick_level_mesh_at(mouse, origin, region, nullptr, nullptr, &object_t);
+
+    float terrain_hit[3] = {};
+    float terrain_t = std::numeric_limits<float>::infinity();
+    if (TerrainEdit::Raycast(
+            ray_origin[0], ray_origin[1], ray_origin[2],
+            ray_direction[0], ray_direction[1], ray_direction[2],
+            terrain_hit[0], terrain_hit[1], terrain_hit[2])) {
+        const float tx = terrain_hit[0] - ray_origin[0];
+        const float ty = terrain_hit[1] - ray_origin[1];
+        const float tz = terrain_hit[2] - ray_origin[2];
+        terrain_t = tx * ray_direction[0] +
+                    ty * ray_direction[1] +
+                    tz * ray_direction[2];
+        if (terrain_t <= 0.0f) {
+            terrain_t = std::numeric_limits<float>::infinity();
+        }
+    }
+
+    float preview_pos[3] = {};
+    const float surface_t = std::min(object_t, terrain_t);
+    if (std::isfinite(surface_t)) {
+        preview_pos[0] = ray_origin[0] + ray_direction[0] * surface_t;
+        preview_pos[1] = ray_origin[1] + ray_direction[1] * surface_t;
+        preview_pos[2] = ray_origin[2] + ray_direction[2] * surface_t;
+    } else if (std::fabs(ray_direction[1]) > 1e-4f) {
+        const float t = (g_mp.center[1] - ray_origin[1]) /
+                        ray_direction[1];
+        if (t <= 0.0f) return false;
+        preview_pos[0] = ray_origin[0] + ray_direction[0] * t;
+        preview_pos[1] = ray_origin[1] + ray_direction[1] * t;
+        preview_pos[2] = ray_origin[2] + ray_direction[2] * t;
+    } else if (allow_forward_fallback) {
+        preview_pos[0] = ray_origin[0] + ray_direction[0] * 10.0f;
+        preview_pos[1] = ray_origin[1] + ray_direction[1] * 10.0f;
+        preview_pos[2] = ray_origin[2] + ray_direction[2] * 10.0f;
+    } else {
+        return false;
+    }
+
+
+    out_engine_pos[0] = preview_pos[0];
+    out_engine_pos[1] = preview_pos[2];
+    out_engine_pos[2] = preview_pos[1];
+    return true;
 }
 
 void draw_model_in_panel(ID3D11Device* device) {
@@ -1351,148 +2312,86 @@ void draw_model_in_panel(ID3D11Device* device) {
             const std::string drop_model(
                 (const char*)pay->Data, (size_t)pay->DataSize);
             const ImVec2 mouse = ImGui::GetIO().MousePos;
-            const float fw = std::max(1.0f, region.x);
-            const float fh = std::max(1.0f, region.y);
-            const float fovd = 60.0f * 3.14159265f / 180.0f;
-            const float aspect = fw / fh;
-            const float tan_half = std::tan(0.5f * fovd);
-            const float mxp = mouse.x - origin.x;
-            const float myp = mouse.y - origin.y;
-            const float u_view =
-                (2.0f * mxp / fw - 1.0f) * aspect * tan_half;
-            const float v_view = (1.0f - 2.0f * myp / fh) * tan_half;
-            const float cy = std::cos(g_flycam.yaw);
-            const float sy = std::sin(g_flycam.yaw);
-            const float cp = std::cos(g_flycam.pitch);
-            const float sp = std::sin(g_flycam.pitch);
-            float ddx = cy * u_view + (-sp * sy) * v_view + sy * cp;
-            float ddy = cp * v_view + sp;
-            float ddz = (-sy) * u_view + (-sp * cy) * v_view + cy * cp;
-            const float dlen =
-                std::sqrt(ddx*ddx + ddy*ddy + ddz*ddz);
-            if (dlen > 1e-6f) {
-                ddx /= dlen; ddy /= dlen; ddz /= dlen;
-                float hx = 0.0f, hy = 0.0f, hz = 0.0f;
-                bool hit = TerrainEdit::Raycast(
-                    g_flycam.pos[0], g_flycam.pos[1], g_flycam.pos[2],
-                    ddx, ddy, ddz, hx, hy, hz);
-                if (!hit && std::fabs(ddy) > 1e-4f) {
-                    const float plane_y = g_mp.center[1];
-                    const float t =
-                        (plane_y - g_flycam.pos[1]) / ddy;
-                    if (t > 0.0f) {
-                        hx = g_flycam.pos[0] + ddx * t;
-                        hy = plane_y;
-                        hz = g_flycam.pos[2] + ddz * t;
-                        hit = true;
-                    }
-                }
-                if (hit) {
-                    const float engine_pos[3] = { hx, hz, hy };
-                    DebugTrace::log(
-                        "drop: '%s' at (%.2f, %.2f, %.2f)",
-                        drop_model.c_str(), engine_pos[0],
-                        engine_pos[1], engine_pos[2]);
-                    spawn_level_model_at(device, drop_model, engine_pos);
-                }
+            float engine_pos[3] = {};
+            if (level_placement_surface_at(mouse, origin, region, false,
+                                           engine_pos)) {
+                DebugTrace::log(
+                    "drop: '%s' at (%.2f, %.2f, %.2f)",
+                    drop_model.c_str(), engine_pos[0],
+                    engine_pos[1], engine_pos[2]);
+                spawn_level_model_at(device, drop_model, engine_pos);
             }
         }
         ImGui::EndDragDropTarget();
     }
 
     static bool  s_gen_popup = false;
+    static bool  s_gen_click_pending = false;
     static float s_gen_pos[3] = {0, 0, 0};
+    static ImVec2 s_gen_click_mouse{};
+    static char  s_add_filter[128] = {};
+    if (g_add_menu_requested) {
+        for (int i = 0; i < 3; ++i) {
+            s_gen_pos[i] = g_add_menu_requested_pos[i];
+        }
+        g_add_menu_requested = false;
+        s_gen_popup = true;
+    }
     if (g_mp.no_tilt && LevelEdit::Enabled() && !LevelEdit::Saving() &&
-        hovered && ImGui::GetIO().KeyShift &&
+        hovered &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        s_gen_click_pending = false;
         const ImVec2 mouse2 = ImGui::GetIO().MousePos;
-        const float fw = std::max(1.0f, region.x);
-        const float fh = std::max(1.0f, region.y);
-        const float fovd = 60.0f * 3.14159265f / 180.0f;
-        const float aspect = fw / fh;
-        const float tan_half = std::tan(0.5f * fovd);
-        const float mxp = mouse2.x - origin.x;
-        const float myp = mouse2.y - origin.y;
-        const float u_view = (2.0f * mxp / fw - 1.0f) * aspect * tan_half;
-        const float v_view = (1.0f - 2.0f * myp / fh) * tan_half;
-        const float cy2 = std::cos(g_flycam.yaw);
-        const float sy2 = std::sin(g_flycam.yaw);
-        const float cp2 = std::cos(g_flycam.pitch);
-        const float sp2 = std::sin(g_flycam.pitch);
-        float ddx = cy2 * u_view + (-sp2 * sy2) * v_view + sy2 * cp2;
-        float ddy = cp2 * v_view + sp2;
-        float ddz = (-sy2) * u_view + (-sp2 * cy2) * v_view + cy2 * cp2;
-        const float dlen = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
-        if (dlen > 1e-6f) {
-            ddx /= dlen; ddy /= dlen; ddz /= dlen;
-            float hx = 0, hy = 0, hz = 0;
-            bool hit = TerrainEdit::Raycast(
-                g_flycam.pos[0], g_flycam.pos[1], g_flycam.pos[2],
-                ddx, ddy, ddz, hx, hy, hz);
-            if (!hit && std::fabs(ddy) > 1e-4f) {
-                const float plane_y = g_mp.center[1];
-                const float t = (plane_y - g_flycam.pos[1]) / ddy;
-                if (t > 0.0f) {
-                    hx = g_flycam.pos[0] + ddx * t;
-                    hy = plane_y;
-                    hz = g_flycam.pos[2] + ddz * t;
-                    hit = true;
+        s_gen_click_mouse = mouse2;
+        float engine_pos[3] = {};
+        if (level_placement_surface_at(mouse2, origin, region, true,
+                                       engine_pos)) {
+            s_gen_pos[0] = engine_pos[0];
+            s_gen_pos[1] = engine_pos[1];
+            s_gen_pos[2] = engine_pos[2];
+            s_gen_click_pending = true;
+        }
+    }
+    if (s_gen_click_pending &&
+        ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        const ImVec2 released_at = ImGui::GetIO().MousePos;
+        const float release_dx = released_at.x - s_gen_click_mouse.x;
+        const float release_dy = released_at.y - s_gen_click_mouse.y;
+        const float release_distance = std::sqrt(
+            release_dx * release_dx + release_dy * release_dy);
+        if (std::max(g_flycam.right_drag_distance,
+                     release_distance) < 4.0f) {
+            uint32_t picked_id = 0;
+            uint64_t picked_hash = 0;
+            const int picked = pick_level_mesh_at(
+                released_at, origin, region, &picked_id, &picked_hash);
+            if (picked >= 0) {
+                ::g_selected_level_mesh_idx = picked;
+                ::g_selected_level_pick_id = picked_id;
+                ::g_selected_level_hash = picked_hash;
+                if (g_mp.meshes[size_t(picked)].is_entity_model) {
+                    g_sel_spawn_marker = -1;
+                    g_sel_pending_sp = -1;
+                    g_sel_pending_gen = -1;
                 }
             }
-            if (!hit) {
-                hx = g_flycam.pos[0] + ddx * 10.0f;
-                hy = g_flycam.pos[1] + ddy * 10.0f;
-                hz = g_flycam.pos[2] + ddz * 10.0f;
-                hit = true;
-            }
-            if (hit) {
-                s_gen_pos[0] = hx;
-                s_gen_pos[1] = hz;
-                s_gen_pos[2] = hy;
-                s_gen_popup = true;
-            }
+            s_gen_popup = true;
         }
+        s_gen_click_pending = false;
     }
     if (s_gen_popup) {
-        ImGui::OpenPopup("New generator");
+        ImGui::OpenPopup("Add to level");
         s_gen_popup = false;
+        s_add_filter[0] = 0;
     }
-    if (ImGui::BeginPopup("New generator")) {
+    const ImGuiIO& add_io = ImGui::GetIO();
+    ImGui::SetNextWindowSize(
+        ImVec2(std::min(500.0f, std::max(300.0f, add_io.DisplaySize.x - 32.0f)),
+               std::min(620.0f, std::max(280.0f, add_io.DisplaySize.y - 32.0f))),
+        ImGuiCond_Appearing);
+    if (ImGui::BeginPopup("Add to level")) {
         ImGui::TextDisabled("(%.1f, %.1f, %.1f)", s_gen_pos[0],
                             s_gen_pos[1], s_gen_pos[2]);
-        static char s_creature[64] = {};
-        ImGui::SetNextItemWidth(240.0f);
-        ImGui::InputTextWithHint("##gen_creature", "search...",
-                                 s_creature, sizeof(s_creature));
-        std::string filt = s_creature;
-        std::transform(filt.begin(), filt.end(), filt.begin(),
-                       ::tolower);
-        ImGui::BeginChild("##gen_creature_list", ImVec2(240.0f, 190.0f),
-                          true);
-        std::string chosen;
-        {
-            std::unordered_set<std::string> seen_names;
-            auto row = [&](const std::string& nm) {
-                if (nm.empty() || !seen_names.insert(nm).second) return;
-                if (!filt.empty()) {
-                    std::string low = nm;
-                    std::transform(low.begin(), low.end(), low.begin(),
-                                   ::tolower);
-                    if (low.find(filt) == std::string::npos) return;
-                }
-                if (ImGui::Selectable(nm.c_str())) {
-                    chosen = nm;
-                }
-            };
-            for (const auto& ce : g_level_creature_catalog) {
-                row(ce.name);
-            }
-            for (const auto& m : g_level_spawn_markers) {
-                if (m.kind == 2) continue;
-                row(m.kind == 1 ? m.creature_name : m.name);
-            }
-        }
-        ImGui::EndChild();
         auto place_generator = [&](const std::string& creature) {
             std::vector<std::string> assets;
             uint32_t creature_entity = 0;
@@ -1529,23 +2428,316 @@ void draw_model_in_panel(ID3D11Device* device) {
                     "on Save)");
             }
         };
-        if (!chosen.empty()) {
-            place_generator(chosen);
-            s_creature[0] = 0;
-            ImGui::CloseCurrentPopup();
+
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##add_to_level_search",
+                                 "Search actors, objects, containers...",
+                                 s_add_filter, sizeof(s_add_filter));
+
+        std::string filter = s_add_filter;
+        std::transform(filter.begin(), filter.end(), filter.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
+        auto matches_filter = [&](const std::string& value) {
+            if (filter.empty()) return true;
+            std::string lower = value;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) {
+                               return (char)std::tolower(c);
+                           });
+            return lower.find(filter) != std::string::npos;
+        };
+
+        std::vector<std::string> actor_names;
+        std::unordered_set<std::string> seen_actor_names;
+        auto add_actor = [&](const std::string& name) {
+            if (name.empty() || !seen_actor_names.insert(name).second ||
+                !matches_filter(name)) return;
+            actor_names.push_back(name);
+        };
+        for (const auto& creature : g_level_creature_catalog) {
+            add_actor(creature.name);
         }
-        const bool can_add = s_creature[0] != 0;
-        ImGui::BeginDisabled(!can_add);
-        if (ImGui::Button("Place generator", ImVec2(150, 0))) {
-            place_generator(s_creature);
-            s_creature[0] = 0;
-            ImGui::CloseCurrentPopup();
+        for (const auto& marker : g_level_spawn_markers) {
+            if (marker.kind != 1 && marker.kind != 3) continue;
+            add_actor(marker.kind == 1 ? marker.creature_name : marker.name);
         }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(80, 0))) {
-            ImGui::CloseCurrentPopup();
+
+        std::vector<size_t> object_indices;
+        object_indices.reserve(S.all_mdl_files.size());
+        for (size_t i = 0; i < S.all_mdl_files.size(); ++i) {
+            const auto& model = S.all_mdl_files[i];
+            if (matches_filter(model.full_path) ||
+                matches_filter(model.name)) {
+                object_indices.push_back(i);
+            }
         }
+
+        const auto container_choices = build_container_spawn_choices();
+        std::vector<size_t> container_indices;
+        std::vector<size_t> dig_indices;
+        for (size_t i = 0; i < container_choices.size(); ++i) {
+            if (!matches_filter(container_choices[i].label)) continue;
+            (container_choices[i].info.is_dig_spot
+                 ? dig_indices : container_indices).push_back(i);
+        }
+
+        ImGui::Separator();
+        ImGui::BeginChild("##add_to_level_flat_list", ImVec2(0.0f, 0.0f),
+                          false, ImGuiWindowFlags_HorizontalScrollbar);
+        bool any_result = false;
+        const ImVec4 heading_colour(0.55f, 0.75f, 1.0f, 1.0f);
+
+        auto draw_heading = [&](const char* title, size_t count) {
+            ImGui::TextColored(heading_colour, "%s  (%zu)", title, count);
+        };
+        QuestUI::NpcCreationRequest npc_request;
+        if (QuestUI::GetPendingNpcCreation(npc_request)) {
+            any_result = true;
+            draw_heading("QUEST NPC", 1);
+            const bool can_author_npc = g_level_npc_donor.valid();
+            ImGui::BeginDisabled(!can_author_npc);
+            const std::string action =
+                "Create " + npc_request.display_name + " here";
+            if (ImGui::Selectable(action.c_str())) {
+                LevelEdit::NpcPlacementInfo info;
+                info.instance_name = npc_request.instance_name;
+                info.creature_name = npc_request.creature_name;
+                info.creature_entity = npc_request.creature_entity;
+                info.transform_component_field =
+                    g_level_npc_donor.transform_field;
+                info.transform_component_template =
+                    g_level_npc_donor.transform_parent;
+                info.position_template =
+                    g_level_npc_donor.position_parent;
+                info.rotation_template =
+                    g_level_npc_donor.rotation_parent;
+                for (uint32_t model_hash : npc_request.model_hashes) {
+                    const FlatAssetEntry* model =
+                        FindGlobalModelAssetByPathHash(model_hash);
+                    if (model) info.asset_models.push_back(model->full_path);
+                }
+                const int addition =
+                    LevelEdit::AddNpcPlacement(s_gen_pos, info);
+                if (addition >= 0) {
+                    LevelSpawnMarker marker;
+                    marker.x = s_gen_pos[0];
+                    marker.y = s_gen_pos[1];
+                    marker.z = s_gen_pos[2];
+                    marker.kind = 3;
+                    marker.pending_addition_index = addition;
+                    marker.name = npc_request.instance_name;
+                    marker.creature_name = npc_request.creature_name;
+                    marker.creature_entity_hash =
+                        npc_request.creature_entity;
+                    marker.model_hashes = npc_request.model_hashes;
+                    g_level_spawn_markers.push_back(marker);
+                    const size_t marker_index =
+                        g_level_spawn_markers.size() - 1;
+                    append_level_entity_model_at(
+                        device, npc_request.model_hashes, marker_index,
+                        s_gen_pos);
+                    UI::select_level_marker(marker_index);
+                    S.show_ent_npcs = true;
+                    S.show_entity_models = true;
+
+                    QuestUI::LevelReferenceCandidate candidate;
+                    candidate.is_npc = true;
+                    candidate.authored_instance = true;
+                    candidate.level_path =
+                        g_pending_terrain_level_entry.full_path;
+                    candidate.level_id = quest_level_id_from_path(
+                        candidate.level_path);
+                    candidate.entity_name = npc_request.instance_name;
+                    candidate.x = s_gen_pos[0];
+                    candidate.y = s_gen_pos[1];
+                    candidate.z = s_gen_pos[2];
+                    candidate.model_hashes = npc_request.model_hashes;
+                    std::string error;
+                    if (QuestUI::BindCreatedNpcInstance(candidate, error)) {
+                        OutputLog::success(
+                            "quest NPC: created '" +
+                            npc_request.instance_name + "' in " +
+                            candidate.level_id +
+                            "; Save Level will inject it");
+                        ImGui::CloseCurrentPopup();
+                    } else {
+                        OutputLog::error("quest NPC: " + error);
+                    }
+                } else {
+                    OutputLog::error(
+                        "quest NPC: level rejected the NPC placement");
+                }
+            }
+            ImGui::EndDisabled();
+            if (!can_author_npc) {
+                ImGui::TextDisabled(
+                    "No placed-NPC transform schema is available yet; "
+                    "load a level containing an NPC first.");
+            }
+            ImGui::Separator();
+        }
+        const int quest_reference_marker =
+            selected_level_spawn_marker_index();
+        if (QuestUI::IsAuthoredQuestActive() &&
+            quest_reference_marker >= 0) {
+            const LevelSpawnMarker& marker =
+                g_level_spawn_markers[static_cast<std::size_t>(
+                    quest_reference_marker)];
+            const QuestUI::LevelReferenceTarget target =
+                QuestUI::PendingLevelReferenceTarget();
+            const bool compatible =
+                (target == QuestUI::LevelReferenceTarget::QuestGiver &&
+                 marker.kind == 3) ||
+                (target != QuestUI::LevelReferenceTarget::QuestGiver &&
+                 marker.is_container);
+            const std::string action =
+                "Assign selected " + QuestUI::PendingLevelReferenceLabel();
+            if (compatible && matches_filter(action)) {
+                any_result = true;
+                draw_heading("QUEST REFERENCES", 1);
+                const bool existing_entity = marker.entity_hash != 0 &&
+                                             marker.pending_addition_index < 0;
+                const bool authored_npc = marker.kind == 3 &&
+                    marker.pending_addition_index >= 0 &&
+                    LevelEdit::AdditionIsNpc(
+                        marker.pending_addition_index);
+                ImGui::BeginDisabled(!existing_entity && !authored_npc);
+                if (ImGui::Selectable(action.c_str())) {
+                    QuestUI::LevelReferenceCandidate candidate;
+                    std::string error;
+                    if (!build_quest_level_reference(
+                            marker, size_t(quest_reference_marker),
+                            candidate)) {
+                        error = "The selected entity has no usable GDB name.";
+                    } else if (QuestUI::BindActiveLevelReference(candidate,
+                                                                  error)) {
+                        if (target !=
+                            QuestUI::LevelReferenceTarget::QuestGiver) {
+                            add_quest_item_to_container(
+                                marker.entity_hash,
+                                QuestUI::PendingLevelReferenceItemHash());
+                        }
+                        OutputLog::success(
+                            "quest reference: " + action + " in " +
+                            candidate.level_id);
+                        ImGui::CloseCurrentPopup();
+                    }
+                    if (!error.empty()) {
+                        OutputLog::error("quest reference: " + error);
+                    }
+                }
+                ImGui::EndDisabled();
+                if (!existing_entity && !authored_npc) {
+                    ImGui::TextDisabled(
+                        "Save and reload newly placed entities before "
+                        "using them as quest references.");
+                }
+            }
+        }
+        if (!actor_names.empty()) {
+            any_result = true;
+            draw_heading("ACTORS", actor_names.size());
+            ImGui::PushID("actors");
+            ImGuiListClipper clipper;
+            clipper.Begin((int)actor_names.size());
+            while (clipper.Step()) {
+                for (int i = clipper.DisplayStart;
+                     i < clipper.DisplayEnd; ++i) {
+                    ImGui::PushID(i);
+                    if (ImGui::Selectable(actor_names[(size_t)i].c_str())) {
+                        place_generator(actor_names[(size_t)i]);
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::PopID();
+                }
+            }
+            clipper.End();
+            ImGui::PopID();
+        }
+
+        if (!object_indices.empty()) {
+            if (any_result) ImGui::Separator();
+            any_result = true;
+            draw_heading("OBJECTS", object_indices.size());
+            ImGui::PushID("objects");
+            ImGuiListClipper clipper;
+            clipper.Begin((int)object_indices.size());
+            while (clipper.Step()) {
+                for (int row = clipper.DisplayStart;
+                     row < clipper.DisplayEnd; ++row) {
+                    const size_t model_index = object_indices[(size_t)row];
+                    const auto& model = S.all_mdl_files[model_index];
+                    const std::string label = clean_level_model_name(
+                        model.name.empty() ? model.full_path : model.name);
+                    ImGui::PushID((int)model_index);
+                    if (ImGui::Selectable(label.c_str())) {
+                        spawn_level_model_at(device, model.full_path,
+                                             s_gen_pos);
+                        ImGui::CloseCurrentPopup();
+                    }
+                    if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                        ImGui::BeginTooltip();
+                        ImGui::TextUnformatted(model.full_path.c_str());
+                        ImGui::EndTooltip();
+                    }
+                    ImGui::PopID();
+                }
+            }
+            clipper.End();
+            ImGui::PopID();
+        }
+
+        auto place_container_choice = [&](size_t choice_index) {
+            const auto& choice = container_choices[choice_index];
+            const int add_idx = spawn_level_container_at(
+                device, choice.model_path, s_gen_pos, choice.info);
+            if (add_idx >= 0) {
+                if (choice.info.is_dig_spot) {
+                    S.show_dig_spots = true;
+                } else {
+                    S.show_containers = true;
+                }
+                if (choice.model_path.empty()) {
+                    LevelSpawnMarker marker;
+                    marker.x = s_gen_pos[0];
+                    marker.y = s_gen_pos[1];
+                    marker.z = s_gen_pos[2];
+                    marker.kind = choice.info.is_dig_spot ? 4 : 5;
+                    marker.is_container = true;
+                    marker.pending_addition_index = add_idx;
+                    marker.name = choice.label;
+                    g_level_spawn_markers.push_back(std::move(marker));
+                    UI::select_level_marker(g_level_spawn_markers.size() - 1);
+                }
+            }
+            ImGui::CloseCurrentPopup();
+        };
+        auto draw_container_section = [&](const char* title,
+                                          const std::vector<size_t>& rows) {
+            if (rows.empty()) return;
+            if (any_result) ImGui::Separator();
+            any_result = true;
+            draw_heading(title, rows.size());
+            ImGui::PushID(title);
+            for (size_t row = 0; row < rows.size(); ++row) {
+                const size_t choice_index = rows[row];
+                ImGui::PushID((int)choice_index);
+                if (ImGui::Selectable(
+                        container_choices[choice_index].label.c_str())) {
+                    place_container_choice(choice_index);
+                }
+                ImGui::PopID();
+            }
+            ImGui::PopID();
+        };
+        draw_container_section("CONTAINERS", container_indices);
+        draw_container_section("DIG SPOTS", dig_indices);
+
+        if (!any_result) {
+            ImGui::TextDisabled("No matching placeable items.");
+        }
+        ImGui::EndChild();
         ImGui::EndPopup();
     }
 #endif
@@ -1645,12 +2837,21 @@ void draw_model_in_panel(ID3D11Device* device) {
         ::g_selected_level_mesh_idx = picked;
         ::g_selected_level_pick_id = picked >= 0 ? picked_id : 0;
         ::g_selected_level_hash = picked >= 0 ? picked_hash : 0;
+        if (picked >= 0 &&
+            g_mp.meshes[static_cast<size_t>(picked)].is_entity_model) {
+
+
+            g_sel_spawn_marker = -1;
+            g_sel_pending_sp = -1;
+            g_sel_pending_gen = -1;
+        }
         if (picked < 0) LevelGizmo::CancelDrag();
     }
 
     if (S.terrain_mode) {
         const float dt = ImGui::GetIO().DeltaTime;
-        if (hovered || g_flycam.is_looking) {
+        if (hovered || g_flycam.is_looking ||
+            g_flycam.right_press_pending) {
             ::render_panel_handle_flycam(dt);
         }
     } else {
@@ -1694,9 +2895,10 @@ void draw_model_in_panel(ID3D11Device* device) {
     }
 
     for (size_t i = 0; i < g_mp.meshes.size(); ++i) {
-        g_mp.meshes[i].highlight = ((int)i == ::g_highlight_mesh_idx)
-                                || (::g_selected_level_pick_id == 0 &&
-                                    (int)i == ::g_selected_level_mesh_idx);
+        g_mp.meshes[i].highlight =
+            ((int)i == ::g_highlight_mesh_idx) ||
+            (::g_selected_level_pick_id == 0 &&
+             (int)i == ::g_selected_level_mesh_idx);
         g_mp.meshes[i].isolated  = ((int)i == ::g_isolate_mesh_idx);
     }
     g_mp.selected_pick_id = ::g_selected_level_pick_id;
@@ -1716,7 +2918,7 @@ void draw_model_in_panel(ID3D11Device* device) {
     if (S.terrain_mode) {
         draw_gdb_placements_overlay(origin, region);
     }
-    draw_spawn_markers_overlay(origin, region);
+    draw_spawn_markers_overlay(origin, region, hovered);
     if (g_marker_clear_selection) {
         g_marker_clear_selection = false;
         ::g_selected_level_pick_id = 0;
@@ -1726,9 +2928,17 @@ void draw_model_in_panel(ID3D11Device* device) {
 
     if (g_sel_spawn_marker >= 0 &&
         g_sel_spawn_marker < (int)g_level_spawn_markers.size() &&
-        (S.show_spawn_markers || S.show_ent_npcs)) {
+        level_marker_visible(
+            g_level_spawn_markers[(size_t)g_sel_spawn_marker])) {
         const auto& mk =
             g_level_spawn_markers[(size_t)g_sel_spawn_marker];
+        const Gdb::EntityGameplayDetails* marker_gameplay = nullptr;
+        const uint32_t gameplay_hash = mk.creature_entity_hash != 0
+            ? mk.creature_entity_hash : mk.entity_hash;
+        auto gameplay_it = g_level_entity_gameplay.find(gameplay_hash);
+        if (gameplay_it != g_level_entity_gameplay.end()) {
+            marker_gameplay = &gameplay_it->second;
+        }
         uint32_t spawn_owner_entity = 0;
         uint32_t spawn_owner_list = 0;
         if (mk.kind == 2) {
@@ -1749,13 +2959,37 @@ void draw_model_in_panel(ID3D11Device* device) {
         }
         const uint32_t edit_id = 0x70000000u |
                                  uint32_t(g_sel_spawn_marker);
+        const bool pending_addition = mk.pending_addition_index >= 0;
         const bool editable = LevelEdit::Enabled() &&
                               !LevelEdit::Saving() &&
-                              (mk.pos_off[0] || mk.pos_off[1] ||
+                              (pending_addition || mk.pos_off[0] ||
+                               mk.pos_off[1] ||
                                mk.pos_off[2]);
         const bool spawn_deletable =
             LevelEdit::Enabled() && !LevelEdit::Saving() &&
             mk.kind == 2 && spawn_owner_list != 0;
+        const bool entity_deletable =
+            LevelEdit::Enabled() && !LevelEdit::Saving() &&
+            mk.kind != 2 && (mk.entity_hash != 0 || pending_addition);
+        auto queue_entity_delete = [&]() {
+            LevelEdit::InstInfo info;
+            const float orig[3] = {mk.x, mk.y, mk.z};
+            info.orig_pos = orig;
+            info.gdb_off = mk.pos_off;
+            info.gdb_rot_off = mk.rot_off;
+            info.gdb_entity_hash = mk.entity_hash;
+            if (pending_addition) {
+                info.lev_off = uint32_t(mk.pending_addition_index + 1);
+                info.lev_kind = 5;
+            }
+            LevelEdit::PushUndoSnapshot({edit_id});
+            LevelEdit::SetDeleted(edit_id, info);
+            OutputLog::info("level edit: entity deletion queued");
+            if (pending_addition) {
+                g_level_spawn_markers[size_t(g_sel_spawn_marker)].kind = 0;
+            }
+            g_sel_spawn_marker = -1;
+        };
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             g_sel_spawn_marker = -1;
         } else if (!ImGui::GetIO().WantTextInput &&
@@ -1767,20 +3001,12 @@ void draw_model_in_panel(ID3D11Device* device) {
                 OutputLog::info(
                     "level edit: spawn point deletion queued");
                 g_sel_spawn_marker = -1;
-            } else if (editable) {
-                LevelEdit::InstInfo info;
-                const float orig[3] = {mk.x, mk.y, mk.z};
-                info.orig_pos = orig;
-                info.gdb_off = mk.pos_off;
-                info.gdb_rot_off = mk.rot_off;
-                info.gdb_entity_hash = mk.entity_hash;
-                LevelEdit::SetDeleted(edit_id, info);
-                OutputLog::info(
-                    "level edit: marker delete queued (entity sinks on "
-                    "Save)");
+            } else if (entity_deletable) {
+                queue_entity_delete();
             }
         }
-        const float kMarkerW = 220.0f;
+        const float kMarkerW =
+            (mk.is_container || marker_gameplay) ? 320.0f : 220.0f;
         ImGui::SetNextWindowPos(
             ImVec2(origin.x + region.x - kMarkerW - 8.0f,
                    origin.y + 6.0f));
@@ -1834,6 +3060,11 @@ void draw_model_in_panel(ID3D11Device* device) {
                     info.gdb_off = mk.pos_off;
                     info.gdb_rot_off = mk.rot_off;
                     info.gdb_entity_hash = mk.entity_hash;
+                    if (pending_addition) {
+                        info.lev_off =
+                            uint32_t(mk.pending_addition_index + 1);
+                        info.lev_kind = 5;
+                    }
                     LevelEdit::AddMove(edit_id, step, info);
                 }
             }
@@ -1842,6 +3073,8 @@ void draw_model_in_panel(ID3D11Device* device) {
             const char* kind_name =
                 mk.kind == 1 ? "Creature generator"
                 : mk.kind == 2 ? "Spawn point"
+                : mk.kind == 4 ? "Dig spot"
+                : mk.kind == 5 ? "Container"
                                : "NPC / creature";
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.55f, 1.0f), "%s",
                                kind_name);
@@ -1852,6 +3085,15 @@ void draw_model_in_panel(ID3D11Device* device) {
                 ImGui::TextDisabled("spawns: %s",
                                     mk.creature_name.c_str());
             }
+            if (marker_gameplay) {
+                draw_entity_gameplay_details(*marker_gameplay);
+            }
+            if (pending_addition) {
+                draw_addition_container_details(
+                    mk.pending_addition_index);
+            } else if (mk.kind == 4 || mk.is_container) {
+                draw_level_container_details(mk.entity_hash);
+            }
             if (mk.kind == 2 && spawn_deletable &&
                 ImGui::Button("Delete spawn point")) {
                 LevelEdit::RemoveSpawnPointFromExisting(
@@ -1860,6 +3102,17 @@ void draw_model_in_panel(ID3D11Device* device) {
                 OutputLog::info(
                     "level edit: spawn point deletion queued");
                 g_sel_spawn_marker = -1;
+            }
+            if (mk.kind != 2 && entity_deletable &&
+                ImGui::Button(mk.kind == 1 ? "Delete generator"
+                                           : pending_addition
+                                               ? (mk.kind == 4
+                                                      ? "Delete dig spot"
+                                                      : mk.kind == 3
+                                                            ? "Delete NPC"
+                                                            : "Delete container")
+                                               : "Delete entity")) {
+                queue_entity_delete();
             }
             if (mk.kind == 1) {
                 const bool can_add_sp =
@@ -2168,6 +3421,13 @@ void draw_model_in_panel(ID3D11Device* device) {
                             g_sel_pending_gen, sp_pos);
                     }
                     ImGui::TextDisabled("unsaved - authored on Save");
+                    if (gen_editable &&
+                        ImGui::Button("Delete generator")) {
+                        LevelEdit::RemoveGenerator(g_sel_pending_gen);
+                        OutputLog::info(
+                            "level edit: unsaved generator removed");
+                        g_sel_pending_gen = -1;
+                    }
                 }
                 ImGui::End();
 
@@ -2342,6 +3602,63 @@ void draw_model_in_panel(ID3D11Device* device) {
                 sel_contents = &cit->second;
             }
         }
+        if (!sel_contents && sel_gdb_entity_hash != 0) {
+            auto cit = g_level_entity_contents.find(sel_gdb_entity_hash);
+            if (cit != g_level_entity_contents.end()) {
+                sel_contents = &cit->second;
+            }
+        }
+        const Gdb::EntityGameplayDetails* sel_gameplay = nullptr;
+        if (::g_selected_level_hash != 0 &&
+            ::g_selected_level_hash <= 0xFFFFFFFFull) {
+            auto git = g_level_entity_gameplay.find(
+                uint32_t(::g_selected_level_hash));
+            if (git != g_level_entity_gameplay.end()) {
+                sel_gameplay = &git->second;
+            }
+        }
+        const Gdb::PropertyDetails* sel_property = nullptr;
+        if (::g_selected_level_hash != 0 &&
+            ::g_selected_level_hash <= 0xFFFFFFFFull) {
+            auto pit = g_level_property_details.find(
+                uint32_t(::g_selected_level_hash));
+            if (pit != g_level_property_details.end()) {
+                sel_property = &pit->second;
+            }
+        }
+        if (!sel_property && sel_gdb_entity_hash != 0) {
+            auto pit = g_level_property_details.find(sel_gdb_entity_hash);
+            if (pit != g_level_property_details.end()) {
+                sel_property = &pit->second;
+            }
+        }
+        if (!sel_gameplay && sel_gdb_entity_hash != 0) {
+            auto git = g_level_entity_gameplay.find(sel_gdb_entity_hash);
+            if (git != g_level_entity_gameplay.end()) {
+                sel_gameplay = &git->second;
+            }
+        }
+        if (!sel_gameplay) {
+            uint32_t creature_hash = 0;
+            const int selected_marker =
+                selected_level_spawn_marker_index();
+            if (selected_marker >= 0) {
+                creature_hash = g_level_spawn_markers[
+                    size_t(selected_marker)].creature_entity_hash;
+            }
+            if (creature_hash == 0 && sel_gdb_entity_hash != 0) {
+                for (const auto& marker : g_level_spawn_markers) {
+                    if (marker.entity_hash == sel_gdb_entity_hash) {
+                        creature_hash = marker.creature_entity_hash;
+                        if (creature_hash != 0) break;
+                    }
+                }
+            }
+            auto git = g_level_entity_gameplay.find(creature_hash);
+            if (git != g_level_entity_gameplay.end()) {
+                sel_gameplay = &git->second;
+            }
+        }
         constexpr uint64_t kAdditionHashBase = 0xADD0000000000000ull;
         int sel_chest_addition = -1;
         int sel_readable_addition = -1;
@@ -2384,8 +3701,10 @@ void draw_model_in_panel(ID3D11Device* device) {
                 }
             }
         }
-        const float kOverlayW = (sel_contents || sel_chest_addition >= 0 ||
-                                 sel_text || sel_readable_addition >= 0)
+        const float kOverlayW = (sel_contents || sel_gameplay ||
+                                 sel_property ||
+                                 sel_chest_addition >= 0 || sel_text ||
+                                 sel_readable_addition >= 0)
             ? 290.0f
             : (LevelEdit::Enabled() ? 190.0f : 150.0f);
         ImGui::SetNextWindowPos(ImVec2(origin.x + region.x - kOverlayW - 8.0f,
@@ -2557,6 +3876,12 @@ void draw_model_in_panel(ID3D11Device* device) {
                 }
                 ImGui::EndDisabled();
             }
+            if (sel_gameplay) {
+                draw_entity_gameplay_details(*sel_gameplay);
+            }
+            if (sel_property) {
+                draw_property_details(*sel_property);
+            }
             if (sel_contents) {
                 auto pretty_tag = [](std::string tag, int money) {
 
@@ -2623,22 +3948,16 @@ void draw_model_in_panel(ID3D11Device* device) {
                 };
                 ImGui::Spacing();
                 ImGui::Separator();
-                if (!sel_contents->entity_name.empty()) {
+                if (!sel_gameplay && !sel_contents->entity_name.empty()) {
                     ImGui::TextColored(ImVec4(0.65f, 0.85f, 1.0f, 1.0f),
                                        "%s",
                                        sel_contents->entity_name.c_str());
                 }
-                if (sel_contents->has_chest_component &&
-                    sel_contents->silver_keys_needed > 0) {
-                    ImGui::TextColored(
-                        ImVec4(0.8f, 0.8f, 0.9f, 1.0f),
-                        "Locked: %d silver key%s",
-                        sel_contents->silver_keys_needed,
-                        sel_contents->silver_keys_needed == 1 ? "" : "s");
-                }
-                constexpr size_t kMaxContentRows = 12;
+                draw_container_authored_rules(*sel_contents);
                 const uint32_t sel_entity =
-                    uint32_t(::g_selected_level_hash);
+                    sel_gdb_entity_hash != 0
+                        ? sel_gdb_entity_hash
+                        : uint32_t(::g_selected_level_hash);
                 std::vector<uint32_t> shown_items;
                 bool staged = LevelEdit::GetChestContents(sel_entity,
                                                           shown_items);
@@ -2655,19 +3974,14 @@ void draw_model_in_panel(ID3D11Device* device) {
                 static char s_picker_filter[64] = {};
 
                 if (staged || !shown_items.empty() ||
-                    sel_contents->potential_items.empty() ||
+                    sel_contents->has_inventory_component ||
                     contents_editable) {
                     ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
-                                       staged ? "Contents (edited):"
-                                              : "Contents:");
-                    size_t shown = 0;
+                                       staged ? "Initial items (edited):"
+                                              : "Initial items:");
                     int remove_idx = -1;
                     bool open_picker = false;
                     for (size_t ii = 0; ii < shown_items.size(); ++ii) {
-                        if (shown++ >= kMaxContentRows &&
-                            !contents_editable) {
-                            break;
-                        }
                         ImGui::PushID(int(ii));
                         if (contents_editable) {
                             if (ImGui::SmallButton("x")) remove_idx = int(ii);
@@ -2703,12 +4017,6 @@ void draw_model_in_panel(ID3D11Device* device) {
                     if (shown_items.empty()) {
                         ImGui::TextDisabled(staged ? "  (emptied)"
                                                    : "  (empty)");
-                    }
-                    if (!contents_editable &&
-                        shown_items.size() > kMaxContentRows) {
-                        ImGui::TextDisabled(
-                            "  +%zu more",
-                            shown_items.size() - kMaxContentRows);
                     }
                     if (contents_editable) {
                         if (ImGui::SmallButton("+ Add item")) {
@@ -2804,49 +4112,8 @@ void draw_model_in_panel(ID3D11Device* device) {
                     }
                 }
 
-                if (!staged && shown_items.empty() &&
-                    !sel_contents->potential_items.empty()) {
-                    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
-                                       "Contents (random roll):");
-                    size_t shown = 0;
-                    for (const auto& it : sel_contents->potential_items) {
-                        if (shown++ >= kMaxContentRows) break;
-                        ImGui::BulletText("%s", item_label(it).c_str());
-                        if (it.weight >= 0.0f || it.min_chapter >= 0.0f) {
-                            ImGui::SameLine();
-                            std::string dim;
-                            if (it.weight >= 0.0f) {
-                                char b[24];
-                                std::snprintf(b, sizeof(b), "w%.1f",
-                                              it.weight);
-                                dim += b;
-                            }
-                            if (it.min_chapter >= 0.0f ||
-                                it.max_chapter >= 0.0f) {
-                                char b[32];
-                                std::snprintf(
-                                    b, sizeof(b), " ch%.1f-%.1f",
-                                    it.min_chapter >= 0.0f ? it.min_chapter
-                                                           : 0.0f,
-                                    it.max_chapter >= 0.0f ? it.max_chapter
-                                                           : 99.0f);
-                                dim += b;
-                            }
-                            ImGui::TextDisabled("%s", dim.c_str());
-                        }
-                    }
-                    if (sel_contents->potential_items.size() >
-                        kMaxContentRows) {
-                        ImGui::TextDisabled(
-                            "  +%zu more",
-                            sel_contents->potential_items.size() -
-                                kMaxContentRows);
-                    }
-                } else if (!staged && shown_items.empty() &&
-                           sel_contents->has_chest_component &&
-                           !contents_editable) {
-                    ImGui::TextDisabled("Empty chest");
-                }
+                draw_container_loot_table_editor(sel_entity,
+                                                 *sel_contents);
             } else if (sel_chest_addition >= 0) {
                 auto pretty_tag2 = [](std::string tag, int money) {
                     for (const char* pfx : { "INV_ITEM_", "OBJECT_",
@@ -2902,7 +4169,10 @@ void draw_model_in_panel(ID3D11Device* device) {
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.65f, 0.85f, 1.0f, 1.0f),
-                                   "New chest (unsaved)");
+                                   LevelEdit::AdditionIsDigSpot(
+                                       sel_chest_addition)
+                                       ? "New dig spot (unsaved)"
+                                       : "New container (unsaved)");
                 std::vector<uint32_t> add_items;
                 LevelEdit::GetAdditionChestItems(sel_chest_addition,
                                                  add_items);
@@ -3004,7 +4274,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                     }
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip(
-                            "Give this chest a weighted random loot "
+                            "Give this container a weighted random loot "
                             "table borrowed from an existing container "
                             "in this level.");
                     }
@@ -3110,8 +4380,36 @@ void draw_model_in_panel(ID3D11Device* device) {
             DebugTrace::log("del: id=%u hash=%llu",
                             ::g_selected_level_pick_id,
                             (unsigned long long)::g_selected_level_hash);
-            LevelEdit::PushUndoSnapshot(collect_group_ids());
-            apply_group_edit(kEditDelete, nullptr);
+            bool removed_spawn_point = false;
+            const int marker_index = selected_level_spawn_marker_index();
+            if (marker_index >= 0) {
+                const LevelSpawnMarker& marker =
+                    g_level_spawn_markers[size_t(marker_index)];
+                if (marker.kind == 2) {
+                    for (const LevelSpawnMarker& owner :
+                         g_level_spawn_markers) {
+                        if (owner.kind != 1 ||
+                            owner.spawn_points_record == 0 ||
+                            std::find(owner.spawn_point_entities.begin(),
+                                      owner.spawn_point_entities.end(),
+                                      marker.entity_hash) ==
+                                owner.spawn_point_entities.end()) {
+                            continue;
+                        }
+                        LevelEdit::RemoveSpawnPointFromExisting(
+                            owner.entity_hash, owner.spawn_points_record,
+                            marker.entity_hash);
+                        OutputLog::info(
+                            "level edit: spawn point deletion queued");
+                        removed_spawn_point = true;
+                        break;
+                    }
+                }
+            }
+            if (!removed_spawn_point) {
+                LevelEdit::PushUndoSnapshot(collect_group_ids());
+                apply_group_edit(kEditDelete, nullptr);
+            }
             ::g_selected_level_mesh_idx = -1;
             ::g_selected_level_pick_id = 0;
             ::g_selected_level_hash = 0;
@@ -3148,12 +4446,16 @@ void draw_model_in_panel(ID3D11Device* device) {
         } else if (g_mp.no_tilt) {
 
         } else {
-            MP_Release(g_mp);
-            g_mp.has_model = false;
-            g_mp_initialized = false;
-            S.show_model_preview = false;
-            S.model_preview_open = false;
-            S.selected_bone = -1;
+            if (S.content_tabs_visible && ContentTabs::HasTabs()) {
+                ContentTabs::CloseActive();
+            } else {
+                MP_Release(g_mp);
+                g_mp.has_model = false;
+                g_mp_initialized = false;
+                S.show_model_preview = false;
+                S.model_preview_open = false;
+                S.selected_bone = -1;
+            }
         }
     }
 
@@ -3271,17 +4573,48 @@ void draw_model_in_panel(ID3D11Device* device) {
                     ImGui::SetTooltip(
                         "Creature generators (red) and their spawn "
                         "points (orange). In edit mode: click to "
-                        "select, Shift+Right-click ground to place a "
+                        "select, Right-click ground to add a "
                         "new generator.");
-                ImGui::Checkbox("NPCs / creatures", &S.show_ent_npcs);
-                ImGui::Checkbox("Text objects", &S.show_ent_text);
-            }
-            if (S.terrain_mode) {
-                ImGui::Checkbox("Adjacent terrain", &S.show_adjacent_terrain);
-                if (ImGui::IsItemHovered())
+                ImGui::Checkbox("NPC / creature markers",
+                                &S.show_ent_npcs);
+                if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip(
-                        "Show the neighbouring levels' heightfields around "
-                        "this level (textured with their baked ground).");
+                        "Show the labelled diamond at each authored NPC or "
+                        "creature position. Markers are not selectable.");
+                }
+                if (ImGui::Checkbox("Entity models",
+                                    &S.show_entity_models) &&
+                    !S.show_entity_models &&
+                    ::g_selected_level_mesh_idx >= 0 &&
+                    ::g_selected_level_mesh_idx <
+                        static_cast<int>(g_mp.meshes.size()) &&
+                    g_mp.meshes[static_cast<size_t>(
+                        ::g_selected_level_mesh_idx)].is_entity_model) {
+                    ::g_selected_level_mesh_idx = -1;
+                    ::g_selected_level_pick_id = 0;
+                    ::g_selected_level_hash = 0;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Render the resolved full NPC and creature models. "
+                        "Select and move entities by clicking their model.");
+                }
+                ImGui::Checkbox("Containers", &S.show_containers);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "All inventory-bearing objects (purple), including "
+                        "chests, cupboards, registers, and barrels. "
+                        "Dig spots remain under their own "
+                        "checkbox.");
+                }
+                ImGui::Checkbox("Dig spots", &S.show_dig_spots);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Dig spots (blue). Click one to inspect its loot, "
+                        "search radius, priority, and respawn chance when "
+                        "those values are present.");
+                }
+                ImGui::Checkbox("Text objects", &S.show_ent_text);
             }
             if (S.dev_mode) {
                 ImGui::Checkbox("Terrain: engine blend",
@@ -3328,11 +4661,22 @@ void draw_model_in_panel(ID3D11Device* device) {
                         std::clamp(hour / 24.0f, 0.0f, 1.0f);
                 }
             }
-            if (g_mp.has_sky_theme || g_mp.has_weather_theme ||
+            if (S.terrain_mode || g_mp.has_sky_theme ||
+                g_mp.has_weather_theme ||
                 g_mp.has_fog_theme) {
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
                                    "Environment");
+                if (S.terrain_mode) {
+                    ImGui::Checkbox("Adjacent terrain",
+                                    &S.show_adjacent_terrain);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "Show the neighbouring levels' heightfields "
+                            "around this level (textured with their baked "
+                            "ground).");
+                    }
+                }
                 if (g_mp.has_sky_theme) {
                     ImGui::Checkbox("Sky", &g_mp.show_sky);
                     if (ImGui::IsItemHovered())
@@ -4208,7 +5552,7 @@ void draw_model_in_panel(ID3D11Device* device) {
     }
 
     if (g_mp.has_model && g_mp.bone_count > 0 && !S.anim_clips.empty() &&
-        !S.item_model_active) {
+        !S.item_model_active && !S.entity_model_active) {
         static float s_anim_alpha = 0.30f;
         const float kIdleAlpha   = 0.30f;
         const float kHoverAlpha  = 1.00f;
@@ -4661,8 +6005,8 @@ void draw_model_in_panel(ID3D11Device* device) {
         ImGui::SetNextWindowPos(
             ImVec2(origin.x + region.x - kItemW - kItemPad,
                    origin.y + kItemPad));
-        // fixed width, auto height (only as tall as its content, capped
-        // to the render area)
+
+
         ImGui::SetNextWindowSizeConstraints(
             ImVec2(kItemW, 0.0f),
             ImVec2(kItemW, std::max(200.0f, region.y - 2 * kItemPad)));
@@ -4746,6 +6090,244 @@ void draw_model_in_panel(ID3D11Device* device) {
                     ImGui::EndTable();
                 }
             }
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
+    }
+
+    if (S.show_entity_details && S.selected_entity >= 0 &&
+        S.selected_entity < static_cast<int>(g_global_entity_catalog.size()) &&
+        !LevelEdit::Enabled() &&
+        ContentTabs::ActiveKind() == ContentTabs::Kind::Entity) {
+        const auto& entity = g_global_entity_catalog[
+            static_cast<std::size_t>(S.selected_entity)];
+        static float s_entity_alpha = 0.30f;
+        constexpr float kIdleAlpha = 0.30f;
+        constexpr float kHoverAlpha = 1.00f;
+        constexpr float kEntityW = 350.0f;
+        constexpr float kEntityPad = 6.0f;
+        const float entity_h = (std::min)(
+            620.0f, (std::max)(180.0f, region.y - 2.0f * kEntityPad));
+        ImGui::SetNextWindowPos(
+            ImVec2(origin.x + region.x - kEntityW - kEntityPad,
+                   origin.y + kEntityPad));
+        ImGui::SetNextWindowSize(ImVec2(kEntityW, entity_h),
+                                 ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(s_entity_alpha * 0.78f);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, s_entity_alpha);
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoScrollbar;
+        if (ImGui::Begin("##entity_details_overlay", nullptr, flags)) {
+            const ImVec2 window_pos = ImGui::GetWindowPos();
+            const ImVec2 window_size = ImGui::GetWindowSize();
+            const ImVec2 mouse = ImGui::GetIO().MousePos;
+            bool hovering = mouse.x >= window_pos.x &&
+                            mouse.x < window_pos.x + window_size.x &&
+                            mouse.y >= window_pos.y &&
+                            mouse.y < window_pos.y + window_size.y;
+            static bool s_was_hovering = false;
+            if (!hovering && s_was_hovering &&
+                ImGui::GetIO().MouseDown[0]) {
+                hovering = true;
+            }
+            s_was_hovering = hovering;
+            const float target = hovering ? kHoverAlpha : kIdleAlpha;
+            s_entity_alpha += (target - s_entity_alpha) * 0.18f;
+            if (std::fabs(s_entity_alpha - target) < 0.005f) {
+                s_entity_alpha = target;
+            }
+
+            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+                               "Entity Details");
+            ImGui::Separator();
+            ImGui::BeginChild("##entity_details_scroll", ImVec2(0.0f, 0.0f),
+                              false);
+            ImGui::TextColored(ImVec4(0.65f, 0.85f, 1.0f, 1.0f), "%s",
+                               (entity.display_name.empty()
+                                    ? entity.name : entity.display_name)
+                                   .c_str());
+            if (S.dev_mode) {
+                if (!entity.display_name.empty() &&
+                    entity.display_name != entity.name) {
+                    ImGui::TextDisabled("Internal: %s", entity.name.c_str());
+                }
+                ImGui::TextDisabled("Entity 0x%08X", entity.entity_hash);
+            }
+
+            static std::uint32_t cached_animation_entity = 0;
+            static std::uint64_t cached_animation_binding_revision = 0;
+            static std::uint64_t cached_animation_catalog_revision = 0;
+            static std::size_t cached_animation_clip_count = 0;
+            static std::string entity_animation_filter;
+            static std::vector<std::pair<std::size_t, std::string>> animations;
+            const std::uint64_t binding_revision =
+                Anim::model_animation_binding_revision();
+            if (cached_animation_entity != entity.entity_hash ||
+                cached_animation_binding_revision != binding_revision ||
+                cached_animation_catalog_revision !=
+                    g_global_entity_catalog_revision ||
+                cached_animation_clip_count != S.anim_clips.size()) {
+                animations.clear();
+                entity_animation_filter.clear();
+                std::unordered_set<std::size_t> seen_animations;
+                const std::unordered_set<std::uint32_t> model_hashes(
+                    entity.model_hashes.begin(), entity.model_hashes.end());
+                for (const Anim::ModelAnimationBinding& binding :
+                     Anim::model_animation_bindings()) {
+                    if (model_hashes.find(binding.model_path_hash) ==
+                        model_hashes.end()) {
+                        continue;
+                    }
+                    if (binding.clip_index >= S.anim_clips.size() ||
+                        !seen_animations.insert(binding.clip_index).second) {
+                        continue;
+                    }
+                    std::string name = binding.animation_name.empty()
+                        ? binding.source_name : binding.animation_name;
+                    if (name.empty()) {
+                        name = S.anim_clips[binding.clip_index].name;
+                    }
+                    animations.emplace_back(binding.clip_index,
+                                             std::move(name));
+                }
+                cached_animation_entity = entity.entity_hash;
+                cached_animation_binding_revision = binding_revision;
+                cached_animation_catalog_revision =
+                    g_global_entity_catalog_revision;
+                cached_animation_clip_count = S.anim_clips.size();
+            }
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.55f, 0.9f, 1.0f, 1.0f),
+                               "Animations (%zu)", animations.size());
+            if (animations.empty()) {
+                ImGui::TextDisabled("None indexed");
+            } else {
+                ImGui::SetNextItemWidth(-1.0f);
+                ImGui::InputTextWithHint("##entity_animation_filter",
+                                         "Filter animations...",
+                                         &entity_animation_filter);
+                std::string filter_lower = entity_animation_filter;
+                std::transform(filter_lower.begin(), filter_lower.end(),
+                               filter_lower.begin(), ::tolower);
+                std::vector<std::size_t> visible_animations;
+                visible_animations.reserve(animations.size());
+                for (std::size_t i = 0; i < animations.size(); ++i) {
+                    if (filter_lower.empty()) {
+                        visible_animations.push_back(i);
+                        continue;
+                    }
+                    std::string name_lower = animations[i].second;
+                    std::transform(name_lower.begin(), name_lower.end(),
+                                   name_lower.begin(), ::tolower);
+                    if (name_lower.find(filter_lower) != std::string::npos) {
+                        visible_animations.push_back(i);
+                    }
+                }
+                auto& player = Anim::global_player();
+                const Anim::AnimClip* current = player.clip();
+                if (current) {
+                    const bool playing = player.state() ==
+                        Anim::AnimPlayer::State::Playing;
+                    const bool paused = player.state() ==
+                        Anim::AnimPlayer::State::Paused;
+                    if (UI::icon_button("##entity_anim_stop", ICON_FA_STOP,
+                                        26.0f, false)) {
+                        player.stop();
+                    }
+                    ImGui::SameLine();
+                    const char* glyph = playing ? ICON_FA_PAUSE : ICON_FA_PLAY;
+                    if (UI::icon_button("##entity_anim_play", glyph,
+                                        30.0f, true)) {
+                        if (playing) player.pause();
+                        else if (paused) player.resume();
+                        else player.play(current, player.is_loop());
+                    }
+                    ImGui::SameLine();
+                    if (UI::icon_button("##entity_anim_loop", ICON_FA_REPEAT,
+                                        26.0f, false,
+                                        player.is_loop())) {
+                        player.set_loop(!player.is_loop());
+                    }
+                    const float duration =
+                        Anim::clip_duration_seconds(*current);
+                    float time = player.time();
+                    ImGui::SetNextItemWidth(-1.0f);
+                    if (ImGui::SliderFloat("##entity_anim_time", &time,
+                                           0.0f,
+                                           (std::max)(duration, 0.001f),
+                                           "%.2fs")) {
+                        player.seek(time);
+                    }
+                } else {
+                    ImGui::TextDisabled("Select an animation to play it");
+                }
+                const float animation_list_height = (std::min)(
+                    240.0f,
+                    (std::max)(100.0f, ImGui::GetContentRegionAvail().y));
+                ImGui::BeginChild("##entity_animation_list",
+                                  ImVec2(0.0f, animation_list_height),
+                                  false);
+                ImGuiListClipper clipper;
+                clipper.Begin(static_cast<int>(visible_animations.size()));
+                while (clipper.Step()) {
+                    for (int row = clipper.DisplayStart;
+                         row < clipper.DisplayEnd; ++row) {
+                        const auto& animation =
+                            animations[visible_animations[
+                                static_cast<std::size_t>(row)]];
+                        const bool selected =
+                            S.anim_selected_clip ==
+                            static_cast<int>(animation.first);
+                        ImGui::PushID(row);
+                        const float duration = Anim::clip_duration_seconds(
+                            S.anim_clips[animation.first]);
+                        char animation_label[192];
+                        std::snprintf(animation_label,
+                                      sizeof(animation_label),
+                                      "%s  (%.2fs)",
+                                      animation.second.c_str(), duration);
+                        if (ImGui::Selectable(animation_label, selected)) {
+                            S.anim_selected_clip =
+                                static_cast<int>(animation.first);
+                            player.play(&S.anim_clips[animation.first],
+                                        player.is_loop());
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                clipper.End();
+                ImGui::EndChild();
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.55f, 0.9f, 1.0f, 1.0f),
+                               "Model parts");
+            if (entity.model_hashes.empty()) {
+                ImGui::TextDisabled("None");
+            } else {
+                for (std::uint32_t hash : entity.model_hashes) {
+                    const FlatAssetEntry* match =
+                        FindGlobalModelAssetByPathHash(hash);
+                    if (match) {
+                        ImGui::Bullet();
+                        ImGui::SameLine();
+                        ImGui::TextWrapped("%s", match->full_path.c_str());
+                    } else {
+                        ImGui::BulletText("Unresolved model 0x%08X", hash);
+                    }
+                }
+            }
+
+            const auto gameplay =
+                g_global_entity_gameplay.find(entity.entity_hash);
+            if (gameplay != g_global_entity_gameplay.end()) {
+                draw_entity_gameplay_details(gameplay->second, false);
+            }
+            ImGui::EndChild();
         }
         ImGui::End();
         ImGui::PopStyleVar();
@@ -4905,10 +6487,113 @@ void draw_heightmap_popout() {
 }
 
 #ifdef _WIN32
+bool select_level_entity_model(unsigned int entity_hash) {
+    if (!entity_hash) return false;
+    for (size_t mesh_index = 0; mesh_index < g_mp.meshes.size();
+         ++mesh_index) {
+        const MPPerMesh& mesh = g_mp.meshes[mesh_index];
+        if (!mesh.is_entity_model) continue;
+        for (const auto& range : mesh.pick_ranges) {
+            if (range.gdb_entity_hash != entity_hash) continue;
+            ::g_selected_level_mesh_idx = static_cast<int>(mesh_index);
+            ::g_selected_level_pick_id = range.selection_id;
+            ::g_selected_level_hash = range.inst_hash;
+            g_sel_spawn_marker = -1;
+            g_sel_pending_sp = -1;
+            g_sel_pending_gen = -1;
+            g_marker_clear_selection = false;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool select_level_marker(std::size_t marker_index) {
+    if (marker_index >= g_level_spawn_markers.size()) return false;
+    if ((g_level_spawn_markers[marker_index].kind == 2 ||
+         g_level_spawn_markers[marker_index].kind == 3) &&
+        !g_level_spawn_markers[marker_index].model_hashes.empty()) {
+        const unsigned int entity_hash =
+            g_level_spawn_markers[marker_index].entity_hash;
+        if (entity_hash && select_level_entity_model(entity_hash)) {
+            return true;
+        }
+        const uint32_t selection_id =
+            0x70000000u | uint32_t(marker_index);
+        for (size_t mesh_index = 0; mesh_index < g_mp.meshes.size();
+             ++mesh_index) {
+            const MPPerMesh& mesh = g_mp.meshes[mesh_index];
+            if (!mesh.is_entity_model) continue;
+            for (const auto& range : mesh.pick_ranges) {
+                if (range.selection_id != selection_id) continue;
+                ::g_selected_level_mesh_idx = int(mesh_index);
+                ::g_selected_level_pick_id = selection_id;
+                ::g_selected_level_hash = range.inst_hash;
+                g_sel_spawn_marker = -1;
+                g_sel_pending_sp = -1;
+                g_sel_pending_gen = -1;
+                g_marker_clear_selection = false;
+                return true;
+            }
+        }
+        return false;
+    }
+    g_sel_spawn_marker = static_cast<int>(marker_index);
+    g_sel_pending_sp = -1;
+    g_sel_pending_gen = -1;
+    g_marker_clear_selection = true;
+    return true;
+}
+
+void request_level_add_menu_at(const float engine_pos[3]) {
+    if (!engine_pos) return;
+    for (int i = 0; i < 3; ++i) {
+        g_add_menu_requested_pos[i] = engine_pos[i];
+    }
+    g_add_menu_requested = true;
+}
+
 void draw_render_panel(ID3D11Device* device) {
 
     if (S.show_gdb_render) {
         draw_gdb_in_panel();
+    } else if (S.content_tabs_visible && ContentTabs::HasTabs()) {
+        ContentTabs::DrawTabBar();
+        const ContentTabs::Kind kind = ContentTabs::ActiveKind();
+        if (kind == ContentTabs::Kind::Lua ||
+            kind == ContentTabs::Kind::Quest ||
+            kind == ContentTabs::Kind::CustomQuest) {
+            draw_lua_in_panel();
+        } else if (kind == ContentTabs::Kind::Level) {
+            if (g_mp.has_model && S.terrain_mode && g_mp.no_tilt) {
+                draw_model_in_panel(device);
+            } else {
+                draw_placeholder();
+            }
+        } else if (kind == ContentTabs::Kind::Model) {
+            if (ContentTabs::ActiveHasModel() && g_mp.has_model &&
+                !S.terrain_mode && !g_mp.no_tilt) {
+                draw_model_in_panel(device);
+            } else {
+                draw_placeholder();
+            }
+        } else if (kind == ContentTabs::Kind::Item) {
+            if (ContentTabs::ActiveHasModel() && g_mp.has_model &&
+                !S.terrain_mode && !g_mp.no_tilt) {
+                draw_model_in_panel(device);
+            } else {
+                draw_item_tab_content();
+            }
+        } else if (kind == ContentTabs::Kind::Entity) {
+            if (ContentTabs::ActiveHasModel() && g_mp.has_model &&
+                !S.terrain_mode && !g_mp.no_tilt) {
+                draw_model_in_panel(device);
+            } else {
+                draw_entity_tab_content();
+            }
+        } else {
+            draw_placeholder();
+        }
     } else if (g_mp.has_model) {
         draw_model_in_panel(device);
     } else if (S.texture_window_srv) {
@@ -4974,10 +6659,11 @@ void apply_orbit_to_flycam_gl() {
     float cp = std::cos(S.cam_pitch);
     float sp = std::sin(S.cam_pitch);
     g_flycam.pos[0] = g_mp.center[0] + sy * cp * S.cam_dist * g_mp.radius;
-    g_flycam.pos[1] = g_mp.center[1] + sp * S.cam_dist * g_mp.radius;
+    const float target_y = g_mp.center[1] + S.cam_target_offset_y;
+    g_flycam.pos[1] = target_y + sp * S.cam_dist * g_mp.radius;
     g_flycam.pos[2] = g_mp.center[2] + cy * cp * S.cam_dist * g_mp.radius;
     float dx = g_mp.center[0] - g_flycam.pos[0];
-    float dy = g_mp.center[1] - g_flycam.pos[1];
+    float dy = target_y - g_flycam.pos[1];
     float dz = g_mp.center[2] - g_flycam.pos[2];
     float len = std::sqrt(dx * dx + dy * dy + dz * dz);
     if (len > 0.0001f) {
@@ -5191,7 +6877,8 @@ void draw_model_in_panel_gl() {
 
     if (S.terrain_mode) {
         float dt = ImGui::GetIO().DeltaTime;
-        if (hovered || g_flycam.is_looking) {
+        if (hovered || g_flycam.is_looking ||
+            g_flycam.right_press_pending) {
             ::render_panel_handle_flycam(dt);
         }
     } else {
@@ -5233,12 +6920,16 @@ void draw_model_in_panel_gl() {
     }
 
     if (hovered && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-        MP_Release(g_mp);
-        g_mp.has_model = false;
-        g_mp_initialized = false;
-        S.show_model_preview = false;
-        S.model_preview_open = false;
-        S.selected_bone = -1;
+        if (S.content_tabs_visible && ContentTabs::HasTabs()) {
+            ContentTabs::CloseActive();
+        } else {
+            MP_Release(g_mp);
+            g_mp.has_model = false;
+            g_mp_initialized = false;
+            S.show_model_preview = false;
+            S.model_preview_open = false;
+            S.selected_bone = -1;
+        }
     }
 
     dl->AddRectFilled(ImVec2(origin.x + 6, origin.y + 6),
@@ -5340,6 +7031,43 @@ void draw_texture_popout_gl() {
 void draw_render_panel() {
     if (S.show_gdb_render) {
         draw_gdb_in_panel();
+    } else if (S.content_tabs_visible && ContentTabs::HasTabs()) {
+        ContentTabs::DrawTabBar();
+        const ContentTabs::Kind kind = ContentTabs::ActiveKind();
+        if (kind == ContentTabs::Kind::Lua ||
+            kind == ContentTabs::Kind::Quest ||
+            kind == ContentTabs::Kind::CustomQuest) {
+            draw_lua_in_panel();
+        } else if (kind == ContentTabs::Kind::Level) {
+            if (g_mp.has_model && S.terrain_mode && g_mp.no_tilt) {
+                draw_model_in_panel_gl();
+            } else {
+                draw_placeholder();
+            }
+        } else if (kind == ContentTabs::Kind::Model) {
+            if (ContentTabs::ActiveHasModel() && g_mp.has_model &&
+                !S.terrain_mode && !g_mp.no_tilt) {
+                draw_model_in_panel_gl();
+            } else {
+                draw_placeholder();
+            }
+        } else if (kind == ContentTabs::Kind::Item) {
+            if (ContentTabs::ActiveHasModel() && g_mp.has_model &&
+                !S.terrain_mode && !g_mp.no_tilt) {
+                draw_model_in_panel_gl();
+            } else {
+                draw_item_tab_content();
+            }
+        } else if (kind == ContentTabs::Kind::Entity) {
+            if (ContentTabs::ActiveHasModel() && g_mp.has_model &&
+                !S.terrain_mode && !g_mp.no_tilt) {
+                draw_model_in_panel_gl();
+            } else {
+                draw_entity_tab_content();
+            }
+        } else {
+            draw_placeholder();
+        }
     } else if (g_mp.has_model) {
         draw_model_in_panel_gl();
     } else if (S.texture_window_gl) {

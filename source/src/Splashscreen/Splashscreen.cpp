@@ -180,7 +180,7 @@ void handle_dialog_pick() {
         return;
     }
 
-    // a .xex is the game executable: open the folder that contains it
+
     if (!file_path.empty() && std::filesystem::is_regular_file(file_path)
         && ends_with_lower(file_path, ".xex"))
     {

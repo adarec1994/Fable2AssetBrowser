@@ -1,20 +1,22 @@
 #include "../UI_Panels.h"
 #include "PanelInternal.h"
 #include "../ModelPreview.h"
+#include "../EntityModelResolver.h"
+#include "../ContentTabs.h"
 #include "../OutputLog.h"
 #include "../../textures/TexParser.h"
 #include "../../textures/LhTexCodec.h"
 #include "../../MDL/ModelParser.h"
 #include "../../MDL/mdl_converter.h"
 #include "../../animations/AnimBank.h"
-#include "../../Level/LevelLoader.h"
-#include "../../Level/TextureAtlasDecoder.h"
-#include "../../Level/TerrainTextureRegistry.h"
-#include "../../Level/EhfLodThumbnails.h"
-#include "../../Level/EhfChunkParser.h"
-#include "../../Level/TerrainSplat.h"
-#include "../../Level/TerrainEdit.h"
-#include "../../Level/LevelEdit.h"
+#include "../../Level/Core/LevelLoader.h"
+#include "../../Level/Terrain/TextureAtlasDecoder.h"
+#include "../../Level/Terrain/TerrainTextureRegistry.h"
+#include "../../Level/Terrain/EhfLodThumbnails.h"
+#include "../../Level/Terrain/EhfChunkParser.h"
+#include "../../Level/Terrain/TerrainSplat.h"
+#include "../../Level/Terrain/TerrainEdit.h"
+#include "../../Level/Editing/LevelEdit.h"
 #include "../../Level/Skybox/SkyboxPreviewBinding.h"
 #include "../../Utilities/Files.h"
 #include "../../Utilities/Utils.h"
@@ -36,6 +38,7 @@
 #include <cctype>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 #ifndef _WIN32
 #include <GL/glew.h>
@@ -127,12 +130,6 @@ static bool is_shell_pair_model_path(const std::string& model_path)
 {
     std::string leaf = normalized_asset_path(asset_leaf(model_path));
     return leaf == "exterior.mdl" || leaf == "interior.mdl";
-}
-
-static bool is_market_bridge_facade_proxy_path(const std::string& model_path)
-{
-    return normalized_asset_path(model_path).find("bs_market_bridge_facade") !=
-           std::string::npos;
 }
 
 static std::string asset_parent_key(const std::string& bnk_path)
@@ -643,9 +640,11 @@ static std::string make_combined_prop_name(const std::string& model_path,
     if (sl != std::string::npos) base = base.substr(sl + 1);
 
     const bool is_engine_level = (block_type == 2u) || (block_type == 21u);
-    std::string name =
-        is_engine_level ? std::string("engine_level: ") + base
-                        : std::string("prop: ") + base;
+    const bool is_entity = block_type == 0xE3u;
+    std::string name = is_entity
+        ? std::string("entity: ") + base
+        : (is_engine_level ? std::string("engine_level: ") + base
+                           : std::string("prop: ") + base);
     if (!src_name.empty()) name += "#" + src_name;
     name += " (" + std::to_string(instance_count) + " inst)";
     return name;
@@ -744,6 +743,43 @@ static void normalize_grid_uvs(MDLMeshGeom& geom, uint32_t width, uint32_t heigh
 }
 
 #ifdef _WIN32
+static void fill_entity_instance_rotation(Level::PropInstance& instance,
+                                          const LevelSpawnMarker& marker)
+{
+    if (!marker.has_rotation) {
+        instance.values[7] = 1.0f;
+        instance.values[9] = instance.values[10] =
+            instance.values[11] = 1.0f;
+        return;
+    }
+
+    const float rx = std::isfinite(marker.rot_x) ? marker.rot_x : 0.0f;
+    const float ry = std::isfinite(marker.rot_y) ? marker.rot_y : 0.0f;
+    const float rz = std::isfinite(marker.rot_z) ? marker.rot_z : 0.0f;
+    const float sx = std::sin(rx), cx = std::cos(rx);
+    const float sy = std::sin(ry), cy = std::cos(ry);
+    const float sz = std::sin(rz), cz = std::cos(rz);
+    float game[9] = {};
+    game[0] = cy * cx;
+    game[1] = sx;
+    game[2] = -sy * cx;
+    game[3] = sy * sz - cy * cz * sx;
+    game[4] = cz * cx;
+    game[5] = sy * cz * sx + cy * sz;
+    game[6] = cy * sz * sx + sy * cz;
+    game[7] = -sz * cx;
+    game[8] = cy * cz - sy * sz * sx;
+    static constexpr int kAxisMap[3] = {0, 2, 1};
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            instance.values[3 + row * 3 + col] =
+                game[kAxisMap[row] * 3 + kAxisMap[col]];
+        }
+    }
+    instance.values[12] = 1.0f;
+    instance.has_full_transform = true;
+}
+
 struct LevelPropStreamState {
     std::atomic<int>            phase{0};
     std::atomic<size_t>         instances_loaded{0};
@@ -755,6 +791,16 @@ struct LevelPropStreamState {
     std::vector<GeneratedTerrainTexture> terrain_textures;
 
     std::vector<Level::PropBlock>  blocks;
+    struct EntityInstance {
+        Level::PropInstance instance;
+        uint32_t selection_id = 0;
+    };
+    struct EntityBatch {
+        std::vector<uint32_t> model_hashes;
+        std::string label;
+        std::vector<EntityInstance> instances;
+    };
+    std::vector<EntityBatch> entity_batches;
     std::string                    model_body_bnk;
     Gdb::SkyTheme                  sky_theme;
     Gdb::CloudTheme                cloud_theme;
@@ -886,6 +932,94 @@ static void prop_worker_run(LevelPropStreamState* s)
             (void)terrain_cx; (void)terrain_cz;
         }
 
+        std::unordered_map<std::string, CachedPropModel> entity_cache;
+        for (const auto& batch : s->entity_batches) {
+            if (cancelled || S.cancel_requested.load()) {
+                cancelled = true;
+                break;
+            }
+            std::ostringstream key_builder;
+            for (uint32_t hash : batch.model_hashes) {
+                key_builder << std::hex << hash << ';';
+            }
+            const std::string key = key_builder.str();
+            auto& cached = entity_cache[key];
+            if (!cached.loaded) {
+                EntityModels::ResolvedModel resolved;
+                std::string error;
+                if (EntityModels::Resolve(batch.model_hashes, resolved,
+                                          &error)) {
+                    cached.info = std::move(resolved.info);
+                    cached.geoms = std::move(resolved.meshes);
+                    for (MDLMeshGeom& geom : cached.geoms) {
+
+
+
+
+                        geom.bone_ids.clear();
+                        geom.bone_weights.clear();
+                        geom.is_cloth = false;
+                        geom.cloth_sim = false;
+                        geom.is_entity_model = true;
+                    }
+                } else {
+                    ++s->model_misses;
+                    OutputLog::warn(
+                        "level entities: full model load miss for '" +
+                        batch.label + "' (" + error + ")");
+                }
+                cached.loaded = true;
+            }
+
+            if (cached.geoms.empty()) {
+                s->instances_loaded.fetch_add(batch.instances.size(),
+                                              std::memory_order_relaxed);
+                continue;
+            }
+
+            std::vector<MDLMeshGeom> combined(cached.geoms.size());
+            std::vector<size_t> chunk_index(cached.geoms.size(), 0);
+            const std::string model_label = batch.label.empty()
+                ? std::string("entity") : batch.label;
+            for (size_t gi = 0; gi < cached.geoms.size(); ++gi) {
+                init_combined_prop_geom(combined[gi], cached.geoms[gi],
+                                        model_label,
+                                        batch.instances.size(), 0xE3, 0);
+                combined[gi].is_entity_model = true;
+            }
+
+            for (const auto& entity_instance : batch.instances) {
+                if (S.cancel_requested.load()) {
+                    cancelled = true;
+                    break;
+                }
+                for (size_t gi = 0; gi < cached.geoms.size(); ++gi) {
+                    const auto& src = cached.geoms[gi];
+                    if (src.positions.empty() || src.indices.empty()) continue;
+                    if (would_exceed_combined_prop_limits(combined[gi], src)) {
+                        flush_combined_prop_geom(
+                            s->geoms, combined[gi], src, model_label,
+                            batch.instances.size(), 0xE3,
+                            chunk_index[gi]);
+                        combined[gi].is_entity_model = true;
+                    }
+                    merge_transformed_instance_into(
+                        combined[gi], src, entity_instance.instance,
+                        entity_instance.selection_id);
+                }
+                s->instances_loaded.fetch_add(1,
+                                              std::memory_order_relaxed);
+            }
+            if (cancelled) break;
+
+            for (auto& geom : combined) {
+                if (!geom.positions.empty() && !geom.indices.empty()) {
+                    geom.is_entity_model = true;
+                    s->geoms.push_back(std::move(geom));
+                }
+            }
+        }
+
         s->phase.store(2, std::memory_order_release);
     } catch (const std::exception& e) {
         OutputLog::error("level props: prop bake worker aborted on " +
@@ -912,14 +1046,82 @@ static bool start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
     g_level_prop_stream.geoms           = std::move(geoms);
     g_level_prop_stream.info            = std::move(info);
     g_level_prop_stream.blocks          = g_pending_level_prop_blocks;
-    g_level_prop_stream.blocks.erase(
-        std::remove_if(g_level_prop_stream.blocks.begin(),
-                       g_level_prop_stream.blocks.end(),
-                       [](const Level::PropBlock& b) {
-                           return is_market_bridge_facade_proxy_path(
-                               b.model_path);
-                       }),
-        g_level_prop_stream.blocks.end());
+    g_level_prop_stream.entity_batches.clear();
+    std::unordered_map<std::string, size_t> entity_batch_by_key;
+    for (size_t marker_index = 0;
+         marker_index < g_level_spawn_markers.size(); ++marker_index) {
+        const LevelSpawnMarker& marker =
+            g_level_spawn_markers[marker_index];
+        const bool placed_character = marker.kind == 3;
+        const bool generator_spawn_preview =
+            marker.kind == 2 && !marker.model_hashes.empty();
+        if ((!placed_character && !generator_spawn_preview) ||
+            marker.entity_hash == 0 ||
+            (placed_character &&
+             LevelEdit::EntityRemovalPending(marker.entity_hash)) ||
+            (generator_spawn_preview &&
+             LevelEdit::SpawnPointRemovalPending(marker.entity_hash))) {
+            continue;
+        }
+
+        std::vector<uint32_t> model_hashes = marker.model_hashes;
+
+
+
+
+
+
+
+        std::unordered_set<uint32_t> seen_model_hashes;
+        model_hashes.erase(
+            std::remove_if(model_hashes.begin(), model_hashes.end(),
+                           [&](uint32_t hash) {
+                               return hash == 0 ||
+                                      !seen_model_hashes.insert(hash).second;
+                           }),
+            model_hashes.end());
+        if (model_hashes.empty()) continue;
+
+        std::ostringstream key_builder;
+        for (uint32_t hash : model_hashes) {
+            key_builder << std::hex << hash << ';';
+        }
+        const std::string key = key_builder.str();
+        auto inserted = entity_batch_by_key.emplace(
+            key, g_level_prop_stream.entity_batches.size());
+        if (inserted.second) {
+            LevelPropStreamState::EntityBatch batch;
+            batch.model_hashes = model_hashes;
+            batch.label = generator_spawn_preview &&
+                                  !marker.creature_name.empty()
+                ? marker.creature_name
+                : marker.name;
+            g_level_prop_stream.entity_batches.push_back(std::move(batch));
+        }
+        auto& batch = g_level_prop_stream.entity_batches[inserted.first->second];
+        if (batch.label.empty() && !marker.name.empty()) {
+            batch.label = marker.name;
+        }
+
+        LevelPropStreamState::EntityInstance entity_instance;
+        Level::PropInstance& instance = entity_instance.instance;
+        instance.hash = marker.entity_hash;
+        instance.gdb_entity_hash = marker.entity_hash;
+        instance.values[0] = marker.x;
+        instance.values[1] = marker.y;
+        instance.values[2] = marker.z;
+        instance.gdb_pos_off[0] = marker.pos_off[0];
+        instance.gdb_pos_off[1] = marker.pos_off[1];
+        instance.gdb_pos_off[2] = marker.pos_off[2];
+        instance.gdb_rot_off[0] = marker.rot_off[0];
+        instance.gdb_rot_off[1] = marker.rot_off[1];
+        instance.gdb_rot_off[2] = marker.rot_off[2];
+        instance.lev_rec_kind = 3;
+        fill_entity_instance_rotation(instance, marker);
+        entity_instance.selection_id =
+            0x70000000u | uint32_t(marker_index);
+        batch.instances.push_back(std::move(entity_instance));
+    }
     g_level_prop_stream.model_body_bnk  = g_pending_level_model_body_bnk;
     g_level_prop_stream.sky_theme       = g_pending_level_sky_theme;
     g_level_prop_stream.cloud_theme     = g_pending_level_cloud_theme;
@@ -933,6 +1135,9 @@ static bool start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
     for (const auto& b : g_level_prop_stream.blocks) {
         g_level_prop_stream.total_instances += b.instances.size();
     }
+    for (const auto& batch : g_level_prop_stream.entity_batches) {
+        g_level_prop_stream.total_instances += batch.instances.size();
+    }
     if (g_level_prop_stream.total_instances == 0) {
         g_level_prop_stream.geoms.clear();
         g_level_prop_stream.info = MDLInfo{};
@@ -940,7 +1145,7 @@ static bool start_level_prop_stream(std::vector<MDLMeshGeom> geoms,
     }
 
     progress_open((int)g_level_prop_stream.total_instances,
-                  "Loading props...");
+                  "Loading level models...");
 
     g_level_prop_stream.phase.store(1);
     g_level_prop_stream.worker = std::thread(prop_worker_run,
@@ -1016,6 +1221,7 @@ static bool stream_level_prop_batch(ID3D11Device* device)
         g_level_prop_stream.geoms.clear();
         g_level_prop_stream.geoms.shrink_to_fit();
         g_level_prop_stream.blocks.clear();
+        g_level_prop_stream.entity_batches.clear();
         g_level_prop_stream.terrain_textures.clear();
         g_level_prop_stream.phase.store(3);
         progress_done();
@@ -1076,6 +1282,8 @@ static bool stream_level_prop_batch(ID3D11Device* device)
     g_level_prop_stream.geoms.shrink_to_fit();
     g_level_prop_stream.blocks.clear();
     g_level_prop_stream.blocks.shrink_to_fit();
+    g_level_prop_stream.entity_batches.clear();
+    g_level_prop_stream.entity_batches.shrink_to_fit();
     g_level_prop_stream.terrain_textures.clear();
     g_level_prop_stream.terrain_textures.shrink_to_fit();
     g_level_prop_stream.phase.store(3);
@@ -1147,7 +1355,6 @@ static void append_level_props_to_geoms(std::vector<MDLMeshGeom>& geoms)
 
     for (const auto& block : g_pending_level_prop_blocks) {
         if (block.model_path.empty()) continue;
-        if (is_market_bridge_facade_proxy_path(block.model_path)) continue;
         auto& cached = cache[block.model_path];
         if (!cached.loaded && cached.geoms.empty()) {
             cached.loaded =
@@ -1397,6 +1604,114 @@ bool spawn_level_model_at(ID3D11Device* device,
                        std::to_string(engine_pos[2]) + ")");
     return true;
 }
+
+bool append_level_entity_model_at(ID3D11Device* device,
+                                  const std::vector<uint32_t>& model_hashes,
+                                  size_t marker_index,
+                                  const float engine_pos[3])
+{
+    extern int g_selected_level_mesh_idx;
+    extern uint32_t g_selected_level_pick_id;
+    extern uint64_t g_selected_level_hash;
+
+    if (!device || !g_mp.has_model || !g_mp.no_tilt ||
+        model_hashes.empty()) {
+        return false;
+    }
+
+    EntityModels::ResolvedModel resolved;
+    std::string error;
+    if (!EntityModels::Resolve(model_hashes, resolved, &error) ||
+        resolved.meshes.empty()) {
+        OutputLog::error("level edit: could not render quest NPC (" +
+                         error + ")");
+        return false;
+    }
+
+    Level::PropInstance instance;
+    instance.values[0] = engine_pos[0];
+    instance.values[1] = engine_pos[1];
+    instance.values[2] = engine_pos[2];
+    instance.values[7] = 1.0f;
+    instance.values[9] = instance.values[10] = instance.values[11] = 1.0f;
+    const int addition_index = marker_index < g_level_spawn_markers.size()
+        ? g_level_spawn_markers[marker_index].pending_addition_index : -1;
+    instance.lev_rec_kind = addition_index >= 0 ? 5 : 3;
+    instance.pos_file_offset = addition_index >= 0
+        ? uint32_t(addition_index + 1) : 0;
+
+    const uint32_t selection_id =
+        0x70000000u | uint32_t(marker_index);
+    std::vector<MDLMeshGeom> out;
+    for (MDLMeshGeom& source : resolved.meshes) {
+        if (source.positions.empty() || source.indices.empty()) continue;
+        source.bone_ids.clear();
+        source.bone_weights.clear();
+        source.is_cloth = false;
+        source.cloth_sim = false;
+        source.is_entity_model = true;
+
+        MDLMeshGeom combined;
+        init_combined_prop_geom(combined, source, "quest NPC", 1, 0xE3, 0);
+        combined.is_entity_model = true;
+        merge_transformed_instance_into(combined, source, instance,
+                                        selection_id);
+        if (!combined.positions.empty() && !combined.indices.empty()) {
+            out.push_back(std::move(combined));
+        }
+    }
+    if (out.empty()) return false;
+
+    MDLInfo dummy_info;
+    MP_Build(device, out, dummy_info, g_mp, true);
+    g_selected_level_pick_id = selection_id;
+    g_selected_level_hash = 0;
+    g_selected_level_mesh_idx = -1;
+    for (size_t mesh_index = g_mp.meshes.size(); mesh_index-- > 0;) {
+        for (const auto& range : g_mp.meshes[mesh_index].pick_ranges) {
+            if (range.selection_id != selection_id) continue;
+            g_selected_level_mesh_idx = int(mesh_index);
+            break;
+        }
+        if (g_selected_level_mesh_idx >= 0) break;
+    }
+    return g_selected_level_mesh_idx >= 0;
+}
+
+int spawn_level_container_at(
+    ID3D11Device* device,
+    const std::string& model_path,
+    const float engine_pos[3],
+    const LevelEdit::ContainerTemplateInfo& info)
+{
+    if (!info.entity_template || !info.transform_component_field) {
+        OutputLog::error(
+            "level edit: container template has no injectable entity data");
+        return -1;
+    }
+    if (model_path.empty()) {
+        const int add_idx =
+            LevelEdit::AddContainerPlacement(model_path, engine_pos, info);
+        if (add_idx >= 0) {
+            OutputLog::success(
+                std::string("level edit: real ") +
+                (info.is_dig_spot ? "dig spot" : "container") +
+                " queued for GDB injection");
+        }
+        return add_idx;
+    }
+    if (!spawn_level_model_at(device, model_path, engine_pos)) return -1;
+    std::vector<LevelEdit::Addition> additions;
+    LevelEdit::GetAdditions(additions);
+    if (additions.empty()) return -1;
+    const int add_idx = int(additions.size()) - 1;
+    LevelEdit::MarkAdditionAsContainer(add_idx, info);
+    OutputLog::success(
+        std::string("level edit: real ") +
+        (info.is_dig_spot ? "dig spot" : "container") +
+        " template queued for GDB injection; click it to edit loot");
+    return add_idx;
+}
 #endif
 
 bool level_edit_click_guard(const char* what) {
@@ -1420,6 +1735,7 @@ void process_pending_loads() {
 #endif
     if (g_pending_mdl_load && level_edit_click_guard("Model loading")) {
         g_pending_mdl_load = false;
+        g_pending_mdl_is_item = false;
         g_pending_mdl_index = -1;
         g_pending_mdl_full_path.clear();
     }
@@ -1434,6 +1750,9 @@ void process_pending_loads() {
     if (g_pending_mdl_load && g_pending_mdl_index >= 0 && g_pending_mdl_index < (int)S.files.size()) {
         g_pending_mdl_load = false;
         S.item_model_active = g_pending_mdl_is_item.exchange(false);
+        S.entity_model_active = false;
+        S.show_entity_details = false;
+        S.selected_entity = -1;
         if (!S.item_model_active) {
             S.show_item_details = false;
             S.selected_item = -1;
@@ -1663,6 +1982,7 @@ void process_pending_loads() {
                         S.texture_window_srv = nullptr;
                     }
 #endif
+                    S.pending_model_tab_capture = true;
                     S.pending_preview_build = true;
                 }
             }
@@ -1672,6 +1992,7 @@ void process_pending_loads() {
 
     if (g_pending_tex_load && g_pending_tex_index >= 0 && g_pending_tex_index < (int)S.files.size()) {
         g_pending_tex_load = false;
+        S.content_tabs_visible = false;
         S.show_item_details = false;
         S.selected_item = -1;
         auto item = S.files[(size_t)g_pending_tex_index];
@@ -1745,13 +2066,19 @@ void process_pending_loads() {
 
     if (S.pending_preview_build) {
         S.pending_preview_build = false;
+        const bool capture_model_tab =
+            S.pending_model_tab_capture.exchange(false);
 #ifdef _WIN32
         try {
             if (!g_mp_initialized) {
                 g_mp_initialized = MP_Init(device, g_mp, 800, 600);
             }
             if (g_mp_initialized) {
-                MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
+                const bool built =
+                    MP_Build(device, S.mdl_meshes, S.mdl_info, g_mp);
+                if (built && capture_model_tab) {
+                    ContentTabs::CaptureCurrentModel();
+                }
                 S.show_model_preview = false;
                 S.model_preview_open = false;
                 S.model_materials_open = false;
@@ -1771,7 +2098,10 @@ void process_pending_loads() {
         MP_Release(g_mp);
         g_mp_initialized = MP_Init(g_mp, 800, 600);
         if (g_mp_initialized) {
-            MP_Build(S.mdl_meshes, S.mdl_info, g_mp);
+            const bool built = MP_Build(S.mdl_meshes, S.mdl_info, g_mp);
+            if (built && capture_model_tab) {
+                ContentTabs::CaptureCurrentModel();
+            }
             S.show_model_preview = false;
             S.model_preview_open = false;
             S.model_materials_open = false;

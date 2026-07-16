@@ -770,7 +770,8 @@ bool find_inherited_hash_any(const GdbMiniView& view,
         if (!view.local_fields(cur, fields)) return false;
         for (const GdbMiniView::Field& field : fields) {
             if (field.hash != field_hash) continue;
-            if (field.type != 3 && field.type != 4 && field.type != 6) {
+            if (field.type != 3 && field.type != 4 && field.type != 6 &&
+                field.type != 7) {
                 continue;
             }
             raw = field.raw;
@@ -830,7 +831,9 @@ void collect_model_file_hashes_from_record(
     visit_record_and_parents(view, record, [&](size_t cur) {
         if (!view.local_fields(cur, fields)) return;
         for (const GdbMiniView::Field& field : fields) {
-            if (field.type != 3 && field.type != 4) continue;
+            if (field.type != 3 && field.type != 4 && field.type != 7) {
+                continue;
+            }
             if (field.hash == kHashModelFile ||
                 field.hash == kHashModelFile1 ||
                 field.hash == kHashModelFile2) {
@@ -847,6 +850,10 @@ void collect_animated_model_hashes_for_record(
     constexpr uint32_t kHashGraphicAppearanceComponent = 0xA7B6EF56u;
     constexpr uint32_t kHashGraphicAppearanceAnimatedMeshComponent =
         0x21D312CAu;
+    constexpr uint32_t kHashGraphicAppearanceMorphComponent =
+        0x0D4ADA1Au;
+    constexpr uint32_t kHashCompositeModelRecord = 0x7CFF5EE2u;
+    constexpr uint32_t kHashModel = 0x90347E14u;
 
     auto collect_component = [&](uint32_t component_hash) {
         size_t component_record = 0;
@@ -862,20 +869,130 @@ void collect_animated_model_hashes_for_record(
     }
 
     uint32_t appearance_hash = 0;
-    if (!find_inherited_hash_any(view, record, kHashGraphicAppearanceComponent,
-                                 appearance_hash)) {
-        return;
+    if (find_inherited_hash_any(view, record,
+                                kHashGraphicAppearanceComponent,
+                                appearance_hash)) {
+        size_t appearance_record = 0;
+        if (view.lookup(appearance_hash, appearance_record)) {
+            visit_record_and_parents(view, appearance_record,
+                                     [&](size_t cur) {
+                uint32_t component_hash = 0;
+                if (view.find_local(
+                        cur, kHashGraphicAppearanceAnimatedMeshComponent,
+                        6, component_hash)) {
+                    collect_component(component_hash);
+                }
+            });
+        }
     }
 
-    size_t appearance_record = 0;
-    if (!view.lookup(appearance_hash, appearance_record)) return;
-    visit_record_and_parents(view, appearance_record, [&](size_t cur) {
-        uint32_t component_hash = 0;
-        if (view.find_local(cur, kHashGraphicAppearanceAnimatedMeshComponent,
-                            6, component_hash)) {
-            collect_component(component_hash);
+    uint32_t morph_hash = 0;
+    if (!find_inherited_hash_any(view, record,
+                                 kHashGraphicAppearanceMorphComponent,
+                                 morph_hash)) {
+        return;
+    }
+    size_t morph_record = 0;
+    if (!view.lookup(morph_hash, morph_record)) return;
+    uint32_t composite_hash = 0;
+    if (!find_inherited_hash_any(view, morph_record,
+                                 kHashCompositeModelRecord,
+                                 composite_hash)) {
+        return;
+    }
+    size_t composite_record = 0;
+    if (!view.lookup(composite_hash, composite_record)) return;
+
+
+
+
+
+
+    const auto is_model_field = [](uint32_t hash) {
+        switch (hash) {
+        case 0x90347E14u:
+        case 0x0C17DB4Eu:
+        case 0x578E3BFBu:
+        case 0x578E3BF8u:
+        case 0x1372D766u:
+        case 0x05294B89u:
+        case 0x547DDA3Eu:
+        case 0xD622E5ADu:
+        case 0x139ADC04u:
+        case 0x8D09F54Fu:
+        case 0x8D09F551u:
+        case 0x8D09F56Eu:
+        case 0xA0CFEC37u:
+        case 0x017CDC23u:
+        case 0x017CDC24u:
+        case 0x017CDC25u:
+        case 0x017CDC26u:
+        case 0x017CDC27u:
+            return true;
+        default:
+            return false;
         }
-    });
+    };
+    const auto is_appearance_link = [&](uint32_t hash) {
+        if (is_model_field(hash)) return true;
+        switch (hash) {
+        case 0xA7B6EF56u:
+        case 0x21D312CAu:
+        case 0x0D4ADA1Au:
+        case 0x7CFF5EE2u:
+        case 0x29CF50D1u:
+        case 0xCE642A15u:
+        case 0x77679B84u:
+        case 0x3C06A4E4u:
+        case 0x31FF8FCFu:
+        case 0x515A75DAu:
+            return true;
+        default:
+            return false;
+        }
+    };
+    std::vector<size_t> stack{composite_record};
+    std::unordered_set<size_t> visited;
+    std::vector<GdbMiniView::Field> fields;
+    while (!stack.empty() && visited.size() < 512) {
+        size_t current = stack.back();
+        stack.pop_back();
+        if (!visited.insert(current).second) continue;
+        std::unordered_set<uint32_t> resolved_fields;
+        std::unordered_set<size_t> inherited_records;
+        for (int depth = 0; depth < 64; ++depth) {
+            if (!inherited_records.insert(current).second ||
+                !view.local_fields(current, fields)) {
+                break;
+            }
+            for (const GdbMiniView::Field& field : fields) {
+                if (field.hash == GdbMiniView::kHashParent) continue;
+                if (!resolved_fields.insert(field.hash).second) continue;
+                if (is_model_field(field.hash) &&
+                    (field.type == 3 || field.type == 4 ||
+                     field.type == 7)) {
+                    push_unique_u32(out, field.raw);
+                }
+                if ((field.type == 6 || field.type == 7) &&
+                    is_appearance_link(field.hash) &&
+                    field.raw != 0 && field.raw != 0x811C9DC5u) {
+                    size_t linked = 0;
+                    if (view.lookup(field.raw, linked)) {
+                        stack.push_back(linked);
+                    }
+                }
+            }
+
+            uint32_t parent_hash = 0;
+            size_t parent_record = 0;
+            if (!view.find_local(current, GdbMiniView::kHashParent, 6,
+                                 parent_hash) ||
+                !view.lookup(parent_hash, parent_record)) {
+                break;
+            }
+            current = parent_record;
+        }
+    }
 }
 
 std::unordered_map<uint32_t, std::vector<size_t>>
@@ -978,30 +1095,49 @@ void collect_clip_refs_for_record(
     constexpr uint32_t kHashAnimationList = 0x63565E85u;
     constexpr uint32_t kHashAnimations = 0xF96D7984u;
     constexpr uint32_t kHashAnimationSet = 0xE227399Fu;
+    constexpr uint32_t kHashAnimationManagerComponent = 0x7C63CDDFu;
 
-    uint32_t raw = 0;
-    if (find_inherited_hash_any(view, record, kHashAnimation, raw)) {
-        auto key_it = by_key0.find(raw);
-        if (key_it != by_key0.end()) {
-            push_unique_clip_ref(
-                out,
-                GdbClipRef{key_it->second, view.hash_for_record(record),
-                           raw,
-                           label_for_gdb_animation_source(
-                               view, view.hash_for_record(record), raw)});
+    auto collect_scope = [&](size_t scope_record) {
+        uint32_t raw = 0;
+        if (find_inherited_hash_any(view, scope_record, kHashAnimation,
+                                    raw)) {
+            auto key_it = by_key0.find(raw);
+            if (key_it != by_key0.end()) {
+                push_unique_clip_ref(
+                    out,
+                    GdbClipRef{
+                        key_it->second, view.hash_for_record(scope_record),
+                        raw,
+                        label_for_gdb_animation_source(
+                            view, view.hash_for_record(scope_record), raw)});
+            }
         }
-    }
 
-    const uint32_t group_fields[] = {
-        kHashAnimationList, kHashAnimations, kHashAnimationSet
+        const uint32_t group_fields[] = {
+            kHashAnimationList, kHashAnimations, kHashAnimationSet
+        };
+        for (uint32_t field_hash : group_fields) {
+            raw = 0;
+            if (!find_inherited_hash_any(view, scope_record, field_hash,
+                                         raw)) {
+                continue;
+            }
+            collect_clip_refs_from_animation_group(
+                view, raw, children, records, by_key0, out);
+        }
     };
-    for (uint32_t field_hash : group_fields) {
-        raw = 0;
-        if (!find_inherited_hash_any(view, record, field_hash, raw)) {
-            continue;
+
+    collect_scope(record);
+
+    uint32_t manager_hash = 0;
+    if (find_inherited_hash_any(view, record,
+                                kHashAnimationManagerComponent,
+                                manager_hash)) {
+        size_t manager_record = 0;
+        if (view.lookup(manager_hash, manager_record) &&
+            manager_record != record) {
+            collect_scope(manager_record);
         }
-        collect_clip_refs_from_animation_group(
-            view, raw, children, records, by_key0, out);
     }
 }
 

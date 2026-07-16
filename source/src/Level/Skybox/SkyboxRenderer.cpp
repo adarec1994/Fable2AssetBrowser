@@ -59,7 +59,7 @@ const char* kSkyElementPixelShader = R"(
 Texture2D element_tex : register(t0);
 SamplerState element_sampler : register(s0);
 cbuffer SkyElementCB : register(b6) {
-    float4 element_colour;  // rgb scale, a = alpha scale
+    float4 element_colour;
 }
 struct PSIN {
     float4 position : SV_Position;
@@ -135,11 +135,11 @@ float4 PS(PSIN i) : SV_Target {
     float3 sun_dir = normalize(sky_sun.xyz);
     float h = saturate(ray.y * 0.5 + 0.5);
 
-    // Engine sky model (XEX sky constant builder sub_82263530 +
-    // in-scatter LUT sub_821F71F0): Hoffman-Preetham single scattering.
-    // Rayleigh/Mie RGB extinction ratios and phase normalisation
-    // constants (3/16pi, 1/4pi) taken from the XEX; theme multipliers
-    // SKY_BETA_RAYLEIGH/MIE in sky_params.zw, sun intensity in .x.
+
+
+
+
+
     float rayleigh = max(sky_params.z, 0.05);
     float mie = max(sky_params.w, 0.05);
     float3 betaR = float3(0.007337, 0.009459, 0.0257276) * rayleigh;
@@ -158,8 +158,8 @@ float4 PS(PSIN i) : SV_Target {
     float3 inscatter =
         (betaR * phaseR + betaM * phaseM) / beta_sum * (1.0 - extinct);
 
-    // theme colour ramp: SKY_COLOUR tints the scattered light,
-    // complementary/fog colour dominates the horizon.
+
+
     float sun_h = saturate(sun_dir.y * 2.2 + 0.12);
     float3 col = inscatter * (7.2 * sun_h) * sky_top.rgb;
     float horizon = 1.0 - saturate(elev * 3.2);
@@ -167,7 +167,7 @@ float4 PS(PSIN i) : SV_Target {
     col = lerp(col, sky_bottom.rgb * (0.35 + 0.65 * sun_h),
                horizon * (0.55 + 0.30 * bias));
 
-    // sunset tint: Mie forward lobe near a low sun.
+
     float sunset_w = saturate(1.0 - abs(sun_dir.y) * 5.0) *
                      saturate(cosT * 0.5 + 0.5);
     col = lerp(col, sky_sunset.rgb * (0.4 + 0.8 * phaseM),
@@ -255,9 +255,9 @@ cbuffer CloudCB : register(b5) {
     float4 viewer_direction;
     float4 light_position;
     float4 light_colour;
-    float4 layer_params;       // transparency, ambient, brightness, normal
-    float4 uv_scale_offset;    // scale.xy, accumulated offset.zw
-    float4 cloud_globals;      // global brightness, unused, alpha ref
+    float4 layer_params;
+    float4 uv_scale_offset;
+    float4 cloud_globals;
 }
 
 struct VSIN {
@@ -273,7 +273,7 @@ struct VSOUT {
 
 VSOUT VS(VSIN input) {
     VSOUT output;
-    // The recovered vertex bytes are XEX Z-up; level preview space is Y-up.
+
     const float3 preview_position = input.position.xzy;
     output.position = mul(float4(preview_position, 1.0),
                           cloud_view_projection);
@@ -305,7 +305,7 @@ struct PSIN {
 };
 
 float density_channel(float4 value) {
-    // PSHADER_CLOUDS fetches .wxyz and reads its first component: source A.
+
     return value.a;
 }
 
@@ -352,7 +352,7 @@ float4 PS(PSIN input) : SV_Target {
         rgb = ((lighting * light_colour.rgb + layer_params.y.xxx) *
                layer_params.z.xxx * centre.rgb) * cloud_globals.x;
     }
-    // Xenos fixed-function strict-GREATER alpha test (context 2 uses 5/255).
+
     if (alpha <= cloud_globals.z) discard;
     return float4(rgb, alpha);
 }

@@ -3,6 +3,7 @@
 #include "../UI_Main.h"
 #include "../HexView.h"
 #include "../ModelPreview.h"
+#include "../ContentTabs.h"
 #include "../../textures/TexParser.h"
 #include "../../textures/LhTexCodec.h"
 #include "../../MDL/ModelParser.h"
@@ -596,7 +597,11 @@ if (!can_preview) {
                     if (S.mdl_info_ok) {
                         S.mdl_meshes.clear();
                         build_mdl_engine_geometry(S.hex_data, S.mdl_meshes);
+                        S.current_mdl_path = name;
+                        S.current_mdl_path_hash =
+                            Anim::gdb_model_path_hash(name);
                         S.cam_yaw = 0.0f; S.cam_pitch = 0.2f; S.cam_dist = 3.0f;
+                        S.pending_model_tab_capture = true;
                         S.pending_preview_build = true;
                     }
                 }
@@ -683,9 +688,13 @@ if (!can_preview) {
                             S.mdl_info_ok = true;
                             S.mdl_info = mdl_info;
                             S.mdl_meshes = meshes;
+                            S.current_mdl_path = name;
+                            S.current_mdl_path_hash =
+                                Anim::gdb_model_path_hash(name);
                             S.cam_yaw = 0.0f;
                             S.cam_pitch = 0.2f;
                             S.cam_dist = 3.0f;
+                            S.pending_model_tab_capture = true;
                             S.pending_preview_build = true;
                             ok = true;
                         }
@@ -932,17 +941,24 @@ if (!can_preview) {
                 S.lua_preview_title = S.lua_files[S.selected_file_index].filename;
                 S.lua_preview_content.clear();
                 S.lua_preview_loading = true;
+                S.lua_preview_is_quest = false;
+                S.quest_preview_select_nodes = false;
+                const uint64_t preview_request = ++S.lua_preview_request;
                 S.show_gdb_render = false;
 
                 std::string path = S.lua_files[S.selected_file_index].path;
                 std::string title = S.lua_preview_title;
+                ContentTabs::OpenLua(path, title, false);
 
                 progress_open(0, "Decompiling " + title + "...");
 
-                std::thread([path, title]() {
+                std::thread([path, title, preview_request]() {
                     std::string content = read_lua_file_content(path);
-                    S.lua_preview_content = content;
-                    S.lua_preview_loading = false;
+                    ContentTabs::CompleteLua(path, content);
+                    if (S.lua_preview_request.load() == preview_request) {
+                        S.lua_preview_content = std::move(content);
+                        S.lua_preview_loading = false;
+                    }
                     progress_done();
                 }).detach();
             }
@@ -1067,6 +1083,7 @@ if (!can_preview) {
                             build_mdl_engine_geometry(buf, S.mdl_meshes);
                             bool geom_ok = true;
                             if (geom_ok) {
+                                S.pending_model_tab_capture = true;
                                 S.pending_preview_build = true;
                             } else {
                                 ok = false;
@@ -1085,6 +1102,7 @@ if (!can_preview) {
 
     if (g_pending_tex_load && g_pending_tex_index >= 0 && g_pending_tex_index < (int)S.files.size()) {
         g_pending_tex_load = false;
+        S.content_tabs_visible = false;
         auto item = S.files[(size_t)g_pending_tex_index];
         auto name = item.name;
         S.texture_window_name = name;
@@ -1131,13 +1149,18 @@ if (!can_preview) {
 #ifndef _WIN32
     if (S.pending_preview_build) {
         S.pending_preview_build = false;
+        const bool capture_model_tab =
+            S.pending_model_tab_capture.exchange(false);
         extern ModelPreview g_mp;
         extern FlyCam g_flycam;
         extern bool g_mp_initialized;
         MP_Release(g_mp);
         g_mp_initialized = MP_Init(g_mp, 800, 600);
         if (g_mp_initialized) {
-            MP_Build(S.mdl_meshes, S.mdl_info, g_mp);
+            const bool built = MP_Build(S.mdl_meshes, S.mdl_info, g_mp);
+            if (built && capture_model_tab) {
+                ContentTabs::CaptureCurrentModel();
+            }
             S.show_model_preview = false;
             S.model_preview_open = false;
             S.model_materials_open = false;

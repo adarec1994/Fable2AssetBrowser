@@ -1,5 +1,6 @@
 #include "../UI_Panels.h"
 #include "PanelInternal.h"
+#include "../ContentTabs.h"
 #include "../../Utilities/Utils.h"
 #include "../../Utilities/Files.h"
 #include "../../Utilities/Progress.h"
@@ -277,15 +278,26 @@ void draw_tree_node(TreeNode& node) {
                         std::string bnk_path  = node.bnk_source;
                         std::string lua_title = node.name;
                         int         bnk_index = node.bnk_index;
+                        const std::string lua_tab_key =
+                            node.full_path.empty()
+                                ? bnk_path + "#" + std::to_string(bnk_index)
+                                : node.full_path;
+                        ContentTabs::OpenLua(lua_tab_key, lua_title, false);
                         S.lua_preview_selected = (int)i;
                         S.lua_preview_title    = lua_title;
                         S.lua_preview_content.clear();
                         S.lua_preview_loading  = true;
+                        S.lua_preview_is_quest = false;
+                        S.quest_preview_select_nodes = false;
+                        const uint64_t preview_request =
+                            ++S.lua_preview_request;
                         S.show_lua_render      = true;
                         S.show_gdb_render      = false;
                         OutputLog::info("Decompiling Lua: " + lua_title);
                         progress_open(0, "Decompiling " + lua_title + "...");
-                        std::thread([bnk_path, bnk_index, lua_title]() {
+                        std::thread([bnk_path, bnk_index, lua_title,
+                                     lua_tab_key,
+                                     preview_request]() {
                             std::string content;
                             try {
                                 auto bytes = BnkCache::extract_bytes(bnk_path, bnk_index);
@@ -310,8 +322,12 @@ void draw_tree_node(TreeNode& node) {
                             } catch (...) {
                                 content = "-- Error: extracting lua bytes failed";
                             }
-                            S.lua_preview_content = content;
-                            S.lua_preview_loading = false;
+                            ContentTabs::CompleteLua(lua_tab_key, content);
+                            if (S.lua_preview_request.load() ==
+                                preview_request) {
+                                S.lua_preview_content = std::move(content);
+                                S.lua_preview_loading = false;
+                            }
                             progress_done();
                         }).detach();
                     }

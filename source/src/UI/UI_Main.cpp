@@ -31,7 +31,12 @@
 #include "../ISO/IsoMount.h"
 #include "../ISO/IsoDump.h"
 #include "OutputLog.h"
-#include "../Level/LevelEdit.h"
+#include "../Level/Editing/LevelEdit.h"
+#include "../Level/Core/LevelLoader.h"
+#include "../Level/Database/TextBank.h"
+#include "../Quest/QuestInjection.h"
+#include "../Entity/NpcAuthoring.h"
+#include "../BNKCore.cpp"
 #ifndef _WIN32
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
@@ -217,29 +222,74 @@ static void handle_flycam_input(float dt) {
     bool e_pressed = keys_ok && ImGui::IsKeyDown(S.key_up);
     float mouse_dx = 0.0f;
     float mouse_dy = 0.0f;
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !io.KeyShift) {
+
+    auto begin_right_look = [&]() {
         g_flycam.is_looking = true;
-        g_flycam.saved_mouse_x = io.MousePos.x;
-        g_flycam.saved_mouse_y = io.MousePos.y;
+        g_flycam.right_press_pending = false;
+
+
+        g_flycam.right_drag_distance = std::max(
+            g_flycam.right_drag_distance, 4.0f);
+        g_flycam.saved_mouse_x = g_flycam.right_press_x;
+        g_flycam.saved_mouse_y = g_flycam.right_press_y;
 #ifdef _WIN32
         ShowCursor(FALSE);
 #else
         if (g_glfw_window) {
-            glfwSetInputMode(g_glfw_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            glfwSetInputMode(g_glfw_window, GLFW_CURSOR,
+                             GLFW_CURSOR_DISABLED);
         }
 #endif
+    };
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        g_flycam.right_drag_distance = 0.0f;
+        g_flycam.right_press_x = io.MousePos.x;
+        g_flycam.right_press_y = io.MousePos.y;
+        g_flycam.right_press_started = float(ImGui::GetTime());
+        if (LevelEdit::Enabled()) {
+
+
+            g_flycam.right_press_pending = true;
+        } else {
+            begin_right_look();
+        }
     }
-    if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
-        g_flycam.is_looking = false;
-#ifdef _WIN32
-        ShowCursor(TRUE);
-        SetCursorPos((int)g_flycam.saved_mouse_x, (int)g_flycam.saved_mouse_y);
-#else
-        if (g_glfw_window) {
-            glfwSetInputMode(g_glfw_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            glfwSetCursorPos(g_glfw_window, g_flycam.saved_mouse_x, g_flycam.saved_mouse_y);
+
+    if (g_flycam.right_press_pending) {
+        const float dx = io.MousePos.x - g_flycam.right_press_x;
+        const float dy = io.MousePos.y - g_flycam.right_press_y;
+        const float distance = std::sqrt(dx * dx + dy * dy);
+        g_flycam.right_drag_distance = std::max(
+            g_flycam.right_drag_distance, distance);
+        constexpr float kRightDragThreshold = 4.0f;
+        constexpr float kRightHoldSeconds = 0.18f;
+        const float held_for = float(ImGui::GetTime()) -
+            g_flycam.right_press_started;
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Right) &&
+            (distance >= kRightDragThreshold ||
+             held_for >= kRightHoldSeconds)) {
+            begin_right_look();
         }
+    }
+
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        g_flycam.right_press_pending = false;
+        if (g_flycam.is_looking) {
+            g_flycam.is_looking = false;
+#ifdef _WIN32
+            ShowCursor(TRUE);
+            SetCursorPos((int)g_flycam.saved_mouse_x,
+                         (int)g_flycam.saved_mouse_y);
+#else
+            if (g_glfw_window) {
+                glfwSetInputMode(g_glfw_window, GLFW_CURSOR,
+                                 GLFW_CURSOR_NORMAL);
+                glfwSetCursorPos(g_glfw_window, g_flycam.saved_mouse_x,
+                                 g_flycam.saved_mouse_y);
+            }
 #endif
+        }
     }
     if (g_flycam.is_looking) {
 #ifdef _WIN32
@@ -252,6 +302,8 @@ static void handle_flycam_input(float dt) {
         mouse_dx = io.MouseDelta.x;
         mouse_dy = io.MouseDelta.y;
 #endif
+        g_flycam.right_drag_distance +=
+            std::sqrt(mouse_dx * mouse_dx + mouse_dy * mouse_dy);
     }
     FlyCam_Update(g_flycam, dt, w_pressed, s_pressed, a_pressed, d_pressed, q_pressed, e_pressed, mouse_dx, mouse_dy);
 }
@@ -565,6 +617,8 @@ void draw_main(GLFWwindow* window) {
                     ImGui::EndPopup();
                 }
             }
+            static bool s_confirm_restore_quests = false;
+            static bool s_confirm_restore_npcs = false;
             if (ImGui::BeginMenu("Settings")) {
                 if (ImGui::Checkbox("Show file paths in tree tooltips", &S.show_paths)) {
                     S.hide_tooltips = !S.show_paths;
@@ -646,7 +700,102 @@ void draw_main(GLFWwindow* window) {
                     S.show_keybinds_window = true;
                 }
 
+                ImGui::Separator();
+                if (ImGui::MenuItem(
+                        "Restore Quest Defaults", nullptr, false,
+                        QuestInjection::BackupsAvailable(S.root_dir))) {
+                    s_confirm_restore_quests = true;
+                }
+                if (ImGui::MenuItem(
+                        "Restore NPC Defaults", nullptr, false,
+                        NpcAuthoring::BackupAvailable(S.root_dir))) {
+                    s_confirm_restore_npcs = true;
+                }
+
                 ImGui::EndMenu();
+            }
+            if (s_confirm_restore_quests) {
+                ImGui::OpenPopup("Restore Quest Defaults?");
+                s_confirm_restore_quests = false;
+            }
+            if (ImGui::BeginPopupModal("Restore Quest Defaults?", nullptr,
+                                       ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextWrapped(
+                    "Restore the original game script and quest text "
+                    "banks from their .bak files?");
+                ImGui::Spacing();
+                if (ImGui::Button("Restore", ImVec2(120, 0))) {
+                    static LevelOpThread s_restore_quest_thread;
+                    const std::string root = S.root_dir;
+                    s_restore_quest_thread.launch(std::thread([root] {
+                        progress_open(100, "Restoring quest files...");
+                        std::string result;
+                        std::string error;
+                        const bool ok = QuestInjection::RestoreDefaults(
+                            root, result, error);
+                        if (ok) {
+                            const std::filesystem::path data =
+                                std::filesystem::path(root) / "data";
+                            BnkCache::invalidate(
+                                (data / "gamescripts.bnk").string());
+                            BnkCache::invalidate(
+                                (data / "gamescripts_r.bnk").string());
+                            TextBank::Invalidate();
+                            TextBank::LoadForRoot(root);
+                            OutputLog::success("quest restore: " + result);
+                            show_completion_box(result);
+                        } else {
+                            OutputLog::error("quest restore: " + error);
+                            show_error_box(error);
+                        }
+                        progress_done();
+                    }));
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SetItemDefaultFocus();
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+            if (s_confirm_restore_npcs) {
+                ImGui::OpenPopup("Restore NPC Defaults?");
+                s_confirm_restore_npcs = false;
+            }
+            if (ImGui::BeginPopupModal("Restore NPC Defaults?", nullptr,
+                                       ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextWrapped(
+                    "Restore the original globals.gdb from its .bak file? "
+                    "All NPC definitions saved with Create NPC will be "
+                    "removed.");
+                ImGui::Spacing();
+                if (ImGui::Button("Restore", ImVec2(120, 0))) {
+                    static LevelOpThread s_restore_npc_thread;
+                    const std::string root = S.root_dir;
+                    s_restore_npc_thread.launch(std::thread([root] {
+                        progress_open(100, "Restoring NPC definitions...");
+                        std::string result;
+                        std::string error;
+                        if (NpcAuthoring::RestoreDefault(root, result,
+                                                        error)) {
+                            Level::BuildGlobalEntityCatalog();
+                            OutputLog::success("NPC restore: " + result);
+                            show_completion_box(result);
+                        } else {
+                            OutputLog::error("NPC restore: " + error);
+                            show_error_box(error);
+                        }
+                        progress_done();
+                    }));
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SetItemDefaultFocus();
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
             }
 
             if (ImGui::BeginMenu("Addons")) {

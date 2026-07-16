@@ -29,6 +29,7 @@
 #include "Utilities/Progress.h"
 #include "UI/HexView.h"
 #include "UI/OutputLog.h"
+#include "UI/Quest/QuestNodeView.h"
 #include "Splashscreen/Splashscreen.h"
 #include "Utilities/Files.h"
 #include "Utilities/AutoPilot.h"
@@ -578,6 +579,7 @@ int main() {
 #endif
     }
     S.exiting = true;
+    QuestUI::Shutdown();
     AudioPlayer::shutdown();
     BackgroundAudio::instance().stop();
 #ifdef _WIN32

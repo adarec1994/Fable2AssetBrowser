@@ -7,12 +7,14 @@
     <mapping directory="$PROJECT_DIR$/build/_deps/iconfontcpp-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/build/_deps/imgui-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/build/_deps/imgui_hex_editor-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/imgui_node_editor-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/build/_deps/imguifiledialog-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/build/_deps/miniaudio-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/build/_deps/stb-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/build/_deps/zlib-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/imgui-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/imgui_hex_editor-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/imgui_node_editor-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/imguifiledialog-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/zlib-src" vcs="Git" />
   </component>

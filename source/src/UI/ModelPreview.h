@@ -6,10 +6,10 @@
 #include <unordered_map>
 #include <array>
 #include "../MDL/ModelParser.h"
-#include "../Level/LevelEdit.h"
+#include "../Level/Editing/LevelEdit.h"
 #include "../Level/Skybox/CloudRuntime.h"
 #include "../Level/Skybox/SkyboxTypes.h"
-#include "../Level/ParticleFX.h"
+#include "../Level/Effects/ParticleFX.h"
 #ifdef _WIN32
 #include <d3d11.h>
 #endif
@@ -30,6 +30,11 @@ struct FlyCam {
     bool is_looking = false;
     float saved_mouse_x = 0.0f;
     float saved_mouse_y = 0.0f;
+    float right_drag_distance = 0.0f;
+    bool right_press_pending = false;
+    float right_press_started = 0.0f;
+    float right_press_x = 0.0f;
+    float right_press_y = 0.0f;
 };
 struct MPPerMesh {
 #ifdef _WIN32
@@ -75,6 +80,7 @@ struct MPPerMesh {
     bool is_terrain = false;
     bool is_water   = false;
     bool is_cloth   = false;
+    bool is_entity_model = false;
     bool alpha_test = true;
     bool cloth_sim  = false;
     std::shared_ptr<struct ClothSim> cloth;

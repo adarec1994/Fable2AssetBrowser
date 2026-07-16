@@ -18,6 +18,9 @@ void refresh_file_table();
 void pick_bnk(const std::string &path);
 void open_folder_logic(const std::string &sel);
 void open_iso_logic(const std::string& iso_path);
+bool select_quest_script_by_query(const std::string& query);
+bool select_entity_by_query(const std::string& query);
+void request_open_create_npc();
 
 float left_panel_min_width();
 

@@ -6,7 +6,7 @@
 #include "../../Utilities/operations.h"
 #include "../../ISO/IsoMount.h"
 #include "../../BNKCore.cpp"
-#include "../../Level/GdbParser.h"
+#include "../../GDB/GdbParser.h"
 #include "../UI_Main.h"
 #include "../AudioPlayerWindow.h"
 #include "../OutputLog.h"
@@ -297,6 +297,10 @@ void pick_bnk(const std::string &path) {
     S.lua_preview_content.clear();
     S.lua_preview_title.clear();
     S.lua_preview_selected = -1;
+    ++S.lua_preview_request;
+    S.lua_preview_loading = false;
+    S.lua_preview_is_quest = false;
+    S.quest_preview_select_nodes = false;
     S.show_gdb_render = false;
     S.gdb_view_rows.clear();
     S.gdb_view_title.clear();

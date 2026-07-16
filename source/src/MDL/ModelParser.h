@@ -97,6 +97,7 @@ struct MDLMeshGeom {
     bool is_terrain = false;
     bool is_water = false;
     bool is_cloth = false;
+    bool is_entity_model = false;
     bool cloth_sim = false;
     std::vector<uint8_t> cloth_pin;
     float cloth_damping = 0.05f;

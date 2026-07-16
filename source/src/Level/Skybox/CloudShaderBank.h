@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Level/ShaderBankFile.h"
+#include "Level/Rendering/ShaderBankFile.h"
 #include "XenosShaderBinary.h"
 
 #include <array>

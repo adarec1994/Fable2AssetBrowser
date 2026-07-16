@@ -7,7 +7,7 @@
 #include "../textures/LhTexCodec.h"
 #include "../MDL/ModelParser.h"
 #include "ModelPreview.h"
-#include "../Level/TerrainTextureRegistry.h"
+#include "../Level/Terrain/TerrainTextureRegistry.h"
 #include "../BNKCore.cpp"
 #include "imgui.h"
 #include "imgui_hex.h"

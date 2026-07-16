@@ -2,7 +2,7 @@
 #include "Utilities/Files.h"
 #include "Utilities/Utils.h"
 #include "BNKCore.cpp"
-#include "Level/LevelLoader.h"
+#include "Level/Core/LevelLoader.h"
 #include <filesystem>
 #include <fstream>
 #include <optional>

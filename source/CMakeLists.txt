@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
 project(Fable_2_Asset_Browser CXX)
 
+# Dependencies are pinned to explicit revisions below. Once populated, avoid
+# contacting every upstream repository during unrelated source changes.
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
+
 option(FABLE_ENABLE_RECONSTRUCTED_CLOUD_PREVIEW
        "Enable the non-authoritative handwritten D3D11 cloud preview"
        ON)
@@ -61,42 +65,56 @@ set(APP_SOURCES
         src/ISO/IsoMount.cpp
         src/ISO/IsoDump.cpp
         src/MDL/mdl_converter.cpp
-        src/Level/LevelLoader.cpp
-        src/Level/LevelLoader.h
-        src/Level/LevelExport.cpp
-        src/Level/LevelExport.h
-        src/Level/HeightfieldLoader.cpp
-        src/Level/HeightfieldLoader.h
-        src/Level/TextureAtlasDecoder.cpp
-        src/Level/TextureAtlasDecoder.h
-        src/Level/EhfPalette.cpp
-        src/Level/EhfPalette.h
-        src/Level/ShaderBankFile.cpp
-        src/Level/ShaderBankFile.h
-        src/Level/TerrainTextureRegistry.cpp
-        src/Level/TerrainTextureRegistry.h
-        src/Level/EhfChunkParser.cpp
-        src/Level/EhfChunkParser.h
-        src/Level/EhfLodThumbnails.cpp
-        src/Level/EhfLodThumbnails.h
-        src/Level/TerrainSplat.cpp
-        src/Level/TerrainSplat.h
-        src/Level/TerrainEdit.cpp
-        src/Level/TerrainEdit.h
-        src/Level/LevelEdit.cpp
-        src/Level/LevelEdit.h
-        src/Level/BnkWriter.cpp
-        src/Level/BnkWriter.h
+        src/Level/Core/LevelLoader.cpp
+        src/Level/Core/LevelLoader.h
+        src/Level/Loading/LevelBinaryReader.h
+        src/Level/Loading/EngineLevelParser.cpp
+        src/Level/Loading/LevelCatalogLoader.cpp
+        src/Level/Loading/LevelCatalogLoaderInternal.h
+        src/Level/Loading/LevelTerrainLoader.cpp
+        src/Level/Loading/LevelTerrainMesh.cpp
+        src/Level/Loading/LevelTerrainLoaderInternal.h
+        src/Level/Loading/Stages/LoadContainers.inl
+        src/Level/Loading/Stages/LoadEffects.inl
+        src/Level/Loading/Stages/LoadEntities.inl
+        src/Level/Loading/Stages/LoadEnvironment.inl
+        src/Level/Loading/Stages/LoadProps.inl
+        src/Level/Loading/Stages/LevelPropSupport.inl
+        src/Level/Core/LevelExport.cpp
+        src/Level/Core/LevelExport.h
+        src/Level/Terrain/HeightfieldLoader.cpp
+        src/Level/Terrain/HeightfieldLoader.h
+        src/Level/Terrain/TextureAtlasDecoder.cpp
+        src/Level/Terrain/TextureAtlasDecoder.h
+        src/Level/Terrain/EhfPalette.cpp
+        src/Level/Terrain/EhfPalette.h
+        src/Level/Rendering/ShaderBankFile.cpp
+        src/Level/Rendering/ShaderBankFile.h
+        src/Level/Terrain/TerrainTextureRegistry.cpp
+        src/Level/Terrain/TerrainTextureRegistry.h
+        src/Level/Terrain/EhfChunkParser.cpp
+        src/Level/Terrain/EhfChunkParser.h
+        src/Level/Terrain/EhfLodThumbnails.cpp
+        src/Level/Terrain/EhfLodThumbnails.h
+        src/Level/Terrain/TerrainSplat.cpp
+        src/Level/Terrain/TerrainSplat.h
+        src/Level/Terrain/TerrainEdit.cpp
+        src/Level/Terrain/TerrainEdit.h
+        src/Level/Editing/LevelEdit.cpp
+        src/Level/Editing/LevelEdit.h
+        src/Level/IO/BnkWriter.cpp
+        src/Level/IO/BnkWriter.h
         src/UI/LevelGizmo.cpp
         src/UI/LevelGizmo.h
-        src/Level/VfsConfig.cpp
-        src/Level/VfsConfig.h
-        src/Level/GdbModelHashlist.cpp
-        src/Level/GdbModelHashlist.h
-        src/Level/GdbEdit.cpp
-        src/Level/GdbEdit.h
-        src/Level/GdbParser.cpp
-        src/Level/GdbParser.h
+        src/Level/IO/VfsConfig.cpp
+        src/Level/IO/VfsConfig.h
+        src/GDB/GdbModelHashlist.cpp
+        src/GDB/GdbModelHashlist.h
+        src/GDB/GdbEdit.cpp
+        src/GDB/GdbEdit.h
+        src/GDB/GdbParser.cpp
+        src/GDB/GdbParser.h
+        src/GDB/GdbReaderInternal.h
         src/Level/Skybox/CloudBackgroundGeneration.cpp
         src/Level/Skybox/CloudBackgroundGeneration.h
         src/Level/Skybox/CloudBackgroundMap.cpp
@@ -114,7 +132,6 @@ set(APP_SOURCES
         src/Level/Skybox/EnvironmentTheme.h
         src/Level/Skybox/EnvironmentThemeParser.cpp
         src/Level/Skybox/EnvironmentThemeParser.h
-        src/Level/Skybox/GdbReaderInternal.h
         src/Level/Skybox/SkyboxPreviewBinding.cpp
         src/Level/Skybox/SkyboxPreviewBinding.h
         src/Level/Skybox/SkyboxRenderer.cpp
@@ -126,14 +143,14 @@ set(APP_SOURCES
         src/Level/Skybox/SkyXexDecomp.h
         src/Level/Skybox/XenosShaderBinary.cpp
         src/Level/Skybox/XenosShaderBinary.h
-        src/Level/WaterParser.cpp
-        src/Level/WaterParser.h
-        src/Level/TextBank.cpp
-        src/Level/TextBank.h
-        src/Level/ParticleBank.cpp
-        src/Level/ParticleBank.h
-        src/Level/ParticleFX.cpp
-        src/Level/ParticleFX.h
+        src/Level/Environment/WaterParser.cpp
+        src/Level/Environment/WaterParser.h
+        src/Level/Database/TextBank.cpp
+        src/Level/Database/TextBank.h
+        src/Level/Effects/ParticleBank.cpp
+        src/Level/Effects/ParticleBank.h
+        src/Level/Effects/ParticleFX.cpp
+        src/Level/Effects/ParticleFX.h
         src/Havok/HavokPackfileReader.cpp
         src/Havok/HavokPackfileReader.h
         src/BNKCore.cpp
@@ -148,12 +165,34 @@ set(APP_SOURCES
         src/Audio/Xma2Codec/XmaWmaProDecoder.cpp
         src/UI/ModelPreview.cpp
         src/UI/ModelPreview.h
+        src/UI/EntityModelResolver.cpp
+        src/UI/EntityModelResolver.h
         src/Lua.cpp
         src/Lua.h
         src/lua/lua_decompile.h
         src/lua/lua_parse.cpp
         src/lua/lua_decompile.cpp
         src/lua/lua_decompiler.cpp
+        src/Quest/QuestGraph.cpp
+        src/Quest/QuestGraph.h
+        src/Quest/QuestAuthoring.cpp
+        src/Quest/QuestAuthoring.h
+        src/Quest/QuestInjection.cpp
+        src/Quest/QuestInjection.h
+        src/Quest/QuestReferences.cpp
+        src/Quest/QuestReferences.h
+        src/Quest/QuestRewards.cpp
+        src/Quest/QuestRewards.h
+        src/Quest/QuestStoryGraph.cpp
+        src/Quest/QuestStoryGraph.h
+        src/Quest/QuestWorldIndex.cpp
+        src/Quest/QuestWorldIndex.h
+        src/Entity/NpcAuthoring.cpp
+        src/Entity/NpcAuthoring.h
+        src/UI/Quest/QuestNodeView.cpp
+        src/UI/Quest/QuestNodeView.h
+        src/UI/ContentTabs.cpp
+        src/UI/ContentTabs.h
 )
 
 if(WIN32)
@@ -282,7 +321,7 @@ target_link_libraries(Fable_2_Asset_Browser PRIVATE ZLIB::ZLIB)
 if(BUILD_TESTING)
     add_executable(texture_atlas_decoder_tests
             tests/TextureAtlasDecoderTests.cpp
-            src/Level/TextureAtlasDecoder.cpp
+            src/Level/Terrain/TextureAtlasDecoder.cpp
     )
     target_include_directories(texture_atlas_decoder_tests PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -293,7 +332,7 @@ if(BUILD_TESTING)
 
     add_executable(shader_bank_tests
             tests/ShaderBankTests.cpp
-            src/Level/ShaderBankFile.cpp
+            src/Level/Rendering/ShaderBankFile.cpp
     )
     target_include_directories(shader_bank_tests PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -303,26 +342,47 @@ if(BUILD_TESTING)
 
     add_executable(gdb_edit_tests
             tests/GdbEditTests.cpp
-            src/Level/GdbEdit.cpp
+            src/GDB/GdbEdit.cpp
     )
     target_include_directories(gdb_edit_tests PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     add_test(NAME gdb_edit_tests COMMAND gdb_edit_tests)
 
+    add_executable(npc_authoring_tests
+            tests/NpcAuthoringTests.cpp
+            src/Entity/NpcAuthoring.cpp
+            src/GDB/GdbEdit.cpp
+    )
+    target_include_directories(npc_authoring_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    add_executable(quest_graph_tests
+            src/Quest/tests/QuestGraphTests.cpp
+            src/Quest/QuestAuthoring.cpp
+            src/Quest/QuestGraph.cpp
+            src/Quest/QuestStoryGraph.cpp
+    )
+    target_include_directories(quest_graph_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    add_test(NAME quest_graph_tests COMMAND quest_graph_tests)
+
     add_executable(gdb_contents_probe
             tests/GdbContentsProbe.cpp
-            src/Level/GdbParser.cpp
+            src/GDB/GdbParser.cpp
             src/Level/Skybox/EnvironmentThemeParser.cpp
     )
     target_include_directories(gdb_contents_probe PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
+
 endif()
 
 add_executable(shader_bank_extract
         tools/ShaderBankExtract.cpp
-        src/Level/ShaderBankFile.cpp
+        src/Level/Rendering/ShaderBankFile.cpp
         src/Level/Skybox/CloudShaderBank.cpp
         src/Level/Skybox/XenosShaderBinary.cpp
 )
@@ -331,6 +391,22 @@ target_include_directories(shader_bank_extract PRIVATE
 )
 target_link_libraries(shader_bank_extract PRIVATE ZLIB::ZLIB)
 
+add_executable(quest_script_probe
+        tools/quests/QuestScriptProbe.cpp
+        src/ISO/IsoMount.cpp
+        src/Level/Database/TextBank.cpp
+        src/Quest/QuestGraph.cpp
+        src/Quest/QuestReferences.cpp
+        src/Quest/QuestStoryGraph.cpp
+        src/lua/lua_parse.cpp
+        src/lua/lua_decompile.cpp
+        src/lua/lua_decompiler.cpp
+)
+target_include_directories(quest_script_probe PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(quest_script_probe PRIVATE ZLIB::ZLIB)
+
 include(FetchContent)
 FetchContent_Declare(
         imgui
@@ -338,6 +414,25 @@ FetchContent_Declare(
         GIT_TAG v1.91.5
 )
 FetchContent_MakeAvailable(imgui)
+
+FetchContent_Declare(
+        imgui_node_editor
+        GIT_REPOSITORY https://github.com/thedmd/imgui-node-editor.git
+        # develop commit with Dear ImGui 1.90+ compatibility (v0.9.3 still
+        # uses removed key APIs and duplicates ImVec2 equality operators).
+        GIT_TAG b302971455b3719ec9b5fb94b2f92d27c62b9ff0
+)
+FetchContent_MakeAvailable(imgui_node_editor)
+
+target_sources(Fable_2_Asset_Browser PRIVATE
+        ${imgui_node_editor_SOURCE_DIR}/crude_json.cpp
+        ${imgui_node_editor_SOURCE_DIR}/imgui_canvas.cpp
+        ${imgui_node_editor_SOURCE_DIR}/imgui_node_editor.cpp
+        ${imgui_node_editor_SOURCE_DIR}/imgui_node_editor_api.cpp
+)
+target_include_directories(Fable_2_Asset_Browser PRIVATE
+        ${imgui_node_editor_SOURCE_DIR}
+)
 
 FetchContent_Declare(
         imguifiledialog
@@ -480,4 +575,23 @@ endif()
 if(MINGW)
     target_link_options(Fable_2_Asset_Browser PRIVATE -static -static-libgcc -static-libstdc++)
     target_link_libraries(Fable_2_Asset_Browser PRIVATE -lwinpthread)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(bnk_writer_tests
+            tests/BnkWriterTests.cpp
+            src/Level/IO/BnkWriter.cpp
+            src/ISO/IsoMount.cpp
+    )
+    target_include_directories(bnk_writer_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${imgui_SOURCE_DIR}
+            ${imgui_hex_editor_SOURCE_DIR}
+            ${directxmath_SOURCE_DIR}/Inc
+    )
+    if(WIN32)
+        target_compile_definitions(bnk_writer_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    target_link_libraries(bnk_writer_tests PRIVATE ZLIB::ZLIB)
+    add_test(NAME bnk_writer_tests COMMAND bnk_writer_tests)
 endif()

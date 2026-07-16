@@ -9,7 +9,7 @@
 #include "imgui_hex.h"
 #include "../MDL/ModelParser.h"
 #include "../animations/AnimBank.h"
-#include "../Level/GdbParser.h"
+#include "../GDB/GdbParser.h"
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -126,14 +126,20 @@ struct State {
     std::vector<FlatAssetEntry> all_mdl_files;
     std::vector<FlatAssetEntry> all_tex_files;
     std::vector<FlatAssetEntry> all_wav_files;
+    std::vector<FlatAssetEntry> all_gdb_files;
+    std::vector<FlatAssetEntry> all_save_files;
 
     std::vector<FlatAssetEntry> all_anim_files;
     std::vector<FlatAssetEntry> all_level_files;
     std::vector<FlatAssetEntry> all_heightfield_files;
+    std::vector<FlatAssetEntry> all_quest_files;
     bool terrain_mode = false;
     bool show_gdb_placements = false;
     bool show_spawn_markers = false;
     bool show_ent_npcs = false;
+    bool show_entity_models = true;
+    bool show_dig_spots = false;
+    bool show_containers = false;
     bool show_ent_text = false;
 
     bool level_edit_guard_popup = false;
@@ -147,9 +153,15 @@ struct State {
     std::string level_filter;
     std::string lua_filter;
     std::string item_filter;
-    int  selected_item = -1;          // index into g_item_details
-    bool show_item_details = false;   // floating detail overlay
-    bool item_model_active = false;   // model came from the Items tab
+    std::string entity_filter;
+    std::string quest_filter;
+    int  selected_item = -1;
+    int  selected_entity = -1;
+    int  selected_quest = -1;
+    bool show_item_details = false;
+    bool item_model_active = false;
+    bool show_entity_details = false;
+    bool entity_model_active = false;
 
     bool show_paths = true;
 
@@ -243,6 +255,8 @@ struct State {
     bool model_preview_open = false;
     bool model_materials_open = false;
     std::atomic<bool> pending_preview_build{false};
+    std::atomic<bool> pending_model_tab_capture{false};
+    bool content_tabs_visible = false;
     std::vector<MDLMeshGeom> mdl_meshes;
 
     std::vector<float> bone_rot_deltas;
@@ -256,6 +270,7 @@ struct State {
     float cam_yaw = 0.0f;
     float cam_pitch = 0.2f;
     float cam_dist = 3.0f;
+    float cam_target_offset_y = 0.0f;
 #ifdef _WIN32
     ID3D11ShaderResourceView* model_diffuse_srv = nullptr;
 #else
@@ -266,6 +281,9 @@ struct State {
     std::string lua_preview_title;
     int lua_preview_selected = -1;
     std::atomic<bool> lua_preview_loading{false};
+    std::atomic<uint64_t> lua_preview_request{0};
+    bool lua_preview_is_quest = false;
+    bool quest_preview_select_nodes = false;
 
     bool show_lua_render = false;
 

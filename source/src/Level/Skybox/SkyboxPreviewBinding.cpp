@@ -1,7 +1,7 @@
 #include "SkyboxPreviewBinding.h"
 
+#include "EnvironmentTheme.h"
 #include "SkyboxRenderer.h"
-#include "../GdbParser.h"
 #include "../../UI/ModelPreview.h"
 #include "../../UI/OutputLog.h"
 #include "../../Utilities/State.h"

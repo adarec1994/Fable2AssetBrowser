@@ -3,14 +3,21 @@
 #include "../UI_Main.h"
 #include "../OutputLog.h"
 #include "../ModelPreview.h"
+#include "../EntityModelResolver.h"
+#include "../ContentTabs.h"
+#include "../Quest/QuestNodeView.h"
 
 #include "../../ISO/IsoDump.h"
-#include "../../Level/LevelLoader.h"
-#include "../../Level/TextBank.h"
-#include "../../Level/LevelExport.h"
+#include "../../Quest/QuestInjection.h"
+#include "../../Entity/NpcAuthoring.h"
+#include "../../Level/Editing/LevelEdit.h"
+#include "../../Level/Core/LevelLoader.h"
+#include "../../Level/Database/TextBank.h"
+#include "../../Level/Core/LevelExport.h"
 #include "../../animations/AnimDataFile.h"
 #include "../../animations/AnimPlayer.h"
 #include "../../animations/AnimRigMap.h"
+#include "../../MDL/ModelParser.h"
 
 #include "../../Lua.h"
 #include "../../Utilities/Progress.h"
@@ -23,7 +30,9 @@
 #include <filesystem>
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <thread>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <cstring>
@@ -31,9 +40,105 @@
 
 extern ModelPreview g_mp;
 
+namespace {
+
+struct EntityPreviewCompletion {
+    std::uint64_t request = 0;
+    int entity_index = -1;
+    MDLInfo model_info;
+    std::vector<MDLMeshGeom> meshes;
+    std::string primary_model_path;
+    std::uint32_t primary_model_hash = 0;
+};
+
+std::atomic<std::uint64_t> g_entity_preview_request{0};
+std::mutex g_entity_preview_mutex;
+std::vector<EntityPreviewCompletion> g_entity_preview_completions;
+
+NpcAuthoring::Definition g_new_npc;
+int g_new_npc_template_index = -1;
+char g_new_npc_template_filter[128]{};
+std::string g_new_npc_error;
+bool g_open_create_npc_requested = false;
+
+void select_new_npc_template(int index) {
+    if (index < 0 ||
+        static_cast<std::size_t>(index) >= g_global_entity_catalog.size()) {
+        return;
+    }
+    const std::string internal_name = g_new_npc.internal_name;
+    const std::string display_name = g_new_npc.display_name;
+    g_new_npc = NpcAuthoring::Definition{};
+    g_new_npc.internal_name = internal_name;
+    g_new_npc.display_name = display_name;
+    g_new_npc_template_index = index;
+
+    const Gdb::CreatureCatalogEntry& entity =
+        g_global_entity_catalog[static_cast<std::size_t>(index)];
+    g_new_npc.template_name = entity.display_name.empty()
+        ? entity.name : entity.display_name;
+    g_new_npc.template_entity = entity.entity_hash;
+    g_new_npc.model_hashes = entity.model_hashes;
+
+    const auto gameplay = g_global_entity_gameplay.find(entity.entity_hash);
+    if (gameplay == g_global_entity_gameplay.end()) {
+        g_new_npc_error =
+            "That entity has no indexed NPC gameplay components.";
+        return;
+    }
+    const Gdb::EntityGameplayDetails& details = gameplay->second;
+    g_new_npc.creature_component = details.creature_component_record;
+    g_new_npc.health_component = details.health_component_record;
+    g_new_npc.combat_component = details.combat_component_record;
+    g_new_npc.faction_component = details.faction_component_record;
+    g_new_npc.faction_record = details.faction_record;
+    g_new_npc.faction_name = details.faction_name;
+    g_new_npc.combat_profile_record = details.combat_profile_record;
+    g_new_npc.combat_profile_name = details.combat_profile_name;
+    for (const auto& option : g_global_entity_gameplay_options.factions) {
+        if (option.record_hash == g_new_npc.faction_record) {
+            g_new_npc.faction_name = option.label;
+            break;
+        }
+    }
+    for (const auto& option :
+         g_global_entity_gameplay_options.combat_profiles) {
+        if (option.record_hash == g_new_npc.combat_profile_record) {
+            g_new_npc.combat_profile_name = option.label;
+            break;
+        }
+    }
+    for (const Gdb::EntityGameplayField& source : details.core_fields) {
+        NpcAuthoring::FieldValue value;
+        value.label = source.label;
+        value.display_value = source.value;
+        value.field_hash = source.field_hash;
+        value.raw_value = source.raw_value;
+        value.value_type = source.value_type;
+        g_new_npc.core_fields.push_back(std::move(value));
+    }
+    for (const Gdb::EntityGameplayField& source : details.combat_fields) {
+        NpcAuthoring::FieldValue value;
+        value.label = source.label;
+        value.display_value = source.value;
+        value.field_hash = source.field_hash;
+        value.raw_value = source.raw_value;
+        value.value_type = source.value_type;
+        g_new_npc.combat_fields.push_back(std::move(value));
+    }
+    g_new_npc_error.clear();
+}
+
+}
+
+void request_open_create_npc() {
+    g_open_create_npc_requested = true;
+}
+
 static const char* const kLeftPanelTabLabels[] = {
     "BNK List", "File Tree", "Levels", "Lua Scripts",
-    "Models", "Textures", "Audio", "Animations", "Items"
+    "Models", "Textures", "Audio", "Animations", "Items", "Entities",
+    "Quests"
 };
 
 static float compute_tab_button_width() {
@@ -57,23 +162,11 @@ float left_panel_min_width() {
 }
 
 static const FlatAssetEntry* find_model_by_path_hash_left(uint32_t h) {
-    if (!h) return nullptr;
-    for (const auto& mf : S.all_mdl_files) {
-        std::string lp = mf.full_path;
-        std::transform(lp.begin(), lp.end(), lp.begin(), ::tolower);
-        std::replace(lp.begin(), lp.end(), '/', '\\');
-        uint32_t mh = 0x811C9DC5u;
-        for (unsigned char c : lp) {
-            mh *= 0x01000193u;
-            mh ^= uint32_t(c);
-        }
-        if (mh == h) return &mf;
-    }
-    return nullptr;
+    return FindGlobalModelAssetByPathHash(h);
 }
 
-// resolve a model by its path string: exact lower-path match, then a
-// filename (leaf) match as a fallback for path-prefix differences
+
+
 static const FlatAssetEntry* find_model_by_path_left(
     const std::string& path) {
     if (path.empty()) return nullptr;
@@ -98,6 +191,117 @@ static const FlatAssetEntry* find_model_by_path_left(
         }
     }
     return leaf_hit;
+}
+
+static void apply_entity_preview_completions() {
+    std::vector<EntityPreviewCompletion> completed;
+    {
+        std::lock_guard<std::mutex> lock(g_entity_preview_mutex);
+        completed.swap(g_entity_preview_completions);
+    }
+    for (EntityPreviewCompletion& result : completed) {
+        if (result.request != g_entity_preview_request.load() ||
+            result.entity_index != S.selected_entity ||
+            ContentTabs::ActiveKind() != ContentTabs::Kind::Entity) {
+            continue;
+        }
+        if (result.meshes.empty()) {
+            OutputLog::warn("entity preview: no renderable model parts found");
+            continue;
+        }
+        S.hex_data.clear();
+        S.mdl_info_ok = true;
+        S.mdl_info = std::move(result.model_info);
+        S.mdl_meshes = std::move(result.meshes);
+        S.current_mdl_path = std::move(result.primary_model_path);
+        S.current_mdl_path_hash = result.primary_model_hash;
+        S.item_model_active = false;
+        S.selected_item = -1;
+        S.show_item_details = false;
+        S.entity_model_active = true;
+        S.show_entity_details = true;
+        S.cam_yaw = 3.14159265f;
+        S.cam_pitch = 0.2f;
+        S.cam_dist = 3.0f;
+        S.pending_model_tab_capture = true;
+        S.pending_preview_build = true;
+    }
+}
+
+static void load_entity_preview(int entity_index) {
+    if (entity_index < 0 ||
+        entity_index >= static_cast<int>(g_global_entity_catalog.size())) {
+        return;
+    }
+    const auto& entity = g_global_entity_catalog[entity_index];
+    if (entity.model_hashes.empty()) {
+        OutputLog::warn("entity preview: no model assets resolve for '" +
+                        (entity.display_name.empty() ? entity.name
+                                                     : entity.display_name) +
+                        "'");
+        return;
+    }
+
+    const std::uint64_t request = ++g_entity_preview_request;
+    g_mp.has_model = false;
+    S.mdl_info_ok = false;
+    S.mdl_meshes.clear();
+    progress_open(0, "Loading full entity model...");
+    std::thread([request, entity_index,
+                 model_hashes = entity.model_hashes]() mutable {
+        EntityPreviewCompletion result;
+        result.request = request;
+        result.entity_index = entity_index;
+        EntityModels::ResolvedModel resolved;
+        std::string error;
+        if (EntityModels::Resolve(model_hashes, resolved, &error)) {
+            result.model_info = std::move(resolved.info);
+            result.meshes = std::move(resolved.meshes);
+            result.primary_model_path =
+                std::move(resolved.primary_model_path);
+            result.primary_model_hash = resolved.primary_model_hash;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_entity_preview_mutex);
+            g_entity_preview_completions.push_back(std::move(result));
+        }
+        progress_done();
+    }).detach();
+}
+
+bool select_entity_by_query(const std::string& query) {
+    std::string needle = query;
+    std::transform(needle.begin(), needle.end(), needle.begin(),
+                   [](unsigned char c) { return char(std::tolower(c)); });
+
+    int best = -1;
+    for (int i = 0; i < static_cast<int>(g_global_entity_catalog.size()); ++i) {
+        const auto& entity = g_global_entity_catalog[static_cast<size_t>(i)];
+        std::string name = entity.name;
+        std::string display = entity.display_name;
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        std::transform(display.begin(), display.end(), display.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        if (name == needle || display == needle) {
+            best = i;
+            break;
+        }
+        if (best < 0 &&
+            (name.find(needle) != std::string::npos ||
+             display.find(needle) != std::string::npos)) {
+            best = i;
+        }
+    }
+    if (best < 0) return false;
+
+    const auto& entity = g_global_entity_catalog[static_cast<size_t>(best)];
+    const std::string& label = entity.display_name.empty()
+        ? entity.name : entity.display_name;
+    ContentTabs::OpenEntity(best, label);
+    load_entity_preview(best);
+    return true;
 }
 
 void load_flat_asset_entry(const FlatAssetEntry& e, int kind) {
@@ -269,6 +473,7 @@ void select_lua_script(size_t idx) {
 
     const std::string lua_path = S.lua_files[idx].path;
     const std::string lua_title = S.lua_files[idx].filename;
+    ContentTabs::OpenLua(lua_path, lua_title, false);
 
     g_pending_mdl_load = false;
     g_pending_tex_load = false;
@@ -293,16 +498,276 @@ void select_lua_script(size_t idx) {
     S.lua_preview_title    = lua_title;
     S.lua_preview_content.clear();
     S.lua_preview_loading  = true;
+    S.lua_preview_is_quest = false;
+    S.quest_preview_select_nodes = false;
+    const uint64_t preview_request = ++S.lua_preview_request;
     S.show_lua_render      = true;
     S.show_gdb_render      = false;
 
     OutputLog::info("Decompiling Lua: " + lua_title);
     progress_open(0, "Decompiling " + lua_title + "...");
-    std::thread([lua_path]() {
+    std::thread([lua_path, preview_request]() {
         std::string content = read_lua_file_content(lua_path);
-        S.lua_preview_content = content;
-        S.lua_preview_loading = false;
+        ContentTabs::CompleteLua(lua_path, content);
+        if (S.lua_preview_request.load() == preview_request) {
+            S.lua_preview_content = std::move(content);
+            S.lua_preview_loading = false;
+        }
         progress_done();
+    }).detach();
+}
+
+bool quest_source_has_debug_symbols(std::string bnk_path) {
+    std::replace(bnk_path.begin(), bnk_path.end(), '\\', '/');
+    const size_t slash = bnk_path.find_last_of('/');
+    if (slash != std::string::npos) bnk_path.erase(0, slash + 1);
+    std::transform(bnk_path.begin(), bnk_path.end(), bnk_path.begin(),
+                   [](unsigned char c) { return char(std::tolower(c)); });
+    return bnk_path == "gamescripts.bnk";
+}
+
+void select_quest_script(size_t idx) {
+    if (level_edit_click_guard("Quest script preview")) return;
+    if (idx >= S.all_quest_files.size()) return;
+
+    const FlatAssetEntry entry = S.all_quest_files[idx];
+    const std::string quest_tab_key = entry.full_path.empty()
+        ? entry.bnk_path + "#" + std::to_string(entry.file_index)
+        : entry.full_path;
+    const std::string quest_tab_title = entry.full_path.empty()
+        ? entry.name : entry.full_path;
+    ContentTabs::OpenLua(quest_tab_key, quest_tab_title, true);
+    S.selected_quest = (int)idx;
+    S.selected_item = -1;
+    S.show_item_details = false;
+    S.item_model_active = false;
+    S.selected_entity = -1;
+    S.show_entity_details = false;
+    S.entity_model_active = false;
+    S.viewing_lua = false;
+    S.viewing_adb = false;
+    S.show_gdb_render = false;
+
+    g_pending_mdl_load = false;
+    g_pending_tex_load = false;
+    g_pending_mdl_index = -1;
+    g_pending_tex_index = -1;
+    g_pending_mdl_full_path.clear();
+
+#ifdef _WIN32
+    if (g_mp.has_model) MP_Release(g_mp);
+    g_mp.has_model = false;
+    if (S.texture_window_srv) {
+        S.texture_window_srv->Release();
+        S.texture_window_srv = nullptr;
+    }
+    S.texture_window_width = 0;
+    S.texture_window_height = 0;
+#else
+    g_mp.has_model = false;
+#endif
+
+    S.lua_preview_selected = -1;
+    S.lua_preview_title = quest_tab_title;
+    S.lua_preview_content.clear();
+    S.lua_preview_loading = true;
+    S.lua_preview_is_quest = true;
+    S.quest_preview_select_nodes = true;
+    const uint64_t preview_request = ++S.lua_preview_request;
+    QuestUI::Clear();
+    QuestUI::RefreshReferenceCatalog();
+    S.show_lua_render = true;
+
+    OutputLog::info("Decompiling quest Lua: " + entry.full_path);
+    progress_open(0, "Decompiling " + entry.name + "...");
+    std::thread([entry, quest_tab_key, preview_request]() {
+        std::string content;
+        try {
+            const auto bytes =
+                BnkCache::extract_bytes(entry.bnk_path, entry.file_index);
+            if (bytes.empty()) {
+                content = "-- Error: empty quest script entry";
+            } else if (bytes.size() > 10 * 1024 * 1024) {
+                content = "-- Error: quest script is too large to preview (>10MB)";
+            } else {
+                const bool is_bytecode =
+                    bytes.size() >= 4 && bytes[0] == 0x1B &&
+                    bytes[1] == 'L' && bytes[2] == 'u' &&
+                    bytes[3] == 'a';
+                if (is_bytecode) {
+                    content = decompile_lua51_bytecode(bytes.data(),
+                                                       bytes.size());
+                } else {
+                    content.assign(bytes.begin(), bytes.end());
+                }
+            }
+        } catch (const std::exception& ex) {
+            content = std::string("-- Error: ") + ex.what();
+        } catch (...) {
+            content = "-- Error: extracting quest Lua failed";
+        }
+        ContentTabs::CompleteLua(quest_tab_key, content);
+        if (S.lua_preview_request.load() == preview_request) {
+            QuestUI::SetQuestSource(
+                entry.full_path.empty() ? entry.name : entry.full_path,
+                content);
+            if (S.lua_preview_request.load() == preview_request) {
+                S.lua_preview_content = std::move(content);
+                S.lua_preview_loading = false;
+            }
+        }
+        progress_done();
+    }).detach();
+}
+
+void show_authored_quest(const std::string& quest_id) {
+    if (level_edit_click_guard("Custom quest preview")) return;
+    ++S.lua_preview_request;
+    if (!QuestUI::OpenAuthoredQuest(quest_id)) return;
+    ContentTabs::OpenCustomQuest(quest_id,
+                                "Custom quest: " + quest_id);
+
+    S.selected_quest = -1;
+    S.selected_item = -1;
+    S.show_item_details = false;
+    S.item_model_active = false;
+    S.selected_entity = -1;
+    S.show_entity_details = false;
+    S.entity_model_active = false;
+    S.viewing_lua = false;
+    S.viewing_adb = false;
+    S.show_gdb_render = false;
+    S.lua_preview_selected = -1;
+    S.lua_preview_title = "Custom quest: " + quest_id;
+    S.lua_preview_content = QuestUI::ActiveAuthoredLua();
+    S.lua_preview_loading = false;
+    S.lua_preview_is_quest = true;
+    S.quest_preview_select_nodes = true;
+    S.show_lua_render = true;
+}
+
+bool shipped_quest_id_exists(const std::string& quest_id) {
+    std::string wanted = quest_id;
+    std::transform(wanted.begin(), wanted.end(), wanted.begin(),
+                   [](unsigned char c) { return char(std::tolower(c)); });
+    for (const FlatAssetEntry& entry : S.all_quest_files) {
+        std::string stem = std::filesystem::path(
+            entry.name.empty() ? entry.full_path : entry.name).stem().string();
+        std::transform(stem.begin(), stem.end(), stem.begin(),
+                       [](unsigned char c) {
+                           return char(std::tolower(c));
+                       });
+        if (stem == wanted) return true;
+    }
+    return false;
+}
+
+std::atomic<bool> g_quest_injection_busy{false};
+
+std::string authored_quest_entry_path(const std::string& quest_id) {
+    std::string lower = quest_id;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    return "scripts/quests/" + lower + ".lua";
+}
+
+bool collect_quest_injection_targets(
+    const std::string& quest_id,
+    std::vector<QuestInjection::BankTarget>& targets,
+    std::string& error) {
+    targets.clear();
+    error.clear();
+    const std::filesystem::path data =
+        std::filesystem::path(S.root_dir) / "data";
+    for (const char* filename : {"gamescripts.bnk",
+                                 "gamescripts_r.bnk"}) {
+        const std::filesystem::path path = data / filename;
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(path, ec)) continue;
+
+        QuestInjection::BankTarget target;
+        target.path = path.string();
+        target.gameflow_lua_index = BnkCache::find_index(
+            target.path, "scripts/quests/gameflow.lua");
+        target.gameflow_text_index = BnkCache::find_index(
+            target.path, "scripts/quests/gameflow.txt");
+        target.quest_script_index = BnkCache::find_index(
+            target.path, authored_quest_entry_path(quest_id));
+        if (target.gameflow_lua_index < 0 ||
+            target.gameflow_text_index < 0) {
+            error = std::string(filename) +
+                    " does not contain gameflow.lua and gameflow.txt";
+            return false;
+        }
+        try {
+            target.gameflow_source = BnkCache::extract_bytes(
+                target.path, target.gameflow_text_index);
+        } catch (const std::exception& ex) {
+            error = std::string("Could not read ") + filename + ": " +
+                    ex.what();
+            return false;
+        }
+        targets.push_back(std::move(target));
+    }
+    if (targets.empty()) {
+        error = "No loose gamescripts.bnk files were found under the "
+                "selected Fable 2 root.";
+        return false;
+    }
+    return true;
+}
+
+void inject_active_authored_quest() {
+    if (g_quest_injection_busy.exchange(true)) return;
+    std::string validation_error;
+    if (!QuestUI::ValidateActiveAuthoredQuest(validation_error)) {
+        g_quest_injection_busy = false;
+        show_error_box(validation_error);
+        return;
+    }
+    if (LevelEdit::Dirty()) {
+        g_quest_injection_busy = false;
+        show_error_box(
+            "Save the referenced level first. Its normal level backup "
+            "will protect the NPC/container changes.");
+        return;
+    }
+    const std::string quest_id = QuestUI::ActiveAuthoredQuestId();
+    const std::string quest_lua = QuestUI::ActiveAuthoredQuestLua();
+    const std::string eligibility =
+        QuestUI::ActiveAuthoredEligibilityLua();
+    const auto localized_text = QuestUI::ActiveAuthoredTextEntries();
+    const std::string root = S.root_dir;
+    std::vector<QuestInjection::BankTarget> targets;
+    std::string error;
+    if (!collect_quest_injection_targets(quest_id, targets, error)) {
+        g_quest_injection_busy = false;
+        show_error_box(error);
+        return;
+    }
+
+    progress_open(100, "Saving " + quest_id + "...");
+    std::thread([root, quest_id, quest_lua, eligibility, localized_text,
+                 targets = std::move(targets)]() mutable {
+        std::string result;
+        std::string error;
+        const bool ok = QuestInjection::Inject(
+            root, quest_id, quest_lua, eligibility, localized_text, targets,
+            result, error);
+        for (const QuestInjection::BankTarget& target : targets) {
+            BnkCache::invalidate(target.path);
+        }
+        if (ok) {
+            OutputLog::success("quest saved: " + result);
+            show_completion_box(result);
+        } else {
+            OutputLog::error("quest save failed: " + error);
+            show_error_box("Quest save failed:\n" + error);
+        }
+        progress_done();
+        g_quest_injection_busy = false;
     }).detach();
 }
 
@@ -315,6 +780,296 @@ bool drill_settled(const DrillState& d) {
     return std::abs(d.anim_t - d.target_t) < 0.001f;
 }
 
+std::vector<std::pair<uint32_t, std::string>> npc_reference_options(
+    uint32_t field_hash) {
+    std::unordered_map<uint32_t, std::string> unique;
+    for (const auto& entry : g_global_entity_gameplay) {
+        auto add = [&](const std::vector<Gdb::EntityGameplayField>& fields) {
+            for (const auto& field : fields) {
+                if (field.field_hash == field_hash &&
+                    (field.value_type == 4 || field.value_type == 6 ||
+                     field.value_type == 7) && field.raw_value != 0) {
+                    unique.try_emplace(field.raw_value, field.value);
+                }
+            }
+        };
+        add(entry.second.core_fields);
+        add(entry.second.combat_fields);
+    }
+    std::vector<std::pair<uint32_t, std::string>> out(unique.begin(),
+                                                       unique.end());
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+        return a.second < b.second;
+    });
+    return out;
+}
+
+void draw_npc_value_field(NpcAuthoring::FieldValue& field) {
+    ImGui::PushID(static_cast<int>(field.field_hash));
+    if (field.value_type == 0) {
+        bool value = field.raw_value != 0;
+        if (ImGui::Checkbox(field.label.c_str(), &value)) {
+            field.raw_value = value ? 1u : 0u;
+            field.display_value = value ? "Yes" : "No";
+        }
+    } else if (field.value_type == 1 || field.value_type == 5) {
+        int value = static_cast<int32_t>(field.raw_value);
+        if (ImGui::InputInt(field.label.c_str(), &value)) {
+            field.raw_value = static_cast<uint32_t>(value);
+            field.display_value = std::to_string(value);
+        }
+    } else if (field.value_type == 3) {
+        float value = 0.0f;
+        std::memcpy(&value, &field.raw_value, sizeof(value));
+        if (ImGui::InputFloat(field.label.c_str(), &value, 0.0f, 0.0f,
+                              "%.3f")) {
+            std::memcpy(&field.raw_value, &value, sizeof(value));
+            char buffer[48];
+            std::snprintf(buffer, sizeof(buffer), "%.3f", value);
+            field.display_value = buffer;
+        }
+    } else if (field.value_type == 4 || field.value_type == 6 ||
+               field.value_type == 7) {
+        std::vector<std::pair<uint32_t, std::string>> options =
+            npc_reference_options(field.field_hash);
+        std::string preview = field.display_value;
+        if (preview.empty()) {
+            char buffer[16];
+            std::snprintf(buffer, sizeof(buffer), "0x%08X",
+                          field.raw_value);
+            preview = buffer;
+        }
+        if (ImGui::BeginCombo(field.label.c_str(), preview.c_str())) {
+            for (const auto& option : options) {
+                const bool selected = option.first == field.raw_value;
+                if (ImGui::Selectable(option.second.c_str(), selected)) {
+                    field.raw_value = option.first;
+                    field.display_value = option.second;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    } else {
+        ImGui::Text("%s: %s", field.label.c_str(),
+                    field.display_value.c_str());
+    }
+    ImGui::PopID();
+}
+
+void draw_npc_template_picker() {
+    const char* preview = g_new_npc.template_entity == 0
+        ? "Select NPC template..." : g_new_npc.template_name.c_str();
+    if (!ImGui::BeginCombo("Full model + animations", preview)) return;
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##new_npc_template_filter",
+                             "Search NPC templates...",
+                             g_new_npc_template_filter,
+                             sizeof(g_new_npc_template_filter));
+    std::string filter = g_new_npc_template_filter;
+    std::transform(filter.begin(), filter.end(), filter.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    std::vector<int> visible;
+    visible.reserve(g_global_entity_catalog.size());
+    for (int i = 0; i < static_cast<int>(g_global_entity_catalog.size());
+         ++i) {
+        const auto& entity = g_global_entity_catalog[static_cast<size_t>(i)];
+        if (g_global_entity_gameplay.find(entity.entity_hash) ==
+            g_global_entity_gameplay.end()) continue;
+        std::string text = entity.name + " " + entity.display_name;
+        std::transform(text.begin(), text.end(), text.begin(),
+                       [](unsigned char c) {
+                           return static_cast<char>(std::tolower(c));
+                       });
+        if (filter.empty() || text.find(filter) != std::string::npos) {
+            visible.push_back(i);
+        }
+    }
+    ImGui::Separator();
+    ImGui::BeginChild("##new_npc_templates", ImVec2(0.0f, 280.0f));
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(visible.size()));
+    while (clipper.Step()) {
+        for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+            const int index = visible[static_cast<size_t>(row)];
+            const auto& entity =
+                g_global_entity_catalog[static_cast<size_t>(index)];
+            const std::string& label = entity.display_name.empty()
+                ? entity.name : entity.display_name;
+            const bool selected = index == g_new_npc_template_index;
+            if (ImGui::Selectable(label.c_str(), selected)) {
+                select_new_npc_template(index);
+                ImGui::CloseCurrentPopup();
+            }
+        }
+    }
+    clipper.End();
+    ImGui::EndChild();
+    ImGui::EndCombo();
+}
+
+void draw_npc_named_record_combo(const char* label,
+                                 uint32_t& selected_record,
+                                 std::string& selected_name,
+                                 bool faction) {
+    const std::vector<Gdb::EntityGameplayOption>& options = faction
+        ? g_global_entity_gameplay_options.factions
+        : g_global_entity_gameplay_options.combat_profiles;
+    const char* preview = selected_name.empty() ? "Inherit template"
+                                                 : selected_name.c_str();
+    if (ImGui::BeginCombo(label, preview)) {
+        const bool inherited = selected_record == 0;
+        if (ImGui::Selectable("Inherit template", inherited)) {
+            selected_record = 0;
+            selected_name.clear();
+        }
+        if (inherited) ImGui::SetItemDefaultFocus();
+        ImGui::Separator();
+        for (const auto& option : options) {
+            const bool selected = selected_record == option.record_hash;
+            if (ImGui::Selectable(option.label.c_str(), selected)) {
+                selected_record = option.record_hash;
+                selected_name = option.label;
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+}
+
+void draw_create_npc_modal() {
+    ImGui::SetNextWindowSize(ImVec2(720.0f, 620.0f),
+                             ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Create NPC##modal", nullptr,
+                                ImGuiWindowFlags_NoResize)) return;
+
+    ImGui::BeginChild("##create_npc_form", ImVec2(0.0f, -44.0f), false);
+    ImGui::SeparatorText("Identity");
+    ImGui::InputTextWithHint("NPC ID", "QNPC_MyCharacter",
+                             &g_new_npc.internal_name);
+    ImGui::InputText("Display name", &g_new_npc.display_name);
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Appearance and behaviour");
+    draw_npc_template_picker();
+    if (g_new_npc.template_entity != 0) {
+        ImGui::TextDisabled(
+            "The complete model, eyes, hair, rig, animations, and unlisted "
+            "GDB values are inherited from this template.");
+        const std::string model_parts_label = "Model parts (" +
+            std::to_string(g_new_npc.model_hashes.size()) + ')';
+        if (ImGui::TreeNode(model_parts_label.c_str())) {
+            for (uint32_t hash : g_new_npc.model_hashes) {
+                const FlatAssetEntry* model =
+                    FindGlobalModelAssetByPathHash(hash);
+                if (model) ImGui::BulletText("%s", model->full_path.c_str());
+                else ImGui::BulletText("Unresolved model 0x%08X", hash);
+            }
+            ImGui::TreePop();
+        }
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Gameplay");
+        draw_npc_named_record_combo("Faction / allegiance",
+                                    g_new_npc.faction_record,
+                                    g_new_npc.faction_name, true);
+        draw_npc_named_record_combo("Combat profile",
+                                    g_new_npc.combat_profile_record,
+                                    g_new_npc.combat_profile_name, false);
+
+        if (!g_new_npc.core_fields.empty()) {
+            ImGui::Spacing();
+            ImGui::SeparatorText("Core stats");
+            for (auto& field : g_new_npc.core_fields) {
+                draw_npc_value_field(field);
+            }
+        }
+        if (!g_new_npc.combat_fields.empty()) {
+            ImGui::Spacing();
+            ImGui::SeparatorText("Combat");
+            for (auto& field : g_new_npc.combat_fields) {
+                draw_npc_value_field(field);
+            }
+        }
+    }
+    if (!g_new_npc_error.empty()) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.95f, 0.42f, 0.38f, 1.0f), "%s",
+                           g_new_npc_error.c_str());
+    }
+    ImGui::EndChild();
+
+    const bool can_save = g_new_npc.template_entity != 0 &&
+                          g_new_npc.creature_component != 0;
+    ImGui::BeginDisabled(!can_save);
+    if (ImGui::Button("Save NPC", ImVec2(140.0f, 0.0f))) {
+        uint32_t entity_hash = 0;
+        std::string result;
+        std::string error;
+        if (NpcAuthoring::Save(S.root_dir, g_new_npc, entity_hash,
+                               result, error)) {
+            TextBank::Invalidate();
+            TextBank::LoadForRoot(S.root_dir);
+            Level::BuildGlobalEntityCatalog();
+            int saved_index = -1;
+            for (int i = 0;
+                 i < static_cast<int>(g_global_entity_catalog.size()); ++i) {
+                if (g_global_entity_catalog[static_cast<size_t>(i)]
+                        .entity_hash == entity_hash) {
+                    saved_index = i;
+                    break;
+                }
+            }
+            if (saved_index >= 0) {
+                const auto& saved =
+                    g_global_entity_catalog[static_cast<size_t>(saved_index)];
+                const std::string label = saved.display_name.empty()
+                    ? saved.name : saved.display_name;
+                ContentTabs::OpenEntity(saved_index, label);
+                load_entity_preview(saved_index);
+            }
+            OutputLog::success("NPC save: " + result);
+            show_completion_box(result);
+            g_new_npc = NpcAuthoring::Definition{};
+            g_new_npc_template_index = -1;
+            g_new_npc_error.clear();
+            ImGui::CloseCurrentPopup();
+        } else {
+            g_new_npc_error = std::move(error);
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(110.0f, 0.0f))) {
+        g_new_npc = NpcAuthoring::Definition{};
+        g_new_npc_template_index = -1;
+        g_new_npc_error.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+}
+
+bool select_quest_script_by_query(const std::string& query) {
+    std::string needle = query;
+    std::transform(needle.begin(), needle.end(), needle.begin(),
+                   [](unsigned char c) { return char(std::tolower(c)); });
+
+    for (size_t i = 0; i < S.all_quest_files.size(); ++i) {
+        const FlatAssetEntry& entry = S.all_quest_files[i];
+        std::string haystack = entry.name + " " + entry.full_path;
+        std::transform(haystack.begin(), haystack.end(), haystack.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        if (haystack.find(needle) == std::string::npos) continue;
+
+        S.quest_filter = query;
+        select_quest_script(i);
+        return true;
+    }
+    return false;
 }
 
 void open_tree_bnk_drill_from_entry(const std::string& parent_bnk_path,
@@ -355,9 +1110,11 @@ void draw_left_panel(ID3D11Device* device) {
 void draw_left_panel() {
 #endif
 
+    apply_entity_preview_completions();
     ImGui::BeginChild("left_panel", ImVec2(0, 0), true);
 
     static int s_active_tab = 1;
+    if (g_open_create_npc_requested) s_active_tab = 9;
 
     const ImVec2 tab_size(compute_tab_button_width(), 0.0f);
 
@@ -398,6 +1155,12 @@ void draw_left_panel() {
 
     const ImU32 kItemsLabel = IM_COL32(255, 175, 90, 255);
     if (tab_button("Items", s_active_tab == 8, kItemsLabel)) s_active_tab = 8;
+    ImGui::SameLine(0, 2);
+    const ImU32 kEntitiesLabel = IM_COL32(110, 220, 165, 255);
+    if (tab_button("Entities", s_active_tab == 9, kEntitiesLabel)) s_active_tab = 9;
+    ImGui::SameLine(0, 2);
+    const ImU32 kQuestsLabel = IM_COL32(100, 200, 255, 255);
+    if (tab_button("Quests", s_active_tab == 10, kQuestsLabel)) s_active_tab = 10;
 
     ImGui::Separator();
 
@@ -1433,8 +2196,8 @@ void draw_left_panel() {
                 std::vector<int> vis;
                 vis.reserve(g_item_details.size());
                 for (int i = 0; i < (int)g_item_details.size(); ++i) {
-                    // preset money amounts belong in the chest loot
-                    // picker, not the general item list
+
+
                     if (g_item_details[i].is_money) continue;
                     if (flow.empty()) { vis.push_back(i); continue; }
                     std::string low = g_item_details[i].display_name;
@@ -1465,6 +2228,7 @@ void draw_left_panel() {
                                                           .c_str();
                         if (ImGui::Selectable(row_name, sel)) {
                             extern std::atomic<bool> g_item_icon_dirty;
+                            ContentTabs::OpenItem(idx, row_name);
                             S.selected_item = idx;
                             S.show_item_details = true;
                             g_item_icon_dirty = true;
@@ -1492,6 +2256,325 @@ void draw_left_panel() {
                 clipper.End();
                 ImGui::EndChild();
             }
+        }
+
+        if (s_active_tab == 9) {
+            const bool create_npc_clicked =
+                ImGui::Button("Create NPC", ImVec2(-1.0f, 0.0f));
+            if (create_npc_clicked || g_open_create_npc_requested) {
+                g_open_create_npc_requested = false;
+                g_new_npc = NpcAuthoring::Definition{};
+                g_new_npc_template_index = -1;
+                g_new_npc_template_filter[0] = 0;
+                g_new_npc_error.clear();
+                if (S.selected_entity >= 0 &&
+                    static_cast<std::size_t>(S.selected_entity) <
+                        g_global_entity_catalog.size()) {
+                    select_new_npc_template(S.selected_entity);
+                }
+                ImGui::OpenPopup("Create NPC##modal");
+            }
+            draw_create_npc_modal();
+
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputTextWithHint("##entity_filter", "Filter entities",
+                                     &S.entity_filter);
+            std::string filter = S.entity_filter;
+            std::transform(filter.begin(), filter.end(), filter.begin(),
+                           [](unsigned char c) {
+                               return static_cast<char>(std::tolower(c));
+                           });
+
+            if (g_global_entity_catalog.empty()) {
+                ImGui::TextDisabled("No entities indexed yet.");
+                ImGui::TextDisabled("Open a Fable 2 game root to index them.");
+            } else {
+                static uint64_t cached_catalog_revision =
+                    std::numeric_limits<uint64_t>::max();
+                static std::string cached_filter;
+                static std::vector<std::string> searchable_entities;
+                static std::vector<int> visible;
+                bool catalog_changed = false;
+                if (cached_catalog_revision !=
+                    g_global_entity_catalog_revision) {
+                    searchable_entities.clear();
+                    searchable_entities.reserve(g_global_entity_catalog.size());
+                    for (const auto& entity : g_global_entity_catalog) {
+                        std::string searchable = entity.name + " " +
+                            entity.display_name;
+                        const auto gameplay =
+                            g_global_entity_gameplay.find(entity.entity_hash);
+                        if (gameplay != g_global_entity_gameplay.end()) {
+                            searchable += " " + gameplay->second.faction_name;
+                            searchable += " " +
+                                gameplay->second.combat_profile_name;
+                        }
+                        std::transform(
+                            searchable.begin(), searchable.end(),
+                            searchable.begin(), [](unsigned char c) {
+                                return static_cast<char>(std::tolower(c));
+                            });
+                        searchable_entities.push_back(std::move(searchable));
+                    }
+                    cached_catalog_revision =
+                        g_global_entity_catalog_revision;
+                    catalog_changed = true;
+                }
+                if (catalog_changed || cached_filter != filter) {
+                    visible.clear();
+                    visible.reserve(searchable_entities.size());
+                    for (int i = 0;
+                         i < static_cast<int>(searchable_entities.size()); ++i) {
+                        if (filter.empty() ||
+                            searchable_entities[static_cast<size_t>(i)].find(
+                                filter) != std::string::npos) {
+                            visible.push_back(i);
+                        }
+                    }
+                    cached_filter = filter;
+                }
+                if (S.dev_mode) {
+                    ImGui::TextDisabled("%zu / %zu entities", visible.size(),
+                                        g_global_entity_catalog.size());
+                }
+                ImGui::BeginChild("entities_list", ImVec2(0, 0), false);
+                ImGuiListClipper clipper;
+                clipper.Begin(static_cast<int>(visible.size()));
+                while (clipper.Step()) {
+                    for (int row = clipper.DisplayStart;
+                         row < clipper.DisplayEnd; ++row) {
+                        const int index = visible[static_cast<std::size_t>(row)];
+                        const auto& entity = g_global_entity_catalog[index];
+                        const std::string& label =
+                            entity.display_name.empty()
+                                ? entity.name : entity.display_name;
+                        ImGui::PushID(index);
+                        if (ImGui::Selectable(label.c_str(),
+                                              S.selected_entity == index,
+                                              ImGuiSelectableFlags_SpanAllColumns)) {
+                            const bool protected_level =
+                                ContentTabs::ActiveKind() ==
+                                    ContentTabs::Kind::Level &&
+                                (LevelEdit::Enabled() || LevelEdit::Dirty() ||
+                                 LevelEdit::Saving() ||
+                                 Level::IsAsyncLoadInProgress());
+                            if (protected_level) {
+                                OutputLog::warn(
+                                    "Finish the level edit before opening an entity tab.");
+                            } else {
+                                ContentTabs::OpenEntity(index, label);
+                                load_entity_preview(index);
+                            }
+                        }
+                        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                            ImGui::BeginTooltip();
+                            ImGui::TextUnformatted(label.c_str());
+                            if (S.dev_mode && label != entity.name) {
+                                ImGui::TextDisabled("%s", entity.name.c_str());
+                            }
+                            ImGui::Text("Model parts: %zu",
+                                        entity.model_hashes.size());
+                            ImGui::EndTooltip();
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                clipper.End();
+                ImGui::EndChild();
+            }
+        }
+
+        if (s_active_tab == 10) {
+            static std::string new_quest_id = "QO000_NewQuest";
+            static std::string new_quest_error;
+            if (ImGui::Button("Create a new quest", ImVec2(-1.0f, 0.0f))) {
+                new_quest_error.clear();
+                ImGui::OpenPopup("Create a new quest##modal");
+            }
+            ImGui::SetNextWindowSize(ImVec2(430.0f, 0.0f),
+                                     ImGuiCond_Appearing);
+            if (ImGui::BeginPopupModal("Create a new quest##modal", nullptr,
+                                       ImGuiWindowFlags_AlwaysAutoResize)) {
+                if (ImGui::IsWindowAppearing()) {
+                    ImGui::SetKeyboardFocusHere();
+                }
+                ImGui::SetNextItemWidth(390.0f);
+                ImGui::InputTextWithHint("##new_quest_id", "Quest ID",
+                                         &new_quest_id);
+                if (!new_quest_error.empty()) {
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 390.0f);
+                    ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.40f, 1.0f),
+                                       "%s", new_quest_error.c_str());
+                    ImGui::PopTextWrapPos();
+                }
+                if (ImGui::Button("Create")) {
+                    if (shipped_quest_id_exists(new_quest_id)) {
+                        new_quest_error =
+                            "A shipped quest already uses this ID.";
+                    } else {
+                        ++S.lua_preview_request;
+                        if (QuestUI::CreateNewQuest(new_quest_id,
+                                                    new_quest_error)) {
+                            ContentTabs::OpenCustomQuest(
+                                new_quest_id,
+                                "Custom quest: " + new_quest_id);
+                            S.selected_quest = -1;
+                            S.selected_item = -1;
+                            S.show_item_details = false;
+                            S.item_model_active = false;
+                            S.selected_entity = -1;
+                            S.show_entity_details = false;
+                            S.entity_model_active = false;
+                            S.viewing_lua = false;
+                            S.viewing_adb = false;
+                            S.show_gdb_render = false;
+                            S.lua_preview_selected = -1;
+                            S.lua_preview_title =
+                                "Custom quest: " + new_quest_id;
+                            S.lua_preview_content =
+                                QuestUI::ActiveAuthoredLua();
+                            S.lua_preview_loading = false;
+                            S.lua_preview_is_quest = true;
+                            S.quest_preview_select_nodes = true;
+                            S.show_lua_render = true;
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel")) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
+            if (QuestUI::IsAuthoredQuestActive()) {
+                ImGui::BeginDisabled(g_quest_injection_busy.load());
+                if (ImGui::Button("Save Quest", ImVec2(-1.0f, 0.0f))) {
+                    ImGui::OpenPopup("Save custom quest?##modal");
+                }
+                ImGui::EndDisabled();
+                if (ImGui::BeginPopupModal(
+                        "Save custom quest?##modal", nullptr,
+                        ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGui::Text("Save %s to the game scripts?",
+                                QuestUI::ActiveAuthoredQuestId().c_str());
+                    ImGui::TextDisabled(
+                        "Backups will be created beside the script banks.");
+                    if (ImGui::Button("Save Quest")) {
+                        ImGui::CloseCurrentPopup();
+                        inject_active_authored_quest();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel")) {
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+            }
+
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##quest_filter", "Filter quests",
+                                     &S.quest_filter);
+            std::string flow = S.quest_filter;
+            std::transform(flow.begin(), flow.end(), flow.begin(),
+                           [](unsigned char c) {
+                               return char(std::tolower(c));
+                           });
+
+            std::vector<int> vis;
+            vis.reserve(S.all_quest_files.size());
+            for (size_t i = 0; i < S.all_quest_files.size(); ++i) {
+                const FlatAssetEntry& e = S.all_quest_files[i];
+                std::string haystack = e.name + " " + e.full_path;
+                std::transform(haystack.begin(), haystack.end(),
+                               haystack.begin(),
+                               [](unsigned char c) {
+                                   return char(std::tolower(c));
+                               });
+                if (flow.empty() || haystack.find(flow) != std::string::npos) {
+                    vis.push_back((int)i);
+                }
+            }
+
+            if (S.dev_mode) {
+                ImGui::TextDisabled("%d / %zu quest scripts",
+                                    (int)vis.size(),
+                                    S.all_quest_files.size());
+                ImGui::Separator();
+            }
+
+            ImGui::BeginChild("quests_list", ImVec2(0, 0), false);
+            const std::vector<std::string> authored_quests =
+                QuestUI::AuthoredQuestIds();
+            bool showed_authored_heading = false;
+            for (const std::string& quest_id : authored_quests) {
+                std::string lower_id = quest_id;
+                std::transform(lower_id.begin(), lower_id.end(),
+                               lower_id.begin(), [](unsigned char c) {
+                                   return char(std::tolower(c));
+                               });
+                if (!flow.empty() &&
+                    lower_id.find(flow) == std::string::npos) continue;
+                if (!showed_authored_heading) {
+                    ImGui::TextDisabled("CUSTOM QUESTS");
+                    showed_authored_heading = true;
+                }
+                const bool selected = QuestUI::IsAuthoredQuestActive() &&
+                                      QuestUI::ActiveAuthoredQuestId() ==
+                                          quest_id;
+                if (ImGui::Selectable(quest_id.c_str(), selected,
+                                      ImGuiSelectableFlags_SpanAllColumns)) {
+                    show_authored_quest(quest_id);
+                }
+            }
+            if (showed_authored_heading && !vis.empty()) {
+                ImGui::Separator();
+            }
+            if (S.all_quest_files.empty()) {
+                if (tree_build_in_progress()) {
+                    ImGui::TextDisabled("Indexing quest scripts...");
+                } else {
+                    ImGui::TextDisabled("No embedded quest scripts found.");
+                    ImGui::TextDisabled(
+                        "Open a Fable 2 root containing gamescripts.bnk or gamescripts_r.bnk.");
+                }
+            } else {
+                ImGuiListClipper clipper;
+                clipper.Begin((int)vis.size());
+                while (clipper.Step()) {
+                    for (int row = clipper.DisplayStart;
+                         row < clipper.DisplayEnd; ++row) {
+                        const int idx = vis[(size_t)row];
+                        const FlatAssetEntry& e =
+                            S.all_quest_files[(size_t)idx];
+                        const bool selected = S.selected_quest == idx;
+
+                        ImGui::PushID(idx);
+                        if (ImGui::Selectable(
+                                e.name.c_str(), selected,
+                                ImGuiSelectableFlags_SpanAllColumns)) {
+                            select_quest_script((size_t)idx);
+                        }
+                        if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                            ImGui::BeginTooltip();
+                            ImGui::TextUnformatted(e.full_path.c_str());
+                            ImGui::Text("Source: %s",
+                                std::filesystem::path(e.bnk_path)
+                                    .filename().string().c_str());
+                            ImGui::TextUnformatted(
+                                quest_source_has_debug_symbols(e.bnk_path)
+                                    ? "Symbol-rich script"
+                                    : "Stripped runtime script");
+                            ImGui::Text("Size: %u bytes", e.size);
+                            ImGui::EndTooltip();
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                clipper.End();
+            }
+            ImGui::EndChild();
         }
 
         if (s_active_tab == 6) {
@@ -1665,7 +2748,9 @@ void draw_left_panel() {
                         if (!level_edit_click_guard("Level loading")) {
                             S.show_item_details = false;
                             S.selected_item = -1;
-                            Level::OpenAsync(e);
+                            S.show_entity_details = false;
+                            S.selected_entity = -1;
+                            ContentTabs::OpenLevel(e, friendly);
                         }
                     }
                     if (level_busy) ImGui::EndDisabled();

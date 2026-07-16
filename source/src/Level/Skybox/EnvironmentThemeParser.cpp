@@ -1,5 +1,5 @@
 #include "EnvironmentThemeParser.h"
-#include "GdbReaderInternal.h"
+#include "GDB/GdbReaderInternal.h"
 
 #include <algorithm>
 #include <cmath>

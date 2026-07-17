@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <csignal>
 #include <cstdarg>
 #include <cstdio>
@@ -31,7 +32,43 @@ inline const std::string& log_path() {
     return p;
 }
 
-inline void log(const char*, ...) {}
+inline void log(const char* format, ...) {
+    if (!format) return;
+    char message[4096] = {};
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+#ifdef _WIN32
+    SYSTEMTIME now = {};
+    GetLocalTime(&now);
+    char line[4352] = {};
+    const int length = std::snprintf(
+        line, sizeof(line),
+        "%04u-%02u-%02u %02u:%02u:%02u.%03u [%lu] %s\r\n",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+        now.wSecond, now.wMilliseconds,
+        (unsigned long)GetCurrentThreadId(), message);
+    if (length <= 0) return;
+    HANDLE file = CreateFileA(
+        log_path().c_str(), FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    const DWORD bytes =
+        (DWORD)std::min<int>(length, (int)sizeof(line) - 1);
+    WriteFile(file, line, bytes, &written, nullptr);
+    FlushFileBuffers(file);
+    CloseHandle(file);
+#else
+    FILE* file = std::fopen(log_path().c_str(), "a");
+    if (!file) return;
+    std::fprintf(file, "%s\n", message);
+    std::fflush(file);
+    std::fclose(file);
+#endif
+}
 
 #ifdef _WIN32
 inline void log_exception(const char* tag, EXCEPTION_POINTERS* ep) {

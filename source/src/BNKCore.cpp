@@ -214,12 +214,21 @@ static std::vector<std::string> find_bnks(const std::string& root, const std::ve
 
     std::filesystem::path base = std::filesystem::absolute(root);
     if (!std::filesystem::exists(base)) return hits;
+    if (to_lower(base.filename().string()) == "f2ab_backup") return hits;
 
     std::error_code ec;
     for (auto it = std::filesystem::recursive_directory_iterator(base, std::filesystem::directory_options::skip_permission_denied, ec);
          it != std::filesystem::recursive_directory_iterator(); ++it)
     {
         if (ec) { ec.clear(); continue; }
+        if (it->is_directory(ec)) {
+            if (to_lower(it->path().filename().string()) ==
+                "f2ab_backup") {
+                it.disable_recursion_pending();
+            }
+            if (ec) ec.clear();
+            continue;
+        }
         if (!it->is_regular_file(ec)) { if (ec) ec.clear(); continue; }
         std::string ext = to_lower(it->path().extension().string());
         if (std::find(exts_lower.begin(), exts_lower.end(), ext) != exts_lower.end()) {

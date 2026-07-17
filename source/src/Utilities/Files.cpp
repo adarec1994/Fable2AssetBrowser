@@ -61,6 +61,12 @@ static bool ci_path_less(const std::string& a, const std::string& b) {
     return la < lb;
 }
 
+static bool is_f2ab_backup_dir(const std::filesystem::path& path) {
+    std::string name = path.filename().string();
+    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+    return name == "f2ab_backup";
+}
+
 std::vector<std::string> scan_bnks_recursive(const std::string &root) {
     std::vector<std::string> out;
 
@@ -72,10 +78,18 @@ std::vector<std::string> scan_bnks_recursive(const std::string &root) {
         return out;
     }
 
+    if (is_f2ab_backup_dir(std::filesystem::path(root))) return out;
     std::error_code ec;
     for (auto it = std::filesystem::recursive_directory_iterator(
              root, std::filesystem::directory_options::skip_permission_denied, ec);
          it != std::filesystem::recursive_directory_iterator(); ++it) {
+        if (it->is_directory(ec)) {
+            if (is_f2ab_backup_dir(it->path())) {
+                it.disable_recursion_pending();
+            }
+            if (ec) ec.clear();
+            continue;
+        }
         if (it->is_regular_file(ec)) {
             auto p = it->path();
             auto ext = p.extension().string();
@@ -96,10 +110,18 @@ std::vector<std::string> scan_adbs_recursive(const std::string &root) {
         std::sort(out.begin(), out.end(), ci_path_less);
         return out;
     }
+    if (is_f2ab_backup_dir(std::filesystem::path(root))) return out;
     std::error_code ec;
     for (auto it = std::filesystem::recursive_directory_iterator(
              root, std::filesystem::directory_options::skip_permission_denied, ec);
          it != std::filesystem::recursive_directory_iterator(); ++it) {
+        if (it->is_directory(ec)) {
+            if (is_f2ab_backup_dir(it->path())) {
+                it.disable_recursion_pending();
+            }
+            if (ec) ec.clear();
+            continue;
+        }
         if (it->is_regular_file(ec)) {
             auto p = it->path();
             auto ext = p.extension().string();
@@ -120,10 +142,18 @@ std::vector<std::string> scan_luas_recursive(const std::string &root) {
         std::sort(out.begin(), out.end(), ci_path_less);
         return out;
     }
+    if (is_f2ab_backup_dir(std::filesystem::path(root))) return out;
     std::error_code ec;
     for (auto it = std::filesystem::recursive_directory_iterator(
              root, std::filesystem::directory_options::skip_permission_denied, ec);
          it != std::filesystem::recursive_directory_iterator(); ++it) {
+        if (it->is_directory(ec)) {
+            if (is_f2ab_backup_dir(it->path())) {
+                it.disable_recursion_pending();
+            }
+            if (ec) ec.clear();
+            continue;
+        }
         if (it->is_regular_file(ec)) {
             auto p = it->path();
             auto ext = p.extension().string();

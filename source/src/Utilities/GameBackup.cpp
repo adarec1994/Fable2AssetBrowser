@@ -8,11 +8,13 @@
 
 #include "imgui.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -79,6 +81,27 @@ std::vector<std::string> writable_files() {
                               it->path().filename().string() +
                               "/text/book.babel");
             }
+        }
+    }
+    const std::filesystem::path data = root / "data";
+    for (std::filesystem::recursive_directory_iterator it(data, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        std::string ext = it->path().extension().string();
+        std::string leaf = it->path().filename().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
+        std::transform(leaf.begin(), leaf.end(), leaf.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
+        if (ext != ".bnk" || leaf.find("texture") == std::string::npos) {
+            continue;
+        }
+        const std::filesystem::path rel =
+            std::filesystem::relative(it->path(), root, ec);
+        if (ec) break;
+        const std::string rel_text = rel.generic_string();
+        if (std::find(out.begin(), out.end(), rel_text) == out.end()) {
+            out.push_back(rel_text);
         }
     }
     return out;
@@ -186,6 +209,75 @@ bool RequireBackup(std::string& error) {
         error = "Editing is disabled until you create a backup - use "
                 "Backup > Create Backup in the top menu bar.";
         return false;
+    }
+    return true;
+}
+
+bool EnsureFilesCovered(const std::vector<std::string>& paths,
+                        std::string& error) {
+    if (!RequireBackup(error)) return false;
+    const std::filesystem::path root = game_root();
+    const std::filesystem::path dir = backup_dir();
+    std::set<std::string> manifest_entries;
+    {
+        std::ifstream manifest(manifest_path());
+        std::string line;
+        while (std::getline(manifest, line)) {
+            while (!line.empty() &&
+                   (line.back() == '\r' || line.back() == '\n')) {
+                line.pop_back();
+            }
+            if (!line.empty()) manifest_entries.insert(line);
+        }
+    }
+    std::vector<std::string> additions;
+    for (const std::string& path_text : paths) {
+        std::error_code ec;
+        const std::filesystem::path absolute =
+            std::filesystem::weakly_canonical(path_text, ec);
+        const std::filesystem::path canonical_root =
+            std::filesystem::weakly_canonical(root, ec);
+        if (ec || absolute.empty() || canonical_root.empty()) {
+            error = "Could not resolve a texture bank for backup.";
+            return false;
+        }
+        const std::filesystem::path rel =
+            std::filesystem::relative(absolute, canonical_root, ec);
+        if (ec || rel.empty() || rel.is_absolute() ||
+            *rel.begin() == "..") {
+            error = "Texture replacement target is outside the game folder.";
+            return false;
+        }
+        const std::string rel_text = rel.generic_string();
+        const std::filesystem::path saved = dir / rel;
+        if (manifest_entries.count(rel_text) &&
+            std::filesystem::is_regular_file(saved, ec)) {
+            continue;
+        }
+        std::filesystem::create_directories(saved.parent_path(), ec);
+        if (ec) {
+            error = "Could not create the texture backup folder: " +
+                    ec.message();
+            return false;
+        }
+        std::filesystem::copy_file(
+            absolute, saved,
+            std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            error = "Could not back up " + absolute.string() + ": " +
+                    ec.message();
+            return false;
+        }
+        manifest_entries.insert(rel_text);
+        additions.push_back(rel_text);
+    }
+    if (!additions.empty()) {
+        std::ofstream manifest(manifest_path(), std::ios::app);
+        for (const std::string& rel : additions) manifest << rel << '\n';
+        if (!manifest) {
+            error = "Could not update the backup manifest.";
+            return false;
+        }
     }
     return true;
 }

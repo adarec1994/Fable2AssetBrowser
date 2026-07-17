@@ -11,7 +11,9 @@
 #include "../AudioPlayerWindow.h"
 #include "../OutputLog.h"
 #include "../HexView.h"
+#include "ImportDialog.h"
 #include "../../textures/export/TextureExport.h"
+#include "../../Utilities/GameBackup.h"
 #include "../../Audio/XmaDecoder.h"
 
 #include "../../Audio/MfAudioEncoder.h"
@@ -1006,6 +1008,24 @@ void file_hex_context_menu(const std::string& bnk_path,
             }
         }
         if (is_tex) {
+
+            std::string backup_error;
+            const bool backup_ready =
+                GameBackup::RequireBackup(backup_error);
+            if (!backup_ready) {
+                ImGui::MenuItem(
+                    "Replace (UNAVAILABLE WITHOUT BACKUP)", nullptr,
+                    false, false);
+            } else {
+                const bool replace_busy = ImportDialog::Busy();
+                if (replace_busy) ImGui::BeginDisabled();
+                if (ImGui::MenuItem("Replace...")) {
+                    ImportDialog::OpenTextureReplacement(
+                        bnk_path, file_index, file_name);
+                }
+                if (replace_busy) ImGui::EndDisabled();
+            }
+            ImGui::Separator();
 
             tex_export_menu_named(file_name, file_name, bnk_path,
                                   0);

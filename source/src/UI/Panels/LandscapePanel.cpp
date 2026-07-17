@@ -147,7 +147,7 @@ ID3D11ShaderResourceView* paint_tex_thumbnail(
             std::vector<uint8_t> rgba;
             int w = 0, h = 0;
             bool has_alpha = false;
-            if (decode_tex_to_rgba(copy, rgba, w, h, &has_alpha) &&
+            if (decode_tex_to_rgba(copy, rgba, w, h, &has_alpha, 0) &&
                 w > 0 && h > 0) {
                 constexpr int kThumb = 48;
                 std::vector<uint8_t> thumb_rgba((size_t)kThumb * kThumb *
@@ -542,13 +542,16 @@ void draw_sky(const FlatAssetEntry& entry) {
             std::max(120.0f, ImGui::GetContentRegionAvail().y -
                                  ImGui::GetFrameHeight() * 2.2f);
         ImGui::BeginChild("##sky_theme_list", ImVec2(0, list_h), true);
-        for (const auto& option : s_sky_options) {
+        for (size_t i = 0; i < s_sky_options.size(); ++i) {
+            const auto& option = s_sky_options[i];
+            ImGui::PushID((int)i);
             const bool selected = option.day_set_hash == s_sky_selected;
             std::string label = option.name;
             if (option.day_set_hash == s_sky_current) label += "  (active)";
             if (ImGui::Selectable(label.c_str(), selected)) {
                 s_sky_selected = option.day_set_hash;
             }
+            ImGui::PopID();
         }
         ImGui::EndChild();
     }

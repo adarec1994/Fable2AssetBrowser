@@ -633,8 +633,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             if (m.MipDataSizeParsed < sz_bc1) {
                 DEC_FAIL("c7_pf35_size_short");
             }
-            std::vector<uint8_t> linear;
-            untile_xbox360_bc(src, m.MipDataSizeParsed, linear, w, h, 8);
+            std::vector<uint8_t> linear(src, src + sz_bc1);
             swap_bc1_endian(linear.data(), linear.size());
             blit_bc1_to_rgba(linear.data(), w, h, rgba);
             out_w = w; out_h = h;
@@ -645,8 +644,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             if (m.MipDataSizeParsed < sz_bc3) {
                 DEC_FAIL("c7_pf39_size_short");
             }
-            std::vector<uint8_t> linear;
-            untile_xbox360_bc(src, m.MipDataSizeParsed, linear, w, h, 16);
+            std::vector<uint8_t> linear(src, src + sz_bc3);
             swap_bc3_endian(linear.data(), linear.size());
             blit_bc3_to_rgba(linear.data(), w, h, rgba);
             out_w = w; out_h = h;
@@ -657,8 +655,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             if (m.MipDataSizeParsed < sz_bc3) {
                 DEC_FAIL("c7_pf40_size_short");
             }
-            std::vector<uint8_t> linear;
-            untile_xbox360_bc(src, m.MipDataSizeParsed, linear, w, h, 16);
+            std::vector<uint8_t> linear(src, src + sz_bc3);
             swap_bc5_endian(linear.data(), linear.size());
             blit_bc5_to_rgba(linear.data(), w, h, rgba);
             out_w = w; out_h = h;
@@ -675,7 +672,16 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             DEC_FAIL("c7_raw_size_short");
         }
         rgba.assign(sz_raw, 0xFF);
-        memcpy(rgba.data(), src, sz_raw);
+        if (ti.PixelFormat == 2 || ti.PixelFormat == 4) {
+            for (size_t i = 0, n = (size_t)w * (size_t)h; i < n; ++i) {
+                rgba[i * 4 + 0] = src[i * 4 + 1];
+                rgba[i * 4 + 1] = src[i * 4 + 2];
+                rgba[i * 4 + 2] = src[i * 4 + 3];
+                rgba[i * 4 + 3] = (ti.PixelFormat == 4) ? 0xFFu : src[i * 4 + 0];
+            }
+        } else {
+            memcpy(rgba.data(), src, sz_raw);
+        }
         out_w = w; out_h = h;
         if (out_has_alpha) *out_has_alpha = any_alpha_lt_255(rgba);
         return true;

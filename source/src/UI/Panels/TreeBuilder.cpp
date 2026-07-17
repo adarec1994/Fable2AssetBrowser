@@ -644,3 +644,60 @@ bool refresh_loose_file_index() {
     ContentTabs::FixLooseEntryIndices(loose_dir);
     return true;
 }
+
+namespace {
+std::mutex g_injected_mutex;
+std::vector<std::pair<std::string, std::string>> g_injected_pending;
+}
+
+void tree_register_injected_file(const std::string& bnk_path,
+                                 const std::string& virtual_path) {
+    std::lock_guard<std::mutex> lk(g_injected_mutex);
+    g_injected_pending.emplace_back(bnk_path, virtual_path);
+}
+
+void tree_apply_pending_injections() {
+    std::vector<std::pair<std::string, std::string>> items;
+    {
+        std::lock_guard<std::mutex> lk(g_injected_mutex);
+        if (g_injected_pending.empty()) return;
+        items.swap(g_injected_pending);
+    }
+
+    std::unordered_map<std::string, size_t> quest_by_path;
+    bool any = false;
+    for (const auto& [bnk, vpath] : items) {
+        std::string key = vpath;
+        std::transform(key.begin(), key.end(), key.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        std::replace(key.begin(), key.end(), '\\', '/');
+        const int idx = BnkCache::find_index(bnk, key);
+        if (idx < 0) continue;
+
+        uint32_t size = 0;
+        try {
+            auto entry = BnkCache::get(bnk);
+            const auto& files = entry.reader->list_files();
+            if (idx >= 0 && (size_t)idx < files.size())
+                size = files[(size_t)idx].size();
+        } catch (...) {
+            continue;
+        }
+
+        auto strip_stale = [&](std::vector<FlatAssetEntry>& v) {
+            v.erase(std::remove_if(v.begin(), v.end(),
+                                   [&](const FlatAssetEntry& e) {
+                                       return e.bnk_path == bnk &&
+                                              e.full_path == vpath;
+                                   }),
+                    v.end());
+        };
+        strip_stale(S.all_mdl_files);
+        strip_stale(S.all_tex_files);
+
+        tb_index_file(g_tree_root, quest_by_path, vpath, bnk, idx, size,
+                      false);
+        any = true;
+    }
+    if (any) tb_sort_flat_lists();
+}

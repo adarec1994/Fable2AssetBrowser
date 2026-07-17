@@ -5,6 +5,7 @@
 #include "MdlWriter.h"
 
 #include "MDL/ModelParser.h"
+#include "textures/TexParser.h"
 #include "UI/OutputLog.h"
 #include "Utilities/Progress.h"
 #include "Utilities/State.h"

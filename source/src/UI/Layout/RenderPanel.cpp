@@ -5728,6 +5728,7 @@ void draw_model_in_panel(ID3D11Device* device) {
     const bool paint_mode_active =
         details_panel_docked() && g_mp.has_model && g_mp.no_tilt &&
         LandscapePanel::InPaintMode() && TerrainPaint::Active();
+    bool paint_dab_applied = false;
     if (sculpt_mode_active || paint_mode_active ||
         (S.dev_mode && g_mp.has_model && g_mp.no_tilt &&
          !details_panel_docked())) {
@@ -6107,6 +6108,7 @@ void draw_model_in_panel(ID3D11Device* device) {
                         TerrainPaint::ApplyBrush(
                             hx, hz, eff_size, eff_strength, eff_falloff,
                             ImGui::GetIO().KeyShift);
+                        paint_dab_applied = true;
                         g_paint_composite_pending = true;
                     }
                     else if (!imgui_captured &&
@@ -6145,6 +6147,10 @@ void draw_model_in_panel(ID3D11Device* device) {
         }
     }
 
+    if (!paint_mode_active || !paint_dab_applied) {
+        TerrainPaint::EndStroke();
+    }
+
     
     
     if (g_paint_composite_pending && paint_mode_active) {
@@ -6158,7 +6164,7 @@ void draw_model_in_panel(ID3D11Device* device) {
             if (TerrainPaint::BuildComposite(rgba, cw, ch) &&
                 !g_mp.meshes.empty()) {
                 ID3D11ShaderResourceView* srv =
-                    create_srv_from_rgba(device, cw, ch, rgba);
+                    create_srv_from_rgba_mipped(device, cw, ch, rgba);
                 if (srv) {
                     MPPerMesh& m = g_mp.meshes[0];
                     if (m.srv_diffuse &&

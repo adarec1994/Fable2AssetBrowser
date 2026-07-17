@@ -12,9 +12,6 @@ namespace {
 
 
 
-// Header-tail words verified across 600 retail globals models: first float
-// is 2x the bounding-sphere radius, then 0x01000000, 0.05, 1.0, two zero
-// words, 0x100, 10000.0.
 constexpr uint32_t kHdrTailFlags0 = 0x01000000u;
 constexpr float    kHdrTailF1     = 0.05f;
 constexpr float    kHdrTailF2     = 1.0f;
@@ -29,7 +26,7 @@ constexpr float    kMeshHdrScale   = 1.0f;
 constexpr uint32_t kMeshHdrU0      = 0u;      
 constexpr uint32_t kMeshHdrU1      = 0u;
 constexpr uint32_t kMeshHdrU2      = 0xFFFFFFFFu;
-constexpr float    kMatFloat0      = 0.1f;   // most common retail pair
+constexpr float    kMatFloat0      = 0.1f;
 constexpr float    kMatFloat1      = 0.17f;
 
 constexpr uint16_t kVertexFlag     = 0u;      

@@ -3,6 +3,7 @@
 #include "LandscapeAuthoring.h"
 
 #include "BNKCore.cpp"
+#include "GDB/GdbEdit.h"
 #include "UI/OutputLog.h"
 #include "Utilities/GameBackup.h"
 #include "Utilities/State.h"
@@ -61,6 +62,117 @@ struct DonorFile {
     std::string          rel_path;   
     std::vector<uint8_t> bytes;
 };
+
+struct SpawnPointMapping {
+    std::string name;
+    uint32_t record_hash = 0;
+};
+
+struct TextReplacement {
+    size_t pos = 0;
+    size_t length = 0;
+    std::string value;
+};
+
+bool parse_hex_hash(const std::string& text, uint32_t& value) {
+    if (text.empty() || text.size() > 8) return false;
+    uint32_t parsed = 0;
+    for (const char c : text) {
+        parsed <<= 4;
+        if (c >= '0' && c <= '9') parsed |= uint32_t(c - '0');
+        else if (c >= 'A' && c <= 'F') parsed |= uint32_t(c - 'A' + 10);
+        else if (c >= 'a' && c <= 'f') parsed |= uint32_t(c - 'a' + 10);
+        else return false;
+    }
+    value = parsed;
+    return true;
+}
+
+bool build_custom_spawn_save(const std::vector<uint8_t>& source,
+                             const std::string& level_name,
+                             std::vector<uint8_t>& out,
+                             std::vector<SpawnPointMapping>& mappings,
+                             std::string& error) {
+    std::string xml(source.begin(), source.end());
+    const std::string entity_open = "<Entity name=\"";
+    const std::string entity_close = "</Entity>";
+    std::vector<TextReplacement> replacements;
+    int start_count = 0;
+    int teleport_count = 0;
+    size_t pos = 0;
+    while ((pos = xml.find(entity_open, pos)) != std::string::npos) {
+        const size_t name_start = pos + entity_open.size();
+        const size_t name_end = xml.find('"', name_start);
+        if (name_end == std::string::npos) break;
+        const size_t close = xml.find(entity_close, name_end);
+        if (close == std::string::npos) break;
+        const size_t hash_start = xml.find("0x", name_end);
+        if (hash_start == std::string::npos || hash_start > close) {
+            pos = close + entity_close.size();
+            continue;
+        }
+        const size_t hash_end = xml.find_first_not_of(
+            "0123456789abcdefABCDEF", hash_start + 2);
+        if (hash_end == std::string::npos || hash_end > close) {
+            pos = close + entity_close.size();
+            continue;
+        }
+        const std::string old_name =
+            xml.substr(name_start, name_end - name_start);
+        const std::string old_name_low = lower(old_name);
+        bool is_start = old_name_low.rfind("startfrom", 0) == 0;
+        bool is_teleport = old_name_low.rfind("teleportto", 0) == 0;
+        if (is_start || is_teleport) {
+            uint32_t record_hash = 0;
+            if (!parse_hex_hash(
+                    xml.substr(hash_start + 2, hash_end - hash_start - 2),
+                    record_hash)) {
+                error = "Donor player-start save contains an invalid hash.";
+                return false;
+            }
+            int& count = is_start ? start_count : teleport_count;
+            ++count;
+            std::string new_name =
+                std::string(is_start ? "StartFrom_" : "TeleportTo_") +
+                level_name;
+            if (count > 1) new_name += "_" + std::to_string(count);
+            replacements.push_back(
+                {name_start, name_end - name_start, new_name});
+            mappings.push_back({new_name, record_hash});
+        }
+        pos = close + entity_close.size();
+    }
+    if (start_count == 0 || teleport_count == 0) {
+        error = "Donor level must contain both StartFrom and TeleportTo "
+                "player-start entities.";
+        return false;
+    }
+    for (auto it = replacements.rbegin(); it != replacements.rend(); ++it) {
+        xml.replace(it->pos, it->length, it->value);
+    }
+    out.assign(xml.begin(), xml.end());
+    return true;
+}
+
+bool build_custom_spawn_gdb(
+    const std::vector<uint8_t>& source,
+    const std::vector<SpawnPointMapping>& mappings,
+    std::vector<uint8_t>& out, std::string& error) {
+    GdbEdit::GdbFile gdb;
+    if (!gdb.Parse(source, error)) {
+        error = "Donor player-start GDB could not be parsed: " + error;
+        return false;
+    }
+    for (const SpawnPointMapping& mapping : mappings) {
+        if (!gdb.RecordByHash(mapping.record_hash)) {
+            error = "Donor player-start record is missing from the GDB.";
+            return false;
+        }
+        gdb.AddNameMapping(mapping.name, mapping.record_hash);
+    }
+    out = gdb.Serialize();
+    return true;
+}
 
 bool load_donor_files(const std::string& data_dir, const std::string& donor,
                       std::vector<DonorFile>& out, std::string& error) {
@@ -301,6 +413,28 @@ NewLevelResult CreateNewLevel(const NewLevelParams& params) {
         return res;
     }
 
+    std::vector<uint8_t> custom_spawn_save;
+    std::vector<SpawnPointMapping> spawn_mappings;
+    bool found_spawn_save = false;
+    for (const DonorFile& df : donor_files) {
+        const size_t slash = df.rel_path.find_last_of('\\');
+        const std::string leaf = slash == std::string::npos
+                                     ? df.rel_path
+                                     : df.rel_path.substr(slash + 1);
+        if (leaf != "defaultscenario.save") continue;
+        if (!build_custom_spawn_save(df.bytes, params.name,
+                                     custom_spawn_save, spawn_mappings,
+                                     res.error)) {
+            return res;
+        }
+        found_spawn_save = true;
+        break;
+    }
+    if (!found_spawn_save) {
+        res.error = "Donor region has no default scenario save file.";
+        return res;
+    }
+
     const std::string region_prefix = "worlds\\albion\\" + region + "\\";
     std::vector<std::string> virtual_paths;
 
@@ -314,6 +448,13 @@ NewLevelResult CreateNewLevel(const NewLevelParams& params) {
             bytes = to_bytes(build_engine_level(region, hfid));
         } else if (leaf == "defaultscenario.list") {
             bytes = to_bytes(build_list_file(region, hfid));
+        } else if (leaf == "defaultscenario.save") {
+            bytes = custom_spawn_save;
+        } else if (leaf == "defaultscenario.gdb") {
+            if (!build_custom_spawn_gdb(df.bytes, spawn_mappings, bytes,
+                                        res.error)) {
+                return res;
+            }
         } else if (leaf == "level.vfsconfig" || leaf == "config.ai_config") {
             const std::string text(df.bytes.begin(), df.bytes.end());
             bytes = to_bytes(replace_ci(text, params.donor_region, region));

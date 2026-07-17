@@ -48,6 +48,19 @@ set(APP_SOURCES
         src/MDL/ModelParser.cpp
         src/MDL/MdlFbxExport.cpp
         src/MDL/MdlTexExport.cpp
+        src/Import/ImageLoad.cpp
+        src/Import/ImageLoad.h
+        src/Import/TexWriter.cpp
+        src/Import/TexWriter.h
+        src/Import/GlbImport.cpp
+        src/Import/GlbImport.h
+        src/Import/MdlWriter.cpp
+        src/Import/MdlWriter.h
+        src/Import/AssetImport.cpp
+        src/Import/AssetImport.h
+        src/Import/Xbox360Tiling.h
+        src/UI/Panels/ImportDialog.cpp
+        src/UI/Panels/ImportDialog.h
         src/Utilities/Progress.cpp
         src/Utilities/operations.cpp
         src/UI/HexView.cpp

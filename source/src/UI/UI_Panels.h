@@ -30,6 +30,9 @@ bool tree_build_in_progress();
 bool tree_build_finished();
 
 bool refresh_loose_file_index();
+void tree_register_injected_file(const std::string& bnk_path,
+                                 const std::string& virtual_path);
+void tree_apply_pending_injections();
 float tree_build_elapsed_seconds();
 float tree_build_progress();
 int   tree_build_done_units();

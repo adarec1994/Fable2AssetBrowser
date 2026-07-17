@@ -12,14 +12,6 @@ namespace TexWriter {
 
 namespace {
 
-// Retail header constants (verified over 800 globals texture headers):
-// Sign is always 0xFFFFFFFE; RawDataSize equals the total def+payload bytes
-// after the header entry; Unknown_0 is 0; Unknown_1 is a per-format flags
-// word (PF35 -> 0x10, PF39 -> 0xF0, PF40 -> 0x110). Header entries are
-// padded to a fixed 84 bytes. CompFlag-7 mip payloads are stored as plain
-// row-major (linear) block data, exactly blocksWide*blocksHigh*blockBytes,
-// big-endian u16 words -- retail never tiles def-chain mips (the tiled
-// layouts belong to the GUI/zlib texture classes).
 constexpr uint32_t kHeaderSign = 0xFFFFFFFEu;
 constexpr uint32_t kHeaderUnknown0 = 0u;
 constexpr size_t   kHeaderEntrySize = 84u;
@@ -31,7 +23,6 @@ constexpr uint32_t kPfARGB = 2u;
 
 constexpr uint32_t kCompFlagRaw = 7u;
 
-// Retail mip chains stop once the next level would drop under 16 pixels.
 constexpr int kMinMipDim = 16;
 
 uint32_t u1_flags_for_pf(uint32_t pf) {
@@ -122,7 +113,6 @@ void gather_block_rgba(const uint8_t* rgba, int w, int h, int bx, int by,
     }
 }
 
-// One mip payload: linear BC blocks (or linear ARGB), console-endian.
 void build_mip_payload(const uint8_t* rgba, int w, int h, Format fmt,
                        std::vector<uint8_t>& payload)
 {
@@ -161,7 +151,7 @@ void build_mip_payload(const uint8_t* rgba, int w, int h, Format fmt,
     X360Tile::swap_u16_endian(payload.data(), payload.size());
 }
 
-}  // namespace
+}
 
 bool rgba_has_alpha(const uint8_t* rgba, int w, int h)
 {
@@ -211,8 +201,6 @@ bool build_from_rgba(const uint8_t* rgba_in, int w, int h,
         build_mip_payload(level.data(), lw, lh, fmt, payload);
 
         MipChunk ck; ck.w = lw; ck.h = lh;
-        // 48-byte mip def: CompFlag 7, DataOffset 48, DataSize, 9 zero words
-        // (retail leaves Unknown_3..11 zero on every raw mip).
         put32be(ck.bytes, kCompFlagRaw);
         put32be(ck.bytes, 48u);
         put32be(ck.bytes, (uint32_t)payload.size());
@@ -229,7 +217,6 @@ bool build_from_rgba(const uint8_t* rgba_in, int w, int h,
 
     out.mip_count = (uint32_t)chunks.size();
 
-    // Fixed-size (84-byte) header entry: 8 words + offset per mip + zero pad.
     const size_t header_size =
         std::max(kHeaderEntrySize, (size_t)32 + 4 * chunks.size());
 

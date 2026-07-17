@@ -37,6 +37,11 @@ struct State {
 
     int  active_layer = 0;
     bool dirty = false;
+    bool stroke_active = false;
+    float stroke_x = 0.0f;
+    float stroke_z = 0.0f;
+    int stroke_layer = -1;
+    bool stroke_erase = false;
 
     std::unordered_map<std::string, DecodedTexture> tex_cache;
 };
@@ -84,7 +89,7 @@ const DecodedTexture& decoded_texture(const std::string& tex_path) {
             std::vector<unsigned char> copy(blob.begin(), blob.end());
             bool has_alpha = false;
             dt.ok = decode_tex_to_rgba(copy, dt.rgba, dt.w, dt.h,
-                                       &has_alpha);
+                                       &has_alpha, 0);
         } catch (...) {
             dt.ok = false;
         }
@@ -94,6 +99,39 @@ const DecodedTexture& decoded_texture(const std::string& tex_path) {
         OutputLog::warn("paint: could not decode texture " + tex_path);
     }
     return s.tex_cache.emplace(tex_path, std::move(dt)).first->second;
+}
+
+std::vector<uint8_t> resize_weights(const std::vector<uint8_t>& source,
+                                    int source_w, int source_h,
+                                    int target_w, int target_h) {
+    std::vector<uint8_t> target((size_t)target_w * target_h, 0);
+    for (int y = 0; y < target_h; ++y) {
+        const float sy = target_h > 1
+                             ? float(y) * float(source_h - 1) /
+                                   float(target_h - 1)
+                             : 0.0f;
+        const int y0 = std::clamp((int)std::floor(sy), 0, source_h - 1);
+        const int y1 = std::min(y0 + 1, source_h - 1);
+        const float fy = sy - float(y0);
+        for (int x = 0; x < target_w; ++x) {
+            const float sx = target_w > 1
+                                 ? float(x) * float(source_w - 1) /
+                                       float(target_w - 1)
+                                 : 0.0f;
+            const int x0 = std::clamp((int)std::floor(sx), 0, source_w - 1);
+            const int x1 = std::min(x0 + 1, source_w - 1);
+            const float fx = sx - float(x0);
+            const float a = float(source[(size_t)y0 * source_w + x0]);
+            const float b = float(source[(size_t)y0 * source_w + x1]);
+            const float c = float(source[(size_t)y1 * source_w + x0]);
+            const float d = float(source[(size_t)y1 * source_w + x1]);
+            const float top = a + (b - a) * fx;
+            const float bottom = c + (d - c) * fx;
+            target[(size_t)y * target_w + x] = (uint8_t)std::clamp(
+                int(top + (bottom - top) * fy + 0.5f), 0, 255);
+        }
+    }
+    return target;
 }
 
 void load_sidecar() {
@@ -131,17 +169,31 @@ void load_sidecar() {
         wf.read(reinterpret_cast<char*>(&pw), 4);
         wf.read(reinterpret_cast<char*>(&ph), 4);
         wf.read(reinterpret_cast<char*>(&count), 4);
-        if (wf && pw == (uint32_t)s.paint_w &&
-            ph == (uint32_t)s.paint_h &&
-            count == (uint32_t)s.layers.size()) {
-            s.weights.assign(s.layers.size(),
-                             std::vector<uint8_t>(
-                                 (size_t)s.paint_w * s.paint_h, 0));
-            for (auto& w : s.weights) {
+        const uint64_t source_area = uint64_t(pw) * uint64_t(ph);
+        if (wf && count == (uint32_t)s.layers.size() &&
+            pw > 0 && ph > 0 && pw <= 8192 && ph <= 8192 &&
+            source_area * uint64_t(count) <=
+                128ull * 1024ull * 1024ull) {
+            std::vector<std::vector<uint8_t>> loaded(
+                s.layers.size(),
+                std::vector<uint8_t>((size_t)source_area, 0));
+            for (auto& w : loaded) {
                 wf.read(reinterpret_cast<char*>(w.data()),
                         (std::streamsize)w.size());
             }
-            if (!wf) s.weights.clear();
+            if (wf) {
+                if (pw == (uint32_t)s.paint_w &&
+                    ph == (uint32_t)s.paint_h) {
+                    s.weights = std::move(loaded);
+                } else {
+                    s.weights.reserve(loaded.size());
+                    for (const auto& w : loaded) {
+                        s.weights.push_back(resize_weights(
+                            w, (int)pw, (int)ph,
+                            s.paint_w, s.paint_h));
+                    }
+                }
+            }
         }
     }
     if (s.weights.size() != s.layers.size()) {
@@ -164,8 +216,8 @@ void InitForLevel(const std::string& level_key, int grid_w, int grid_h,
     s.grid_w = std::max(2, grid_w);
     s.grid_h = std::max(2, grid_h);
     s.tile_size = tile_size > 0.0f ? tile_size : 1.0f;
-    s.paint_w = std::clamp(s.grid_w * 2, 64, 1024);
-    s.paint_h = std::clamp(s.grid_h * 2, 64, 1024);
+    s.paint_w = std::clamp(s.grid_w * 4, 64, 1024);
+    s.paint_h = std::clamp(s.grid_h * 4, 64, 1024);
     load_sidecar();
 }
 
@@ -232,41 +284,77 @@ void ApplyBrush(float wx, float wz, float radius_m, float strength01,
     const float span_z = float(s.grid_h - 1) * s.tile_size;
     if (span_x <= 0.0f || span_z <= 0.0f || radius_m <= 0.0f) return;
 
-    const float px_c = wx / span_x * float(s.paint_w - 1);
-    const float pz_c = wz / span_z * float(s.paint_h - 1);
     const float pr_x = radius_m / span_x * float(s.paint_w - 1);
     const float pr_z = radius_m / span_z * float(s.paint_h - 1);
-    const int xmin = std::max(0, int(std::floor(px_c - pr_x)));
-    const int xmax = std::min(s.paint_w - 1, int(std::ceil(px_c + pr_x)));
-    const int zmin = std::max(0, int(std::floor(pz_c - pr_z)));
-    const int zmax = std::min(s.paint_h - 1, int(std::ceil(pz_c + pr_z)));
-    if (xmin > xmax || zmin > zmax) return;
-
     const float falloff = std::clamp(falloff01, 0.0f, 1.0f);
     const float add = std::clamp(strength01, 0.0f, 1.0f) * 48.0f;
     std::vector<uint8_t>& target = s.weights[(size_t)s.active_layer];
 
-    for (int z = zmin; z <= zmax; ++z) {
-        for (int x = xmin; x <= xmax; ++x) {
-            const float dx = (float(x) - px_c) / std::max(pr_x, 0.001f);
-            const float dz = (float(z) - pz_c) / std::max(pr_z, 0.001f);
-            const float dist = std::sqrt(dx * dx + dz * dz);
-            if (dist >= 1.0f) continue;
-            float w = 1.0f;
-            const float fade_start = 1.0f - falloff;
-            if (dist > fade_start && falloff > 0.0f) {
-                const float t = 1.0f - (dist - fade_start) / falloff;
-                w = t * t * (3.0f - 2.0f * t);
+    auto apply_dab = [&](float dab_x, float dab_z) {
+        const float px_c = dab_x / span_x * float(s.paint_w - 1);
+        const float pz_c = dab_z / span_z * float(s.paint_h - 1);
+        const int xmin = std::max(0, int(std::floor(px_c - pr_x)));
+        const int xmax =
+            std::min(s.paint_w - 1, int(std::ceil(px_c + pr_x)));
+        const int zmin = std::max(0, int(std::floor(pz_c - pr_z)));
+        const int zmax =
+            std::min(s.paint_h - 1, int(std::ceil(pz_c + pr_z)));
+        if (xmin > xmax || zmin > zmax) return;
+        for (int z = zmin; z <= zmax; ++z) {
+            for (int x = xmin; x <= xmax; ++x) {
+                const float dx =
+                    (float(x) - px_c) / std::max(pr_x, 0.001f);
+                const float dz =
+                    (float(z) - pz_c) / std::max(pr_z, 0.001f);
+                const float dist = std::sqrt(dx * dx + dz * dz);
+                if (dist >= 1.0f) continue;
+                float w = 1.0f;
+                const float fade_start = 1.0f - falloff;
+                if (dist > fade_start && falloff > 0.0f) {
+                    const float t =
+                        1.0f - (dist - fade_start) / falloff;
+                    w = t * t * (3.0f - 2.0f * t);
+                }
+                const size_t idx = (size_t)z * s.paint_w + x;
+                const int delta =
+                    int(add * w + 0.5f) * (erase ? -1 : 1);
+                const int next =
+                    std::clamp(int(target[idx]) + delta, 0, 255);
+                target[idx] = (uint8_t)next;
             }
-            const size_t idx = (size_t)z * s.paint_w + x;
-            const int delta = int(add * w + 0.5f) * (erase ? -1 : 1);
-            const int next =
-                std::clamp(int(target[idx]) + delta, 0, 255);
-            target[idx] = (uint8_t)next;
         }
+    };
+
+    const bool continue_stroke =
+        s.stroke_active && s.stroke_layer == s.active_layer &&
+        s.stroke_erase == erase;
+    const float from_x = continue_stroke ? s.stroke_x : wx;
+    const float from_z = continue_stroke ? s.stroke_z : wz;
+    const float dx = wx - from_x;
+    const float dz = wz - from_z;
+    const float distance = std::sqrt(dx * dx + dz * dz);
+    const float pixel_size = std::max(
+        span_x / float(s.paint_w - 1),
+        span_z / float(s.paint_h - 1));
+    const float spacing =
+        std::max(pixel_size * 0.75f, radius_m * 0.12f);
+    const int steps = continue_stroke
+                          ? std::clamp((int)std::ceil(distance / spacing),
+                                       1, 256)
+                          : 1;
+    for (int i = 1; i <= steps; ++i) {
+        const float t = float(i) / float(steps);
+        apply_dab(from_x + dx * t, from_z + dz * t);
     }
+    s.stroke_active = true;
+    s.stroke_x = wx;
+    s.stroke_z = wz;
+    s.stroke_layer = s.active_layer;
+    s.stroke_erase = erase;
     s.dirty = true;
 }
+
+void EndStroke() { st().stroke_active = false; }
 
 bool BuildComposite(std::vector<uint8_t>& rgba, int& out_w, int& out_h) {
     auto& s = st();
@@ -308,15 +396,34 @@ bool BuildComposite(std::vector<uint8_t>& rgba, int& out_w, int& out_h) {
                 const DecodedTexture& dt = *samples[li].tex;
                 const float tu = u * samples[li].repeat_x;
                 const float tv = v * samples[li].repeat_z;
-                const int tx =
-                    int((tu - std::floor(tu)) * float(dt.w)) % dt.w;
-                const int tz =
-                    int((tv - std::floor(tv)) * float(dt.h)) % dt.h;
-                const uint8_t* p =
-                    dt.rgba.data() + ((size_t)tz * dt.w + tx) * 4;
-                r = r * (1.0f - w) + float(p[0]) * w;
-                g = g * (1.0f - w) + float(p[1]) * w;
-                b = b * (1.0f - w) + float(p[2]) * w;
+                const float txf =
+                    (tu - std::floor(tu)) * float(dt.w);
+                const float tzf =
+                    (tv - std::floor(tv)) * float(dt.h);
+                const int tx0 = int(std::floor(txf)) % dt.w;
+                const int tz0 = int(std::floor(tzf)) % dt.h;
+                const int tx1 = (tx0 + 1) % dt.w;
+                const int tz1 = (tz0 + 1) % dt.h;
+                const float fx = txf - std::floor(txf);
+                const float fz = tzf - std::floor(tzf);
+                const uint8_t* p00 = dt.rgba.data() +
+                    ((size_t)tz0 * dt.w + tx0) * 4;
+                const uint8_t* p10 = dt.rgba.data() +
+                    ((size_t)tz0 * dt.w + tx1) * 4;
+                const uint8_t* p01 = dt.rgba.data() +
+                    ((size_t)tz1 * dt.w + tx0) * 4;
+                const uint8_t* p11 = dt.rgba.data() +
+                    ((size_t)tz1 * dt.w + tx1) * 4;
+                auto sample = [&](int channel) {
+                    const float top = float(p00[channel]) +
+                        (float(p10[channel]) - float(p00[channel])) * fx;
+                    const float bottom = float(p01[channel]) +
+                        (float(p11[channel]) - float(p01[channel])) * fx;
+                    return top + (bottom - top) * fz;
+                };
+                r = r * (1.0f - w) + sample(0) * w;
+                g = g * (1.0f - w) + sample(1) * w;
+                b = b * (1.0f - w) + sample(2) * w;
             }
             uint8_t* out = rgba.data() + idx * 4;
             out[0] = (uint8_t)std::clamp(int(r + 0.5f), 0, 255);

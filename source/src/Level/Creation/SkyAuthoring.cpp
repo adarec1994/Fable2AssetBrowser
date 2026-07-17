@@ -67,7 +67,7 @@ bool ListSkyThemes(std::vector<SkyThemeOption>& out, std::string& error) {
         return false;
     }
 
-    std::unordered_set<uint32_t> seen;
+    std::unordered_set<std::string> seen;
     for (const FlatAssetEntry& e : S.all_gdb_files) {
         std::string low = e.full_path;
         std::transform(low.begin(), low.end(), low.begin(),
@@ -99,7 +99,7 @@ bool ListSkyThemes(std::vector<SkyThemeOption>& out, std::string& error) {
                                     kHashEnvironmentThemeDaySet, f)) {
                 continue;
             }
-            if (f.value == 0 || !seen.insert(f.value).second) break;
+            if (f.value == 0 || !seen.insert(region).second) break;
             SkyThemeOption option;
             option.day_set_hash = f.value;
             option.name = region + " sky";

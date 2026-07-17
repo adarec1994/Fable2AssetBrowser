@@ -40,6 +40,7 @@ void MarkSaved();
 
 void ApplyBrush(float wx, float wz, float radius_m, float strength01,
                 float falloff01, bool erase);
+void EndStroke();
 
 
 

@@ -5,6 +5,7 @@
 #include "../Utilities/Files.h"
 #include "../Utilities/Progress.h"
 #include "UI_Panels.h"
+#include "Panels/ImportDialog.h"
 #include "AudioPlayerWindow.h"
 #include "Layout/LoadingScreen.h"
 #include "Layout/MainLayout.h"
@@ -502,6 +503,25 @@ void draw_main(GLFWwindow* window) {
                     }
                     ImGui::Separator();
                 }
+                {
+                    const bool import_busy = ImportDialog::Busy();
+                    if (ImGui::BeginMenu("Import", !import_busy)) {
+                        if (ImGui::MenuItem("Import .glb...")) {
+                            ImportDialog::OpenGlb();
+                        }
+                        if (ImGui::MenuItem("Import Image...")) {
+                            ImportDialog::OpenImage();
+                        }
+                        if (ImGui::MenuItem("Import Folder...")) {
+                            ImportDialog::OpenFolder();
+                        }
+                        ImGui::EndMenu();
+                    }
+                    if (import_busy && ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("An import is already running");
+                    }
+                }
+                ImGui::Separator();
                 if (ImGui::MenuItem("Quit", "Alt+F4")) {
 #ifdef _WIN32
                     PostQuitMessage(0);
@@ -828,6 +848,8 @@ void draw_main(GLFWwindow* window) {
     }
 
     tex_export_drive();
+
+    ImportDialog::Draw();
 
     {
         ImVec2 vp = ImGui::GetMainViewport()->WorkSize;

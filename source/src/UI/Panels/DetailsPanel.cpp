@@ -28,7 +28,7 @@ namespace {
 
 constexpr uint64_t kAdditionHashBase = 0xADD0000000000000ull;
 
-enum class SelKind { None, Landscape, Addition, Generator, SpawnPoint };
+enum class SelKind { None, Landscape, Sky, Addition, Generator, SpawnPoint };
 
 SelKind s_kind = SelKind::None;
 int     s_index = -1;   
@@ -193,6 +193,16 @@ void draw_outliner(const std::vector<LevelEdit::Addition>& adds,
         clear_model_selection();
         if (landscape_action.double_clicked) {
             focus_camera(g_mp.center, g_mp.radius);
+        }
+    }
+
+    if (g_mp.has_sky_theme) {
+        const OutlinerRowAction sky_action = outliner_row(
+            "Sky", "Sky", s_kind == SelKind::Sky, 2);
+        if (sky_action.clicked) {
+            s_kind = SelKind::Sky;
+            s_index = -1;
+            clear_model_selection();
         }
     }
 
@@ -391,6 +401,54 @@ void draw_spawn_point_details(
 
 }
 
+void draw_sky_details() {
+    if (!g_mp.has_sky_theme) {
+        s_kind = SelKind::None;
+        return;
+    }
+
+    if (!begin_props("##det_sky")) return;
+    prop_label("Item");
+    ImGui::TextUnformatted("Sky");
+    prop_label("Type");
+    ImGui::TextUnformatted("Environment");
+
+    const bool has_cycle =
+        g_mp.has_day_night_cycle && g_mp.day_night_keyframes.size() >= 2;
+    bool auto_time = has_cycle && !g_mp.time_of_day_override;
+    prop_label("Auto time");
+    ImGui::BeginDisabled(!has_cycle);
+    if (ImGui::Checkbox("##det_sky_auto_time", &auto_time)) {
+        if (auto_time) {
+            g_mp.time_of_day_override = false;
+        } else {
+            g_mp.time_of_day_override = true;
+            g_mp.time_of_day_override_value = g_mp.current_time_of_day;
+        }
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(
+            has_cycle
+                ? "Disable this to freeze the sky at the current time."
+                : "This sky has no automatic day/night cycle.");
+    }
+
+    float hour = (g_mp.time_of_day_override
+                      ? g_mp.time_of_day_override_value
+                      : g_mp.current_time_of_day) *
+                 24.0f;
+    hour = std::clamp(hour, 0.0f, 24.0f);
+    prop_label("Time");
+    if (ImGui::SliderFloat("##det_sky_time", &hour, 0.0f, 24.0f,
+                           "%.2f h", ImGuiSliderFlags_AlwaysClamp)) {
+        g_mp.time_of_day_override = true;
+        g_mp.time_of_day_override_value =
+            std::clamp(hour / 24.0f, 0.0f, 1.0f);
+    }
+    ImGui::EndTable();
+}
+
 }
 
 bool Active() {
@@ -408,6 +466,9 @@ void Draw() {
     if (g_selected_level_hash >= kAdditionHashBase) {
         s_kind = SelKind::Addition;
         s_index = int(g_selected_level_hash - kAdditionHashBase);
+    }
+    if (s_kind == SelKind::Sky && !g_mp.has_sky_theme) {
+        s_kind = SelKind::None;
     }
 
     std::vector<LevelEdit::Addition> adds;
@@ -429,9 +490,17 @@ void Draw() {
             if (begin_props("##det_landscape")) {
                 prop_label("Item");
                 ImGui::TextUnformatted("Landscape");
+                prop_label("Show fog");
+                ImGui::Checkbox("##det_landscape_fog", &g_mp.show_mist);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Show or hide the environment fog and ground mist "
+                        "in the level preview.");
+                }
                 ImGui::EndTable();
             }
             break;
+        case SelKind::Sky:        draw_sky_details(); break;
         case SelKind::Addition:   draw_addition_details(adds); break;
         case SelKind::Generator:  draw_generator_details(gens); break;
         case SelKind::SpawnPoint: draw_spawn_point_details(sps); break;

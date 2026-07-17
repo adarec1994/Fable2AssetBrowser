@@ -222,8 +222,8 @@ void InitForLevel(const std::string& level_key, int grid_w, int grid_h,
     s.grid_w = std::max(2, grid_w);
     s.grid_h = std::max(2, grid_h);
     s.tile_size = tile_size > 0.0f ? tile_size : 1.0f;
-    s.paint_w = std::clamp(s.grid_w * 4, 64, 1024);
-    s.paint_h = std::clamp(s.grid_h * 4, 64, 1024);
+    s.paint_w = std::clamp(s.grid_w * 4, 64, 2048);
+    s.paint_h = std::clamp(s.grid_h * 4, 64, 2048);
     load_sidecar();
 }
 

@@ -249,6 +249,14 @@ void rebuild_paint_tex_options() {
               });
 }
 
+const PaintTexOption* find_paint_tex_option(const std::string& full_path) {
+    const std::string low = lower_slash(full_path);
+    for (const PaintTexOption& option : s_paint_tex_options) {
+        if (option.low == low) return &option;
+    }
+    return nullptr;
+}
+
 #ifdef _WIN32
 ID3D11ShaderResourceView* paint_tex_thumbnail(
     const PaintTexOption& opt) {
@@ -527,34 +535,88 @@ void draw_paint() {
 
     if (ImGui::CollapsingHeader("Target Layers",
                                 ImGuiTreeNodeFlags_DefaultOpen)) {
+        rebuild_paint_tex_options();
         const auto& layers = TerrainPaint::Layers();
         const int active = TerrainPaint::ActiveLayer();
         int remove_index = -1;
         for (size_t i = 0; i < layers.size(); ++i) {
             ImGui::PushID((int)i);
+            const bool selected = (int)i == active;
             const std::string leaf =
                 std::filesystem::path(layers[i].tex_path)
                     .stem()
                     .string();
-            if (ImGui::Selectable(leaf.c_str(), (int)i == active,
-                                  ImGuiSelectableFlags_AllowOverlap,
-                                  ImVec2(ImGui::GetContentRegionAvail().x -
-                                             112.0f,
-                                         0.0f))) {
-                TerrainPaint::SetActiveLayer((int)i);
+            const PaintTexOption* option =
+                find_paint_tex_option(layers[i].tex_path);
+            const ImVec4 background = selected
+                                          ? ImVec4(kAccent.x, kAccent.y,
+                                                   kAccent.z, 0.58f)
+                                          : ImGui::GetStyleColorVec4(
+                                                ImGuiCol_FrameBg);
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, background);
+            ImGui::BeginChild("##layer_card", ImVec2(0.0f, 96.0f), true,
+                              ImGuiWindowFlags_NoScrollbar |
+                                  ImGuiWindowFlags_NoScrollWithMouse);
+            if (ImGui::BeginTable("##layer_layout", 3,
+                                  ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("##preview",
+                                        ImGuiTableColumnFlags_WidthFixed,
+                                        58.0f);
+                ImGui::TableSetupColumn("##details",
+                                        ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("##actions",
+                                        ImGuiTableColumnFlags_WidthFixed,
+                                        24.0f);
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+#ifdef _WIN32
+                ID3D11ShaderResourceView* thumbnail =
+                    option ? paint_tex_thumbnail(*option) : nullptr;
+                if (thumbnail) {
+                    ImGui::Image((ImTextureID)thumbnail,
+                                 ImVec2(56.0f, 56.0f));
+                } else {
+                    ImGui::Dummy(ImVec2(56.0f, 56.0f));
+                }
+#else
+                ImGui::Dummy(ImVec2(56.0f, 56.0f));
+#endif
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", layers[i].tex_path.c_str());
+                }
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextUnformatted(leaf.c_str());
+                ImGui::TextDisabled("Layer %02d  |  Diffuse", (int)i + 1);
+                ImGui::TextDisabled(
+                    layers[i].normal_path.empty() ? "Normal not found"
+                                                  : "Normal paired");
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("Texture size");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "World-space size of one texture tile. Smaller "
+                        "values repeat the texture more often. This is "
+                        "independent of brush size.");
+                }
+                ImGui::SameLine();
+                float tiling = layers[i].tiling;
+                ImGui::SetNextItemWidth(80.0f);
+                if (ImGui::DragFloat("##tiling", &tiling, 0.1f, 0.5f,
+                                     256.0f, "%.1f m")) {
+                    TerrainPaint::SetLayerTiling((int)i, tiling);
+                }
+                ImGui::TableSetColumnIndex(2);
+                if (ImGui::SmallButton("X")) remove_index = (int)i;
+                ImGui::EndTable();
             }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", layers[i].tex_path.c_str());
-            }
-            ImGui::SameLine();
-            float tiling = layers[i].tiling;
-            ImGui::SetNextItemWidth(76.0f);
-            if (ImGui::DragFloat("##tiling", &tiling, 0.1f, 0.5f, 256.0f,
-                                 "%.1f m")) {
-                TerrainPaint::SetLayerTiling((int)i, tiling);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("X")) remove_index = (int)i;
+            const bool card_clicked =
+                ImGui::IsWindowHovered(
+                    ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+                ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+            if (card_clicked) TerrainPaint::SetActiveLayer((int)i);
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
             ImGui::PopID();
         }
         if (remove_index >= 0) TerrainPaint::RemoveLayer(remove_index);

@@ -55,6 +55,9 @@ public:
     const std::unordered_map<uint32_t, std::string>& Dict() const {
         return dict_by_hash_;
     }
+    const std::vector<std::pair<uint32_t, uint32_t>>& NameMappings() const {
+        return name_map_;
+    }
 
     size_t RecordCount() const { return records_.size(); }
     const Record& RecordAt(size_t i) const { return records_[i]; }

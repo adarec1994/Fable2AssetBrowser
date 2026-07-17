@@ -165,7 +165,7 @@ bool LoadHeightfieldFiles(const std::string& ehf_path,
         }
         parse_ehf_header(out.ehf_bytes, out.ehf_header);
         if (out.ehf_header.magic.empty()) {
-            out.error = ".ehf magic mismatch — not a HeightFieldGraphicsFile";
+            out.error = ".ehf magic mismatch - not a HeightFieldGraphicsFile";
             return false;
         }
     }
@@ -208,7 +208,7 @@ bool DecodeGhfHeights(const std::vector<uint8_t>& bytes, GhfHeights& out)
                        * static_cast<size_t>(out.height);
     const size_t need  = 0x14 + cells * kCellStride;
     if (bytes.size() < need) {
-        out.error = ".ghf truncated — header says " +
+        out.error = ".ghf truncated - header says " +
                     std::to_string(out.width) + "x" +
                     std::to_string(out.height) +
                     " but body is too short";

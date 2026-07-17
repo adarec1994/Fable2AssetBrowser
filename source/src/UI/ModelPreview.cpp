@@ -728,7 +728,7 @@ bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
             } else {
                 std::ostringstream os;
                 os << "variant_2_3_4 BC5 X-channel (" << w << "x" << h
-                   << ") failed: " << err_x << " — falling back to comp=7";
+                   << ") failed: " << err_x << " - falling back to comp=7";
 
             }
         }
@@ -3021,7 +3021,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
                     std::string msg = "texture '" + tex_name + "' failed to decode";
                     if (!reason.empty()) msg += " (" + reason + ")";
                     if (!info.empty())   msg += " [" + info + "]";
-                    msg += " — bytes=" + std::to_string(tex_buf.size());
+                    msg += " - bytes=" + std::to_string(tex_buf.size());
                     OutputLog::error(msg);
                 }
             }

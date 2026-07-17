@@ -1,5 +1,6 @@
 #include "LevelLoader.h"
 #include "Level/Terrain/HeightfieldLoader.h"
+#include "Level/Creation/LandscapeAuthoring.h"
 #include "Level/Editing/LevelEdit.h"
 #include "Level/Terrain/TextureAtlasDecoder.h"
 #include "Level/Terrain/EhfPalette.h"
@@ -305,7 +306,7 @@ bool Open(const FlatAssetEntry& entry)
     OutputLog::info("bridge debug log: " +
                     bridge_debug_log_path().string());
     if (!g_level_export_only_load.load()) {
-        OutputLog::info("loading level '" + entry.name + "' …");
+        OutputLog::info("loading level '" + entry.name + "' ...");
     }
     loader_progress_update(8, 100, "Extracting " + entry.name);
 
@@ -507,7 +508,7 @@ bool Open(const FlatAssetEntry& entry)
     }
 
     if (n_heightfield_refs == 0) {
-        OutputLog::warn("level references no .ehf/.ghf/heightfield* strings — "
+        OutputLog::warn("level references no .ehf/.ghf/heightfield* strings - "
                         "checking sibling .list file for the heightfield "
                         "names instead.");
     }
@@ -854,6 +855,7 @@ bool Open(const FlatAssetEntry& entry)
                         " streaming hint path(s), " + std::to_string(indexed) +
                         " resolved through global .mdl index");
     }
+    loader_progress_update(22, 100, "Reading level GDB + save...");
     g_level_gdb_placements.clear();
     g_level_entity_contents.clear();
     g_level_entity_gameplay.clear();
@@ -863,8 +865,29 @@ bool Open(const FlatAssetEntry& entry)
     g_level_creature_catalog.clear();
     {
 #include "Level/Loading/Stages/LoadEntities.inl"
+    loader_progress_update(26, 100, "Scanning level effects...");
 #include "Level/Loading/Stages/LoadEffects.inl"
+    loader_progress_update(28, 100, "Matching prop models...");
 #include "Level/Loading/Stages/LoadProps.inl"
+    }
+
+    
+    
+    
+    if (Creation::IsCustomLooseLevel(entry)) {
+        const size_t cleared = g_level_gdb_placements.size();
+        const size_t cleared_fx = g_pending_level_fx.size();
+        g_level_gdb_placements.clear();
+        g_pending_level_fx.clear();
+        g_level_entity_contents.clear();
+        g_level_entity_gameplay.clear();
+        g_level_property_details.clear();
+        if (cleared || cleared_fx) {
+            OutputLog::info(
+                "custom level: cleared " + std::to_string(cleared) +
+                " donor entity placement(s) and " +
+                std::to_string(cleared_fx) + " fx spawn(s)");
+        }
     }
 
     for (const auto& vfs_stream_path : g_level_vfs_streaming_bnks) {
@@ -975,7 +998,7 @@ bool Open(const FlatAssetEntry& entry)
             hos << "heightfield loaded:"
                 << "  ehf=" << hf.ehf_bytes.size() << "B"
                 << "  ghf=" << hf.ghf_bytes_compressed.size() << "B (gz)"
-                << " → " << hf.ghf_bytes_raw.size() << "B (raw)";
+                << " -> " << hf.ghf_bytes_raw.size() << "B (raw)";
             OutputLog::success(hos.str());
 
             if (!hf.ghf_bytes_raw.empty()) {
@@ -991,7 +1014,7 @@ bool Open(const FlatAssetEntry& entry)
                             (ehf_tile > 0.0f && std::isfinite(ehf_tile))
                                 ? ehf_tile : 0.5f;
                         std::ostringstream tos;
-                        tos << "  .ghf tile_size was 0 — using .ehf f2 = "
+                        tos << "  .ghf tile_size was 0 - using .ehf f2 = "
                             << fallback << " (world = "
                             << (hg.width  - 1) * fallback << " x "
                             << (hg.height - 1) * fallback << ")";
@@ -1620,6 +1643,55 @@ bool Open(const FlatAssetEntry& entry)
                                     }
                                     continue;
                                 }
+                                if (a.entity_kind ==
+                                        LevelEdit::AdditionEntityKind::
+                                            GenericProp &&
+                                    !a.entity_name.empty()) {
+                                    const bool already_marked =
+                                        std::any_of(
+                                            g_level_spawn_markers.begin(),
+                                            g_level_spawn_markers.end(),
+                                            [&](const LevelSpawnMarker&
+                                                    existing) {
+                                                return existing
+                                                           .pending_addition_index ==
+                                                       int(ai);
+                                            });
+                                    if (!already_marked) {
+                                        LevelSpawnMarker marker;
+                                        marker.x = a.pos[0];
+                                        marker.y = a.pos[1];
+                                        marker.z = a.pos[2];
+                                        marker.kind = 6;
+                                        marker.pending_addition_index =
+                                            int(ai);
+                                        marker.name = a.entity_name;
+                                        std::string model_path =
+                                            a.model_path;
+                                        std::transform(
+                                            model_path.begin(),
+                                            model_path.end(),
+                                            model_path.begin(),
+                                            [](unsigned char c) {
+                                                return static_cast<char>(
+                                                    std::tolower(c));
+                                            });
+                                        std::replace(model_path.begin(),
+                                                     model_path.end(), '/',
+                                                     '\\');
+                                        uint32_t model_hash =
+                                            0x811C9DC5u;
+                                        for (unsigned char c :
+                                             model_path) {
+                                            model_hash *= 0x01000193u;
+                                            model_hash ^= uint32_t(c);
+                                        }
+                                        marker.model_hashes.push_back(
+                                            model_hash);
+                                        g_level_spawn_markers.push_back(
+                                            std::move(marker));
+                                    }
+                                }
                                 Level::PropBlock pb;
                                 pb.type = 0xB3;
                                 pb.model_path = a.model_path;
@@ -1765,9 +1837,14 @@ bool Open(const FlatAssetEntry& entry)
                                     continue;
                                 }
 
-                                OutputLog::warn(
-                                    ".water sibling found but failed to parse: " +
-                                    water_path);
+                                
+                                
+                                
+                                if (water_bytes.size() > 16) {
+                                    OutputLog::warn(
+                                        ".water sibling found but failed "
+                                        "to parse: " + water_path);
+                                }
                             }
                             if (!merged.bodies.empty()) {
                                 merged.body_count =
@@ -1858,7 +1935,7 @@ bool Open(const FlatAssetEntry& entry)
             }
         }
     } else {
-        OutputLog::warn("no .ehf or .ghf path in level — can't load terrain");
+        OutputLog::warn("no .ehf or .ghf path in level - can't load terrain");
     }
 
     return true;

@@ -1,6 +1,7 @@
 #include "QuestInjection.h"
 
 #include "QuestAuthoring.h"
+#include "../BNKCore.cpp"
 #include "../Level/IO/BnkWriter.h"
 #include "../Level/Database/TextBank.h"
 
@@ -71,19 +72,6 @@ bool write_file_atomically(const std::string& path,
     return true;
 }
 
-bool ensure_backup(const std::string& path, std::string& error) {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    const std::string backup = path + ".bak";
-    if (fs::exists(backup, ec)) return true;
-    fs::copy_file(path, backup, fs::copy_options::none, ec);
-    if (ec) {
-        error = "could not create backup " + backup + ": " + ec.message();
-        return false;
-    }
-    return true;
-}
-
 std::vector<uint8_t> to_bytes(const std::string& text) {
     return std::vector<uint8_t>(text.begin(), text.end());
 }
@@ -124,6 +112,14 @@ bool Inject(const std::string& root_dir,
         std::string path;
         std::vector<uint8_t> bytes;
     };
+
+    
+    
+    
+    for (const BankTarget& target : targets) {
+        BnkCache::invalidate(target.path);
+    }
+
     std::vector<Snapshot> snapshots;
     snapshots.reserve(targets.size());
     for (const BankTarget& target : targets) {
@@ -136,15 +132,11 @@ bool Inject(const std::string& root_dir,
         }
         Snapshot snapshot;
         snapshot.path = target.path;
-        if (!read_file(target.path, snapshot.bytes, error) ||
-            !ensure_backup(target.path, error)) {
+        if (!read_file(target.path, snapshot.bytes, error)) {
             return false;
         }
         snapshots.push_back(std::move(snapshot));
     }
-
-
-
 
     std::unordered_map<uint32_t, std::string> text_edits;
     for (const auto& entry : localized_text) {
@@ -214,110 +206,7 @@ bool Inject(const std::string& root_dir,
 
     std::ostringstream message;
     message << "Saved " << quest_id << " to " << targets.size()
-            << " script bank" << (targets.size() == 1 ? "" : "s")
-            << ". Backups were kept beside each modified file.";
-    result = message.str();
-    return true;
-}
-
-bool BackupsAvailable(const std::string& root_dir) {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    const fs::path data = fs::path(root_dir) / "data";
-    for (const char* name : {"gamescripts.bnk", "gamescripts_r.bnk"}) {
-        if (fs::is_regular_file((data / name).string() + ".bak", ec)) {
-            return true;
-        }
-    }
-    const fs::path language = data / "language";
-    if (!fs::is_directory(language, ec)) return false;
-    for (const fs::directory_entry& entry :
-         fs::directory_iterator(language, ec)) {
-        if (!entry.is_directory(ec)) continue;
-        const fs::path babel = entry.path() / "text" / "book.babel";
-        if (fs::is_regular_file(babel.string() + ".bak", ec)) return true;
-    }
-    return false;
-}
-
-bool RestoreDefaults(const std::string& root_dir,
-                     std::string& result,
-                     std::string& error) {
-    namespace fs = std::filesystem;
-    result.clear();
-    error.clear();
-
-    std::vector<std::string> originals;
-    const fs::path data = fs::path(root_dir) / "data";
-    std::error_code ec;
-    for (const char* name : {"gamescripts.bnk", "gamescripts_r.bnk"}) {
-        const fs::path original = data / name;
-        if (fs::is_regular_file(original.string() + ".bak", ec)) {
-            originals.push_back(original.string());
-        }
-    }
-    const fs::path language = data / "language";
-    if (fs::is_directory(language, ec)) {
-        for (const fs::directory_entry& entry :
-             fs::directory_iterator(language, ec)) {
-            if (!entry.is_directory(ec)) continue;
-            const fs::path original =
-                entry.path() / "text" / "book.babel";
-            if (fs::is_regular_file(original.string() + ".bak", ec)) {
-                originals.push_back(original.string());
-            }
-        }
-    }
-    if (originals.empty()) {
-        error = "No quest backups were found.";
-        return false;
-    }
-
-    struct RestoreFile {
-        std::string path;
-        std::vector<uint8_t> before;
-        std::vector<uint8_t> backup;
-    };
-    std::vector<RestoreFile> files;
-    files.reserve(originals.size());
-    for (const std::string& path : originals) {
-        RestoreFile file;
-        file.path = path;
-        if (!read_file(path, file.before, error) ||
-            !read_file(path + ".bak", file.backup, error)) {
-            return false;
-        }
-        files.push_back(std::move(file));
-    }
-
-    std::size_t restored = 0;
-    for (; restored < files.size(); ++restored) {
-        if (!write_file_atomically(files[restored].path,
-                                   files[restored].backup, error)) {
-            break;
-        }
-    }
-    if (restored != files.size()) {
-        std::string rollback_error;
-        for (std::size_t i = 0; i < restored; ++i) {
-            std::string one_error;
-            if (!write_file_atomically(files[i].path, files[i].before,
-                                       one_error)) {
-                if (!rollback_error.empty()) rollback_error += "; ";
-                rollback_error += one_error;
-            }
-        }
-        if (!rollback_error.empty()) {
-            error += " (restore rollback also failed: " + rollback_error +
-                     ')';
-        }
-        return false;
-    }
-
-    std::ostringstream message;
-    message << "Restored " << restored
-            << " quest script/text file" << (restored == 1 ? "" : "s")
-            << " from the original backups.";
+            << " script bank" << (targets.size() == 1 ? "" : "s") << ".";
     result = message.str();
     return true;
 }

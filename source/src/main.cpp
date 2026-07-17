@@ -33,6 +33,7 @@
 #include "Splashscreen/Splashscreen.h"
 #include "Utilities/Files.h"
 #include "Utilities/AutoPilot.h"
+#include "Utilities/CrashLog.h"
 #include "Utilities/DebugTrace.h"
 #include "Audio/AudioPlayer.h"
 #include "Splashscreen/IconFont.h"
@@ -276,6 +277,7 @@ static void build_theme() {
 #ifdef _WIN32
 int main() {
     DebugTrace::install_crash_handler();
+    CrashLog::Install();
 
     HINSTANCE hInstance = GetModuleHandle(nullptr);
     WNDCLASSEXA wc{};
@@ -333,6 +335,9 @@ int main() {
     ImGui_ImplGlfw_InitForOpenGL(g_window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 #endif
+    
+    
+    ImGui::GetIO().ConfigDragClickToInputText = true;
     Splashscreen_init_icon_font_at_startup();
     build_theme();
     S.last_dir = load_last_dir();

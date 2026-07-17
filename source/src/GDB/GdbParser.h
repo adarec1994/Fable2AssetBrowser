@@ -143,6 +143,7 @@ struct EntityContents {
     bool has_inventory_component = false;
     bool has_chest_component = false;
     bool is_dig_spot = false;
+    bool is_dive_spot = false;
     bool dog_can_lead_to = false;
     int  can_be_stolen_from = -1;
     int  can_respawn_items_once = -1;
@@ -354,16 +355,23 @@ std::unordered_map<uint32_t, SpawnEntityInfo> CollectSpawnEntities(
     SpawnDonorInfo* out_donor = nullptr,
     NpcDonorInfo* out_npc_donor = nullptr);
 
+enum class EntityCatalogKind : uint8_t {
+    Creature = 0,
+    StaticProp = 1,
+};
+
 struct CreatureCatalogEntry {
     std::string name;
     std::string display_name;
     uint32_t entity_hash = 0;
-
-
-
+    EntityCatalogKind kind = EntityCatalogKind::Creature;
     uint32_t authored_name_hash = 0;
     uint32_t name_tag_hash = 0;
     std::vector<uint32_t> model_hashes;
+    uint32_t transform_component_field = 0;
+    uint32_t transform_component_template = 0;
+    uint32_t position_template = 0;
+    uint32_t rotation_template = 0;
 };
 std::vector<CreatureCatalogEntry> CollectCreatureNames(
     const std::vector<const std::vector<uint8_t>*>& gdbs,

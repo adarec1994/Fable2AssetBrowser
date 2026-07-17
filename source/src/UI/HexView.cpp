@@ -675,7 +675,7 @@ void draw_hex_window() {
                             std::ostringstream os;
                             os << "CompFlag=" << m.CompFlag
                                << " with PixelFormat=" << S.tex_info.PixelFormat
-                               << " — only BC1 (35) compressed mips are supported by the codec port";
+                               << " - only BC1 (35) compressed mips are supported by the codec port";
                             ImGui::TextUnformatted("Compressed non-BC1 preview not supported yet.");
                             if(ImGui::Button("Close", ImVec2(-1,0))) ImGui::CloseCurrentPopup();
                             ImGui::EndPopup();

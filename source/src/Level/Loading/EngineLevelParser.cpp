@@ -319,7 +319,7 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                     << std::hex << e.type << std::dec
                     << " (" << e.type << ") at offset 0x"
                     << std::hex << e.offset << std::dec
-                    << " — last 6 entries:";
+                    << " - last 6 entries:";
                 OutputLog::warn(uos.str());
                 const size_t n = out.entries.size();
                 for (size_t k = (n > 6 ? n - 6 : 0); k < n; ++k) {

@@ -10,8 +10,10 @@ namespace QuestUI {
 
 
 
-bool CreateNewQuest(const std::string& quest_id, std::string& error);
+bool CreateNewBlueprintQuest(const std::string& quest_id,
+                             std::string& error);
 bool OpenAuthoredQuest(const std::string& quest_id);
+bool DeleteAuthoredQuest(const std::string& quest_id, std::string& error);
 std::vector<std::string> AuthoredQuestIds();
 bool IsAuthoredQuestActive();
 std::string ActiveAuthoredQuestId();
@@ -59,11 +61,6 @@ bool BindCreatedNpcInstance(const LevelReferenceCandidate& candidate,
                             std::string& error);
 void CancelPendingNpcCreation();
 
-
-
-bool HasSelectedAuthoredNode();
-void ClearSelectedAuthoredNode();
-void DrawSelectedAuthoredNodeInspector();
 
 
 void RequestOpenPrerequisiteMenu();

@@ -1,15 +1,20 @@
 #include "../UI_Panels.h"
 #include "PanelInternal.h"
+#include "NewLevelDialog.h"
 #include "../UI_Main.h"
 #include "../OutputLog.h"
 #include "../ModelPreview.h"
 #include "../EntityModelResolver.h"
 #include "../ContentTabs.h"
+#include "DetailsPanel.h"
+#include "../../Level/Creation/LandscapeAuthoring.h"
+#include "../../Level/Creation/NewLevel.h"
 #include "../Quest/QuestNodeView.h"
 
 #include "../../ISO/IsoDump.h"
 #include "../../Quest/QuestInjection.h"
 #include "../../Entity/NpcAuthoring.h"
+#include "../../Entity/StaticPropAuthoring.h"
 #include "../../Level/Editing/LevelEdit.h"
 #include "../../Level/Core/LevelLoader.h"
 #include "../../Level/Database/TextBank.h"
@@ -22,6 +27,7 @@
 #include "../../Lua.h"
 #include "../../Utilities/Progress.h"
 #include "../../Utilities/Utils.h"
+#include "../../Utilities/GameBackup.h"
 #include "../../BNKCore.cpp"
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -59,11 +65,24 @@ NpcAuthoring::Definition g_new_npc;
 int g_new_npc_template_index = -1;
 char g_new_npc_template_filter[128]{};
 std::string g_new_npc_error;
+StaticPropAuthoring::Definition g_new_static_prop;
+int g_new_static_prop_model_index = -1;
+char g_new_static_prop_model_filter[128]{};
+std::string g_new_static_prop_error;
+enum class NewEntityKind : int {
+    Npc = 0,
+    StaticProp = 1,
+};
+NewEntityKind g_new_entity_kind = NewEntityKind::Npc;
 bool g_open_create_npc_requested = false;
 
 void select_new_npc_template(int index) {
     if (index < 0 ||
         static_cast<std::size_t>(index) >= g_global_entity_catalog.size()) {
+        return;
+    }
+    if (g_global_entity_catalog[static_cast<std::size_t>(index)].kind !=
+        Gdb::EntityCatalogKind::Creature) {
         return;
     }
     const std::string internal_name = g_new_npc.internal_name;
@@ -450,7 +469,6 @@ std::string lua_script_list_label(const LuaFileUI& e) {
 }
 
 void select_lua_script(size_t idx) {
-    if (level_edit_click_guard("Script preview")) return;
     S.viewing_lua = true;
     S.viewing_adb = false;
     S.show_gdb_render = false;
@@ -527,7 +545,6 @@ bool quest_source_has_debug_symbols(std::string bnk_path) {
 }
 
 void select_quest_script(size_t idx) {
-    if (level_edit_click_guard("Quest script preview")) return;
     if (idx >= S.all_quest_files.size()) return;
 
     const FlatAssetEntry entry = S.all_quest_files[idx];
@@ -621,7 +638,6 @@ void select_quest_script(size_t idx) {
 }
 
 void show_authored_quest(const std::string& quest_id) {
-    if (level_edit_click_guard("Custom quest preview")) return;
     ++S.lua_preview_request;
     if (!QuestUI::OpenAuthoredQuest(quest_id)) return;
     ContentTabs::OpenCustomQuest(quest_id,
@@ -663,6 +679,7 @@ bool shipped_quest_id_exists(const std::string& quest_id) {
 }
 
 std::atomic<bool> g_quest_injection_busy{false};
+void inject_active_authored_quest();
 
 std::string authored_quest_entry_path(const std::string& quest_id) {
     std::string lower = quest_id;
@@ -720,6 +737,13 @@ bool collect_quest_injection_targets(
 }
 
 void inject_active_authored_quest() {
+    {
+        std::string backup_error;
+        if (!GameBackup::RequireBackup(backup_error)) {
+            OutputLog::error("quest save: " + backup_error);
+            return;
+        }
+    }
     if (g_quest_injection_busy.exchange(true)) return;
     std::string validation_error;
     if (!QuestUI::ValidateActiveAuthoredQuest(validation_error)) {
@@ -910,6 +934,67 @@ void draw_npc_template_picker() {
     ImGui::EndCombo();
 }
 
+void draw_static_prop_model_picker() {
+    const char* preview = g_new_static_prop.model_path.empty()
+        ? "Select model..." : g_new_static_prop.model_path.c_str();
+    if (!ImGui::BeginCombo("Model", preview)) return;
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##new_static_prop_model_filter",
+                             "Search models...",
+                             g_new_static_prop_model_filter,
+                             sizeof(g_new_static_prop_model_filter));
+    std::string filter = g_new_static_prop_model_filter;
+    std::transform(filter.begin(), filter.end(), filter.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    std::vector<int> visible;
+    visible.reserve(S.all_mdl_files.size());
+    for (int i = 0; i < static_cast<int>(S.all_mdl_files.size()); ++i) {
+        const FlatAssetEntry& model = S.all_mdl_files[size_t(i)];
+        std::string searchable = model.name + " " + model.full_path;
+        std::transform(searchable.begin(), searchable.end(),
+                       searchable.begin(), [](unsigned char c) {
+                           return static_cast<char>(std::tolower(c));
+                       });
+        if (filter.empty() ||
+            searchable.find(filter) != std::string::npos) {
+            visible.push_back(i);
+        }
+    }
+    ImGui::Separator();
+    ImGui::BeginChild("##new_static_prop_models",
+                      ImVec2(0.0f, 300.0f));
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(visible.size()));
+    while (clipper.Step()) {
+        for (int row = clipper.DisplayStart; row < clipper.DisplayEnd;
+             ++row) {
+            const int index = visible[size_t(row)];
+            const FlatAssetEntry& model = S.all_mdl_files[size_t(index)];
+            const std::string label =
+                model.name.empty() ? model.full_path : model.name;
+            const bool selected = index == g_new_static_prop_model_index;
+            ImGui::PushID(index);
+            if (ImGui::Selectable(label.c_str(), selected)) {
+                g_new_static_prop_model_index = index;
+                g_new_static_prop.model_path = model.full_path;
+                g_new_static_prop_error.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(model.full_path.c_str());
+                ImGui::EndTooltip();
+            }
+            ImGui::PopID();
+        }
+    }
+    clipper.End();
+    ImGui::EndChild();
+    ImGui::EndCombo();
+}
+
 void draw_npc_named_record_combo(const char* label,
                                  uint32_t& selected_record,
                                  std::string& selected_name,
@@ -939,22 +1024,55 @@ void draw_npc_named_record_combo(const char* label,
     }
 }
 
-void draw_create_npc_modal() {
+void draw_create_entity_modal() {
     ImGui::SetNextWindowSize(ImVec2(720.0f, 620.0f),
                              ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Create NPC##modal", nullptr,
+    if (!ImGui::BeginPopupModal("Create Entity##modal", nullptr,
                                 ImGuiWindowFlags_NoResize)) return;
 
-    ImGui::BeginChild("##create_npc_form", ImVec2(0.0f, -44.0f), false);
-    ImGui::SeparatorText("Identity");
-    ImGui::InputTextWithHint("NPC ID", "QNPC_MyCharacter",
-                             &g_new_npc.internal_name);
-    ImGui::InputText("Display name", &g_new_npc.display_name);
+    int entity_kind = static_cast<int>(g_new_entity_kind);
+    const char* entity_kinds[] = {"NPC", "Static prop"};
+    ImGui::SetNextItemWidth(220.0f);
+    if (ImGui::Combo("Entity type", &entity_kind, entity_kinds,
+                     static_cast<int>(std::size(entity_kinds)))) {
+        g_new_entity_kind = static_cast<NewEntityKind>(entity_kind);
+        g_new_npc_error.clear();
+        g_new_static_prop_error.clear();
+    }
 
-    ImGui::Spacing();
-    ImGui::SeparatorText("Appearance and behaviour");
-    draw_npc_template_picker();
-    if (g_new_npc.template_entity != 0) {
+    ImGui::BeginChild("##create_entity_form", ImVec2(0.0f, -44.0f),
+                      false);
+    if (g_new_entity_kind == NewEntityKind::StaticProp) {
+        ImGui::SeparatorText("Identity");
+        ImGui::InputTextWithHint("Entity ID", "QPROP_ChildhoodSkip",
+                                 &g_new_static_prop.internal_name);
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Appearance");
+        draw_static_prop_model_picker();
+        ImGui::Spacing();
+        ImGui::TextWrapped(
+            "A static prop is a lightweight named world object. It receives "
+            "only a model and transform: no AI, targeting, action-use, "
+            "sale-sign, readable, inventory, or physics behaviour.");
+        ImGui::TextDisabled(
+            "Quest Blueprint nodes reference the placed instance by name; "
+            "the node does not copy the entity's component details.");
+        if (!g_new_static_prop_error.empty()) {
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.95f, 0.42f, 0.38f, 1.0f), "%s",
+                               g_new_static_prop_error.c_str());
+        }
+    } else {
+        ImGui::SeparatorText("Identity");
+        ImGui::InputTextWithHint("NPC ID", "QNPC_MyCharacter",
+                                 &g_new_npc.internal_name);
+        ImGui::InputText("Display name", &g_new_npc.display_name);
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Appearance and behaviour");
+        draw_npc_template_picker();
+        if (g_new_npc.template_entity != 0) {
         ImGui::TextDisabled(
             "The complete model, eyes, hair, rig, animations, and unlisted "
             "GDB values are inherited from this template.");
@@ -993,31 +1111,49 @@ void draw_create_npc_modal() {
                 draw_npc_value_field(field);
             }
         }
-    }
-    if (!g_new_npc_error.empty()) {
-        ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.95f, 0.42f, 0.38f, 1.0f), "%s",
-                           g_new_npc_error.c_str());
+        }
+        if (!g_new_npc_error.empty()) {
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.95f, 0.42f, 0.38f, 1.0f), "%s",
+                               g_new_npc_error.c_str());
+        }
     }
     ImGui::EndChild();
 
-    const bool can_save = g_new_npc.template_entity != 0 &&
-                          g_new_npc.creature_component != 0;
+    const bool saving_static =
+        g_new_entity_kind == NewEntityKind::StaticProp;
+    const bool can_save = saving_static
+        ? StaticPropAuthoring::IsValidInternalName(
+              g_new_static_prop.internal_name) &&
+              !g_new_static_prop.model_path.empty()
+        : g_new_npc.template_entity != 0 &&
+              g_new_npc.creature_component != 0;
     ImGui::BeginDisabled(!can_save);
-    if (ImGui::Button("Save NPC", ImVec2(140.0f, 0.0f))) {
-        uint32_t entity_hash = 0;
+    if (ImGui::Button("Save Entity", ImVec2(140.0f, 0.0f))) {
+        uint32_t saved_entity_hash = 0;
         std::string result;
         std::string error;
-        if (NpcAuthoring::Save(S.root_dir, g_new_npc, entity_hash,
-                               result, error)) {
-            TextBank::Invalidate();
-            TextBank::LoadForRoot(S.root_dir);
+        bool saved_ok = false;
+        if (saving_static) {
+            StaticPropAuthoring::CatalogEntry saved;
+            saved_ok = StaticPropAuthoring::Save(
+                S.root_dir, g_new_static_prop, saved, result, error);
+            saved_entity_hash = saved.entity_hash;
+        } else {
+            saved_ok = NpcAuthoring::Save(
+                S.root_dir, g_new_npc, saved_entity_hash, result, error);
+        }
+        if (saved_ok) {
+            if (!saving_static) {
+                TextBank::Invalidate();
+                TextBank::LoadForRoot(S.root_dir);
+            }
             Level::BuildGlobalEntityCatalog();
             int saved_index = -1;
             for (int i = 0;
                  i < static_cast<int>(g_global_entity_catalog.size()); ++i) {
                 if (g_global_entity_catalog[static_cast<size_t>(i)]
-                        .entity_hash == entity_hash) {
+                        .entity_hash == saved_entity_hash) {
                     saved_index = i;
                     break;
                 }
@@ -1030,14 +1166,18 @@ void draw_create_npc_modal() {
                 ContentTabs::OpenEntity(saved_index, label);
                 load_entity_preview(saved_index);
             }
-            OutputLog::success("NPC save: " + result);
+            OutputLog::success("entity save: " + result);
             show_completion_box(result);
             g_new_npc = NpcAuthoring::Definition{};
             g_new_npc_template_index = -1;
             g_new_npc_error.clear();
+            g_new_static_prop = StaticPropAuthoring::Definition{};
+            g_new_static_prop_model_index = -1;
+            g_new_static_prop_error.clear();
             ImGui::CloseCurrentPopup();
         } else {
-            g_new_npc_error = std::move(error);
+            (saving_static ? g_new_static_prop_error : g_new_npc_error) =
+                std::move(error);
         }
     }
     ImGui::EndDisabled();
@@ -1046,6 +1186,9 @@ void draw_create_npc_modal() {
         g_new_npc = NpcAuthoring::Definition{};
         g_new_npc_template_index = -1;
         g_new_npc_error.clear();
+        g_new_static_prop = StaticPropAuthoring::Definition{};
+        g_new_static_prop_model_index = -1;
+        g_new_static_prop_error.clear();
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -1161,6 +1304,16 @@ void draw_left_panel() {
     ImGui::SameLine(0, 2);
     const ImU32 kQuestsLabel = IM_COL32(100, 200, 255, 255);
     if (tab_button("Quests", s_active_tab == 10, kQuestsLabel)) s_active_tab = 10;
+
+    if (DetailsPanel::Active()) {
+        ImGui::SameLine(0, 2);
+        const ImU32 kDetailsLabel = IM_COL32(255, 230, 120, 255);
+        if (tab_button("Details", s_active_tab == 11, kDetailsLabel)) {
+            s_active_tab = 11;
+        }
+    } else if (s_active_tab == 11) {
+        s_active_tab = 1;
+    }
 
     ImGui::Separator();
 
@@ -1889,7 +2042,7 @@ void draw_left_panel() {
                 ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
                 ImGui::BeginTooltip();
                 ImGui::TextUnformatted(
-                    "No MDLs indexed yet — open a Fable 2 root "
+                    "No MDLs indexed yet - open a Fable 2 root "
                     "(folder or ISO) to populate this list.");
                 ImGui::EndTooltip();
             }
@@ -1924,7 +2077,7 @@ void draw_left_panel() {
                 ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
                 ImGui::BeginTooltip();
                 ImGui::TextUnformatted(
-                    "No textures indexed yet — open a Fable 2 root "
+                    "No textures indexed yet - open a Fable 2 root "
                     "(folder or ISO) to populate this list.");
                 ImGui::EndTooltip();
             }
@@ -1966,7 +2119,7 @@ void draw_left_panel() {
                 ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
                 ImGui::BeginTooltip();
                 ImGui::TextUnformatted(
-                    "No audio indexed yet — open a Fable 2 root "
+                    "No audio indexed yet - open a Fable 2 root "
                     "(folder or ISO) to populate this list.");
                 ImGui::EndTooltip();
             }
@@ -2259,22 +2412,32 @@ void draw_left_panel() {
         }
 
         if (s_active_tab == 9) {
-            const bool create_npc_clicked =
-                ImGui::Button("Create NPC", ImVec2(-1.0f, 0.0f));
-            if (create_npc_clicked || g_open_create_npc_requested) {
+            const bool create_entity_clicked =
+                ImGui::Button("Create Entity", ImVec2(-1.0f, 0.0f));
+            if (create_entity_clicked || g_open_create_npc_requested) {
+                if (g_open_create_npc_requested) {
+                    g_new_entity_kind = NewEntityKind::Npc;
+                }
                 g_open_create_npc_requested = false;
                 g_new_npc = NpcAuthoring::Definition{};
                 g_new_npc_template_index = -1;
                 g_new_npc_template_filter[0] = 0;
                 g_new_npc_error.clear();
+                g_new_static_prop = StaticPropAuthoring::Definition{};
+                g_new_static_prop_model_index = -1;
+                g_new_static_prop_model_filter[0] = 0;
+                g_new_static_prop_error.clear();
                 if (S.selected_entity >= 0 &&
                     static_cast<std::size_t>(S.selected_entity) <
-                        g_global_entity_catalog.size()) {
+                        g_global_entity_catalog.size() &&
+                    g_global_entity_catalog[
+                        static_cast<std::size_t>(S.selected_entity)].kind ==
+                        Gdb::EntityCatalogKind::Creature) {
                     select_new_npc_template(S.selected_entity);
                 }
-                ImGui::OpenPopup("Create NPC##modal");
+                ImGui::OpenPopup("Create Entity##modal");
             }
-            draw_create_npc_modal();
+            draw_create_entity_modal();
 
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputTextWithHint("##entity_filter", "Filter entities",
@@ -2352,19 +2515,8 @@ void draw_left_panel() {
                         if (ImGui::Selectable(label.c_str(),
                                               S.selected_entity == index,
                                               ImGuiSelectableFlags_SpanAllColumns)) {
-                            const bool protected_level =
-                                ContentTabs::ActiveKind() ==
-                                    ContentTabs::Kind::Level &&
-                                (LevelEdit::Enabled() || LevelEdit::Dirty() ||
-                                 LevelEdit::Saving() ||
-                                 Level::IsAsyncLoadInProgress());
-                            if (protected_level) {
-                                OutputLog::warn(
-                                    "Finish the level edit before opening an entity tab.");
-                            } else {
-                                ContentTabs::OpenEntity(index, label);
-                                load_entity_preview(index);
-                            }
+                            ContentTabs::OpenEntity(index, label);
+                            load_entity_preview(index);
                         }
                         if (!S.hide_tooltips && ImGui::IsItemHovered()) {
                             ImGui::BeginTooltip();
@@ -2387,13 +2539,13 @@ void draw_left_panel() {
         if (s_active_tab == 10) {
             static std::string new_quest_id = "QO000_NewQuest";
             static std::string new_quest_error;
-            if (ImGui::Button("Create a new quest", ImVec2(-1.0f, 0.0f))) {
+            if (ImGui::Button("Create Quest", ImVec2(-1.0f, 0.0f))) {
                 new_quest_error.clear();
-                ImGui::OpenPopup("Create a new quest##modal");
+                ImGui::OpenPopup("Create Quest##modal");
             }
             ImGui::SetNextWindowSize(ImVec2(430.0f, 0.0f),
                                      ImGuiCond_Appearing);
-            if (ImGui::BeginPopupModal("Create a new quest##modal", nullptr,
+            if (ImGui::BeginPopupModal("Create Quest##modal", nullptr,
                                        ImGuiWindowFlags_AlwaysAutoResize)) {
                 if (ImGui::IsWindowAppearing()) {
                     ImGui::SetKeyboardFocusHere();
@@ -2413,11 +2565,12 @@ void draw_left_panel() {
                             "A shipped quest already uses this ID.";
                     } else {
                         ++S.lua_preview_request;
-                        if (QuestUI::CreateNewQuest(new_quest_id,
-                                                    new_quest_error)) {
+                        if (QuestUI::CreateNewBlueprintQuest(
+                                new_quest_id, new_quest_error)) {
+                            const std::string title =
+                                "Custom quest: " + new_quest_id;
                             ContentTabs::OpenCustomQuest(
-                                new_quest_id,
-                                "Custom quest: " + new_quest_id);
+                                new_quest_id, title);
                             S.selected_quest = -1;
                             S.selected_item = -1;
                             S.show_item_details = false;
@@ -2429,8 +2582,7 @@ void draw_left_panel() {
                             S.viewing_adb = false;
                             S.show_gdb_render = false;
                             S.lua_preview_selected = -1;
-                            S.lua_preview_title =
-                                "Custom quest: " + new_quest_id;
+                            S.lua_preview_title = title;
                             S.lua_preview_content =
                                 QuestUI::ActiveAuthoredLua();
                             S.lua_preview_loading = false;
@@ -2446,31 +2598,6 @@ void draw_left_panel() {
                     ImGui::CloseCurrentPopup();
                 }
                 ImGui::EndPopup();
-            }
-
-            if (QuestUI::IsAuthoredQuestActive()) {
-                ImGui::BeginDisabled(g_quest_injection_busy.load());
-                if (ImGui::Button("Save Quest", ImVec2(-1.0f, 0.0f))) {
-                    ImGui::OpenPopup("Save custom quest?##modal");
-                }
-                ImGui::EndDisabled();
-                if (ImGui::BeginPopupModal(
-                        "Save custom quest?##modal", nullptr,
-                        ImGuiWindowFlags_AlwaysAutoResize)) {
-                    ImGui::Text("Save %s to the game scripts?",
-                                QuestUI::ActiveAuthoredQuestId().c_str());
-                    ImGui::TextDisabled(
-                        "Backups will be created beside the script banks.");
-                    if (ImGui::Button("Save Quest")) {
-                        ImGui::CloseCurrentPopup();
-                        inject_active_authored_quest();
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Cancel")) {
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ImGui::EndPopup();
-                }
             }
 
             ImGui::SetNextItemWidth(-1);
@@ -2505,6 +2632,7 @@ void draw_left_panel() {
             }
 
             ImGui::BeginChild("quests_list", ImVec2(0, 0), false);
+            static std::string s_delete_quest_id;
             const std::vector<std::string> authored_quests =
                 QuestUI::AuthoredQuestIds();
             bool showed_authored_heading = false;
@@ -2527,6 +2655,40 @@ void draw_left_panel() {
                                       ImGuiSelectableFlags_SpanAllColumns)) {
                     show_authored_quest(quest_id);
                 }
+                if (ImGui::BeginPopupContextItem()) {
+                    if (ImGui::MenuItem("Delete Quest")) {
+                        s_delete_quest_id = quest_id;
+                    }
+                    ImGui::EndPopup();
+                }
+            }
+            if (!s_delete_quest_id.empty() &&
+                !ImGui::IsPopupOpen("Delete custom quest?")) {
+                ImGui::OpenPopup("Delete custom quest?");
+            }
+            if (ImGui::BeginPopupModal("Delete custom quest?", nullptr,
+                                       ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::Text("Delete %s? This removes its blueprint file "
+                            "for good.",
+                            s_delete_quest_id.c_str());
+                if (ImGui::Button("Delete", ImVec2(120, 0))) {
+                    const std::string id = s_delete_quest_id;
+                    s_delete_quest_id.clear();
+                    ContentTabs::CloseCustomQuest(id);
+                    std::string derr;
+                    if (QuestUI::DeleteAuthoredQuest(id, derr)) {
+                        OutputLog::success("quest deleted: " + id);
+                    } else {
+                        OutputLog::error("quest delete: " + derr);
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                    s_delete_quest_id.clear();
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
             }
             if (showed_authored_heading && !vis.empty()) {
                 ImGui::Separator();
@@ -2717,6 +2879,21 @@ void draw_left_panel() {
                 }
             }
 
+            {
+                const bool new_level_busy =
+                    Level::IsAsyncLoadInProgress() ||
+                    Level::IsExportInProgress() ||
+                    tree_build_in_progress();
+                if (new_level_busy) ImGui::BeginDisabled();
+                if (ImGui::Button("+ New Level", ImVec2(-1, 0))) {
+                    if (!level_edit_click_guard("Level creation")) {
+                        NewLevelDialog::Open();
+                    }
+                }
+                if (new_level_busy) ImGui::EndDisabled();
+            }
+            NewLevelDialog::Draw();
+
             ImGui::SetNextItemWidth(-1);
             ImGui::InputTextWithHint("##level_filter", "Filter",
                                      &S.level_filter);
@@ -2730,6 +2907,8 @@ void draw_left_panel() {
             }
 
             ImGui::BeginChild("levels_list", ImVec2(0, 0), false);
+            static FlatAssetEntry s_delete_level_entry{};
+            static std::string s_delete_level_name;
             if (S.all_level_files.empty()) {
                 ImGui::TextDisabled("No .engine_level files indexed yet.");
                 ImGui::TextDisabled("Open a Fable 2 root to populate the list.");
@@ -2802,6 +2981,13 @@ void draw_left_panel() {
                             }
                             ImGui::EndMenu();
                         }
+                        if (Level::Creation::IsCustomLooseLevel(e)) {
+                            ImGui::Separator();
+                            if (ImGui::MenuItem("Delete Level")) {
+                                s_delete_level_entry = e;
+                                s_delete_level_name = friendly;
+                            }
+                        }
                         ImGui::EndPopup();
                     }
                     if (!S.hide_tooltips && ImGui::IsItemHovered()) {
@@ -2822,6 +3008,7 @@ void draw_left_panel() {
                 }
 
                 std::unordered_set<const FlatAssetEntry*> placed;
+                std::unordered_set<std::string> placed_paths;
 
                 auto matches_filter = [&](const std::string& friendly,
                                           const std::string& full_path) {
@@ -2843,6 +3030,7 @@ void draw_left_panel() {
                         if (!matches_filter(m.name, it->second->full_path)) continue;
                         rows.push_back({it->second, std::string(m.name)});
                         placed.insert(it->second);
+                        placed_paths.insert(norm(it->second->full_path));
                     }
                     if (rows.empty()) continue;
 
@@ -2858,13 +3046,49 @@ void draw_left_panel() {
                     ImGui::Spacing();
                 }
 
+                auto is_loose_source = [](const FlatAssetEntry& e) {
+                    std::string src = e.bnk_path;
+                    std::transform(src.begin(), src.end(), src.begin(),
+                        [](unsigned char c){ return (char)std::tolower(c); });
+                    return src.size() < 4 ||
+                           src.compare(src.size() - 4, 4, ".bnk") != 0;
+                };
+                std::vector<std::pair<const FlatAssetEntry*, std::string>> custom;
+                for (const auto& e : S.all_level_files) {
+                    if (placed.count(&e)) continue;
+                    if (!is_loose_source(e)) continue;
+                    if (!placed_paths.insert(norm(e.full_path)).second) continue;
+                    std::filesystem::path p = e.full_path;
+
+                    
+                    auto region = p.parent_path().parent_path()
+                                      .filename().string();
+                    std::string label = region.empty() ? e.name : region;
+                    if (!matches_filter(label, e.full_path)) continue;
+                    custom.push_back({&e, label});
+                    placed.insert(&e);
+                }
+                if (!custom.empty()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                        ImVec4(1.0f, 0.84f, 0.0f, 1.0f));
+                    ImGui::TextUnformatted("Custom Levels");
+                    ImGui::PopStyleColor();
+                    ImGui::Indent(8.0f);
+                    for (const auto& [e, label] : custom) {
+                        draw_entry(*e, label);
+                    }
+                    ImGui::Unindent(8.0f);
+                    ImGui::Spacing();
+                }
+
                 std::vector<std::pair<const FlatAssetEntry*, std::string>> leftover;
                 for (const auto& e : S.all_level_files) {
                     if (placed.count(&e)) continue;
+                    if (placed_paths.count(norm(e.full_path))) continue;
                     std::filesystem::path p = e.full_path;
                     auto parent = p.parent_path().filename().string();
                     std::string label = parent.empty()
-                        ? e.name : parent + " — " + e.name;
+                        ? e.name : parent + " - " + e.name;
                     if (!matches_filter(label, e.full_path)) continue;
                     leftover.push_back({&e, label});
                 }
@@ -2879,6 +3103,40 @@ void draw_left_panel() {
                     }
                     ImGui::Unindent(8.0f);
                 }
+            }
+
+            if (!s_delete_level_name.empty() &&
+                !ImGui::IsPopupOpen("Delete custom level?")) {
+                ImGui::OpenPopup("Delete custom level?");
+            }
+            if (ImGui::BeginPopupModal("Delete custom level?", nullptr,
+                                       ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::Text("Delete %s? This permanently removes its "
+                            "files from data\\worlds\\albion.",
+                            s_delete_level_name.c_str());
+                if (ImGui::Button("Delete", ImVec2(120, 0))) {
+                    const FlatAssetEntry doomed = s_delete_level_entry;
+                    s_delete_level_name.clear();
+                    
+                    std::string off_msg;
+                    LevelEdit::SetEnabled(false, off_msg);
+                    LevelEdit::ClearEdits();
+                    ContentTabs::CloseLevelByPath(doomed.full_path);
+                    std::string derr;
+                    if (Level::Creation::DeleteCustomLevel(doomed,
+                                                           derr)) {
+                        refresh_loose_file_index();
+                    } else {
+                        OutputLog::error("delete level: " + derr);
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                    s_delete_level_name.clear();
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
             }
             ImGui::EndChild();
         }
@@ -2950,5 +3208,12 @@ void draw_left_panel() {
             ImGui::EndChild();
         }
 
+        if (s_active_tab == 11) {
+            DetailsPanel::Draw();
+        }
+
     ImGui::EndChild();
 }
+
+void RequestQuestInjection() { inject_active_authored_quest(); }
+bool QuestInjectionBusy() { return g_quest_injection_busy.load(); }

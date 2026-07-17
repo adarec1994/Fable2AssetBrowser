@@ -602,7 +602,7 @@ void extract_single_bnk_contents(const std::string& bnk_path) {
         }
     } catch (const std::exception& e) {
         OutputLog::error(std::string("Extract BNK: failed to open ") +
-                         bnk_path + " — " + e.what());
+                         bnk_path + " - " + e.what());
         return;
     } catch (...) {
         OutputLog::error(std::string("Extract BNK: failed to open ") +
@@ -622,12 +622,12 @@ void extract_single_bnk_contents(const std::string& bnk_path) {
     OutputLog::info(std::string("Extracting ") + std::to_string(total) +
                     " file(s) from " +
                     std::filesystem::path(bnk_path).filename().string() +
-                    " → " + export_root);
+                    " -> " + export_root);
 
     progress_open(total,
                   std::string("Extracting ") +
                   std::filesystem::path(bnk_path).filename().string() +
-                  " → " + export_root);
+                  " -> " + export_root);
     progress_update(0, total, "Starting...");
 
     std::thread([items = std::move(items),
@@ -690,7 +690,7 @@ void extract_single_bnk_contents(const std::string& bnk_path) {
                             std::to_string(n_failed) + " failed.");
         } else {
             OutputLog::success(std::string("BNK extract complete: ") +
-                               std::to_string(total) + " file(s) → " +
+                               std::to_string(total) + " file(s) -> " +
                                export_root);
         }
     }).detach();
@@ -810,7 +810,7 @@ static void asset_export_audio_raw_xma(const std::string& bnk_path,
         std::filesystem::create_directories(parent, ec);
         if (ec) {
             OutputLog::error(std::string(".xma export: cannot create ") +
-                             parent.string() + " — " + ec.message());
+                             parent.string() + " - " + ec.message());
             return;
         }
     }
@@ -828,7 +828,7 @@ static void asset_export_audio_raw_xma(const std::string& bnk_path,
     if (ok) {
         OutputLog::success(std::string("Exported ") +
                            std::filesystem::path(file_name).filename().string()
-                           + " as raw .xma → " + out.string());
+                           + " as raw .xma -> " + out.string());
     } else {
         OutputLog::error(std::string(".xma export failed: ") + file_name);
     }
@@ -853,7 +853,7 @@ static void asset_export_audio_encoded(const std::string& bnk_path,
         if (ec) {
             OutputLog::error(std::string(fmt_label) +
                              " export: cannot create " +
-                             parent.string() + " — " + ec.message());
+                             parent.string() + " - " + ec.message());
             return;
         }
     }
@@ -878,7 +878,7 @@ static void asset_export_audio_encoded(const std::string& bnk_path,
         if (!XmaDecoder::decode_xma_to_pcm(src, pcm, sr, ch, &err) ||
             pcm.empty()) {
             throw std::runtime_error(
-                std::string("XMA→PCM decode failed: ") + err);
+                std::string("XMA->PCM decode failed: ") + err);
         }
 
         bool encoded = aac
@@ -902,7 +902,7 @@ static void asset_export_audio_encoded(const std::string& bnk_path,
     if (ok) {
         OutputLog::success(std::string("Exported ") +
                            std::filesystem::path(file_name).filename().string()
-                           + " as " + fmt_label + " → " + out.string());
+                           + " as " + fmt_label + " -> " + out.string());
     } else {
         OutputLog::error(std::string(fmt_label) + " export failed: " +
                          file_name);
@@ -920,7 +920,7 @@ static void asset_export_to_export_dir(const std::string& bnk_path,
         std::filesystem::create_directories(parent, ec);
         if (ec) {
             OutputLog::error(std::string("Export: cannot create ") +
-                             parent.string() + " — " + ec.message());
+                             parent.string() + " - " + ec.message());
             return;
         }
     }
@@ -962,7 +962,7 @@ static void asset_export_to_export_dir(const std::string& bnk_path,
     if (ok) {
         OutputLog::success(std::string("Exported ") +
                            std::filesystem::path(file_name).filename().string() +
-                           " → " + out.string());
+                           " -> " + out.string());
     } else {
         OutputLog::error(std::string("Export failed: ") + file_name +
                          " (target: " + out.string() + ")");

@@ -29,6 +29,12 @@ void OpenLua(const std::string& key, const std::string& title,
              bool is_quest);
 void OpenCustomQuest(const std::string& quest_id,
                      const std::string& title);
+void CloseCustomQuest(const std::string& quest_id);
+void CloseLevelByPath(const std::string& full_path);
+
+
+
+void FixLooseEntryIndices(const std::string& loose_dir);
 
 
 
@@ -37,6 +43,7 @@ void CompleteLua(const std::string& key, const std::string& content);
 bool HasTabs();
 Kind ActiveKind();
 bool ActiveHasModel();
+const FlatAssetEntry* ActiveLevelEntry();
 void DrawTabBar();
 void CloseActive();
 void Clear();

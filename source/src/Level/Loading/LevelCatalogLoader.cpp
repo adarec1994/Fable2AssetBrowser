@@ -1,6 +1,7 @@
 #include "Level/Core/LevelLoader.h"
 #include "Level/Loading/LevelCatalogLoaderInternal.h"
 #include "Level/Database/TextBank.h"
+#include "Entity/StaticPropAuthoring.h"
 #include "GDB/GdbParser.h"
 #include "BNKCore.cpp"
 #include "ISO/IsoMount.h"
@@ -466,6 +467,38 @@ void BuildGlobalEntityCatalog() {
             " duplicate quest/scenario actor record(s)");
     }
 
+    std::vector<StaticPropAuthoring::CatalogEntry> static_props;
+    std::string static_prop_error;
+    if (StaticPropAuthoring::LoadCatalog(
+            S.root_dir, static_props, static_prop_error)) {
+        for (const auto& prop : static_props) {
+            Gdb::CreatureCatalogEntry entity;
+            entity.name = prop.internal_name;
+            entity.display_name = prop.internal_name;
+            entity.entity_hash = prop.entity_hash;
+            entity.kind = Gdb::EntityCatalogKind::StaticProp;
+            entity.model_hashes.push_back(prop.model_path_hash);
+            entity.transform_component_field =
+                prop.transform_component_field;
+            entity.transform_component_template =
+                prop.transform_component_template;
+            entity.position_template = prop.position_template;
+            entity.rotation_template = prop.rotation_template;
+            entities.push_back(std::move(entity));
+
+            if (prop.entity_hash != 0 && prop.model_path_hash != 0) {
+                exact_model_hashes[prop.entity_hash] = {
+                    prop.model_path_hash};
+            }
+        }
+    } else if (!static_prop_error.empty() &&
+               !S.root_dir.empty() &&
+               !ISO::IsoMount::is_iso_path(S.root_dir)) {
+        OutputLog::warn(
+            "entities: could not index custom static props: " +
+            static_prop_error);
+    }
+
     std::sort(entities.begin(), entities.end(),
               [](const Gdb::CreatureCatalogEntry& a,
                  const Gdb::CreatureCatalogEntry& b) {
@@ -500,9 +533,10 @@ void BuildGlobalEntityCatalog() {
     OutputLog::info(
         "entities: indexed " +
         std::to_string(g_global_entity_catalog.size()) +
-        " creature/NPC definition(s) from all game and level GDBs (" +
+        " entity definition(s) from all game and level GDBs (" +
         std::to_string(g_global_entity_gameplay.size()) +
-        " with gameplay details)");
+        " NPC/creature definitions with gameplay details, " +
+        std::to_string(static_props.size()) + " custom static prop(s))");
 }
 
 namespace Loading {

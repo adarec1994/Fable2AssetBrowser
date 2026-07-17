@@ -63,9 +63,11 @@ enum class AuthoredNodeKind {
     ApproachNpc,
     Dialogue,
     AcceptQuest,
+    HoldInteraction,
     ObtainItem,
     ReturnToNpc,
     CompleteQuest,
+    SkipChildhoodEnding,
 };
 
 struct WorldReference {

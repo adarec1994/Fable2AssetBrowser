@@ -68,6 +68,15 @@ size_t resolve_clip_names_from_gdb_animation_fields_for_root(
     const std::string& root,
     std::vector<AnimClip>& clips);
 
+
+
+
+
+bool load_clip_name_cache_for_root(const std::string& root,
+                                   std::vector<AnimClip>& clips);
+void save_clip_name_cache_for_root(const std::string& root,
+                                   const std::vector<AnimClip>& clips);
+
 uint32_t gdb_model_path_hash(std::string path);
 
 uint64_t model_animation_binding_revision();

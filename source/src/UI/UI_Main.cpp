@@ -36,6 +36,7 @@
 #include "../Level/Database/TextBank.h"
 #include "../Quest/QuestInjection.h"
 #include "../Entity/NpcAuthoring.h"
+#include "../Utilities/GameBackup.h"
 #include "../BNKCore.cpp"
 #ifndef _WIN32
 #include <GL/glew.h>
@@ -304,6 +305,14 @@ static void handle_flycam_input(float dt) {
 #endif
         g_flycam.right_drag_distance +=
             std::sqrt(mouse_dx * mouse_dx + mouse_dy * mouse_dy);
+
+        
+        
+        if (io.MouseWheel != 0.0f) {
+            g_flycam.move_speed *= std::pow(1.25f, io.MouseWheel);
+            g_flycam.move_speed =
+                std::clamp(g_flycam.move_speed, 0.1f, 5000.0f);
+        }
     }
     FlyCam_Update(g_flycam, dt, w_pressed, s_pressed, a_pressed, d_pressed, q_pressed, e_pressed, mouse_dx, mouse_dy);
 }
@@ -483,7 +492,7 @@ void draw_main(GLFWwindow* window) {
                             ImGui::MenuItem(
                                 (".anim (" +
                                  std::to_string(S.all_anim_files.size()) +
-                                 " indexed — dump TBD)").c_str(),
+                                 " indexed - dump TBD)").c_str(),
                                 nullptr, false, false);
                         } else {
                             ImGui::MenuItem(".anim (none indexed)",
@@ -503,7 +512,6 @@ void draw_main(GLFWwindow* window) {
                 ImGui::EndMenu();
             }
             {
-                static bool s_confirm_restore = false;
                 const bool level_ready = LevelEdit::Available();
                 if (ImGui::BeginMenu("Level", level_ready)) {
                     static LevelOpThread s_toggle_thread;
@@ -517,7 +525,7 @@ void draw_main(GLFWwindow* window) {
                         } else {
                             s_toggle_thread.launch(std::thread([] {
                                 progress_open(100,
-                                              "Backing up level files...");
+                                              "Enabling level editing...");
                                 std::string msg;
                                 const bool ok =
                                     LevelEdit::SetEnabled(true, msg);
@@ -554,48 +562,8 @@ void draw_main(GLFWwindow* window) {
                                 }
                             }));
                         }
-                        ImGui::Separator();
-                        if (ImGui::MenuItem("Restore Defaults", nullptr,
-                                            false, !saving)) {
-                            s_confirm_restore = true;
-                        }
                     }
                     ImGui::EndMenu();
-                }
-                if (s_confirm_restore) {
-                    ImGui::OpenPopup("Restore Level Defaults?");
-                    s_confirm_restore = false;
-                }
-                if (ImGui::BeginPopupModal("Restore Level Defaults?",
-                                           nullptr,
-                                           ImGuiWindowFlags_AlwaysAutoResize)) {
-                    ImGui::TextWrapped(
-                        "This restores the level back to its original "
-                        "state: the level's files are OVERWRITTEN with "
-                        "the .bak backups and the level is reloaded. Any "
-                        "saved or unsaved edits are lost.");
-                    ImGui::Spacing();
-                    if (ImGui::Button("Restore", ImVec2(120, 0))) {
-                        static LevelOpThread s_restore_thread;
-                        s_restore_thread.launch(std::thread([] {
-                            progress_open(100, "Restoring level files...");
-                            std::string msg;
-                            const bool ok = LevelEdit::RestoreDefaults(msg);
-                            progress_done();
-                            if (ok) {
-                                OutputLog::success("level edit: " + msg);
-                            } else {
-                                OutputLog::error("level edit: " + msg);
-                            }
-                        }));
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ImGui::SetItemDefaultFocus();
-                    ImGui::SameLine();
-                    if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ImGui::EndPopup();
                 }
                 if (S.level_edit_guard_popup) {
                     ImGui::OpenPopup("Level Editing Active");
@@ -617,8 +585,6 @@ void draw_main(GLFWwindow* window) {
                     ImGui::EndPopup();
                 }
             }
-            static bool s_confirm_restore_quests = false;
-            static bool s_confirm_restore_npcs = false;
             if (ImGui::BeginMenu("Settings")) {
                 if (ImGui::Checkbox("Show file paths in tree tooltips", &S.show_paths)) {
                     S.hide_tooltips = !S.show_paths;
@@ -700,102 +666,7 @@ void draw_main(GLFWwindow* window) {
                     S.show_keybinds_window = true;
                 }
 
-                ImGui::Separator();
-                if (ImGui::MenuItem(
-                        "Restore Quest Defaults", nullptr, false,
-                        QuestInjection::BackupsAvailable(S.root_dir))) {
-                    s_confirm_restore_quests = true;
-                }
-                if (ImGui::MenuItem(
-                        "Restore NPC Defaults", nullptr, false,
-                        NpcAuthoring::BackupAvailable(S.root_dir))) {
-                    s_confirm_restore_npcs = true;
-                }
-
                 ImGui::EndMenu();
-            }
-            if (s_confirm_restore_quests) {
-                ImGui::OpenPopup("Restore Quest Defaults?");
-                s_confirm_restore_quests = false;
-            }
-            if (ImGui::BeginPopupModal("Restore Quest Defaults?", nullptr,
-                                       ImGuiWindowFlags_AlwaysAutoResize)) {
-                ImGui::TextWrapped(
-                    "Restore the original game script and quest text "
-                    "banks from their .bak files?");
-                ImGui::Spacing();
-                if (ImGui::Button("Restore", ImVec2(120, 0))) {
-                    static LevelOpThread s_restore_quest_thread;
-                    const std::string root = S.root_dir;
-                    s_restore_quest_thread.launch(std::thread([root] {
-                        progress_open(100, "Restoring quest files...");
-                        std::string result;
-                        std::string error;
-                        const bool ok = QuestInjection::RestoreDefaults(
-                            root, result, error);
-                        if (ok) {
-                            const std::filesystem::path data =
-                                std::filesystem::path(root) / "data";
-                            BnkCache::invalidate(
-                                (data / "gamescripts.bnk").string());
-                            BnkCache::invalidate(
-                                (data / "gamescripts_r.bnk").string());
-                            TextBank::Invalidate();
-                            TextBank::LoadForRoot(root);
-                            OutputLog::success("quest restore: " + result);
-                            show_completion_box(result);
-                        } else {
-                            OutputLog::error("quest restore: " + error);
-                            show_error_box(error);
-                        }
-                        progress_done();
-                    }));
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::SetItemDefaultFocus();
-                ImGui::SameLine();
-                if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::EndPopup();
-            }
-            if (s_confirm_restore_npcs) {
-                ImGui::OpenPopup("Restore NPC Defaults?");
-                s_confirm_restore_npcs = false;
-            }
-            if (ImGui::BeginPopupModal("Restore NPC Defaults?", nullptr,
-                                       ImGuiWindowFlags_AlwaysAutoResize)) {
-                ImGui::TextWrapped(
-                    "Restore the original globals.gdb from its .bak file? "
-                    "All NPC definitions saved with Create NPC will be "
-                    "removed.");
-                ImGui::Spacing();
-                if (ImGui::Button("Restore", ImVec2(120, 0))) {
-                    static LevelOpThread s_restore_npc_thread;
-                    const std::string root = S.root_dir;
-                    s_restore_npc_thread.launch(std::thread([root] {
-                        progress_open(100, "Restoring NPC definitions...");
-                        std::string result;
-                        std::string error;
-                        if (NpcAuthoring::RestoreDefault(root, result,
-                                                        error)) {
-                            Level::BuildGlobalEntityCatalog();
-                            OutputLog::success("NPC restore: " + result);
-                            show_completion_box(result);
-                        } else {
-                            OutputLog::error("NPC restore: " + error);
-                            show_error_box(error);
-                        }
-                        progress_done();
-                    }));
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::SetItemDefaultFocus();
-                ImGui::SameLine();
-                if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::EndPopup();
             }
 
             if (ImGui::BeginMenu("Addons")) {
@@ -816,6 +687,8 @@ void draw_main(GLFWwindow* window) {
                 }
                 ImGui::EndMenu();
             }
+
+            GameBackup::DrawMainMenu();
 
             if (ImGui::BeginMenu("Help")) {
                 if (ImGui::MenuItem("About")) {

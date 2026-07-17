@@ -43,6 +43,10 @@
                     }
                     for (const auto& p : info.placements) {
                         if (emitted_spawns.count(p.hash_a)) continue;
+                        const auto placed_name_it = nm.find(p.hash_a);
+                        const std::string placed_name =
+                            placed_name_it != nm.end()
+                                ? placed_name_it->second : p.entity_name;
                         uint8_t kind = 0;
                         auto contents_it =
                             g_level_entity_contents.find(p.hash_a);
@@ -60,10 +64,26 @@
                             } else if (p.skeleton_file_hash != 0 ||
                                        p.retarget_skeleton_file_hash != 0) {
                                 kind = 3;
+                            } else if (
+                                placed_name.rfind("F2AB_Static_", 0) == 0) {
+                                kind = 6;
                             }
                         }
                         if (!kind && is_container) kind = 5;
-                        if (!kind) continue;
+                        
+                        
+                        
+                        const bool placed_player_start = [&] {
+                            std::string low = placed_name;
+                            std::transform(low.begin(), low.end(),
+                                           low.begin(),
+                                           [](unsigned char c) {
+                                               return (char)std::tolower(c);
+                                           });
+                            return low.rfind("startfrom", 0) == 0 ||
+                                   low.rfind("teleportto", 0) == 0;
+                        }();
+                        if (!kind && !placed_player_start) continue;
                         LevelSpawnMarker m;
                         m.x = p.x;
                         m.y = p.y;
@@ -84,9 +104,7 @@
                             m.pos_off[k] = p.pos_value_off[k];
                             m.rot_off[k] = p.rot_value_off[k];
                         }
-                        auto nit = nm.find(p.hash_a);
-                        m.name = nit != nm.end() ? nit->second
-                                                 : p.entity_name;
+                        m.name = placed_name;
                         emitted_spawns.insert(p.hash_a);
                         g_level_spawn_markers.push_back(std::move(m));
                     }
@@ -116,12 +134,14 @@
                     }
                     if (!g_level_spawn_markers.empty()) {
                         size_t gen = 0, sp = 0, cre = 0, dig = 0;
+                        size_t static_props = 0;
                         size_t containers = 0;
                         for (const auto& m : g_level_spawn_markers) {
                             if (m.kind == 1) ++gen;
                             else if (m.kind == 2) ++sp;
                             else if (m.kind == 4) ++dig;
                             else if (m.kind == 5) {}
+                            else if (m.kind == 6) ++static_props;
                             else ++cre;
                             if (m.is_container && m.kind != 4) {
                                 ++containers;
@@ -134,6 +154,8 @@
                             " generator(s), " + std::to_string(sp) +
                             " spawn point(s), " + std::to_string(cre) +
                             " creature(s)/NPC(s), " +
+                            std::to_string(static_props) +
+                            " static prop(s), " +
                             std::to_string(dig) + " dig spot(s), " +
                             std::to_string(containers) +
                             " non-dig container(s))");

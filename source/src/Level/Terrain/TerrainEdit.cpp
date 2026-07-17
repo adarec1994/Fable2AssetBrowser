@@ -217,7 +217,7 @@ bool Raycast(float ox, float oy, float oz,
 void ApplyBrush(BrushTool tool,
                 float wx, float wz,
                 float radius, float strength,
-                float target_h)
+                float target_h, float falloff)
 {
     auto& s = storage();
     if (!s.loaded || tool == BrushTool::None) return;
@@ -252,6 +252,13 @@ void ApplyBrush(BrushTool tool,
         }
     }
 
+    
+    static uint32_t s_noise_seed = 0x9E3779B9u;
+    s_noise_seed = s_noise_seed * 1664525u + 1013904223u;
+
+    const float clamped_falloff = std::clamp(falloff, 0.f, 1.f);
+    const float fade_start = gr * (1.f - clamped_falloff);
+
     bool any_changed = false;
     for (int z = zmin; z <= zmax; ++z) {
         for (int x = xmin; x <= xmax; ++x) {
@@ -259,8 +266,14 @@ void ApplyBrush(BrushTool tool,
             const float dzg = float(z) - gz_c;
             const float dist = std::sqrt(dxg * dxg + dzg * dzg);
             if (dist >= gr) continue;
-            const float t = 1.f - (dist / gr);
-            const float w = t * t * (3.f - 2.f * t);
+            
+            
+            float w = 1.f;
+            if (dist > fade_start && gr > fade_start) {
+                const float t =
+                    1.f - (dist - fade_start) / (gr - fade_start);
+                w = t * t * (3.f - 2.f * t);
+            }
 
             const size_t idx = size_t(z) * s.width + x;
             float& h = s.heights_current[idx];
@@ -277,6 +290,18 @@ void ApplyBrush(BrushTool tool,
                 case BrushTool::Flatten: {
                     const float a = std::clamp(strength * w, 0.f, 1.f);
                     h = h * (1.f - a) + target_h * a;
+                    break;
+                }
+                case BrushTool::Noise: {
+                    uint32_t n = uint32_t(x) * 73856093u ^
+                                 uint32_t(z) * 19349663u ^ s_noise_seed;
+                    n ^= n >> 13;
+                    n *= 0x85EBCA6Bu;
+                    n ^= n >> 16;
+                    const float r =
+                        (float(n & 0xFFFFFFu) / float(0xFFFFFF)) * 2.f -
+                        1.f;
+                    h += r * strength * w;
                     break;
                 }
                 default: break;
@@ -508,14 +533,21 @@ bool Save(std::string& out_path_or_error) {
     }
 
     std::ostringstream ok;
-    ok << "Patched ISO in place — BNK \"" << bnk_vpath
+    ok << "Patched ISO in place - BNK \"" << bnk_vpath
        << "\" + 0x" << std::hex << s.ghf_bnk_entry_offset
-       << " ← " << std::dec << gz.size() << " B gzip (slot "
+       << " <- " << std::dec << gz.size() << " B gzip (slot "
        << s.ghf_bnk_entry_on_disk_size << " B).  Backup: "
        << sibling_path.string();
     out_path_or_error = ok.str();
     s.dirty = false;
     return true;
+}
+
+void MarkSaved() {
+    auto& s = storage();
+    if (!s.loaded) return;
+    s.heights_original = s.heights_current;
+    s.dirty = false;
 }
 
 void Clear() {

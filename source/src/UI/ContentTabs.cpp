@@ -1,9 +1,17 @@
 #include "ContentTabs.h"
 
+#include "UI_Panels.h"
+#include "Quest/QuestNodeView.h"
+#include "IconsFontAwesome6.h"
+#include "../BNKCore.cpp"
+
 #include "ModelPreview.h"
 #include "OutputLog.h"
 #include "Quest/QuestNodeView.h"
+#include "../Level/Creation/LandscapeAuthoring.h"
 #include "../Level/Editing/LevelEdit.h"
+#include "../Level/Terrain/TerrainEdit.h"
+#include "../Level/Terrain/TerrainPaint.h"
 #include "../Level/Core/LevelLoader.h"
 #include "../Utilities/State.h"
 
@@ -60,6 +68,7 @@ std::vector<Tab> g_tabs;
 std::uint64_t g_active_id = 0;
 std::uint64_t g_select_id = 0;
 std::uint64_t g_next_id = 1;
+std::uint64_t g_level_edit_tab_id = 0;
 bool g_keep_selection = false;
 std::mutex g_completion_mutex;
 std::vector<LuaCompletion> g_completions;
@@ -214,6 +223,40 @@ Tab* active_tab() {
     return index < g_tabs.size() ? &g_tabs[index] : nullptr;
 }
 
+bool level_edit_session_active() {
+    return LevelEdit::Enabled() || LevelEdit::Dirty() ||
+           LevelEdit::Saving();
+}
+
+void sync_level_edit_tab() {
+    if (!level_edit_session_active()) {
+        g_level_edit_tab_id = 0;
+        return;
+    }
+    if (find_id(g_level_edit_tab_id) < g_tabs.size()) return;
+
+    const Tab* tab = active_tab();
+    if (tab && tab->kind == Kind::Level) {
+        g_level_edit_tab_id = tab->id;
+        return;
+    }
+    for (const Tab& candidate : g_tabs) {
+        if (candidate.kind == Kind::Level && candidate.level_preview) {
+            g_level_edit_tab_id = candidate.id;
+            return;
+        }
+    }
+}
+
+bool level_load_blocks_tab_switch() {
+    if (Level::IsAsyncLoadInProgress()) {
+        OutputLog::warn(
+            "Wait for the current level load to finish before switching tabs.");
+        return true;
+    }
+    return false;
+}
+
 void reset_model_specific_ui() {
     S.anim_selected_clip = -1;
     S.anim_authored_signature = 0;
@@ -236,6 +279,7 @@ void save_active_state() {
     Tab* tab = active_tab();
     if (!tab) return;
     if (tab->kind == Kind::Level) {
+        if (level_edit_session_active()) g_level_edit_tab_id = tab->id;
         capture_level_preview(*tab);
         return;
     }
@@ -251,13 +295,6 @@ void save_active_state() {
         tab->lua_content = S.lua_preview_content;
         tab->lua_loading = S.lua_preview_loading.load();
     }
-}
-
-bool current_level_is_protected() {
-    const Tab* tab = active_tab();
-    return tab && tab->kind == Kind::Level &&
-           (LevelEdit::Enabled() || LevelEdit::Dirty() ||
-            LevelEdit::Saving());
 }
 
 void show_lua(Tab& tab) {
@@ -300,15 +337,17 @@ bool activate(std::size_t index) {
     Tab& target = g_tabs[index];
     if (target.id == g_active_id) return true;
 
-    if (current_level_is_protected()) {
-        OutputLog::warn(
-            "Finish the level edit before switching away from this tab.");
+    sync_level_edit_tab();
+    if (level_load_blocks_tab_switch()) {
         g_select_id = g_active_id;
         g_keep_selection = true;
         return false;
     }
-    if (Level::IsAsyncLoadInProgress()) {
-        OutputLog::warn("Wait for the current level load to finish before switching tabs.");
+    if (target.kind == Kind::Level && level_edit_session_active() &&
+        target.id != g_level_edit_tab_id) {
+        OutputLog::warn(
+            "Save any changes and turn off level editing, or restore defaults, "
+            "before opening another level.");
         g_select_id = g_active_id;
         g_keep_selection = true;
         return false;
@@ -424,12 +463,13 @@ void apply_lua_completions() {
 }
 
 void close_id(std::uint64_t id) {
+    sync_level_edit_tab();
     const std::size_t index = find_id(id);
     if (index >= g_tabs.size()) return;
     const bool was_active = g_active_id == id;
-    if (was_active && g_tabs[index].kind == Kind::Level &&
-        (LevelEdit::Enabled() || LevelEdit::Dirty() ||
-         LevelEdit::Saving() || Level::IsAsyncLoadInProgress())) {
+    if (g_tabs[index].kind == Kind::Level &&
+        ((level_edit_session_active() && id == g_level_edit_tab_id) ||
+         (was_active && Level::IsAsyncLoadInProgress()))) {
         g_select_id = g_active_id;
         g_keep_selection = true;
         return;
@@ -466,7 +506,11 @@ void close_id(std::uint64_t id) {
         return;
     }
 
-    const std::size_t next = std::min(index, g_tabs.size() - 1);
+    std::size_t next = std::min(index, g_tabs.size() - 1);
+    if (level_edit_session_active()) {
+        const std::size_t edit_index = find_id(g_level_edit_tab_id);
+        if (edit_index < g_tabs.size()) next = edit_index;
+    }
     g_active_id = 0;
     g_select_id = g_tabs[next].id;
     activate(next);
@@ -545,11 +589,7 @@ void CaptureCurrentModel() {
 }
 
 void OpenItem(int item_index, const std::string& title) {
-    if (current_level_is_protected()) {
-        OutputLog::warn(
-            "Finish the level edit before switching away from this tab.");
-        return;
-    }
+    if (level_load_blocks_tab_switch()) return;
     save_active_state();
     const std::string key = "item:" + std::to_string(item_index);
     std::size_t index = find_key(Kind::Item, key);
@@ -578,11 +618,7 @@ void OpenItem(int item_index, const std::string& title) {
 }
 
 void OpenEntity(int entity_index, const std::string& title) {
-    if (current_level_is_protected()) {
-        OutputLog::warn(
-            "Finish the level edit before switching away from this tab.");
-        return;
-    }
+    if (level_load_blocks_tab_switch()) return;
     save_active_state();
     const std::string key = "entity:" + std::to_string(entity_index);
     std::size_t index = find_key(Kind::Entity, key);
@@ -611,17 +647,20 @@ void OpenEntity(int entity_index, const std::string& title) {
 }
 
 void OpenLevel(const FlatAssetEntry& entry, const std::string& title) {
-    if (current_level_is_protected() || Level::IsAsyncLoadInProgress()) {
-        if (current_level_is_protected()) {
-            OutputLog::warn(
-                "Finish the level edit before opening another level tab.");
-        }
-        return;
-    }
-    save_active_state();
     const std::string key = entry.full_path.empty() ? entry.name
                                                      : entry.full_path;
     std::size_t index = find_key(Kind::Level, key);
+    sync_level_edit_tab();
+    if (level_load_blocks_tab_switch()) return;
+    if (level_edit_session_active() &&
+        (index >= g_tabs.size() ||
+         g_tabs[index].id != g_level_edit_tab_id)) {
+        OutputLog::warn(
+            "Save any changes and turn off level editing, or restore defaults, "
+            "before opening another level.");
+        return;
+    }
+    save_active_state();
     if (index >= g_tabs.size()) {
         Tab tab;
         tab.id = g_next_id++;
@@ -644,11 +683,7 @@ void OpenLevel(const FlatAssetEntry& entry, const std::string& title) {
 
 void OpenLua(const std::string& key, const std::string& title,
              bool is_quest) {
-    if (current_level_is_protected()) {
-        OutputLog::warn(
-            "Finish the level edit before switching away from this tab.");
-        return;
-    }
+    if (level_load_blocks_tab_switch()) return;
     save_active_state();
     const Kind kind = is_quest ? Kind::Quest : Kind::Lua;
     std::size_t index = find_key(kind, key);
@@ -671,11 +706,7 @@ void OpenLua(const std::string& key, const std::string& title,
 
 void OpenCustomQuest(const std::string& quest_id,
                      const std::string& title) {
-    if (current_level_is_protected()) {
-        OutputLog::warn(
-            "Finish the level edit before switching away from this tab.");
-        return;
-    }
+    if (level_load_blocks_tab_switch()) return;
     save_active_state();
     const std::string key = "custom-quest:" + quest_id;
     std::size_t index = find_key(Kind::CustomQuest, key);
@@ -693,6 +724,41 @@ void OpenCustomQuest(const std::string& quest_id,
     g_active_id = g_tabs[index].id;
     g_select_id = g_active_id;
     S.content_tabs_visible = true;
+}
+
+void CloseCustomQuest(const std::string& quest_id) {
+    for (const Tab& tab : g_tabs) {
+        if (tab.kind == Kind::CustomQuest &&
+            tab.authored_quest_id == quest_id) {
+            close_id(tab.id);
+            return;
+        }
+    }
+}
+
+void CloseLevelByPath(const std::string& full_path) {
+    for (const Tab& tab : g_tabs) {
+        if (tab.kind == Kind::Level &&
+            tab.level_entry.full_path == full_path) {
+            close_id(tab.id);
+            return;
+        }
+    }
+}
+
+void FixLooseEntryIndices(const std::string& loose_dir) {
+    for (Tab& tab : g_tabs) {
+        if (tab.kind != Kind::Level) continue;
+        if (tab.level_entry.bnk_path != loose_dir) continue;
+        std::string key = tab.level_entry.full_path;
+        std::replace(key.begin(), key.end(), '\\', '/');
+        std::transform(key.begin(), key.end(), key.begin(),
+                       [](unsigned char c) {
+                           return char(std::tolower(c));
+                       });
+        const int idx = BnkCache::find_index(loose_dir, key);
+        if (idx >= 0) tab.level_entry.file_index = idx;
+    }
 }
 
 void CompleteLua(const std::string& key, const std::string& content) {
@@ -716,11 +782,19 @@ bool ActiveHasModel() {
            !tab->model_meshes.empty();
 }
 
+const FlatAssetEntry* ActiveLevelEntry() {
+    const Tab* tab = active_tab();
+    return tab && tab->kind == Kind::Level ? &tab->level_entry : nullptr;
+}
+
 void DrawTabBar() {
     apply_lua_completions();
     if (g_tabs.empty()) return;
+    sync_level_edit_tab();
 
     std::uint64_t close = 0;
+    const ImVec2 strip_pos = ImGui::GetCursorScreenPos();
+    const float strip_width = ImGui::GetContentRegionAvail().x;
     const ImGuiTabBarFlags bar_flags =
         ImGuiTabBarFlags_Reorderable |
         ImGuiTabBarFlags_AutoSelectNewTabs |
@@ -730,9 +804,11 @@ void DrawTabBar() {
             Tab& tab = g_tabs[i];
             bool open = true;
             const bool protected_level =
-                tab.id == g_active_id && tab.kind == Kind::Level &&
-                (LevelEdit::Enabled() || LevelEdit::Dirty() ||
-                 LevelEdit::Saving() || Level::IsAsyncLoadInProgress());
+                tab.kind == Kind::Level &&
+                ((level_edit_session_active() &&
+                  tab.id == g_level_edit_tab_id) ||
+                 (tab.id == g_active_id &&
+                  Level::IsAsyncLoadInProgress()));
             bool* open_ptr = protected_level ? nullptr : &open;
             const ImGuiTabItemFlags flags =
                 tab.id == g_select_id ? ImGuiTabItemFlags_SetSelected
@@ -751,7 +827,95 @@ void DrawTabBar() {
             }
             if (!open) close = tab.id;
         }
+
         ImGui::EndTabBar();
+    }
+
+    
+    
+    
+    const FlatAssetEntry* active_level = ActiveLevelEntry();
+    const bool level_save_active =
+        active_level && Level::Creation::IsCustomLooseLevel(*active_level);
+    const bool quest_active =
+        !level_save_active && QuestUI::IsAuthoredQuestActive();
+    auto save_level_working_copy = [&] {
+        std::string msg;
+        if (LevelEdit::SaveWorkingCopy(msg)) {
+            OutputLog::success("level save: " + msg);
+        } else {
+            OutputLog::error("level save: " + msg);
+            return;
+        }
+        if (active_level && TerrainEdit::IsDirty()) {
+            std::string terr;
+            if (Level::Creation::SaveSculptedHeights(*active_level,
+                                                     terr)) {
+                OutputLog::success(
+                    "level save: sculpted terrain written to the level's "
+                    ".ghf");
+            } else {
+                OutputLog::error("level save: terrain: " + terr);
+            }
+        }
+        if (TerrainPaint::Dirty()) {
+            std::string perr;
+            if (TerrainPaint::SaveSidecar(perr)) {
+                OutputLog::success("level save: terrain paint saved");
+            } else {
+                OutputLog::error("level save: paint: " + perr);
+            }
+        }
+    };
+    if (quest_active || level_save_active) {
+        const ImVec2 after_bar = ImGui::GetCursorScreenPos();
+        const float button_w =
+            ImGui::CalcTextSize(ICON_FA_FLOPPY_DISK).x +
+            ImGui::GetStyle().FramePadding.x * 2.0f;
+        ImGui::SetCursorScreenPos(
+            ImVec2(strip_pos.x + strip_width - button_w, strip_pos.y));
+        const bool busy = quest_active && QuestInjectionBusy();
+        if (busy) ImGui::BeginDisabled();
+        if (ImGui::Button(ICON_FA_FLOPPY_DISK "##save_quest")) {
+            if (quest_active) {
+                ImGui::OpenPopup("Save custom quest?##modal");
+            } else {
+                save_level_working_copy();
+            }
+        }
+        if (busy) ImGui::EndDisabled();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                busy ? "Quest save is in progress..."
+                : quest_active
+                    ? "Save quest to the game scripts (Ctrl+S)"
+                    : "Save this level so it can be worked on later "
+                      "(Ctrl+S)");
+        }
+        ImGui::SetCursorScreenPos(after_bar);
+    }
+    if ((quest_active || level_save_active) &&
+        ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S,
+                        ImGuiInputFlags_RouteGlobal)) {
+        if (level_save_active) {
+            save_level_working_copy();
+        } else if (!QuestInjectionBusy()) {
+            ImGui::OpenPopup("Save custom quest?##modal");
+        }
+    }
+    if (ImGui::BeginPopupModal("Save custom quest?##modal", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Save %s to the game scripts?",
+                    QuestUI::ActiveAuthoredQuestId().c_str());
+        if (ImGui::Button("Save Quest")) {
+            ImGui::CloseCurrentPopup();
+            RequestQuestInjection();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
     if (g_keep_selection) {
         g_keep_selection = false;
@@ -770,6 +934,7 @@ void Clear() {
     g_tabs.clear();
     g_active_id = 0;
     g_select_id = 0;
+    g_level_edit_tab_id = 0;
     S.content_tabs_visible = false;
     S.pending_model_tab_capture = false;
     std::lock_guard<std::mutex> lock(g_completion_mutex);

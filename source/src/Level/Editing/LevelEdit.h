@@ -97,6 +97,21 @@ struct NpcPlacementInfo {
     }
 };
 
+struct StaticPropPlacementInfo {
+    std::string instance_name;
+    uint32_t entity_template = 0;
+    uint32_t transform_component_field = 0;
+    uint32_t transform_component_template = 0;
+    uint32_t position_template = 0;
+    uint32_t rotation_template = 0;
+    bool valid() const {
+        return !instance_name.empty() && entity_template != 0 &&
+               transform_component_field != 0 &&
+               transform_component_template != 0 &&
+               position_template != 0 && rotation_template != 0;
+    }
+};
+
 void OnLevelLoaded(const FlatAssetEntry& entry);
 
 void SetGdbSource(const std::string& bnk_path,
@@ -122,6 +137,9 @@ bool EntityRemovalPending(uint32_t entity_hash);
 
 int AddPlacement(const std::string& model_path, const float pos[3]);
 void GetAdditions(std::vector<Addition>& out);
+void MoveAddition(int index, const float pos[3]);
+void SetAdditionYaw(int index, float yaw_deg);
+void RemoveAddition(int index);
 int SilverKeyChestRequirement(const std::string& model_path);
 
 void SetChestContents(uint32_t entity_hash,
@@ -149,6 +167,7 @@ void MarkAdditionAsContainer(int index,
 bool AdditionIsDigSpot(int index);
 int AddNpcPlacement(const float pos[3], const NpcPlacementInfo& info);
 bool AdditionIsNpc(int index);
+bool AdditionIsNamedEntity(int index);
 
 void MarkAdditionAsPropEntity(int index,
                               uint32_t template_hash,
@@ -156,6 +175,8 @@ void MarkAdditionAsPropEntity(int index,
                               uint32_t comp_template_hash,
                               uint32_t physics_file_hash,
                               bool has_text_tags = false);
+void MarkAdditionAsStaticProp(int index,
+                              const StaticPropPlacementInfo& info);
 
 bool AdditionIsReadable(int index);
 bool GetAdditionReadableText(int index, std::string& out);
@@ -215,7 +236,11 @@ bool Undo();
 
 bool Save(std::string& msg);
 
-bool RestoreDefaults(std::string& msg);
+
+
+
+
+bool SaveWorkingCopy(std::string& msg);
 
 void ClearEdits();
 
@@ -223,7 +248,5 @@ bool RunLevProbe(const std::string& bnk_path, std::string& msg);
 
 bool RunLevProbeMode(const std::string& bnk_path, bool float_only,
                      std::string& msg);
-
-bool RunStreamFix(const std::string& streaming_path, std::string& msg);
 
 }

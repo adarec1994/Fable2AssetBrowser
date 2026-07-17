@@ -1596,6 +1596,195 @@ size_t resolve_clip_names_from_gdb_animation_fields_for_root(
            stats.selector_names_assigned;
 }
 
+namespace {
+
+uint64_t cache_fnv64(uint64_t h, const void* data, size_t n) {
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < n; ++i) {
+        h ^= p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+
+
+uint64_t clip_cache_fingerprint(const std::string& root,
+                                const std::vector<AnimClip>& clips) {
+    uint64_t h = 1469598103934665603ull;
+    h = cache_fnv64(h, root.data(), root.size());
+    std::error_code ec;
+    auto stat_file = [&](const std::filesystem::path& p) {
+        if (!std::filesystem::is_regular_file(p, ec)) return;
+        const uint64_t sz = (uint64_t)std::filesystem::file_size(p, ec);
+        const int64_t ticks = (int64_t)std::filesystem::last_write_time(
+                                  p, ec)
+                                  .time_since_epoch()
+                                  .count();
+        h = cache_fnv64(h, &sz, sizeof(sz));
+        h = cache_fnv64(h, &ticks, sizeof(ticks));
+    };
+    const std::filesystem::path root_path(root);
+    if (std::filesystem::is_regular_file(root_path, ec)) {
+        stat_file(root_path);   
+    } else {
+        stat_file(root_path / "data" / "levels.bnk");
+        stat_file(root_path / "data" / "streaming.bnk");
+        stat_file(root_path / "data" / "Globals" / "globals.gdb");
+    }
+    const uint32_t count = (uint32_t)clips.size();
+    h = cache_fnv64(h, &count, sizeof(count));
+    for (const AnimClip& c : clips) {
+        h = cache_fnv64(h, &c.key0, sizeof(c.key0));
+    }
+    return h;
+}
+
+std::filesystem::path clip_cache_path() {
+    return std::filesystem::current_path() / "anim_names.cache";
+}
+
+void cache_put_u32(std::vector<uint8_t>& out, uint32_t v) {
+    out.push_back(uint8_t(v));
+    out.push_back(uint8_t(v >> 8));
+    out.push_back(uint8_t(v >> 16));
+    out.push_back(uint8_t(v >> 24));
+}
+
+void cache_put_str(std::vector<uint8_t>& out, const std::string& s) {
+    const uint16_t n = (uint16_t)std::min<size_t>(s.size(), 0xFFFF);
+    out.push_back(uint8_t(n));
+    out.push_back(uint8_t(n >> 8));
+    out.insert(out.end(), s.begin(), s.begin() + n);
+}
+
+struct CacheReader {
+    const uint8_t* p = nullptr;
+    size_t n = 0;
+    size_t pos = 0;
+    bool ok = true;
+
+    uint32_t u32() {
+        if (pos + 4 > n) { ok = false; return 0; }
+        const uint32_t v = uint32_t(p[pos]) | (uint32_t(p[pos + 1]) << 8) |
+                           (uint32_t(p[pos + 2]) << 16) |
+                           (uint32_t(p[pos + 3]) << 24);
+        pos += 4;
+        return v;
+    }
+    uint64_t u64() {
+        const uint64_t lo = u32();
+        const uint64_t hi = u32();
+        return lo | (hi << 32);
+    }
+    std::string str() {
+        if (pos + 2 > n) { ok = false; return {}; }
+        const size_t len = size_t(p[pos]) | (size_t(p[pos + 1]) << 8);
+        pos += 2;
+        if (pos + len > n) { ok = false; return {}; }
+        std::string s(reinterpret_cast<const char*>(p + pos), len);
+        pos += len;
+        return s;
+    }
+};
+
+constexpr uint32_t kClipCacheMagic = 0x43414632u;   
+constexpr uint32_t kClipCacheVersion = 1;
+
+}
+
+bool load_clip_name_cache_for_root(const std::string& root,
+                                   std::vector<AnimClip>& clips) {
+    if (clips.empty()) return false;
+    std::ifstream f(clip_cache_path(), std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    const std::streamoff len = f.tellg();
+    if (len < 20) return false;
+    std::vector<uint8_t> bytes((size_t)len);
+    f.seekg(0);
+    if (!f.read(reinterpret_cast<char*>(bytes.data()), len)) return false;
+
+    CacheReader r{bytes.data(), bytes.size()};
+    if (r.u32() != kClipCacheMagic) return false;
+    if (r.u32() != kClipCacheVersion) return false;
+    if (r.u64() != clip_cache_fingerprint(root, clips)) return false;
+    const uint32_t clip_count = r.u32();
+    if (!r.ok || clip_count != clips.size()) return false;
+
+    std::vector<std::string> names(clip_count);
+    for (uint32_t i = 0; i < clip_count; ++i) {
+        const uint32_t key0 = r.u32();
+        names[i] = r.str();
+        if (!r.ok || key0 != clips[i].key0) return false;
+    }
+    const uint32_t binding_count = r.u32();
+    if (!r.ok) return false;
+    std::vector<ModelAnimationBinding> bindings;
+    bindings.reserve(binding_count);
+    for (uint32_t i = 0; i < binding_count; ++i) {
+        ModelAnimationBinding b;
+        b.model_path_hash = r.u32();
+        b.skeleton_file_hash = r.u32();
+        b.retarget_skeleton_file_hash = r.u32();
+        b.animation_record_hash = r.u32();
+        b.animation_key = r.u32();
+        b.source_record_hash = r.u32();
+        b.clip_index = r.u32();
+        b.animation_name = r.str();
+        b.source_name = r.str();
+        if (!r.ok || b.clip_index >= clips.size()) return false;
+        bindings.push_back(std::move(b));
+    }
+
+    for (uint32_t i = 0; i < clip_count; ++i) {
+        if (!names[i].empty()) clips[i].name = std::move(names[i]);
+    }
+    g_model_animation_bindings = std::move(bindings);
+    ++g_model_animation_binding_revision;
+    if (g_model_animation_binding_revision == 0) {
+        g_model_animation_binding_revision = 1;
+    }
+    OutputLog::success(
+        "animation names restored from cache (" +
+        std::to_string(clip_count) + " clips, " +
+        std::to_string(binding_count) + " model bindings)");
+    return true;
+}
+
+void save_clip_name_cache_for_root(const std::string& root,
+                                   const std::vector<AnimClip>& clips) {
+    if (clips.empty()) return;
+    std::vector<uint8_t> out;
+    out.reserve(clips.size() * 24 +
+                g_model_animation_bindings.size() * 48 + 64);
+    cache_put_u32(out, kClipCacheMagic);
+    cache_put_u32(out, kClipCacheVersion);
+    const uint64_t fp = clip_cache_fingerprint(root, clips);
+    cache_put_u32(out, uint32_t(fp));
+    cache_put_u32(out, uint32_t(fp >> 32));
+    cache_put_u32(out, (uint32_t)clips.size());
+    for (const AnimClip& c : clips) {
+        cache_put_u32(out, c.key0);
+        cache_put_str(out, c.name);
+    }
+    cache_put_u32(out, (uint32_t)g_model_animation_bindings.size());
+    for (const ModelAnimationBinding& b : g_model_animation_bindings) {
+        cache_put_u32(out, b.model_path_hash);
+        cache_put_u32(out, b.skeleton_file_hash);
+        cache_put_u32(out, b.retarget_skeleton_file_hash);
+        cache_put_u32(out, b.animation_record_hash);
+        cache_put_u32(out, b.animation_key);
+        cache_put_u32(out, b.source_record_hash);
+        cache_put_u32(out, (uint32_t)b.clip_index);
+        cache_put_str(out, b.animation_name);
+        cache_put_str(out, b.source_name);
+    }
+    std::ofstream f(clip_cache_path(), std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    f.write(reinterpret_cast<const char*>(out.data()),
+            (std::streamsize)out.size());
+}
+
 uint32_t gdb_model_path_hash(std::string path) {
     std::transform(path.begin(), path.end(), path.begin(),
                    [](unsigned char c) {

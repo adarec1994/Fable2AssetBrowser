@@ -163,7 +163,7 @@ BHeader parse_lua_bytecode(const uint8_t* data, size_t size, const Configuration
         int minor = versionNumber & 0x0F;
         throw std::runtime_error(
             "lua: chunk reports Lua version " + std::to_string(major) + "." +
-            std::to_string(minor) + " — only Lua 5.1 is currently supported.");
+            std::to_string(minor) + " - only Lua 5.1 is currently supported.");
     }
     h.lheader.version = versionNumber;
 

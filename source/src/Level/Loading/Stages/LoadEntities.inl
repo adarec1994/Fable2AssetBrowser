@@ -113,7 +113,7 @@
                     }
                 }
                 OutputLog::info("save: " + std::to_string(save_hash_to_name.size())
-                                + " entity hash→name mappings");
+                                + " entity hash->name mappings");
                 if (!save_physics_placements.empty()) {
                     OutputLog::info("save: " +
                                     std::to_string(save_physics_placements.size()) +
@@ -168,6 +168,7 @@
         if (load_text_sibling(gdb_path, gdb_bytes,
                               &gdb_src_bnk, &gdb_src_idx, &gdb_src_file)) {
             LevelEdit::SetGdbSource(gdb_src_bnk, gdb_src_idx, gdb_src_file);
+            loader_progress_update(23, 100, "Parsing level GDB records...");
             auto info = Gdb::ParseWithSaveMap(gdb_bytes, save_hash_to_name);
             if (bail_if_cancelled("after gdb parse")) return false;
             {
@@ -177,6 +178,7 @@
                 for (const auto& db : supplemental_gdbs) {
                     contents_gdbs.push_back(&db.bytes);
                 }
+                loader_progress_update(23, 100, "Extracting entity contents...");
                 g_level_entity_contents =
                     Gdb::ExtractEntityContents(contents_gdbs,
                                                save_hash_to_name);
@@ -190,6 +192,7 @@
                     gameplay_entities.emplace_back(creature.entity_hash,
                                                    creature.name);
                 }
+                loader_progress_update(24, 100, "Extracting gameplay details...");
                 g_level_entity_gameplay =
                     Gdb::ExtractEntityGameplayDetails(contents_gdbs,
                                                       gameplay_entities);
@@ -293,6 +296,7 @@
                             property.benefits = std::move(localized);
                         }
                     }
+                    loader_progress_update(24, 100, "Extracting entity text...");
                     g_level_entity_text = Gdb::ExtractEntityTextTags(
                         contents_gdbs, save_hash_to_name);
                     if (!g_level_entity_text.empty()) {
@@ -349,6 +353,7 @@
                             "generators");
                     }
                     Gdb::NpcDonorInfo detected_npc_donor;
+                    loader_progress_update(25, 100, "Collecting spawn entities...");
                     auto spawn_ents = Gdb::CollectSpawnEntities(
                         contents_gdbs, save_hash_to_name,
                         &g_level_spawn_donor, &detected_npc_donor);
@@ -515,7 +520,8 @@
 
                         for (LevelSpawnMarker& marker :
                              g_level_spawn_markers) {
-                            if (marker.kind == 3 &&
+                            if ((marker.kind == 3 ||
+                                 marker.kind == 6) &&
                                 marker.entity_hash == p.hash_a) {
                                 marker.model_hashes = p.model_path_hashes;
                                 break;

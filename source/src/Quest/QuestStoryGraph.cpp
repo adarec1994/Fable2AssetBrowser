@@ -795,9 +795,9 @@ GraphNode compose_story_step(const GraphNode& source,
     return node;
 }
 
-// Must stay in sync with kMaxVisibleNodeDetails in QuestNodeView.cpp: the
-// renderer collapses everything past that many detail lines into one
-// "+N more" line.
+
+
+
 constexpr std::size_t kVisibleDetailLimit = 12;
 
 float estimated_node_height(const GraphNode& node) {
@@ -865,8 +865,8 @@ void layout_branching_story(Graph& graph, int root_story,
     for (auto& entry : forward) {
         std::sort(entry.second.begin(), entry.second.end());
         if (entry.second.size() < 2) continue;
-        // A fan-out from the quest-start node is parallel setup/threads,
-        // not a player-facing branch; leave those links unlabelled.
+        
+        
         const GraphNode* source_node = find_node(graph, entry.first);
         if (source_node && source_node->kind == NodeKind::Quest) continue;
         const bool decision = is_decision(graph, entry.first);
@@ -925,9 +925,9 @@ void layout_branching_story(Graph& graph, int root_story,
         topo_index[topological[i]] = i;
     }
 
-    // Undirected connected components ("No" edges included so condition
-    // loops stay with their flow). Each component is laid out on its own
-    // and stacked below the previous one.
+    
+    
+    
     std::unordered_map<int, std::vector<int>> neighbours;
     for (const GraphLink& link : graph.links) {
         if (!nodes.count(link.from_node) || !nodes.count(link.to_node) ||
@@ -967,9 +967,9 @@ void layout_branching_story(Graph& graph, int root_story,
                               });
     }
 
-    // Left-to-right layered layout: depth selects the column, nodes in a
-    // column are ordered to sit near their parents (barycenter sweeps) and
-    // stacked without overlaps.
+    
+    
+    
     constexpr float kColumnSpacing = 700.0f;
     constexpr float kRowGap = 70.0f;
     constexpr float kComponentGap = 260.0f;
@@ -1040,8 +1040,8 @@ void layout_branching_story(Graph& graph, int root_story,
             }
         }
 
-        // Vertical placement: children aim for the average of their
-        // parents' centres, pushed apart so nothing overlaps.
+        
+        
         std::unordered_map<int, float> node_y;
         std::unordered_map<int, float> node_height;
         for (int id : component) {
@@ -1075,8 +1075,8 @@ void layout_branching_story(Graph& graph, int root_story,
                 placed[i] = std::max(desired[i], cursor);
                 cursor = placed[i] + node_height[column[i]] + kRowGap;
             }
-            // Recentre the column on its desired positions so a collision
-            // push does not drag the whole column downwards.
+            
+            
             if (!column.empty()) {
                 float shift_total = 0.0f;
                 for (std::size_t i = 0; i < column.size(); ++i) {

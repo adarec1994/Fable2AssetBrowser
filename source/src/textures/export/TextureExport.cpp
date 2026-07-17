@@ -84,7 +84,7 @@ void log_export_result(bool ok, const std::string& asset_label,
         fmt == TexExportFormat::TEX  ? "TEX (raw)" : "?";
     if (ok) {
         OutputLog::success(std::string("Exported ") + asset_label +
-                           " as " + fmt_name + " → " + out_path.string());
+                           " as " + fmt_name + " -> " + out_path.string());
     } else {
         OutputLog::error(std::string("Failed to export ") + asset_label +
                          " as " + fmt_name +

@@ -16,7 +16,9 @@
 #include "../../Level/Terrain/EhfChunkParser.h"
 #include "../../Level/Terrain/TerrainSplat.h"
 #include "../../Level/Terrain/TerrainEdit.h"
+#include "../../Level/Terrain/TerrainPaint.h"
 #include "../../Level/Editing/LevelEdit.h"
+#include "../../Level/Creation/LandscapeAuthoring.h"
 #include "../../Level/Skybox/SkyboxPreviewBinding.h"
 #include "../../Utilities/Files.h"
 #include "../../Utilities/Utils.h"
@@ -1623,7 +1625,7 @@ bool append_level_entity_model_at(ID3D11Device* device,
     std::string error;
     if (!EntityModels::Resolve(model_hashes, resolved, &error) ||
         resolved.meshes.empty()) {
-        OutputLog::error("level edit: could not render quest NPC (" +
+        OutputLog::error("level edit: could not render entity (" +
                          error + ")");
         return false;
     }
@@ -1652,7 +1654,7 @@ bool append_level_entity_model_at(ID3D11Device* device,
         source.is_entity_model = true;
 
         MDLMeshGeom combined;
-        init_combined_prop_geom(combined, source, "quest NPC", 1, 0xE3, 0);
+        init_combined_prop_geom(combined, source, "entity", 1, 0xE3, 0);
         combined.is_entity_model = true;
         merge_transformed_instance_into(combined, source, instance,
                                         selection_id);
@@ -1715,9 +1717,12 @@ int spawn_level_container_at(
 #endif
 
 bool level_edit_click_guard(const char* what) {
-    if (!LevelEdit::Enabled()) return false;
+    if (!LevelEdit::Enabled() && !LevelEdit::Dirty() &&
+        !LevelEdit::Saving()) {
+        return false;
+    }
     const std::string msg =
-        std::string(what) + " is disabled while level editing";
+        std::string(what) + " is disabled while a level edit is active";
     if (!S.level_edit_guard_seen) {
         S.level_edit_guard_seen = true;
         S.level_edit_guard_message = msg;
@@ -1733,19 +1738,19 @@ void process_pending_loads(ID3D11Device* device) {
 #else
 void process_pending_loads() {
 #endif
-    if (g_pending_mdl_load && level_edit_click_guard("Model loading")) {
+    const bool level_tab_active =
+        ContentTabs::ActiveKind() == ContentTabs::Kind::Level;
+    if (g_pending_mdl_load && level_tab_active &&
+        level_edit_click_guard("Model loading")) {
         g_pending_mdl_load = false;
         g_pending_mdl_is_item = false;
         g_pending_mdl_index = -1;
         g_pending_mdl_full_path.clear();
     }
-    if (g_pending_tex_load && level_edit_click_guard("Texture preview")) {
+    if (g_pending_tex_load && level_tab_active &&
+        level_edit_click_guard("Texture preview")) {
         g_pending_tex_load = false;
         g_pending_tex_index = -1;
-    }
-    if (S.pending_preview_build &&
-        level_edit_click_guard("Model preview")) {
-        S.pending_preview_build = false;
     }
     if (g_pending_mdl_load && g_pending_mdl_index >= 0 && g_pending_mdl_index < (int)S.files.size()) {
         g_pending_mdl_load = false;
@@ -2029,7 +2034,7 @@ void process_pending_loads() {
                 extern const std::string& mp_last_decode_fail_reason();
                 extern const std::string& mp_last_decode_info();
                 OutputLog::error("Texture preview: decode failed for '" + name +
-                                 "' — reason=" + mp_last_decode_fail_reason() +
+                                 "' - reason=" + mp_last_decode_fail_reason() +
                                  "  info=[" + mp_last_decode_info() + "]");
                 S.texture_window_name = "ERROR: Could not decode texture";
                 S.pending_texture_load = true;
@@ -2206,6 +2211,7 @@ void process_pending_loads() {
             EhfLodThumbnails::Clear();
             TerrainSplat::Clear();
             TerrainEdit::Clear();
+            TerrainPaint::Clear();
             if (!g_mp_initialized) {
                 MP_Init(device, g_mp, 800, 600);
                 g_mp_initialized = true;
@@ -2246,7 +2252,27 @@ void process_pending_loads() {
             std::vector<uint8_t> splat_dbg_rgba;
             int splat_dbg_w = 0, splat_dbg_h = 0;
             progress_update(74, 100, "Baking terrain textures...");
-            if (Level::BakeEhfTerrainCompositeAndSplat(
+            
+            
+            
+            const bool custom_blank_terrain =
+                Level::Creation::IsCustomLooseLevel(
+                    g_pending_terrain_level_entry);
+            if (custom_blank_terrain) {
+                OutputLog::info(
+                    "terrain: custom level - terrain textures cleared");
+                TerrainPaint::InitForLevel(
+                    g_pending_terrain_level_entry.full_path,
+                    (int)tm.width, (int)tm.height,
+                    g_pending_terrain_ghf_tile_size > 0.0f
+                        ? g_pending_terrain_ghf_tile_size
+                        : 0.5f);
+                if (TerrainPaint::Active() &&
+                    TerrainPaint::BuildComposite(picked_rgba, picked_w,
+                                                 picked_h)) {
+                    picked_label = "painted_layers";
+                }
+            } else if (Level::BakeEhfTerrainCompositeAndSplat(
                     g_pending_terrain_ehf_bytes,
                     g_pending_terrain_level_entry.bnk_path,
                     picked_rgba, picked_w, picked_h,
@@ -2309,7 +2335,8 @@ void process_pending_loads() {
             const bool terrain_space_texture =
                 picked_label.rfind("ehf_composite[", 0) == 0 ||
                 picked_label == "ehf_embedded_tile_albedo" ||
-                picked_label == "ehf_baked_albedo";
+                picked_label == "ehf_baked_albedo" ||
+                custom_blank_terrain;
             if (terrain_space_texture) {
                 normalize_grid_uvs(g, tm.width, tm.height);
             } else if (uv_scale != 1.0f) {
@@ -2684,7 +2711,7 @@ void process_pending_loads() {
                                    + std::to_string(picked_h)
                                    + ", uv_scale=" + std::to_string(uv_scale)
                                    + ")");
-            } else {
+            } else if (!custom_blank_terrain) {
                 OutputLog::warn("terrain: no albedo texture decoded "
                                 "(.ehf and .texture_atlas both failed)");
             }
@@ -3074,7 +3101,7 @@ void process_pending_loads() {
     if (g_pending_terrain_load.exchange(false)) {
         const Level::TerrainMesh& tm = g_pending_terrain_mesh;
         if (!tm.ok || tm.indices.empty()) {
-            OutputLog::error("pending terrain mesh is empty — skipped");
+            OutputLog::error("pending terrain mesh is empty - skipped");
         } else {
             TerrainTextureRegistry::Clear();
             EhfLodThumbnails::Clear();

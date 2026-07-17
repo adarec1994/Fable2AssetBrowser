@@ -1,10 +1,12 @@
 #include "../UI_Panels.h"
 #include "../OutputLog.h"
+#include "../ContentTabs.h"
 #include "PanelInternal.h"
 #include "../../Utilities/Utils.h"
 #include "../../BNKCore.cpp"
 #include "../../ISO/IsoMount.h"
 #include "../../Level/Core/LevelLoader.h"
+#include "../../Level/Creation/NewLevel.h"
 #include "imgui.h"
 #include <filesystem>
 #include <algorithm>
@@ -88,8 +90,15 @@ void start_tree_build_for_root(const std::string& root_dir,
         if (!root_snapshot.empty() && !S.anim_clips.empty()) {
             set_tree_label("Resolving animation names");
             try {
-                Anim::resolve_clip_names_from_gdb_animation_fields_for_root(
-                    root_snapshot, S.anim_clips);
+                
+                
+                if (!Anim::load_clip_name_cache_for_root(root_snapshot,
+                                                         S.anim_clips)) {
+                    Anim::resolve_clip_names_from_gdb_animation_fields_for_root(
+                        root_snapshot, S.anim_clips);
+                    Anim::save_clip_name_cache_for_root(root_snapshot,
+                                                        S.anim_clips);
+                }
                 S.anim_authored_signature = 0;
                 S.anim_authored_cache.clear();
             } catch (...) {  }
@@ -143,6 +152,230 @@ bool find_mdl_files_in_folder(TreeNode& root, const std::string& folder_name, st
     return !out_mdl_paths.empty();
 }
 
+static bool tb_ends_with_ci(const std::string& s, const char* suffix) {
+    size_t n = std::strlen(suffix);
+    if (s.size() < n) return false;
+    for (size_t i = 0; i < n; ++i) {
+        char a = s[s.size() - n + i];
+        char b = suffix[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return false;
+    }
+    return true;
+}
+
+static int tb_quest_source_rank(std::string bnk_path) {
+    std::replace(bnk_path.begin(), bnk_path.end(), '\\', '/');
+    const size_t slash = bnk_path.find_last_of('/');
+    if (slash != std::string::npos) bnk_path.erase(0, slash + 1);
+    std::transform(bnk_path.begin(), bnk_path.end(), bnk_path.begin(),
+                   [](unsigned char c) { return char(std::tolower(c)); });
+    if (bnk_path == "gamescripts.bnk") return 3;
+    if (bnk_path == "gamescripts_r.bnk") return 2;
+    return 1;
+}
+
+
+
+static void tb_index_file(TreeNode& root,
+                          std::unordered_map<std::string, size_t>& quest_by_path,
+                          const std::string& path,
+                          const std::string& bnk_source,
+                          int bnk_index, uint32_t file_size,
+                          bool is_nested) {
+    std::string leaf;
+    size_t slash = path.find_last_of("/\\");
+    leaf = (slash == std::string::npos) ? path : path.substr(slash + 1);
+
+    if (tb_ends_with_ci(leaf, ".lua")) {
+        std::string normalized = path;
+        std::replace(normalized.begin(), normalized.end(), '\\', '/');
+        std::transform(normalized.begin(), normalized.end(),
+                       normalized.begin(),
+                       [](unsigned char c) {
+                           return char(std::tolower(c));
+                       });
+        const bool is_quest =
+            normalized.rfind("scripts/quests/", 0) == 0 ||
+            normalized.find("/scripts/quests/") != std::string::npos;
+        if (is_quest) {
+            FlatAssetEntry candidate;
+            candidate.name = leaf;
+            candidate.full_path = path;
+            candidate.bnk_path = bnk_source;
+            candidate.file_index = bnk_index;
+            candidate.size = file_size;
+            candidate.from_nested = is_nested;
+
+            auto [it, inserted] = quest_by_path.emplace(
+                normalized, S.all_quest_files.size());
+            if (inserted) {
+                S.all_quest_files.push_back(std::move(candidate));
+            } else {
+                FlatAssetEntry& current = S.all_quest_files[it->second];
+                if (tb_quest_source_rank(candidate.bnk_path) >
+                    tb_quest_source_rank(current.bnk_path)) {
+                    current = std::move(candidate);
+                }
+            }
+        }
+    }
+
+    if (tb_ends_with_ci(leaf, ".mdl")) {
+        FlatAssetEntry e;
+        e.name = leaf;
+        e.full_path = path;
+        e.bnk_path = bnk_source;
+        e.file_index = bnk_index;
+        e.size = file_size;
+        e.from_nested = is_nested;
+        S.all_mdl_files.push_back(std::move(e));
+    } else if (tb_ends_with_ci(leaf, ".tex")) {
+        FlatAssetEntry e;
+        e.name = leaf;
+        e.full_path = path;
+        e.bnk_path = bnk_source;
+        e.file_index = bnk_index;
+        e.size = file_size;
+        e.from_nested = is_nested;
+        S.all_tex_files.push_back(std::move(e));
+    } else if (tb_ends_with_ci(leaf, ".wav")) {
+        FlatAssetEntry e;
+        e.name = leaf;
+        e.full_path = path;
+        e.bnk_path = bnk_source;
+        e.file_index = bnk_index;
+        e.size = file_size;
+        e.from_nested = is_nested;
+        S.all_wav_files.push_back(std::move(e));
+    } else if (tb_ends_with_ci(leaf, ".gdb")) {
+        FlatAssetEntry e;
+        e.name = leaf;
+        e.full_path = path;
+        e.bnk_path = bnk_source;
+        e.file_index = bnk_index;
+        e.size = file_size;
+        e.from_nested = is_nested;
+        S.all_gdb_files.push_back(std::move(e));
+    } else if (tb_ends_with_ci(leaf, ".save")) {
+        FlatAssetEntry e;
+        e.name = leaf;
+        e.full_path = path;
+        e.bnk_path = bnk_source;
+        e.file_index = bnk_index;
+        e.size = file_size;
+        e.from_nested = is_nested;
+        S.all_save_files.push_back(std::move(e));
+    } else if (tb_ends_with_ci(leaf, ".anim")) {
+        FlatAssetEntry e;
+        e.name = leaf;
+        e.full_path = path;
+        e.bnk_path = bnk_source;
+        e.file_index = bnk_index;
+        e.size = file_size;
+        e.from_nested = is_nested;
+        S.all_anim_files.push_back(std::move(e));
+    } else if (tb_ends_with_ci(leaf, ".engine_level")) {
+        FlatAssetEntry e;
+        e.name = leaf;
+        e.full_path = path;
+        e.bnk_path = bnk_source;
+        e.file_index = bnk_index;
+        e.size = file_size;
+        e.from_nested = is_nested;
+        S.all_level_files.push_back(std::move(e));
+    } else if (tb_ends_with_ci(leaf, ".ehf") ||
+               tb_ends_with_ci(leaf, ".ghf") ||
+               tb_ends_with_ci(leaf, ".hdb") ||
+               tb_ends_with_ci(leaf, ".genv") ||
+               tb_ends_with_ci(leaf, ".ama") ||
+               tb_ends_with_ci(leaf, ".amm") ||
+               tb_ends_with_ci(leaf, ".amr") ||
+               tb_ends_with_ci(leaf, ".texture_atlas")) {
+        FlatAssetEntry e;
+        e.name = leaf;
+        e.full_path = path;
+        e.bnk_path = bnk_source;
+        e.file_index = bnk_index;
+        e.size = file_size;
+        e.from_nested = is_nested;
+        S.all_heightfield_files.push_back(std::move(e));
+    }
+
+    std::string normalized_path = path;
+    std::replace(normalized_path.begin(), normalized_path.end(), '\\', '/');
+
+    std::vector<std::string> parts;
+    size_t start = 0;
+    size_t end = normalized_path.find('/');
+
+    while (end != std::string::npos) {
+        parts.push_back(normalized_path.substr(start, end - start));
+        start = end + 1;
+        end = normalized_path.find('/', start);
+    }
+    parts.push_back(normalized_path.substr(start));
+
+    TreeNode* current = &root;
+    for (size_t j = 0; j < parts.size(); ++j) {
+        const std::string& part = parts[j];
+        if (part.empty()) continue;
+
+        bool is_last = (j == parts.size() - 1);
+
+        TreeNode& child = current->children[part];
+        child.name = part;
+        child.is_file = is_last;
+
+        if (is_last) {
+            child.full_path = path;
+            child.bnk_source = bnk_source;
+            child.bnk_index = bnk_index;
+            child.file_size = file_size;
+            child.is_nested_source = is_nested;
+        }
+
+        current = &child;
+    }
+}
+
+static void tb_sort_flat_lists() {
+    auto cmp_ci = [](const FlatAssetEntry& a, const FlatAssetEntry& b) {
+        const std::string& sa = a.name;
+        const std::string& sb = b.name;
+        size_t n = std::min(sa.size(), sb.size());
+        for (size_t i = 0; i < n; ++i) {
+            char ca = sa[i], cb = sb[i];
+            if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+            if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+            if (ca != cb) return ca < cb;
+        }
+        return sa.size() < sb.size();
+    };
+    std::sort(S.all_mdl_files.begin(), S.all_mdl_files.end(), cmp_ci);
+    std::sort(S.all_tex_files.begin(), S.all_tex_files.end(), cmp_ci);
+    std::sort(S.all_wav_files.begin(), S.all_wav_files.end(), cmp_ci);
+    std::sort(S.all_gdb_files.begin(), S.all_gdb_files.end(), cmp_ci);
+    std::sort(S.all_save_files.begin(), S.all_save_files.end(), cmp_ci);
+    std::sort(S.all_anim_files.begin(), S.all_anim_files.end(), cmp_ci);
+    std::sort(S.all_quest_files.begin(), S.all_quest_files.end(),
+              [](const FlatAssetEntry& a, const FlatAssetEntry& b) {
+                  std::string x = a.name;
+                  std::string y = b.name;
+                  std::transform(x.begin(), x.end(), x.begin(),
+                                 [](unsigned char c) {
+                                     return char(std::tolower(c));
+                                 });
+                  std::transform(y.begin(), y.end(), y.begin(),
+                                 [](unsigned char c) {
+                                     return char(std::tolower(c));
+                                 });
+                  if (x != y) return x < y;
+                  return a.full_path < b.full_path;
+              });
+}
+
 static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk_paths) {
     root.children.clear();
 
@@ -171,188 +404,12 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
         return lower.size() >= 4 && lower.substr(lower.size() - 4) == ".bnk";
     };
 
-    auto ends_with_ci = [](const std::string& s, const char* suffix) -> bool {
-        size_t n = std::strlen(suffix);
-        if (s.size() < n) return false;
-        for (size_t i = 0; i < n; ++i) {
-            char a = s[s.size() - n + i];
-            char b = suffix[i];
-            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
-            if (a != b) return false;
-        }
-        return true;
-    };
-
-    auto quest_source_rank = [](std::string bnk_path) -> int {
-        std::replace(bnk_path.begin(), bnk_path.end(), '\\', '/');
-        const size_t slash = bnk_path.find_last_of('/');
-        if (slash != std::string::npos) bnk_path.erase(0, slash + 1);
-        std::transform(bnk_path.begin(), bnk_path.end(), bnk_path.begin(),
-                       [](unsigned char c) { return char(std::tolower(c)); });
-        if (bnk_path == "gamescripts.bnk") return 3;
-        if (bnk_path == "gamescripts_r.bnk") return 2;
-        return 1;
-    };
-
-    auto add_to_tree = [&root, &ends_with_ci, &quest_by_path,
-                        &quest_source_rank](const std::string& path, const std::string& bnk_source,
-                               int bnk_index, uint32_t file_size, bool is_nested = false) {
-
-        std::string leaf;
-        size_t slash = path.find_last_of("/\\");
-        leaf = (slash == std::string::npos) ? path : path.substr(slash + 1);
-
-        if (ends_with_ci(leaf, ".lua")) {
-            std::string normalized = path;
-            std::replace(normalized.begin(), normalized.end(), '\\', '/');
-            std::transform(normalized.begin(), normalized.end(),
-                           normalized.begin(),
-                           [](unsigned char c) {
-                               return char(std::tolower(c));
-                           });
-            const bool is_quest =
-                normalized.rfind("scripts/quests/", 0) == 0 ||
-                normalized.find("/scripts/quests/") != std::string::npos;
-            if (is_quest) {
-                FlatAssetEntry candidate;
-                candidate.name = leaf;
-                candidate.full_path = path;
-                candidate.bnk_path = bnk_source;
-                candidate.file_index = bnk_index;
-                candidate.size = file_size;
-                candidate.from_nested = is_nested;
-
-                auto [it, inserted] = quest_by_path.emplace(
-                    normalized, S.all_quest_files.size());
-                if (inserted) {
-                    S.all_quest_files.push_back(std::move(candidate));
-                } else {
-                    FlatAssetEntry& current = S.all_quest_files[it->second];
-                    if (quest_source_rank(candidate.bnk_path) >
-                        quest_source_rank(current.bnk_path)) {
-                        current = std::move(candidate);
-                    }
-                }
-            }
-        }
-
-        if (ends_with_ci(leaf, ".mdl")) {
-            FlatAssetEntry e;
-            e.name = leaf;
-            e.full_path = path;
-            e.bnk_path = bnk_source;
-            e.file_index = bnk_index;
-            e.size = file_size;
-            e.from_nested = is_nested;
-            S.all_mdl_files.push_back(std::move(e));
-        } else if (ends_with_ci(leaf, ".tex")) {
-            FlatAssetEntry e;
-            e.name = leaf;
-            e.full_path = path;
-            e.bnk_path = bnk_source;
-            e.file_index = bnk_index;
-            e.size = file_size;
-            e.from_nested = is_nested;
-            S.all_tex_files.push_back(std::move(e));
-        } else if (ends_with_ci(leaf, ".wav")) {
-            FlatAssetEntry e;
-            e.name = leaf;
-            e.full_path = path;
-            e.bnk_path = bnk_source;
-            e.file_index = bnk_index;
-            e.size = file_size;
-            e.from_nested = is_nested;
-            S.all_wav_files.push_back(std::move(e));
-        } else if (ends_with_ci(leaf, ".gdb")) {
-            FlatAssetEntry e;
-            e.name = leaf;
-            e.full_path = path;
-            e.bnk_path = bnk_source;
-            e.file_index = bnk_index;
-            e.size = file_size;
-            e.from_nested = is_nested;
-            S.all_gdb_files.push_back(std::move(e));
-        } else if (ends_with_ci(leaf, ".save")) {
-            FlatAssetEntry e;
-            e.name = leaf;
-            e.full_path = path;
-            e.bnk_path = bnk_source;
-            e.file_index = bnk_index;
-            e.size = file_size;
-            e.from_nested = is_nested;
-            S.all_save_files.push_back(std::move(e));
-        } else if (ends_with_ci(leaf, ".anim")) {
-            FlatAssetEntry e;
-            e.name = leaf;
-            e.full_path = path;
-            e.bnk_path = bnk_source;
-            e.file_index = bnk_index;
-            e.size = file_size;
-            e.from_nested = is_nested;
-            S.all_anim_files.push_back(std::move(e));
-        } else if (ends_with_ci(leaf, ".engine_level")) {
-            FlatAssetEntry e;
-            e.name = leaf;
-            e.full_path = path;
-            e.bnk_path = bnk_source;
-            e.file_index = bnk_index;
-            e.size = file_size;
-            e.from_nested = is_nested;
-            S.all_level_files.push_back(std::move(e));
-        } else if (ends_with_ci(leaf, ".ehf") ||
-                   ends_with_ci(leaf, ".ghf") ||
-                   ends_with_ci(leaf, ".hdb") ||
-                   ends_with_ci(leaf, ".genv") ||
-                   ends_with_ci(leaf, ".ama") ||
-                   ends_with_ci(leaf, ".amm") ||
-                   ends_with_ci(leaf, ".amr") ||
-                   ends_with_ci(leaf, ".texture_atlas")) {
-            FlatAssetEntry e;
-            e.name = leaf;
-            e.full_path = path;
-            e.bnk_path = bnk_source;
-            e.file_index = bnk_index;
-            e.size = file_size;
-            e.from_nested = is_nested;
-            S.all_heightfield_files.push_back(std::move(e));
-        }
-
-        std::string normalized_path = path;
-        std::replace(normalized_path.begin(), normalized_path.end(), '\\', '/');
-
-        std::vector<std::string> parts;
-        size_t start = 0;
-        size_t end = normalized_path.find('/');
-
-        while (end != std::string::npos) {
-            parts.push_back(normalized_path.substr(start, end - start));
-            start = end + 1;
-            end = normalized_path.find('/', start);
-        }
-        parts.push_back(normalized_path.substr(start));
-
-        TreeNode* current = &root;
-        for (size_t j = 0; j < parts.size(); ++j) {
-            const std::string& part = parts[j];
-            if (part.empty()) continue;
-
-            bool is_last = (j == parts.size() - 1);
-
-            TreeNode& child = current->children[part];
-            child.name = part;
-            child.is_file = is_last;
-
-            if (is_last) {
-                child.full_path = path;
-                child.bnk_source = bnk_source;
-                child.bnk_index = bnk_index;
-                child.file_size = file_size;
-                child.is_nested_source = is_nested;
-            }
-
-            current = &child;
-        }
+    auto add_to_tree = [&root, &quest_by_path](
+                           const std::string& path,
+                           const std::string& bnk_source, int bnk_index,
+                           uint32_t file_size, bool is_nested = false) {
+        tb_index_file(root, quest_by_path, path, bnk_source, bnk_index,
+                      file_size, is_nested);
     };
 
     std::vector<std::pair<std::string, int>> nested_bnks;
@@ -462,44 +519,33 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
         }
     }
 
-    auto cmp_ci = [](const FlatAssetEntry& a, const FlatAssetEntry& b) {
-        const std::string& sa = a.name;
-        const std::string& sb = b.name;
-        size_t n = std::min(sa.size(), sb.size());
-        for (size_t i = 0; i < n; ++i) {
-            char ca = sa[i], cb = sb[i];
-            if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
-            if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
-            if (ca != cb) return ca < cb;
+    
+    
+    
+    
+    
+    {
+        const std::string loose_data_dir = Level::Creation::ResolveGameDataDir();
+        if (!loose_data_dir.empty()) {
+            set_tree_label("loose files");
+            try {
+                BNKReader loose_reader(loose_data_dir);
+                const auto& loose_files = loose_reader.list_files();
+                for (size_t i = 0; i < loose_files.size(); ++i) {
+                    add_to_tree(loose_files[i].name, loose_data_dir, (int)i,
+                                loose_files[i].uncompressed_size);
+                }
+            } catch (...) {
+            }
         }
-        return sa.size() < sb.size();
-    };
-    std::sort(S.all_mdl_files.begin(), S.all_mdl_files.end(), cmp_ci);
-    std::sort(S.all_tex_files.begin(), S.all_tex_files.end(), cmp_ci);
-    std::sort(S.all_wav_files.begin(), S.all_wav_files.end(), cmp_ci);
-    std::sort(S.all_gdb_files.begin(), S.all_gdb_files.end(), cmp_ci);
-    std::sort(S.all_save_files.begin(), S.all_save_files.end(), cmp_ci);
-    std::sort(S.all_anim_files.begin(), S.all_anim_files.end(), cmp_ci);
-    std::sort(S.all_quest_files.begin(), S.all_quest_files.end(),
-              [](const FlatAssetEntry& a, const FlatAssetEntry& b) {
-                  std::string x = a.name;
-                  std::string y = b.name;
-                  std::transform(x.begin(), x.end(), x.begin(),
-                                 [](unsigned char c) {
-                                     return char(std::tolower(c));
-                                 });
-                  std::transform(y.begin(), y.end(), y.begin(),
-                                 [](unsigned char c) {
-                                     return char(std::tolower(c));
-                                 });
-                  if (x != y) return x < y;
-                  return a.full_path < b.full_path;
-              });
+    }
+
+    tb_sort_flat_lists();
 
     {
         std::ostringstream os;
         os << "tree built: " << bnk_paths.size() << " parent BNKs + "
-           << S.nested_bnk_paths.size() << " nested BNKs indexed  →  "
+           << S.nested_bnk_paths.size() << " nested BNKs indexed  ->  "
            << S.all_mdl_files.size() << " mdl, "
            << S.all_tex_files.size() << " tex, "
            << S.all_wav_files.size() << " wav, "
@@ -511,4 +557,90 @@ static void build_unified_file_tree(TreeNode& root, std::vector<std::string> bnk
     }
 
     set_tree_label("");
+}
+
+namespace {
+
+
+void tb_prune_loose(TreeNode& node, const std::string& loose_dir) {
+    for (auto it = node.children.begin(); it != node.children.end();) {
+        TreeNode& child = it->second;
+        if (child.is_file) {
+            it = child.bnk_source == loose_dir ? node.children.erase(it)
+                                               : ++it;
+        } else {
+            tb_prune_loose(child, loose_dir);
+            it = child.children.empty() ? node.children.erase(it) : ++it;
+        }
+    }
+}
+
+}
+
+
+
+
+
+
+bool refresh_loose_file_index() {
+    if (!g_tree_built.load() || g_tree_building.load()) return false;
+    const std::string loose_dir = Level::Creation::ResolveGameDataDir();
+    if (loose_dir.empty()) return false;
+
+    BnkCache::invalidate(loose_dir);
+
+    auto is_loose = [&](const FlatAssetEntry& e) {
+        return e.bnk_path == loose_dir;
+    };
+    auto strip = [&](std::vector<FlatAssetEntry>& v) {
+        v.erase(std::remove_if(v.begin(), v.end(), is_loose), v.end());
+    };
+    strip(S.all_mdl_files);
+    strip(S.all_tex_files);
+    strip(S.all_wav_files);
+    strip(S.all_gdb_files);
+    strip(S.all_save_files);
+    strip(S.all_anim_files);
+    strip(S.all_level_files);
+    strip(S.all_heightfield_files);
+    const size_t quests_before_strip = S.all_quest_files.size();
+    strip(S.all_quest_files);
+    bool quests_changed =
+        quests_before_strip != S.all_quest_files.size();
+
+    tb_prune_loose(g_tree_root, loose_dir);
+
+    std::unordered_map<std::string, size_t> quest_by_path;
+    quest_by_path.reserve(S.all_quest_files.size() * 2);
+    for (size_t i = 0; i < S.all_quest_files.size(); ++i) {
+        std::string n = S.all_quest_files[i].full_path;
+        std::replace(n.begin(), n.end(), '\\', '/');
+        std::transform(n.begin(), n.end(), n.begin(),
+                       [](unsigned char c) {
+                           return char(std::tolower(c));
+                       });
+        quest_by_path.emplace(n, i);
+    }
+
+    const size_t quests_before_add = S.all_quest_files.size();
+    try {
+        BNKReader loose_reader(loose_dir);
+        const auto& files = loose_reader.list_files();
+        for (size_t i = 0; i < files.size(); ++i) {
+            tb_index_file(g_tree_root, quest_by_path, files[i].name,
+                          loose_dir, (int)i, files[i].uncompressed_size,
+                          false);
+        }
+    } catch (...) {
+        return false;
+    }
+    quests_changed |= quests_before_add != S.all_quest_files.size();
+    if (quests_changed) S.selected_quest = -1;
+
+    tb_sort_flat_lists();
+
+    
+    
+    ContentTabs::FixLooseEntryIndices(loose_dir);
+    return true;
 }

@@ -69,12 +69,16 @@ enum class BrushTool : int {
     Lower   = 2,
     Smooth  = 3,
     Flatten = 4,
+    Noise   = 5,
 };
+
+
 
 void ApplyBrush(BrushTool tool,
                 float wx, float wz,
                 float radius, float strength,
-                float target_h = 0.f);
+                float target_h = 0.f,
+                float falloff = 1.0f);
 
 float SampleHeightAtWorldXZ(float wx, float wz);
 
@@ -87,6 +91,10 @@ void ApplyToGpu(ID3D11Device* device, void* mesh);
 #endif
 
 bool Save(std::string& out_path_or_error);
+
+
+
+void MarkSaved();
 
 void Clear();
 

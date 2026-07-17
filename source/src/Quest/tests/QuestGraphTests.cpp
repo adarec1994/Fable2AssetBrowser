@@ -270,6 +270,70 @@ int main() {
     assert(authored_text.size() == 5);
     assert(authored_text.front().second == "A Small Favour");
     assert(Quest::RemoveAuthoredNode(authored, story_id));
+
+    Quest::AuthoredQuest skip_patch =
+        Quest::CreateAuthoredQuest("QMOD_SkipChildhood");
+    skip_patch.quest_title = "Skip the Introduction?";
+    assert(skip_patch.nodes.size() == 1);
+    const int skip_start_id = skip_patch.nodes.front().id;
+    const int skip_approach_id = Quest::AddAuthoredNode(
+        skip_patch, Quest::AuthoredNodeKind::ApproachNpc,
+        0.0f, 100.0f);
+    auto* skip_approach =
+        Quest::FindAuthoredNode(skip_patch, skip_approach_id);
+    skip_approach->entity.level_id = "Bowerstone\\BWSSlums";
+    skip_approach->entity.level_path =
+        "worlds\\albion\\bowerstone\\bwsslums";
+    skip_approach->entity.entity_name =
+        "QMOD_SkipChildhood_QuestGiver";
+    skip_approach->entity.authored_instance = true;
+    skip_approach->approach_radius = 3.5f;
+    const int hold_id = Quest::AddAuthoredNode(
+        skip_patch, Quest::AuthoredNodeKind::HoldInteraction,
+        0.0f, 200.0f);
+    Quest::FindAuthoredNode(skip_patch, hold_id)->text =
+        "Hold A to skip the childhood introduction.";
+    const int skip_ending_id = Quest::AddAuthoredNode(
+        skip_patch, Quest::AuthoredNodeKind::SkipChildhoodEnding,
+        0.0f, 300.0f);
+    Quest::AddAuthoredLink(skip_patch, skip_start_id,
+                           skip_approach_id);
+    Quest::AddAuthoredLink(skip_patch, skip_approach_id, hold_id);
+    Quest::AddAuthoredLink(skip_patch, hold_id, skip_ending_id);
+    assert(Quest::ValidateSimpleQuest(skip_patch, authored_error));
+    const std::string skip_lua =
+        Quest::GenerateQuestLua(skip_patch);
+    assert(skip_lua.find(
+               "QuestManager.NewEntityThread("
+               "\"QMOD_SkipChildhood_QuestGiver\")") !=
+           std::string::npos);
+    assert(skip_lua.find("GUI.DisplayInfoBoxParams") !=
+           std::string::npos);
+    assert(skip_lua.find("IsHoldAButton = true") !=
+           std::string::npos);
+    assert(skip_lua.find(
+               "Gameflow.ChildhoodVars.SkipToLuciensStudy()") !=
+           std::string::npos);
+    assert(skip_lua.find("created_dog:IsAlive()") !=
+           std::string::npos);
+    assert(skip_lua.find("childhood.EndChildhood = true") !=
+           std::string::npos);
+    assert(skip_lua.find("Fall_m.bik") == std::string::npos);
+    const std::string skip_eligibility =
+        Quest::GenerateEligibilityLua(skip_patch);
+    assert(skip_eligibility.find("ScriptEnum.GAMEFLOW_START") !=
+           std::string::npos);
+    assert(skip_eligibility.find("ScriptEnum.DebugQC060") !=
+           std::string::npos);
+    const auto skip_text = Quest::AuthoredTextEntries(skip_patch);
+    assert(skip_text.size() == 3);
+    assert(skip_text[1].second == "Skip");
+    skip_approach->entity.authored_instance = false;
+    assert(!Quest::ValidateSimpleQuest(skip_patch, authored_error));
+    assert(authored_error.find("newly placed custom NPC") !=
+           std::string::npos);
+    skip_approach->entity.authored_instance = true;
+
     const std::string gameflow_source =
         "function GameflowQuestUnlocker:Update()\r\n"
         "\twhile true do\r\n"

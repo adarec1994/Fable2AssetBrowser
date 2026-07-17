@@ -2,6 +2,7 @@
 
 #include "../GDB/GdbEdit.h"
 #include "../Level/Database/TextBank.h"
+#include "../Utilities/GameBackup.h"
 
 #include <algorithm>
 #include <cctype>
@@ -80,19 +81,6 @@ bool write_file_atomically(const std::string& path,
     return true;
 }
 
-bool ensure_backup(const std::string& path, std::string& error) {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    const std::string backup = path + ".bak";
-    if (fs::is_regular_file(backup, ec)) return true;
-    fs::copy_file(path, backup, fs::copy_options::none, ec);
-    if (ec) {
-        error = "Could not create backup " + backup + ": " + ec.message();
-        return false;
-    }
-    return true;
-}
-
 GdbEdit::Field field(uint32_t hash, uint8_t type, uint32_t value) {
     GdbEdit::Field out;
     out.hash = hash;
@@ -151,6 +139,7 @@ bool Save(const std::string& root_dir,
     error.clear();
     out_entity_hash = 0;
 
+    if (!GameBackup::RequireBackup(error)) return false;
     if (!IsValidInternalName(definition.internal_name)) {
         error = "NPC ID must start with a letter or underscore and contain "
                 "only letters, numbers, and underscores.";
@@ -169,8 +158,7 @@ bool Save(const std::string& root_dir,
     const fs::path globals = fs::path(root_dir) / "data" / "Globals" /
                              "globals.gdb";
     std::vector<uint8_t> original;
-    if (!read_file(globals.string(), original, error) ||
-        !ensure_backup(globals.string(), error)) {
+    if (!read_file(globals.string(), original, error)) {
         return false;
     }
 
@@ -305,27 +293,6 @@ bool Save(const std::string& root_dir,
             << " to globals.gdb. The definition inherits the full model and "
                "animation setup from " << definition.template_name << '.';
     result = message.str();
-    return true;
-}
-
-bool BackupAvailable(const std::string& root_dir) {
-    std::error_code ec;
-    const std::filesystem::path path =
-        std::filesystem::path(root_dir) / "data" / "Globals" /
-        "globals.gdb.bak";
-    return std::filesystem::is_regular_file(path, ec);
-}
-
-bool RestoreDefault(const std::string& root_dir,
-                    std::string& result,
-                    std::string& error) {
-    const std::filesystem::path path =
-        std::filesystem::path(root_dir) / "data" / "Globals" /
-        "globals.gdb";
-    std::vector<uint8_t> backup;
-    if (!read_file(path.string() + ".bak", backup, error)) return false;
-    if (!write_file_atomically(path.string(), backup, error)) return false;
-    result = "Restored globals.gdb from its original NPC backup.";
     return true;
 }
 

@@ -161,13 +161,6 @@ void AutoPilot_Init() {
             std::fflush(nullptr);
             ExitProcess(ok ? 0 : 1);
         }
-        else if (const char* v = value("--fixstream")) {
-            std::string msg;
-            const bool ok = LevelEdit::RunStreamFix(v, msg);
-            std::fprintf(ok ? stdout : stderr, "%s\n", msg.c_str());
-            std::fflush(nullptr);
-            ExitProcess(ok ? 0 : 1);
-        }
     }
     if (g_quest_fit_all) QuestUI::SetInitialViewAll(true);
     if (g_quest_focus_start > 0) {
@@ -272,7 +265,8 @@ void AutoPilot_Tick() {
     case Stage::OpenCustomQuest: {
         if (--g_countdown > 0) break;
         std::string error;
-        if (!QuestUI::CreateNewQuest(g_custom_quest_id, error)) {
+        if (!QuestUI::CreateNewBlueprintQuest(g_custom_quest_id, error) &&
+            !QuestUI::OpenAuthoredQuest(g_custom_quest_id)) {
             finish("could not create custom quest: " + error, false);
             break;
         }

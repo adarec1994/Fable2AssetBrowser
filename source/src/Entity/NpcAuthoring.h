@@ -45,9 +45,4 @@ bool Save(const std::string& root_dir,
           std::string& result,
           std::string& error);
 
-bool BackupAvailable(const std::string& root_dir);
-bool RestoreDefault(const std::string& root_dir,
-                    std::string& result,
-                    std::string& error);
-
 }

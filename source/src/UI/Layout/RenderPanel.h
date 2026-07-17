@@ -6,6 +6,9 @@
 struct ID3D11Device;
 #endif
 
+struct LevelSpawnMarker;
+bool is_player_start_marker(const LevelSpawnMarker& marker);
+
 namespace UI {
 
 #ifdef _WIN32

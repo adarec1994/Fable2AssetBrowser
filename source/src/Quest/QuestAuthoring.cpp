@@ -34,12 +34,21 @@ std::string node_tag(const AuthoredQuest& quest,
            std::to_string(node.id);
 }
 
+std::string patch_accept_tag(const AuthoredQuest& quest) {
+    return "TEXT_QUEST_" + quest.quest_id + "_SKIP";
+}
+
 const AuthoredNode* find_kind(const AuthoredQuest& quest,
                               AuthoredNodeKind kind) {
     for (const AuthoredNode& node : quest.nodes) {
         if (node.kind == kind) return &node;
     }
     return nullptr;
+}
+
+bool is_childhood_skip_graph(const AuthoredQuest& quest) {
+    return find_kind(quest, AuthoredNodeKind::SkipChildhoodEnding) !=
+           nullptr;
 }
 
 std::string quest_state_expression(const AuthoredNode& node) {
@@ -259,6 +268,203 @@ bool validate_prerequisite(const AuthoredNode& node, std::string& error) {
     return true;
 }
 
+bool contains_ci_ascii(std::string value, std::string needle) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    std::transform(needle.begin(), needle.end(), needle.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    return value.find(needle) != std::string::npos;
+}
+
+bool validate_childhood_skip_patch(const AuthoredQuest& quest,
+                                   std::string& error) {
+    error.clear();
+    if (!IsValidQuestId(quest.quest_id)) {
+        error = "The quest patch ID is invalid.";
+        return false;
+    }
+    if (quest.quest_title.empty()) {
+        error = "Enter the hold-A prompt title.";
+        return false;
+    }
+    if (!quest.prerequisites.empty()) {
+        error = "The childhood skip patch already has a fixed QC010 lifetime.";
+        return false;
+    }
+    for (const AuthoredNode& node : quest.nodes) {
+        if (IsPrerequisiteNode(node.kind)) {
+            error = "Remove prerequisite nodes from the childhood skip patch.";
+            return false;
+        }
+    }
+
+    std::vector<const AuthoredNode*> flow;
+    if (!ordered_flow(quest, flow, error)) return false;
+    const AuthoredNodeKind expected[] = {
+        AuthoredNodeKind::QuestStart,
+        AuthoredNodeKind::ApproachNpc,
+        AuthoredNodeKind::HoldInteraction,
+        AuthoredNodeKind::SkipChildhoodEnding,
+    };
+    if (flow.size() != std::size(expected)) {
+        error =
+            "Connect: Quest start -> Approach entity -> Hold A prompt -> "
+            "Skip childhood to ending.";
+        return false;
+    }
+    for (std::size_t i = 0; i < flow.size(); ++i) {
+        if (flow[i]->kind != expected[i]) {
+            error = "The childhood skip patch nodes are not connected in the "
+                    "required order.";
+            return false;
+        }
+    }
+
+    const AuthoredNode& approach = *flow[1];
+    const AuthoredNode& prompt = *flow[2];
+    if (!approach.entity.valid() ||
+        !IsValidQuestId(approach.entity.entity_name)) {
+        error =
+            "Create, place, and assign a named entity in the Approach "
+            "entity node.";
+        return false;
+    }
+    if (!approach.entity.authored_instance) {
+        error =
+            "The childhood skip patch requires a newly placed named entity.";
+        return false;
+    }
+    if (!contains_ci_ascii(approach.entity.level_id, "bwsslums") &&
+        !contains_ci_ascii(approach.entity.level_id,
+                           "bowerstoneslums")) {
+        error = "Place the entity in Bowerstone Slums (BWSSlums).";
+        return false;
+    }
+    if (approach.approach_radius <= 0.0f) {
+        error = "The approach radius must be greater than zero.";
+        return false;
+    }
+    if (prompt.text.empty()) {
+        error = "Enter the text shown by the Hold A prompt node.";
+        return false;
+    }
+    return true;
+}
+
+std::string generate_childhood_skip_patch_lua(
+    const AuthoredQuest& quest) {
+    const AuthoredNode& approach =
+        *find_kind(quest, AuthoredNodeKind::ApproachNpc);
+    const AuthoredNode& prompt =
+        *find_kind(quest, AuthoredNodeKind::HoldInteraction);
+    const std::string prompt_tag = node_tag(quest, prompt);
+    const std::string title_tag = "Quest_" + quest.quest_id;
+    const std::string accept_tag = patch_accept_tag(quest);
+    const std::string box_tag = quest.quest_id + "_SkipPrompt";
+
+    std::ostringstream lua;
+    lua << "module(..., package.seeall)\n"
+        << "QuestManager.NewQuestThread(\"" << quest.quest_id << "\")\n\n"
+        << "function " << quest.quest_id << ":Init()\n"
+        << "  self.SkipRequested = false\n"
+        << "end\n\n"
+        << "function " << quest.quest_id << ":Update()\n"
+        << "  while Gameflow.Childhood == nil and "
+           "Gameflow.PositionInGameflow <= ScriptEnum.DebugQC060 do\n"
+        << "    coroutine.yield()\n"
+        << "  end\n"
+        << "  if Gameflow.Childhood == nil then return end\n"
+        << "  while not self.SkipRequested and "
+           "Gameflow.Childhood ~= nil and "
+           "not Gameflow.Childhood.Terminated do\n"
+        << "    coroutine.yield()\n"
+        << "  end\n"
+        << "  if not self.SkipRequested or Gameflow.Childhood == nil then "
+           "return end\n"
+        << "  while Gameflow.ChildhoodVars == nil or "
+           "Gameflow.ChildhoodVars.SkipToLuciensStudy == nil do\n"
+        << "    coroutine.yield()\n"
+        << "  end\n"
+        << "  local dog = GetDog()\n"
+        << "  if dog == nil or not dog:IsAlive() then\n"
+        << "    ScriptFunction.CreateDog()\n"
+        << "    self:WaitFor(function()\n"
+        << "      local created_dog = GetDog()\n"
+        << "      return created_dog ~= nil and created_dog:IsAlive()\n"
+        << "    end)\n"
+        << "  end\n"
+        << "  QuestManager.DogEntity = GetDog()\n"
+        << "  Gameflow.ChildhoodVars.SkipToLuciensStudy()\n"
+        << "  self:WaitFor(function()\n"
+        << "    return IsLevelLoaded(\"FairfaxCastleGardens\")\n"
+        << "  end)\n"
+        << "  local childhood = Gameflow.Childhood\n"
+        << "  if childhood == nil or childhood.Terminated then return end\n"
+        << "  childhood.DisperseCrowd = true\n"
+        << "  childhood.MurgoPitchDone = true\n"
+        << "  childhood.Morning = true\n"
+        << "  childhood.CarriageBoarded = true\n"
+        << "  childhood.GoToCastle = true\n"
+        << "  childhood.CircleActive = true\n"
+        << "  childhood.EndChildhood = true\n"
+        << "end\n\n"
+        << "QuestManager.NewEntityThread("
+        << lua_quote(approach.entity.entity_name) << ")\n\n"
+        << "function " << approach.entity.entity_name << ":Init()\n"
+        << "  self.SkipPromptTag = " << lua_quote(box_tag) << "\n"
+        << "end\n\n"
+        << "function " << approach.entity.entity_name << ":CustomUpdate()\n"
+        << (approach.entity.entity_name.rfind("F2AB_Static_", 0) == 0
+                ? std::string()
+                : "  ScriptFunction.DisableSimBehaviours(self.Entity)\n"
+                  "  Navigation.StopMoving(self.Entity)\n"
+                  "  PhysicsCharacter.SetAsPushableByHero(self.Entity, "
+                  "false)\n"
+                  "  Health.SetAsInvulnerable(self.Entity, true)\n"
+                  "  OpinionReaction.SetRespondToExpressions(self.Entity, "
+                  "false)\n")
+        << "  while not self.ParentQuest.SkipRequested do\n"
+        << "    if IsDistanceBetweenThingsUnder("
+        << "self.Entity, QuestManager.HeroEntity, "
+        << approach.approach_radius << ") then\n"
+        << "      GUI.DisplayInfoBoxParams({\n"
+        << "        Name = self.SkipPromptTag,\n"
+        << "        Title = " << lua_quote(title_tag) << ",\n"
+        << "        AcceptText = " << lua_quote(accept_tag) << ",\n"
+        << "        IsHoldAButton = true,\n"
+        << "        ShowYButton = false,\n"
+        << "        DisplayBoxStyle = "
+           "EDisplayBoxStyle.DBS_QUEST_ACCEPTANCE\n"
+        << "      }, " << lua_quote(prompt_tag) << ")\n"
+        << "      while IsDistanceBetweenThingsUnder("
+        << "self.Entity, QuestManager.HeroEntity, "
+        << approach.approach_radius
+        << ") and not self.ParentQuest.SkipRequested do\n"
+        << "        local is_posted, message = "
+           "MessageEvents.IsMessagePosted("
+           "EMessageEventType.MESSAGE_EVENT_INFOBOX, "
+           "self.LastMessageID_PressedAButton)\n"
+        << "        if is_posted then\n"
+        << "          self.LastMessageID_PressedAButton = message:GetID()\n"
+        << "          if message:GetExtraDataAsNumber() == 1 then\n"
+        << "            self.ParentQuest.SkipRequested = true\n"
+        << "          end\n"
+        << "        end\n"
+        << "        coroutine.yield()\n"
+        << "      end\n"
+        << "      GUI.RemoveDisplayBox(self.SkipPromptTag)\n"
+        << "    end\n"
+        << "    coroutine.yield()\n"
+        << "  end\n"
+        << "  GUI.RemoveDisplayBox(self.SkipPromptTag)\n"
+        << "end\n";
+    return lua.str();
+}
+
 }
 
 bool IsValidQuestId(const std::string& quest_id) {
@@ -282,7 +488,8 @@ AuthoredQuest CreateAuthoredQuest(const std::string& quest_id) {
 int AddAuthoredNode(AuthoredQuest& quest, AuthoredNodeKind kind,
                     float x, float y) {
     if (kind == AuthoredNodeKind::QuestStart ||
-        kind == AuthoredNodeKind::CompleteQuest) {
+        kind == AuthoredNodeKind::CompleteQuest ||
+        kind == AuthoredNodeKind::SkipChildhoodEnding) {
         for (const AuthoredNode& existing : quest.nodes) {
             if (existing.kind == kind) {
                 return existing.id;
@@ -325,8 +532,10 @@ bool RemoveAuthoredNode(AuthoredQuest& quest, int node_id) {
 int AddAuthoredLink(AuthoredQuest& quest, int from_node, int to_node) {
     if (from_node == to_node || !FindAuthoredNode(quest, from_node) ||
         !FindAuthoredNode(quest, to_node)) return 0;
-    if (FindAuthoredNode(quest, from_node)->kind ==
-        AuthoredNodeKind::CompleteQuest) return 0;
+    const AuthoredNodeKind from_kind =
+        FindAuthoredNode(quest, from_node)->kind;
+    if (from_kind == AuthoredNodeKind::CompleteQuest ||
+        from_kind == AuthoredNodeKind::SkipChildhoodEnding) return 0;
     for (const AuthoredLink& link : quest.links) {
         if (link.from_node == from_node && link.to_node == to_node) {
             return link.id;
@@ -428,12 +637,15 @@ const char* AuthoredNodeKindName(AuthoredNodeKind kind) {
         case AuthoredNodeKind::PrerequisiteHeroRequirement:
             return "Hero requirement prerequisite";
         case AuthoredNodeKind::QuestStart: return "Quest start";
-        case AuthoredNodeKind::ApproachNpc: return "Approach NPC";
+        case AuthoredNodeKind::ApproachNpc: return "Approach entity";
         case AuthoredNodeKind::Dialogue: return "Dialogue";
         case AuthoredNodeKind::AcceptQuest: return "Accept quest";
+        case AuthoredNodeKind::HoldInteraction: return "Hold A prompt";
         case AuthoredNodeKind::ObtainItem: return "Obtain item";
         case AuthoredNodeKind::ReturnToNpc: return "Return to NPC";
         case AuthoredNodeKind::CompleteQuest: return "Complete quest";
+        case AuthoredNodeKind::SkipChildhoodEnding:
+            return "Skip childhood to ending";
     }
     return "Quest node";
 }
@@ -549,6 +761,9 @@ const std::vector<StoryProgressMilestone>& StoryProgressMilestones() {
 }
 
 bool ValidateSimpleQuest(const AuthoredQuest& quest, std::string& error) {
+    if (is_childhood_skip_graph(quest)) {
+        return validate_childhood_skip_patch(quest, error);
+    }
     error.clear();
     if (!IsValidQuestId(quest.quest_id)) {
         error = "The quest ID is invalid.";
@@ -666,10 +881,14 @@ std::vector<std::pair<std::string, std::string>>
 AuthoredTextEntries(const AuthoredQuest& quest) {
     std::vector<std::pair<std::string, std::string>> entries;
     entries.emplace_back("Quest_" + quest.quest_id, quest.quest_title);
+    if (is_childhood_skip_graph(quest)) {
+        entries.emplace_back(patch_accept_tag(quest), "Skip");
+    }
     for (const AuthoredNode& node : quest.nodes) {
         switch (node.kind) {
             case AuthoredNodeKind::Dialogue:
             case AuthoredNodeKind::AcceptQuest:
+            case AuthoredNodeKind::HoldInteraction:
             case AuthoredNodeKind::ObtainItem:
             case AuthoredNodeKind::ReturnToNpc:
                 if (!node.text.empty()) {
@@ -687,6 +906,9 @@ std::string GenerateQuestLua(const AuthoredQuest& quest) {
     std::string validation_error;
     if (!ValidateSimpleQuest(quest, validation_error)) {
         return "-- Quest graph incomplete: " + validation_error + "\n";
+    }
+    if (is_childhood_skip_graph(quest)) {
+        return generate_childhood_skip_patch_lua(quest);
     }
     const AuthoredNode& approach = *find_kind(quest, AuthoredNodeKind::ApproachNpc);
     const AuthoredNode& dialogue = *find_kind(quest, AuthoredNodeKind::Dialogue);
@@ -892,7 +1114,10 @@ std::string GenerateQuestLua(const AuthoredQuest& quest) {
 
 std::string GenerateEligibilityLua(const AuthoredQuest& quest) {
     std::string start = "ScriptEnum.GAMEFLOW_START";
-    std::string end = "ScriptEnum.GAMEFLOW_END";
+    std::string end =
+        is_childhood_skip_graph(quest)
+            ? "ScriptEnum.DebugQC060"
+            : "ScriptEnum.GAMEFLOW_END";
     std::vector<std::string> requirements;
     auto append_prerequisite = [&](const AuthoredNode& node) {
         if (node.kind == AuthoredNodeKind::PrerequisiteStoryProgress) {

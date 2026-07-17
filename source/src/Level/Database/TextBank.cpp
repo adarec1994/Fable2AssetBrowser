@@ -354,15 +354,6 @@ bool rewrite_file(const std::string& path,
     out.insert(out.end(), comp.begin(), comp.end());
     out.insert(out.end(), d.begin() + tail_start, d.end());
 
-    std::error_code ec;
-    const std::string bak = path + ".bak";
-    if (!std::filesystem::exists(bak, ec)) {
-        std::filesystem::copy_file(path, bak, ec);
-        if (ec) {
-            err = "babel backup failed: " + bak;
-            return false;
-        }
-    }
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) {
         err = "cannot write " + path;

@@ -256,8 +256,16 @@ void draw_tree_node(TreeNode& node) {
                         open_gdb_viewer_for_bnk_entry(
                             node.bnk_source, node.bnk_index, node.name);
                     }
-                    if (is_lua(node.name) &&
-                        !level_edit_click_guard("Script preview")) {
+                    if (is_lua(node.name)) {
+                        std::string bnk_path  = node.bnk_source;
+                        std::string lua_title = node.name;
+                        int         bnk_index = node.bnk_index;
+                        const std::string lua_tab_key =
+                            node.full_path.empty()
+                                ? bnk_path + "#" + std::to_string(bnk_index)
+                                : node.full_path;
+                        ContentTabs::OpenLua(lua_tab_key, lua_title, false);
+
                         g_pending_mdl_load = false;
                         g_pending_tex_load = false;
                         g_pending_mdl_index = -1;
@@ -275,14 +283,6 @@ void draw_tree_node(TreeNode& node) {
 #else
                         g_mp.has_model = false;
 #endif
-                        std::string bnk_path  = node.bnk_source;
-                        std::string lua_title = node.name;
-                        int         bnk_index = node.bnk_index;
-                        const std::string lua_tab_key =
-                            node.full_path.empty()
-                                ? bnk_path + "#" + std::to_string(bnk_index)
-                                : node.full_path;
-                        ContentTabs::OpenLua(lua_tab_key, lua_title, false);
                         S.lua_preview_selected = (int)i;
                         S.lua_preview_title    = lua_title;
                         S.lua_preview_content.clear();

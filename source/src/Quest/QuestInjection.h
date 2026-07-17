@@ -27,9 +27,4 @@ bool Inject(const std::string& root_dir,
             std::string& result,
             std::string& error);
 
-bool BackupsAvailable(const std::string& root_dir);
-bool RestoreDefaults(const std::string& root_dir,
-                     std::string& result,
-                     std::string& error);
-
 }

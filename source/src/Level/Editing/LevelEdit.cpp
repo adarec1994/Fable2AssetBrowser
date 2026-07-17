@@ -1,5 +1,8 @@
 #include "LevelEdit.h"
 
+#include "../../Utilities/GameBackup.h"
+#include "../Creation/LandscapeAuthoring.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -147,15 +150,6 @@ std::filesystem::path edited_levels_dir() {
     return root_p / "edited_levels";
 }
 
-std::filesystem::path slot_bak_path(const FileTarget& t,
-                                    const char* tag) {
-    std::string leaf = std::filesystem::path(
-        !t.file_path.empty() ? t.file_path : st().entry.full_path)
-        .filename().string();
-    if (leaf.empty()) leaf = "level";
-    return edited_levels_dir() / (leaf + "." + tag + ".slot.bak");
-}
-
 bool write_bytes_at(const std::string& path_or_bnk,
                     uint64_t offset,
                     const uint8_t* data,
@@ -193,179 +187,6 @@ void put_f32_be(uint8_t* p, float v) {
     p[1] = uint8_t(bits >> 16);
     p[2] = uint8_t(bits >> 8);
     p[3] = uint8_t(bits);
-}
-
-bool copy_file_with_progress(const std::string& src,
-                             const std::string& dst,
-                             const std::string& what,
-                             std::string& msg,
-                             bool cancellable = true,
-                             bool remove_dst_on_fail = true) {
-    std::error_code ec;
-    const uint64_t total = std::filesystem::file_size(src, ec);
-    if (ec) {
-        msg = "cannot stat " + src;
-        return false;
-    }
-    std::ifstream in(src, std::ios::binary);
-    if (!in) {
-        msg = "cannot open " + src;
-        return false;
-    }
-    std::ofstream out(dst, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        msg = "cannot write " + dst;
-        return false;
-    }
-    const size_t kChunk = 8u << 20;
-    std::vector<char> buf(kChunk);
-    uint64_t done = 0;
-    const int total_mb = (int)(total >> 20) + 1;
-    auto fail = [&](const std::string& why) {
-        out.close();
-        if (remove_dst_on_fail) std::filesystem::remove(dst, ec);
-        msg = why;
-        return false;
-    };
-    while (done < total) {
-        if (cancellable && S.cancel_requested.load()) {
-            return fail("cancelled");
-        }
-        progress_update((int)(done >> 20), total_mb,
-                        what + " (" + std::to_string(done >> 20) + " / " +
-                        std::to_string(total_mb) + " MB)");
-        const size_t n =
-            (size_t)std::min<uint64_t>(kChunk, total - done);
-        in.read(buf.data(), (std::streamsize)n);
-        if ((size_t)in.gcount() != n) {
-            return fail("short read from " + src);
-        }
-        out.write(buf.data(), (std::streamsize)n);
-        if (!out) {
-            return fail("short write to " + dst);
-        }
-        done += n;
-    }
-    return true;
-}
-
-bool ensure_backup(const FileTarget& t, const char* tag,
-                   std::unordered_set<std::string>& backed,
-                   std::string& msg) {
-    if (!t.valid && t.file_path.empty()) return true;
-    std::error_code ec;
-    if (!t.file_path.empty()) {
-        if (!backed.insert(t.file_path).second) return true;
-        const std::filesystem::path bak(t.file_path + ".bak");
-        if (std::filesystem::exists(bak, ec)) return true;
-        std::string cerr;
-        if (!copy_file_with_progress(
-                t.file_path, bak.string(),
-                "Backing up " +
-                    std::filesystem::path(t.file_path).filename().string(),
-                cerr)) {
-            msg = "backup failed: " + cerr;
-            return false;
-        }
-        OutputLog::success("level edit: backup written to " + bak.string());
-        return true;
-    }
-    if (!t.in_iso) {
-        if (!backed.insert(t.bnk_path).second) return true;
-        const std::filesystem::path bak(t.bnk_path + ".bak");
-        if (std::filesystem::exists(bak, ec)) return true;
-        std::string cerr;
-        if (!copy_file_with_progress(
-                t.bnk_path, bak.string(),
-                "Backing up " +
-                    std::filesystem::path(t.bnk_path).filename().string(),
-                cerr)) {
-            msg = "backup failed: " + cerr;
-            return false;
-        }
-        OutputLog::success("level edit: backup written to " + bak.string());
-        return true;
-    }
-    if (t.compressed) return true;
-    const auto bak = slot_bak_path(t, tag);
-    if (std::filesystem::exists(bak, ec)) return true;
-    std::vector<uint8_t> slot;
-    try {
-        slot = BnkCache::extract_bytes(t.bnk_path, t.file_index);
-    } catch (...) {
-        slot.clear();
-    }
-    if (slot.empty()) {
-        msg = "backup failed: could not extract payload for " +
-              std::string(tag);
-        return false;
-    }
-    std::filesystem::create_directories(bak.parent_path(), ec);
-    std::ofstream f(bak, std::ios::binary);
-    if (!f) {
-        msg = "backup failed: cannot write " + bak.string();
-        return false;
-    }
-    f.write(reinterpret_cast<const char*>(slot.data()),
-            (std::streamsize)slot.size());
-    OutputLog::success("level edit: slot backup written to " +
-                       bak.string());
-    return true;
-}
-
-bool restore_target(const FileTarget& t, const char* tag,
-                    std::unordered_set<std::string>& restored,
-                    std::string& msg) {
-    if (!t.valid && t.file_path.empty()) return true;
-    std::error_code ec;
-    if (!t.file_path.empty()) {
-        if (!restored.insert(t.file_path).second) return true;
-        const std::filesystem::path bak(t.file_path + ".bak");
-        if (!std::filesystem::exists(bak, ec)) return true;
-        std::string cerr;
-        if (!copy_file_with_progress(
-                bak.string(), t.file_path,
-                "Restoring " +
-                    std::filesystem::path(t.file_path).filename().string(),
-                cerr, false, false)) {
-            msg = "restore failed: " + cerr;
-            return false;
-        }
-        return true;
-    }
-    if (!t.in_iso) {
-        if (!restored.insert(t.bnk_path).second) return true;
-        const std::filesystem::path bak(t.bnk_path + ".bak");
-        if (!std::filesystem::exists(bak, ec)) return true;
-        BnkCache::invalidate(t.bnk_path);
-        std::string cerr;
-        if (!copy_file_with_progress(
-                bak.string(), t.bnk_path,
-                "Restoring " +
-                    std::filesystem::path(t.bnk_path).filename().string(),
-                cerr, false, false)) {
-            msg = "restore failed: " + cerr;
-            return false;
-        }
-        return true;
-    }
-    if (t.compressed) return true;
-    const auto bak = slot_bak_path(t, tag);
-    if (!std::filesystem::exists(bak, ec)) return true;
-    std::ifstream f(bak, std::ios::binary);
-    std::vector<uint8_t> slot((std::istreambuf_iterator<char>(f)),
-                              std::istreambuf_iterator<char>());
-    if (slot.empty() || slot.size() > t.on_disk_size) {
-        msg = "slot backup unreadable or larger than the BNK slot";
-        return false;
-    }
-    std::string err;
-    if (!write_bytes_at(t.bnk_path, t.disk_offset, slot.data(),
-                        slot.size(), err)) {
-        msg = "restore failed: " + err;
-        return false;
-    }
-    return true;
 }
 
 bool patch_target(const FileTarget& t, uint32_t payload_off,
@@ -996,62 +817,6 @@ std::filesystem::path additions_path() {
     return edited_levels_dir() / (leaf + ".additions.txt");
 }
 
-std::filesystem::path dirent_bak_path() {
-    std::string leaf = std::filesystem::path(st().entry.full_path)
-        .filename().string();
-    if (leaf.empty()) leaf = "level";
-    return edited_levels_dir() / (leaf + ".dirent.bak");
-}
-
-void record_dirent_bak(const std::string& vpath) {
-    const auto p = dirent_bak_path();
-    std::error_code ec;
-    if (std::filesystem::exists(p, ec)) return;
-    const ISO::MountedFile* mf = ISO::IsoMount::instance().find(vpath);
-    if (!mf) return;
-    std::filesystem::create_directories(p.parent_path(), ec);
-    std::ofstream f(p, std::ios::binary | std::ios::trunc);
-    if (!f) return;
-    f << vpath << '\t' << mf->sector << '\t' << mf->size << '\t'
-      << ISO::IsoMount::instance().iso_size() << '\n';
-    OutputLog::success("level edit: ISO dirent backup written to " +
-                       p.string());
-}
-
-void restore_dirent_bak() {
-    const auto p = dirent_bak_path();
-    std::ifstream f(p);
-    if (!f) return;
-    std::string line;
-    if (std::getline(f, line) && !line.empty()) {
-        const size_t p0 = line.find('\t');
-        if (p0 != std::string::npos) {
-            const std::string vp = line.substr(0, p0);
-            unsigned sec = 0, sz = 0;
-            unsigned long long orig_iso = 0;
-            const int got = std::sscanf(line.c_str() + p0 + 1,
-                                        "%u\t%u\t%llu",
-                                        &sec, &sz, &orig_iso);
-            if (got >= 2 && !vp.empty()) {
-                if (ISO::IsoMount::instance().repoint(vp, sec, sz)) {
-                    OutputLog::success(
-                        "level edit: ISO dirent restored for " + vp);
-                }
-                if (got >= 3 && orig_iso > 0) {
-                    if (ISO::IsoMount::instance().truncate_to(orig_iso)) {
-                        OutputLog::success(
-                            "level edit: ISO trimmed back to original "
-                            "size");
-                    }
-                }
-            }
-        }
-    }
-    f.close();
-    std::error_code ec;
-    std::filesystem::remove(p, ec);
-}
-
 void load_additions(ModuleState& s) {
     s.additions.clear();
     std::ifstream f(additions_path());
@@ -1236,6 +1001,117 @@ bool write_additions(const ModuleState& s, std::string& msg) {
     return true;
 }
 
+
+
+std::filesystem::path spawns_path() {
+    std::string leaf = std::filesystem::path(st().entry.full_path)
+        .filename().string();
+    if (leaf.empty()) leaf = "level";
+    return edited_levels_dir() / (leaf + ".spawns.txt");
+}
+
+bool write_spawns(const ModuleState& s, std::string& msg) {
+    const auto path = spawns_path();
+    std::error_code ec;
+    size_t alive_gens = 0;
+    for (const auto& g : s.generators) {
+        if (!g.removed) ++alive_gens;
+    }
+    if (alive_gens == 0 && s.spawn_point_adds.empty()) {
+        std::filesystem::remove(path, ec);
+        return true;
+    }
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        msg = "could not write " + path.string();
+        return false;
+    }
+    char hex[16];
+    for (const auto& g : s.generators) {
+        if (g.removed) continue;
+        std::snprintf(hex, sizeof(hex), "%08X", g.creature_entity);
+        f << "GEN\t" << g.pos[0] << '\t' << g.pos[1] << '\t' << g.pos[2]
+          << '\t' << hex << '\t' << g.creature_name;
+        for (const auto& m : g.asset_models) f << '\t' << m;
+        f << '\n';
+        for (const auto& sp : g.spawn_points) {
+            f << "GSP\t" << sp[0] << '\t' << sp[1] << '\t' << sp[2]
+              << '\n';
+        }
+    }
+    for (const auto& a : s.spawn_point_adds) {
+        char hex2[16];
+        std::snprintf(hex, sizeof(hex), "%08X", a.generator_entity);
+        std::snprintf(hex2, sizeof(hex2), "%08X", a.spawn_points_record);
+        f << "SPA\t" << a.pos[0] << '\t' << a.pos[1] << '\t' << a.pos[2]
+          << '\t' << hex << '\t' << hex2 << '\n';
+    }
+    return true;
+}
+
+void load_spawns(ModuleState& s) {
+    s.generators.clear();
+    s.spawn_point_adds.clear();
+    std::ifstream f(spawns_path());
+    if (!f) return;
+    std::string line;
+    while (std::getline(f, line)) {
+        while (!line.empty() &&
+               (line.back() == '\r' || line.back() == '\n')) {
+            line.pop_back();
+        }
+        if (line.empty()) continue;
+        std::vector<std::string> tok;
+        size_t start = 0;
+        for (;;) {
+            const size_t tab = line.find('\t', start);
+            tok.push_back(line.substr(
+                start, tab == std::string::npos ? std::string::npos
+                                                : tab - start));
+            if (tab == std::string::npos) break;
+            start = tab + 1;
+        }
+        if (tok[0] == "GEN" && tok.size() >= 6) {
+            GeneratorAddition g;
+            g.pos[0] = std::strtof(tok[1].c_str(), nullptr);
+            g.pos[1] = std::strtof(tok[2].c_str(), nullptr);
+            g.pos[2] = std::strtof(tok[3].c_str(), nullptr);
+            g.creature_entity =
+                (uint32_t)std::strtoul(tok[4].c_str(), nullptr, 16);
+            g.creature_name = tok[5];
+            for (size_t i = 6; i < tok.size(); ++i) {
+                if (!tok[i].empty()) g.asset_models.push_back(tok[i]);
+            }
+            s.generators.push_back(std::move(g));
+        } else if (tok[0] == "GSP" && tok.size() >= 4 &&
+                   !s.generators.empty()) {
+            s.generators.back().spawn_points.push_back(
+                {std::strtof(tok[1].c_str(), nullptr),
+                 std::strtof(tok[2].c_str(), nullptr),
+                 std::strtof(tok[3].c_str(), nullptr)});
+        } else if (tok[0] == "SPA" && tok.size() >= 6) {
+            ModuleState::SpawnPointAdd a;
+            a.pos[0] = std::strtof(tok[1].c_str(), nullptr);
+            a.pos[1] = std::strtof(tok[2].c_str(), nullptr);
+            a.pos[2] = std::strtof(tok[3].c_str(), nullptr);
+            a.generator_entity =
+                (uint32_t)std::strtoul(tok[4].c_str(), nullptr, 16);
+            a.spawn_points_record =
+                (uint32_t)std::strtoul(tok[5].c_str(), nullptr, 16);
+            s.spawn_point_adds.push_back(a);
+        }
+    }
+    if (!s.generators.empty() || !s.spawn_point_adds.empty()) {
+        OutputLog::info("level edit: loaded " +
+                        std::to_string(s.generators.size()) +
+                        " generator(s) and " +
+                        std::to_string(s.spawn_point_adds.size()) +
+                        " pending spawn point(s) from " +
+                        spawns_path().string());
+    }
+}
+
 void quat_mul(const float a[4], const float b[4], float out[4]) {
     out[0] = a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1];
     out[1] = a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0];
@@ -1307,8 +1183,23 @@ void OnLevelLoaded(const FlatAssetEntry& entry) {
     s.available = true;
     s.lev.bnk_path = entry.bnk_path;
     s.lev.file_index = entry.file_index;
-    fill_bnk_target(s.lev);
+    std::error_code loose_ec;
+    if (std::filesystem::is_directory(entry.bnk_path, loose_ec)) {
+        
+        
+        const std::filesystem::path loose =
+            std::filesystem::path(entry.bnk_path) / entry.full_path;
+        if (std::filesystem::is_regular_file(loose, loose_ec)) {
+            s.lev.file_path = loose.string();
+            s.lev.on_disk_size =
+                (uint32_t)std::filesystem::file_size(loose, loose_ec);
+            s.lev.valid = s.lev.on_disk_size != 0;
+        }
+    } else {
+        fill_bnk_target(s.lev);
+    }
     load_additions(s);
+    load_spawns(s);
     OutputLog::info(
         "level edit: tracking '" + entry.name + "' (" +
         (s.lev.compressed ? "chunked" : "raw") + " entry, slot " +
@@ -1613,6 +1504,17 @@ bool AdditionIsNpc(int index)
                AdditionEntityKind::Npc;
 }
 
+bool AdditionIsNamedEntity(int index)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    const auto& s = st();
+    if (index < 0 || size_t(index) >= s.additions.size()) return false;
+    const Addition& a = s.additions[size_t(index)];
+    return !a.entity_name.empty() &&
+           (a.entity_kind == AdditionEntityKind::Npc ||
+            a.entity_kind == AdditionEntityKind::GenericProp);
+}
+
 void MarkAdditionAsPropEntity(int index,
                               uint32_t template_hash,
                               uint32_t comp_field_hash,
@@ -1631,6 +1533,30 @@ void MarkAdditionAsPropEntity(int index,
     a.entity_comp_template = comp_template_hash;
     a.physics_file_hash = physics_file_hash;
     a.entity_has_text = has_text_tags;
+    s.dirty = true;
+    ++s.revision;
+}
+
+void MarkAdditionAsStaticProp(int index,
+                              const StaticPropPlacementInfo& info)
+{
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || size_t(index) >= s.additions.size() ||
+        !info.valid()) {
+        return;
+    }
+    Addition& a = s.additions[size_t(index)];
+    a.entity_kind = AdditionEntityKind::GenericProp;
+    a.entity_name = info.instance_name;
+    a.is_dig_spot = false;
+    a.entity_template = info.entity_template;
+    a.entity_comp_field = info.transform_component_field;
+    a.entity_comp_template = info.transform_component_template;
+    a.entity_position_template = info.position_template;
+    a.entity_rotation_template = info.rotation_template;
+    a.physics_file_hash = 0;
+    a.entity_has_text = false;
     s.dirty = true;
     ++s.revision;
 }
@@ -1902,52 +1828,28 @@ void RemovePendingSpawnPoint(int id)
 }
 
 bool SetEnabled(bool on, std::string& msg) {
-    FileTarget lev_t, gdb_t;
-    {
-        std::lock_guard<std::mutex> lk(mtx());
-        auto& s = st();
-        if (!on) {
-            s.enabled = false;
-            msg = "level edit mode off";
-            return true;
-        }
-        if (!s.available) {
-            msg = "no level loaded";
-            return false;
-        }
-        if (s.enabled) {
-            msg = "level edit mode on";
-            return true;
-        }
-        if (s.saving) {
-            msg = "busy";
-            return false;
-        }
-        s.saving = true;
-        lev_t = s.lev;
-        gdb_t = s.gdb;
+    if (on && !GameBackup::RequireBackup(msg)) return false;
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (!on) {
+        s.enabled = false;
+        msg = "level edit mode off";
+        return true;
     }
-
-    std::unordered_set<std::string> backed;
-    std::string berr;
-    const bool ok = ensure_backup(lev_t, "lev", backed, berr) &&
-                    ensure_backup(gdb_t, "gdb", backed, berr);
-
-    {
-        std::lock_guard<std::mutex> lk(mtx());
-        auto& s = st();
-        s.saving = false;
-        if (!ok) {
-            msg = berr;
-            return false;
-        }
-        if (!s.available) {
-            msg = "level changed during backup";
-            return false;
-        }
-        s.enabled = true;
+    if (!s.available) {
+        msg = "no level loaded";
+        return false;
+    }
+    if (s.enabled) {
         msg = "level edit mode on";
+        return true;
     }
+    if (s.saving) {
+        msg = "busy";
+        return false;
+    }
+    s.enabled = true;
+    msg = "level edit mode on";
     return true;
 }
 
@@ -2040,6 +1942,36 @@ int AddPlacement(const std::string& model_path, const float pos[3]) {
 void GetAdditions(std::vector<Addition>& out) {
     std::lock_guard<std::mutex> lk(mtx());
     out = st().additions;
+}
+
+void MoveAddition(int index, const float pos[3]) {
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || index >= (int)s.additions.size()) return;
+    Addition& a = s.additions[(size_t)index];
+    a.pos[0] = pos[0];
+    a.pos[1] = pos[1];
+    a.pos[2] = pos[2];
+    s.dirty = true;
+    ++s.revision;
+}
+
+void SetAdditionYaw(int index, float yaw_deg) {
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || index >= (int)s.additions.size()) return;
+    s.additions[(size_t)index].yaw_deg = yaw_deg;
+    s.dirty = true;
+    ++s.revision;
+}
+
+void RemoveAddition(int index) {
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (index < 0 || index >= (int)s.additions.size()) return;
+    s.additions[(size_t)index].removed = true;
+    s.dirty = true;
+    ++s.revision;
 }
 
 void CollectPreviewXforms(
@@ -3636,6 +3568,20 @@ size_t apply_save_physics_patches(std::vector<uint8_t>& xml_bytes,
 }
 
 bool Save(std::string& msg) {
+    if (!GameBackup::RequireBackup(msg)) return false;
+    {
+        FlatAssetEntry entry_copy;
+        {
+            std::lock_guard<std::mutex> lk(mtx());
+            entry_copy = st().entry;
+        }
+        
+        
+        
+        if (Level::Creation::IsCustomLooseLevel(entry_copy)) {
+            return SaveWorkingCopy(msg);
+        }
+    }
     bool reload_needed = false;
     FlatAssetEntry reload_entry;
     bool need_bake = false;
@@ -3886,7 +3832,7 @@ bool Save(std::string& msg) {
             if (!f) { msg = "could not write " + out.string(); return false; }
             f.write(reinterpret_cast<const char*>(bytes.data()),
                     (std::streamsize)bytes.size());
-            OutputLog::warn("level edit: chunked level entry — patched "
+            OutputLog::warn("level edit: chunked level entry - patched "
                             "copy exported to " + out.string());
         }
     }
@@ -3925,7 +3871,7 @@ bool Save(std::string& msg) {
                 if (f) {
                     f.write(reinterpret_cast<const char*>(bytes.data()),
                             (std::streamsize)bytes.size());
-                    OutputLog::warn("level edit: chunked .gdb entry — "
+                    OutputLog::warn("level edit: chunked .gdb entry - "
                                     "patched copy exported to " +
                                     out.string());
                 }
@@ -4099,10 +4045,12 @@ bool Save(std::string& msg) {
             }
             char name[48];
             std::snprintf(name, sizeof(name), name_fmt, eh);
-            const std::string entity_name =
-                a.entity_kind == AdditionEntityKind::Npc &&
-                        !a.entity_name.empty()
-                    ? a.entity_name : std::string(name);
+            const bool authored_named_entity =
+                (a.entity_kind == AdditionEntityKind::Npc ||
+                 a.entity_kind == AdditionEntityKind::GenericProp) &&
+                !a.entity_name.empty();
+            const std::string entity_name = authored_named_entity
+                ? a.entity_name : std::string(name);
             g.AddNameMapping(entity_name, eh);
             new_save_entities.emplace_back(entity_name, eh);
             ++new_entities_created;
@@ -4345,7 +4293,6 @@ bool Save(std::string& msg) {
                 if (bake_iso) {
                     bake_vpath =
                         ISO::IsoMount::strip_iso_prefix(s.lev.bnk_path);
-                    record_dirent_bak(bake_vpath);
                 } else {
                     std::vector<uint32_t> mdl_hashes;
                     for (const auto& a : s.additions) {
@@ -4891,32 +4838,17 @@ bool Save(std::string& msg) {
                                                         reps, berr);
         if (rebuilt && bake_models_index >= 0 &&
             !bake_models_bytes.empty()) {
-            const std::string bak = bake_streaming_path + ".bak";
-            std::error_code ec;
-            if (!std::filesystem::exists(bak, ec)) {
-                progress_update(70, 100, "Backing up streaming.bnk...");
-                if (!copy_file_with_progress(bake_streaming_path, bak,
-                                             "streaming.bnk backup",
-                                             berr)) {
-                    DebugTrace::log(
-                        "save: streaming.bnk backup failed: %s",
-                        berr.c_str());
-                    rebuilt = false;
-                }
-            }
-            if (rebuilt) {
-                progress_update(75, 100, "Rebuilding streaming.bnk...");
-                BnkCache::invalidate(bake_streaming_path);
-                std::vector<BnkWriter::EntryReplacement> sreps(1);
-                sreps[0].file_index = bake_models_index;
-                sreps[0].payload = std::move(bake_models_bytes);
-                rebuilt = BnkWriter::RebuildWithReplacedEntries(
-                    bake_streaming_path, sreps, berr);
-                BnkCache::invalidate(bake_streaming_path);
-                DebugTrace::log(
-                    "save: streaming.bnk models inject %s %s",
-                    rebuilt ? "OK" : "FAILED", berr.c_str());
-            }
+            progress_update(75, 100, "Rebuilding streaming.bnk...");
+            BnkCache::invalidate(bake_streaming_path);
+            std::vector<BnkWriter::EntryReplacement> sreps(1);
+            sreps[0].file_index = bake_models_index;
+            sreps[0].payload = std::move(bake_models_bytes);
+            rebuilt = BnkWriter::RebuildWithReplacedEntries(
+                bake_streaming_path, sreps, berr);
+            BnkCache::invalidate(bake_streaming_path);
+            DebugTrace::log(
+                "save: streaming.bnk models inject %s %s",
+                rebuilt ? "OK" : "FAILED", berr.c_str());
         }
     }
     DebugTrace::log("save: bake %s (iso=%d target='%s') %s",
@@ -5141,74 +5073,29 @@ bool Save(std::string& msg) {
     return rebuilt && contents_ok;
 }
 
-bool RestoreDefaults(std::string& msg) {
-    FlatAssetEntry reload_entry;
-    FileTarget lev_t, gdb_t;
-    {
-        std::lock_guard<std::mutex> lk(mtx());
-        auto& s = st();
-        if (!s.available) { msg = "no level loaded"; return false; }
-        if (s.saving) { msg = "a save is in progress"; return false; }
-        s.saving = true;
-        lev_t = s.lev;
-        gdb_t = s.gdb;
+bool SaveWorkingCopy(std::string& msg) {
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (!s.available) {
+        msg = "no level loaded";
+        return false;
     }
-
-    restore_dirent_bak();
-
-    std::unordered_set<std::string> restored;
-    std::string rerr;
-    bool ok = restore_target(lev_t, "lev", restored, rerr) &&
-              restore_target(gdb_t, "gdb", restored, rerr);
-    if (ok && !lev_t.bnk_path.empty() &&
-        !ISO::IsoMount::is_iso_path(lev_t.bnk_path)) {
-        const std::string streaming_path =
-            (std::filesystem::path(lev_t.bnk_path).parent_path() /
-             "streaming.bnk").string();
-        const std::string bak = streaming_path + ".bak";
-        std::error_code ec;
-        if (std::filesystem::exists(bak, ec)) {
-            progress_update(80, 100, "Restoring streaming.bnk...");
-            BnkCache::invalidate(streaming_path);
-            std::string cerr2;
-            if (copy_file_with_progress(bak, streaming_path,
-                                        "streaming.bnk restore", cerr2,
-                                        false)) {
-                std::filesystem::remove(bak, ec);
-            } else {
-                rerr = cerr2;
-                ok = false;
-            }
-            BnkCache::invalidate(streaming_path);
-        }
+    std::string werr;
+    if (!write_additions(s, werr) || !write_spawns(s, werr)) {
+        msg = werr;
+        return false;
     }
-
-    {
-        std::lock_guard<std::mutex> lk(mtx());
-        auto& s = st();
-        s.saving = false;
-        if (!ok) {
-            msg = rerr;
-            return false;
-        }
-        if (!s.lev.bnk_path.empty()) BnkCache::invalidate(s.lev.bnk_path);
-        if (!s.gdb.bnk_path.empty()) BnkCache::invalidate(s.gdb.bnk_path);
-        s.edits.clear();
-        s.undo_stack.clear();
-        s.additions.clear();
-        s.contents_edits.clear();
-        s.contents_loot_edits.clear();
-        {
-            std::error_code ec;
-            std::filesystem::remove(additions_path(), ec);
-        }
-        s.dirty = false;
-        ++s.revision;
-        reload_entry = s.entry;
+    size_t models = 0;
+    for (const auto& a : s.additions) {
+        if (!a.removed) ++models;
     }
-
-    Level::OpenAsync(reload_entry);
-    msg = "level restored from backup; reloading";
+    size_t gens = 0;
+    for (const auto& g : s.generators) {
+        if (!g.removed) ++gens;
+    }
+    s.dirty = false;
+    msg = "level saved: " + std::to_string(models) +
+          " placed model(s), " + std::to_string(gens) + " generator(s)";
     return true;
 }
 
@@ -5220,74 +5107,6 @@ void ClearEdits() {
     st().contents_loot_edits.clear();
     st().dirty = false;
     ++st().revision;
-}
-
-bool RunStreamFix(const std::string& streaming_path, std::string& msg) {
-    const std::string bak = streaming_path + ".bak";
-    std::error_code ec;
-    if (!std::filesystem::exists(bak, ec)) {
-        msg = "streamfix: no backup at " + bak;
-        return false;
-    }
-    BnkCache::invalidate(streaming_path);
-    std::string cerr2;
-    if (!copy_file_with_progress(bak, streaming_path,
-                                 "streaming.bnk restore", cerr2, false)) {
-        msg = "streamfix: restore failed: " + cerr2;
-        return false;
-    }
-    BnkCache::invalidate(streaming_path);
-
-    const std::string models_key =
-        "worlds/albion/bwsslums/defaultscenario/"
-        "defaultscenario_models.bnk";
-    const int models_idx =
-        BnkCache::find_index(streaming_path, models_key);
-    if (models_idx < 0) {
-        msg = "streamfix: level models bank not found";
-        return false;
-    }
-    std::vector<uint8_t> blob =
-        BnkCache::extract_bytes(streaming_path, models_idx);
-
-    const std::string want =
-        "art/environment/regions/bower_lake/props/dotxsi/bl_lamp_post/"
-        "bl_lamp_post.mdl";
-    {
-        BNKReader lm(blob);
-        if (nested_bank_has(lm, want)) {
-            msg = "streamfix: lamp already present after restore?";
-            return false;
-        }
-    }
-    std::string src_name;
-    std::vector<uint8_t> src_payload;
-    if (!find_in_nested_banks(streaming_path, "_models.bnk", want,
-                              src_name, src_payload)) {
-        msg = "streamfix: lamp source not found";
-        return false;
-    }
-    std::vector<BnkWriter::EntryAddition> adds;
-    adds.push_back({src_name, std::move(src_payload)});
-    std::string aerr;
-    if (!BnkWriter::AddEntriesToBnkBytes(blob, adds, aerr)) {
-        msg = "streamfix: add failed: " + aerr;
-        return false;
-    }
-    BnkCache::invalidate(streaming_path);
-    std::vector<BnkWriter::EntryReplacement> reps(1);
-    reps[0].file_index = models_idx;
-    reps[0].payload = std::move(blob);
-    if (!BnkWriter::RebuildWithReplacedEntries(streaming_path, reps,
-                                               aerr)) {
-        msg = "streamfix: rebuild failed: " + aerr;
-        return false;
-    }
-    BnkCache::invalidate(streaming_path);
-    msg = "streamfix OK: restored + re-injected lamp with aligned "
-          "layout";
-    DebugTrace::log("%s", msg.c_str());
-    return true;
 }
 
 bool RunLevProbe(const std::string& bnk_path, std::string& msg) {

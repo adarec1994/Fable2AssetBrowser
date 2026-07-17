@@ -375,7 +375,7 @@ std::vector<CollisionMesh> ExtractCollisionMeshes(const PackFile& pf) {
     const ClassEntry* storage_cls =
         pf.find_class("hkpStorageExtendedMeshShapeMeshSubpartStorage");
     if (!storage_cls) {
-        OutputLog::info("havok: no mesh subpart storage class — "
+        OutputLog::info("havok: no mesh subpart storage class - "
                         "nothing to extract");
         return out;
     }

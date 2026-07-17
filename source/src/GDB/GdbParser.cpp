@@ -1897,6 +1897,7 @@ namespace {
 constexpr uint32_t kHashChestComponent        = 0x379C25A9;
 constexpr uint32_t kHashSilverKeysNeeded      = 0xB208E419;
 constexpr uint32_t kHashDiggingSpotComponent  = 0x4D89E63B;
+constexpr uint32_t kHashDiveSpotComponent     = 0x76E2C0A0;
 constexpr uint32_t kHashDogLeadToComponent    = 0x09D8D1BD;
 constexpr uint32_t kHashDogLeadPriority       = 0x6C62C3DD;
 constexpr uint32_t kHashDogLeadRadius         = 0xD422BC6F;
@@ -2390,6 +2391,13 @@ std::unordered_map<uint32_t, EntityContents> ExtractEntityContents(
                                owner, dig_comp_hash) &&
             dig_comp_hash != 0 && dig_comp_hash != kHashNull) {
             ec.is_dig_spot = true;
+        }
+
+        uint32_t dive_comp_hash = 0;
+        if (MultiFindInherited(views, rec, kHashDiveSpotComponent, 6,
+                               owner, dive_comp_hash) &&
+            dive_comp_hash != 0 && dive_comp_hash != kHashNull) {
+            ec.is_dive_spot = true;
         }
 
         comp_hash = 0;

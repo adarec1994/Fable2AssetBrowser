@@ -106,9 +106,9 @@ void dump_iso_contents() {
     const int total = (int)targets.size();
 
     OutputLog::info(std::string("Dumping ") + std::to_string(total) +
-                    " BNK(s) → " + export_root);
+                    " BNK(s) -> " + export_root);
 
-    progress_open(total, std::string("Dumping BNKs → ") + export_root);
+    progress_open(total, std::string("Dumping BNKs -> ") + export_root);
     progress_update(0, total, "Starting...");
 
     std::thread([targets = std::move(targets), total]() {
@@ -404,9 +404,9 @@ void dump_mdl_files() {
 
     OutputLog::info(std::string("Dumping ") + std::to_string(total) +
                     " .mdl file(s) from " +
-                    std::to_string(by_bnk.size()) + " BNK(s) → " +
+                    std::to_string(by_bnk.size()) + " BNK(s) -> " +
                     export_root);
-    progress_open(total, std::string("Dumping MDLs → ") + export_root);
+    progress_open(total, std::string("Dumping MDLs -> ") + export_root);
     progress_update(0, total, "Starting...");
 
     std::thread([targets = std::move(targets),
@@ -670,7 +670,7 @@ void mdl_export_begin_named(MdlExportFormat fmt,
         std::filesystem::create_directories(parent, ec);
         if (ec) {
             OutputLog::error(std::string("MDL export: cannot create ") +
-                             parent.string() + " — " + ec.message());
+                             parent.string() + " - " + ec.message());
             return;
         }
     }
@@ -703,12 +703,12 @@ void mdl_export_begin_named(MdlExportFormat fmt,
 
     if (ok) {
         OutputLog::success(std::string("Exported ") + log_label +
-                           " as " + mdl_fmt_label(fmt) + " → " +
+                           " as " + mdl_fmt_label(fmt) + " -> " +
                            out.string());
     } else {
         OutputLog::error(std::string("MDL export failed (") +
                          mdl_fmt_label(fmt) + "): " + log_label +
-                         (err.empty() ? "" : " — " + err));
+                         (err.empty() ? "" : " - " + err));
     }
 }
 
@@ -731,11 +731,11 @@ void dump_mdl_files_as(MdlExportFormat fmt) {
                              : S.export_dir;
 
     OutputLog::info(std::string("Exporting ") + std::to_string(total) +
-                    " .mdl file(s) as " + mdl_fmt_label(fmt) + " → " +
+                    " .mdl file(s) as " + mdl_fmt_label(fmt) + " -> " +
                     export_root);
     progress_open(total,
                   std::string("Exporting MDLs as ") + mdl_fmt_label(fmt) +
-                  " → " + export_root);
+                  " -> " + export_root);
     progress_update(0, total, "Starting...");
 
     std::thread([targets = std::move(targets), total, fmt]() {
@@ -880,9 +880,9 @@ void dump_tex_files() {
 
     OutputLog::info(std::string("Dumping ") + std::to_string(total) +
                     " .tex file(s) from " +
-                    std::to_string(by_bnk.size()) + " BNK(s) → " +
+                    std::to_string(by_bnk.size()) + " BNK(s) -> " +
                     export_root);
-    progress_open(total, std::string("Dumping TEXs → ") + export_root);
+    progress_open(total, std::string("Dumping TEXs -> ") + export_root);
     progress_update(0, total, "Starting...");
 
     std::thread([targets = std::move(targets),
@@ -1030,11 +1030,11 @@ void dump_tex_files_as(TexExportFormat fmt) {
         fmt == TexExportFormat::DDS  ? "DDS"  : "?";
 
     OutputLog::info(std::string("Exporting ") + std::to_string(total) +
-                    " .tex file(s) as " + fmt_name + " → " +
+                    " .tex file(s) as " + fmt_name + " -> " +
                     export_root);
     progress_open(total,
                   std::string("Exporting TEXs as ") + fmt_name +
-                  " → " + export_root);
+                  " -> " + export_root);
     progress_update(0, total, "Starting...");
 
     std::thread([targets = std::move(targets), total, fmt, fmt_name]() {
@@ -1113,9 +1113,9 @@ void dump_wav_files() {
 
     OutputLog::info(std::string("Dumping ") + std::to_string(total) +
                     " .wav file(s) from " +
-                    std::to_string(by_bnk.size()) + " BNK(s) → " +
+                    std::to_string(by_bnk.size()) + " BNK(s) -> " +
                     export_root);
-    progress_open(total, std::string("Dumping WAVs → ") + export_root);
+    progress_open(total, std::string("Dumping WAVs -> ") + export_root);
     progress_update(0, total, "Starting...");
 
     std::thread([targets = std::move(targets),
@@ -1251,10 +1251,10 @@ void dump_wav_files_as(AudioExportFormat fmt) {
         (fmt == AudioExportFormat::AAC)     ? ".m4a" : ".bin";
 
     OutputLog::info(std::string("Exporting ") + std::to_string(total) +
-                    " .wav file(s) as " + fmt_label + " → " + export_root);
+                    " .wav file(s) as " + fmt_label + " -> " + export_root);
     progress_open(total,
                   std::string("Exporting WAVs as ") + fmt_label +
-                  " → " + export_root);
+                  " -> " + export_root);
     progress_update(0, total, "Starting...");
 
     std::thread([targets = std::move(targets),
@@ -1317,7 +1317,7 @@ void dump_wav_files_as(AudioExportFormat fmt) {
                                 }
                                 OutputLog::warn(std::string(
                                     "PCM decode failed for ") + e.full_path +
-                                    ": " + err + " — kept raw bytes.");
+                                    ": " + err + " - kept raw bytes.");
                             }
                             ok = true;
                         } else {
@@ -1335,7 +1335,7 @@ void dump_wav_files_as(AudioExportFormat fmt) {
                             if (!XmaDecoder::decode_xma_to_pcm(
                                     src, pcm, sr, ch, &err) || pcm.empty()) {
                                 throw std::runtime_error(
-                                    std::string("XMA→PCM decode failed: ")
+                                    std::string("XMA->PCM decode failed: ")
                                     + err);
                             }
                             bool encoded = false;
@@ -1429,10 +1429,10 @@ void dump_bnk_contents() {
                              : S.export_dir;
 
     OutputLog::info(std::string("Dumping every file in ") +
-                    std::to_string(all_bnks.size()) + " BNK(s) → " +
+                    std::to_string(all_bnks.size()) + " BNK(s) -> " +
                     export_root);
 
-    progress_open(0, std::string("Dumping BNK contents → ") + export_root);
+    progress_open(0, std::string("Dumping BNK contents -> ") + export_root);
     progress_update(0, 0, "Indexing...");
 
     std::thread([all_bnks = std::move(all_bnks), export_root]() {

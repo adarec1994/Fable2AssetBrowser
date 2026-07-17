@@ -25,6 +25,10 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 
 set(APP_SOURCES
         src/main.cpp
+        src/Utilities/CrashLog.cpp
+        src/Utilities/CrashLog.h
+        src/Utilities/GameBackup.cpp
+        src/Utilities/GameBackup.h
         src/Utilities/State.cpp
         src/Utilities/Utils.cpp
         src/Utilities/Files.cpp
@@ -58,6 +62,10 @@ set(APP_SOURCES
         src/UI/Panels/FolderDialog.cpp
         src/UI/Panels/RightPanel.cpp
         src/UI/Panels/PendingLoads.cpp
+        src/UI/Panels/NewLevelDialog.cpp
+        src/UI/Panels/LandscapePanel.cpp
+        src/UI/Panels/DetailsPanel.cpp
+        src/UI/Panels/NewLevelDialog.h
         src/UI/AudioPlayerWindow.cpp
         src/UI/Layout/LoadingScreen.cpp
         src/UI/Layout/MainLayout.cpp
@@ -108,6 +116,53 @@ set(APP_SOURCES
         src/Level/Terrain/TerrainEdit.h
         src/Level/Editing/LevelEdit.cpp
         src/Level/Editing/LevelEdit.h
+        src/Level/Creation/NewLevel.cpp
+        src/Level/Creation/LandscapeAuthoring.cpp
+        src/Level/Creation/TiffHeightmap.cpp
+        src/Level/Creation/SkyAuthoring.cpp
+        src/Level/Creation/WaterAuthoring.cpp
+        src/Level/Terrain/TerrainPaint.cpp
+        src/Level/Creation/NewLevel.h
+        src/Level/Creation/GameRegistry.cpp
+        src/Level/Creation/GameRegistry.h
+        src/Quest/Blueprint/BlueprintTypes.h
+        src/Quest/Blueprint/BlueprintGraph.cpp
+        src/Quest/Blueprint/BlueprintGraph.h
+        src/Quest/Blueprint/BlueprintNodeRegistry.cpp
+        src/Quest/Blueprint/BlueprintNodeRegistry.h
+        src/Quest/Blueprint/BlueprintNodes_Events.cpp
+        src/Quest/Blueprint/BlueprintNodes_Flow.cpp
+        src/Quest/Blueprint/BlueprintNodes_Data.cpp
+        src/Quest/Blueprint/BlueprintNodes_Quest.cpp
+        src/Quest/Blueprint/BlueprintNodes_Dialogue.cpp
+        src/Quest/Blueprint/BlueprintNodes_Inventory.cpp
+        src/Quest/Blueprint/BlueprintNodes_Entity.cpp
+        src/Quest/Blueprint/BlueprintNodes_World.cpp
+        src/Quest/Blueprint/BlueprintNodes_Util.cpp
+        src/Quest/Blueprint/BlueprintNodes_Prereq.cpp
+        src/Quest/Blueprint/BlueprintNodes_GameVars.cpp
+        src/Quest/Blueprint/BlueprintCompiler.cpp
+        src/Quest/Blueprint/BlueprintCompiler.h
+        src/Quest/Blueprint/BlueprintSerialize.cpp
+        src/Quest/Blueprint/BlueprintSerialize.h
+        src/UI/Quest/Blueprint/BlueprintPinWidgets.cpp
+        src/UI/Quest/Blueprint/BlueprintPinWidgets.h
+        src/UI/Quest/Blueprint/BlueprintEditor.cpp
+        src/UI/Quest/Blueprint/BlueprintEditor.h
+        src/UI/Quest/Blueprint/BlueprintCanvas.cpp
+        src/UI/Quest/Blueprint/BlueprintCanvas.h
+        src/UI/Quest/Blueprint/BlueprintNodeDrawer.cpp
+        src/UI/Quest/Blueprint/BlueprintNodeDrawer.h
+        src/UI/Quest/Blueprint/BlueprintPalette.cpp
+        src/UI/Quest/Blueprint/BlueprintPalette.h
+        src/UI/Quest/Blueprint/BlueprintInspector.cpp
+        src/UI/Quest/Blueprint/BlueprintInspector.h
+        src/UI/Quest/Blueprint/BlueprintPrerequisites.cpp
+        src/UI/Quest/Blueprint/BlueprintPrerequisites.h
+        src/UI/Quest/Blueprint/vendor/drawing.cpp
+        src/UI/Quest/Blueprint/vendor/drawing.h
+        src/UI/Quest/Blueprint/vendor/widgets.cpp
+        src/UI/Quest/Blueprint/vendor/widgets.h
         src/Level/IO/BnkWriter.cpp
         src/Level/IO/BnkWriter.h
         src/UI/LevelGizmo.cpp
@@ -195,11 +250,42 @@ set(APP_SOURCES
         src/Quest/QuestWorldIndex.h
         src/Entity/NpcAuthoring.cpp
         src/Entity/NpcAuthoring.h
+        src/Entity/StaticPropAuthoring.cpp
+        src/Entity/StaticPropAuthoring.h
         src/UI/Quest/QuestNodeView.cpp
         src/UI/Quest/QuestNodeView.h
         src/UI/ContentTabs.cpp
         src/UI/ContentTabs.h
 )
+
+# The parsing/terrain/texture hot paths dominate level-load time; compile
+# them optimized even in Debug so the debug build stays usable. /RTC1 is
+# stripped globally because it cannot coexist with per-file /O2.
+if(MSVC)
+    string(REPLACE "/RTC1" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+    set(F2AB_HOT_SOURCES
+        src/BNKReader.cpp
+        src/GDB/GdbParser.cpp
+        src/Level/Core/LevelLoader.cpp
+        src/Level/Core/LevelExport.cpp
+        src/Level/Loading/LevelTerrainLoader.cpp
+        src/Level/Loading/LevelCatalogLoader.cpp
+        src/Level/Loading/EngineLevelParser.cpp
+        src/Level/Terrain/HeightfieldLoader.cpp
+        src/Level/Terrain/TextureAtlasDecoder.cpp
+        src/Level/Terrain/EhfChunkParser.cpp
+        src/Level/Terrain/TerrainEdit.cpp
+        src/Level/Terrain/TerrainPaint.cpp
+        src/Level/Environment/WaterParser.cpp
+        src/Level/Skybox/EnvironmentThemeParser.cpp
+        src/textures/TexParser.cpp
+        src/textures/LhTexCodec.cpp
+        src/MDL/ModelParser.cpp
+        src/animations/AnimBank.cpp
+    )
+    set_source_files_properties(${F2AB_HOT_SOURCES} PROPERTIES
+        COMPILE_OPTIONS "$<$<CONFIG:Debug>:/O2>")
+endif()
 
 if(WIN32)
     set(APP_RES ${CMAKE_CURRENT_SOURCE_DIR}/fable.rc resource.h)
@@ -363,6 +449,15 @@ if(FABLE_BUILD_TESTS)
             src/GDB/GdbEdit.cpp
     )
     target_include_directories(npc_authoring_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    add_executable(static_prop_authoring_tests
+            tests/StaticPropAuthoringTests.cpp
+            src/Entity/StaticPropAuthoring.cpp
+            src/GDB/GdbEdit.cpp
+    )
+    target_include_directories(static_prop_authoring_tests PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
 
@@ -604,4 +699,31 @@ if(FABLE_BUILD_TESTS)
     endif()
     target_link_libraries(bnk_writer_tests PRIVATE ZLIB::ZLIB)
     add_test(NAME bnk_writer_tests COMMAND bnk_writer_tests)
+
+    add_executable(blueprint_tests
+            src/Quest/Blueprint/tests/BlueprintTests.cpp
+            src/Quest/Blueprint/BlueprintGraph.cpp
+            src/Quest/Blueprint/BlueprintNodeRegistry.cpp
+            src/Quest/Blueprint/BlueprintNodes_Events.cpp
+            src/Quest/Blueprint/BlueprintNodes_Flow.cpp
+            src/Quest/Blueprint/BlueprintNodes_Data.cpp
+            src/Quest/Blueprint/BlueprintNodes_Quest.cpp
+            src/Quest/Blueprint/BlueprintNodes_Dialogue.cpp
+            src/Quest/Blueprint/BlueprintNodes_Inventory.cpp
+            src/Quest/Blueprint/BlueprintNodes_Entity.cpp
+            src/Quest/Blueprint/BlueprintNodes_World.cpp
+            src/Quest/Blueprint/BlueprintNodes_Util.cpp
+            src/Quest/Blueprint/BlueprintNodes_Prereq.cpp
+            src/Quest/Blueprint/BlueprintNodes_GameVars.cpp
+            src/Quest/Blueprint/BlueprintCompiler.cpp
+            src/Quest/Blueprint/BlueprintSerialize.cpp
+            src/Quest/QuestAuthoring.cpp
+            ${imgui_node_editor_SOURCE_DIR}/crude_json.cpp
+    )
+    target_include_directories(blueprint_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${iconfontcpp_SOURCE_DIR}
+            ${imgui_node_editor_SOURCE_DIR}
+    )
+    add_test(NAME blueprint_tests COMMAND blueprint_tests)
 endif()

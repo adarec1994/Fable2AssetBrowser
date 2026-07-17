@@ -1,6 +1,8 @@
 #ifndef BNKREADER_CPP_INCLUDED
 #define BNKREADER_CPP_INCLUDED
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +13,8 @@
 #include <optional>
 #include <filesystem>
 #include <fstream>
+#include <chrono>
+#include <thread>
 #include <zlib.h>
 
 struct FileEntry {
@@ -86,14 +90,16 @@ public:
     }
     ~BNKReader() { close(); }
 
-    enum class StorageMode { Disk, IsoStream, Memory };
+    enum class StorageMode { Disk, IsoStream, Memory, Directory };
     StorageMode storage_mode() const {
         switch (_mode) {
             case Mode::Disk:      return StorageMode::Disk;
             case Mode::IsoStream: return StorageMode::IsoStream;
+            case Mode::Directory: return StorageMode::Directory;
             default:              return StorageMode::Memory;
         }
     }
+    bool is_directory_source() const { return _mode == Mode::Directory; }
     const std::string& disk_path() const { return _disk_path; }
     const std::string& iso_vpath() const { return _iso_vpath; }
 
@@ -115,7 +121,7 @@ public:
 
 private:
 
-    enum class Mode { Disk, Memory, IsoStream };
+    enum class Mode { Disk, Memory, IsoStream, Directory };
     Mode _mode = Mode::Disk;
     std::string _disk_path;
 
@@ -371,7 +377,38 @@ private:
         file_entries.swap(entries);
     }
 
+    std::vector<uint8_t> read_directory_entry(const FileEntry& e) {
+        const std::filesystem::path p =
+            std::filesystem::path(_disk_path) / e.name;
+        
+        
+        for (int attempt = 0;; ++attempt) {
+            std::ifstream f(p, std::ios::binary | std::ios::ate);
+            if (f) {
+                const std::streamoff sz = f.tellg();
+                std::vector<uint8_t> out(sz > 0 ? (size_t)sz : 0);
+                f.seekg(0);
+                if (!out.empty()) {
+                    f.read(reinterpret_cast<char*>(out.data()),
+                           (std::streamsize)out.size());
+                    if (!f) {
+                        throw std::runtime_error(
+                            "loose file read failed: " + p.string());
+                    }
+                }
+                return out;
+            }
+            if (attempt >= 4) {
+                throw std::runtime_error(
+                    "loose file open failed (locked or still syncing?): " +
+                    p.string());
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+
     std::vector<uint8_t> extract_entry_bytes_impl(const FileEntry& e) {
+        if (_mode == Mode::Directory) return read_directory_entry(e);
         std::vector<uint8_t> out;
         seek_to(e.offset);
 
@@ -426,6 +463,12 @@ private:
     }
 
     void extract_entry_to(const FileEntry& e, std::ofstream& out) {
+        if (_mode == Mode::Directory) {
+            const std::vector<uint8_t> buf = read_directory_entry(e);
+            out.write(reinterpret_cast<const char*>(buf.data()),
+                      std::streamsize(buf.size()));
+            return;
+        }
         seek_to(e.offset);
 
         if (!e.is_compressed) {
@@ -524,6 +567,40 @@ inline void BNKReader::read_exact(void* dst, size_t n) {
 namespace LazyNested { bool materialize(const std::string& temp_path); }
 
 inline BNKReader::BNKReader(const std::string& path) {
+    {
+        std::error_code dir_ec;
+        if (std::filesystem::is_directory(path, dir_ec)) {
+            
+            
+            
+            _mode = Mode::Directory;
+            _disk_path = path;
+            std::error_code ec;
+            for (std::filesystem::recursive_directory_iterator
+                     it(path, std::filesystem::directory_options::skip_permission_denied, ec), end;
+                 it != end; it.increment(ec)) {
+                if (ec) break;
+                if (!it->is_regular_file(ec)) continue;
+                std::string ext = it->path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                               [](unsigned char c){ return (char)std::tolower(c); });
+                if (ext == ".bnk") continue;
+                std::error_code rel_ec;
+                std::filesystem::path rel =
+                    std::filesystem::relative(it->path(), path, rel_ec);
+                if (rel_ec || rel.empty()) continue;
+                std::string name = rel.generic_string();
+                std::replace(name.begin(), name.end(), '/', '\\');
+                std::error_code sz_ec;
+                const uintmax_t sz = it->file_size(sz_ec);
+                FileEntry fe{ name, 0,
+                              sz_ec ? 0u : (uint32_t)std::min<uintmax_t>(sz, UINT32_MAX),
+                              0, false, {} };
+                file_entries.push_back(std::move(fe));
+            }
+            return;
+        }
+    }
     LazyNested::materialize(path);
     if (ISO::IsoMount::is_iso_path(path)) {
 

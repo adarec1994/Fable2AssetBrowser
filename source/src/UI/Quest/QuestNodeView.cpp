@@ -1,5 +1,6 @@
 #include "QuestNodeView.h"
 
+#include "Blueprint/BlueprintEditor.h"
 #include "../../Quest/QuestAuthoring.h"
 #include "../../Quest/QuestGraph.h"
 #include "../../Quest/QuestReferences.h"
@@ -73,9 +74,9 @@ char g_npc_creation_filter[128]{};
 char g_npc_instance_filter[128]{};
 
 constexpr float kNodeContentWidth = 500.0f;
-// Detail lines rendered on the node itself; the rest collapse into a
-// "+N more" line (the inspector shows everything). Keep in sync with
-// kVisibleDetailLimit in QuestStoryGraph.cpp so layout heights match.
+
+
+
 constexpr std::size_t kMaxVisibleNodeDetails = 12;
 
 Quest::AuthoredQuest* active_authored_quest() {
@@ -91,9 +92,8 @@ const Quest::AuthoredQuest* active_authored_quest_const() {
 }
 
 void refresh_authored_lua() {
-    const Quest::AuthoredQuest* quest = active_authored_quest_const();
-    if (!quest) return;
-    S.lua_preview_content = Quest::GenerateAuthoringPreview(*quest);
+    if (!BlueprintUI::IsActive()) return;
+    S.lua_preview_content = BlueprintUI::ActiveLua();
 }
 
 std::string g_reference_root;
@@ -192,39 +192,55 @@ void reset_editor() {
     g_focus_quest_requested = !g_initial_view_all;
 }
 
-// UE5-style exec pin: a right-pointing triangle on the node's header row,
-// input on the left edge, output on the right edge.
-void draw_exec_pin_triangle(bool hovered) {
-    const ImVec2 min = ImGui::GetItemRectMin();
-    const ImVec2 max = ImGui::GetItemRectMax();
-    const ImU32 colour = hovered ? IM_COL32(255, 210, 95, 255)
-                                 : IM_COL32(205, 225, 240, 255);
+
+
+void draw_exec_pin_triangle(const ImVec2& min, const ImVec2& max,
+                            bool hovered) {
+    const bool held = hovered &&
+        ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    const ImU32 colour = held ? IM_COL32(255, 235, 130, 255)
+        : hovered ? IM_COL32(255, 210, 95, 255)
+                  : IM_COL32(205, 225, 240, 255);
+    const float inset_x = (max.x - min.x - 18.0f) * 0.5f;
+    const float inset_y = (max.y - min.y - 18.0f) * 0.5f;
     ImGui::GetWindowDrawList()->AddTriangleFilled(
-        ImVec2(min.x + 4.0f, min.y + 3.0f),
-        ImVec2(max.x - 3.0f, (min.y + max.y) * 0.5f),
-        ImVec2(min.x + 4.0f, max.y - 3.0f),
+        ImVec2(min.x + inset_x + 4.0f, min.y + inset_y + 3.0f),
+        ImVec2(max.x - inset_x - 3.0f, (min.y + max.y) * 0.5f),
+        ImVec2(min.x + inset_x + 4.0f, max.y - inset_y - 3.0f),
         colour);
 }
 
-constexpr float kExecPinSize = 18.0f;
+constexpr float kExecPinSize = 26.0f;
 
 void draw_input_pin(int id, float content_x) {
     ImGui::SetCursorPosX(content_x);
+    ImGui::Dummy(ImVec2(kExecPinSize, kExecPinSize));
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    const ImVec2 pivot(min.x, (min.y + max.y) * 0.5f);
     ed::BeginPin(input_pin_id(id), ed::PinKind::Input);
-    ed::PinPivotAlignment(ImVec2(0.0f, 0.5f));
-    ImGui::InvisibleButton("##exec_input", ImVec2(kExecPinSize, kExecPinSize));
-    draw_exec_pin_triangle(ImGui::IsItemHovered());
+    ed::PinRect(min, max);
+    ed::PinPivotRect(pivot, pivot);
     ed::EndPin();
+    const bool hovered = ImGui::IsMouseHoveringRect(min, max);
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    draw_exec_pin_triangle(min, max, hovered);
 }
 
 void draw_output_pin(int id, float content_x) {
     ImGui::SameLine();
     ImGui::SetCursorPosX(content_x + kNodeContentWidth - kExecPinSize);
+    ImGui::Dummy(ImVec2(kExecPinSize, kExecPinSize));
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    const ImVec2 pivot(max.x, (min.y + max.y) * 0.5f);
     ed::BeginPin(output_pin_id(id), ed::PinKind::Output);
-    ed::PinPivotAlignment(ImVec2(1.0f, 0.5f));
-    ImGui::InvisibleButton("##exec_output", ImVec2(kExecPinSize, kExecPinSize));
-    draw_exec_pin_triangle(ImGui::IsItemHovered());
+    ed::PinRect(min, max);
+    ed::PinPivotRect(pivot, pivot);
     ed::EndPin();
+    const bool hovered = ImGui::IsMouseHoveringRect(min, max);
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    draw_exec_pin_triangle(min, max, hovered);
 }
 
 void draw_node(const Quest::GraphNode& node) {
@@ -352,384 +368,6 @@ bool draw_story_milestone_combo(const char* label, std::string& value,
     return changed;
 }
 
-#if 0
-std::string reference_location(const Quest::WorldReference& reference) {
-    if (reference.level_id.empty()) return "Level reference not assigned";
-    char position[96];
-    std::snprintf(position, sizeof(position), "%s  (%.1f, %.1f, %.1f)",
-                  reference.level_id.c_str(), reference.x, reference.y,
-                  reference.z);
-    return position;
-}
-
-void place_flow_node_if_needed(const Quest::AuthoredQuest& quest,
-                               int id, std::size_t slot) {
-    if (g_apply_layout) {
-        ed::SetNodePosition(node_id(id),
-                            ImVec2(quest.flow_x[slot], quest.flow_y[slot]));
-    }
-}
-
-void draw_authored_start_node(const Quest::AuthoredQuest& quest) {
-    const int id = Quest::AuthoredQuest::kStartNodeId;
-    ed::PushStyleColor(ed::StyleColor_NodeBg,
-                       node_color(Quest::NodeKind::Quest));
-    ed::PushStyleColor(ed::StyleColor_NodeBorder,
-                       ImVec4(0.66f, 0.72f, 0.82f, 0.75f));
-    ed::BeginNode(node_id(id));
-    ImGui::PushID(id);
-    const float content_x = ImGui::GetCursorPosX();
-    draw_input_pin(id, content_x);
-    ImGui::TextColored(ImVec4(0.76f, 0.82f, 0.92f, 1.0f),
-                       "Quest start");
-    ImGui::TextUnformatted(Quest::QuestStartMethodName(quest.start_method));
-    if (quest.start_method == Quest::QuestStartMethod::Npc) {
-        ImGui::Text("NPC: %s", quest.quest_giver.entity_name.empty()
-                                   ? "not assigned"
-                                   : quest.quest_giver.entity_name.c_str());
-        ImGui::TextDisabled("%s",
-                            reference_location(quest.quest_giver).c_str());
-    } else if (quest.start_method == Quest::QuestStartMethod::Item) {
-        ImGui::Text("Item: %s", quest.start_item.display_name.empty()
-                                    ? "not selected"
-                                    : quest.start_item.display_name.c_str());
-        ImGui::TextDisabled("%s",
-            reference_location(quest.start_item.source).c_str());
-    } else {
-        ImGui::TextDisabled("Begins as soon as prerequisites pass");
-    }
-    ImGui::SetCursorPosX(content_x);
-    ImGui::Dummy(ImVec2(kNodeContentWidth, 1.0f));
-    ImGui::PopID();
-    ed::EndNode();
-    ed::PopStyleColor(2);
-    place_flow_node_if_needed(quest, id, 0);
-}
-
-void draw_authored_acquire_node(const Quest::AuthoredQuest& quest) {
-    const int id = Quest::AuthoredQuest::kAcquireItemNodeId;
-    ed::PushStyleColor(ed::StyleColor_NodeBg,
-                       node_color(Quest::NodeKind::State));
-    ed::PushStyleColor(ed::StyleColor_NodeBorder,
-                       ImVec4(0.78f, 0.66f, 0.36f, 0.85f));
-    ed::BeginNode(node_id(id));
-    ImGui::PushID(id);
-    const float content_x = ImGui::GetCursorPosX();
-    draw_input_pin(id, content_x);
-    ImGui::TextColored(ImVec4(0.94f, 0.78f, 0.38f, 1.0f),
-                       "Quest step 1");
-    ImGui::TextUnformatted("Obtain item");
-    ImGui::Separator();
-    ImGui::Text("Item: %s", quest.required_item.display_name.empty()
-                                ? "not selected"
-                                : quest.required_item.display_name.c_str());
-    ImGui::TextDisabled("%s",
-        reference_location(quest.required_item.source).c_str());
-    ImGui::SetCursorPosX(content_x);
-    ImGui::Dummy(ImVec2(kNodeContentWidth, 1.0f));
-    draw_output_pin(id, content_x);
-    ImGui::PopID();
-    ed::EndNode();
-    ed::PopStyleColor(2);
-    place_flow_node_if_needed(quest, id, 1);
-}
-
-void draw_authored_return_node(const Quest::AuthoredQuest& quest) {
-    const int id = Quest::AuthoredQuest::kReturnNodeId;
-    ed::PushStyleColor(ed::StyleColor_NodeBg,
-                       node_color(Quest::NodeKind::Action));
-    ed::PushStyleColor(ed::StyleColor_NodeBorder,
-                       ImVec4(0.46f, 0.80f, 0.54f, 0.85f));
-    ed::BeginNode(node_id(id));
-    ImGui::PushID(id);
-    const float content_x = ImGui::GetCursorPosX();
-    draw_input_pin(id, content_x);
-    ImGui::TextColored(ImVec4(0.55f, 0.90f, 0.62f, 1.0f),
-                       "Quest step 2");
-    ImGui::TextUnformatted("Return to quest giver");
-    ImGui::Separator();
-    ImGui::Text("NPC: %s", quest.quest_giver.entity_name.empty()
-                               ? "not assigned"
-                               : quest.quest_giver.entity_name.c_str());
-    ImGui::TextDisabled("The required item is removed here");
-    ImGui::SetCursorPosX(content_x);
-    ImGui::Dummy(ImVec2(kNodeContentWidth, 1.0f));
-    draw_output_pin(id, content_x);
-    ImGui::PopID();
-    ed::EndNode();
-    ed::PopStyleColor(2);
-    place_flow_node_if_needed(quest, id, 2);
-}
-
-void draw_authored_reward_node(const Quest::AuthoredQuest& quest) {
-    const int id = Quest::AuthoredQuest::kRewardNodeId;
-    ed::PushStyleColor(ed::StyleColor_NodeBg,
-                       node_color(Quest::NodeKind::Action));
-    ed::PushStyleColor(ed::StyleColor_NodeBorder,
-                       ImVec4(0.94f, 0.75f, 0.30f, 0.90f));
-    ed::BeginNode(node_id(id));
-    ImGui::PushID(id);
-    const float content_x = ImGui::GetCursorPosX();
-    draw_input_pin(id, content_x);
-    ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.32f, 1.0f), "Reward");
-    ImGui::Text("%d gold", quest.reward_gold);
-    ImGui::TextDisabled("Quest completes");
-    ImGui::SetCursorPosX(content_x);
-    ImGui::Dummy(ImVec2(kNodeContentWidth, 1.0f));
-    ImGui::PopID();
-    ed::EndNode();
-    ed::PopStyleColor(2);
-    place_flow_node_if_needed(quest, id, 3);
-}
-
-bool draw_authored_prerequisite(Quest::PrerequisiteNode& node) {
-    bool changed = false;
-    ed::PushStyleColor(ed::StyleColor_NodeBg,
-                       node_color(Quest::NodeKind::State));
-    ed::PushStyleColor(ed::StyleColor_NodeBorder,
-                       ImVec4(0.75f, 0.68f, 0.56f, 0.85f));
-    ed::BeginNode(node_id(node.id));
-    ImGui::PushID(node.id);
-    const float content_x = ImGui::GetCursorPosX();
-
-    ImGui::TextColored(ImVec4(0.86f, 0.80f, 0.70f, 1.0f),
-                       "Prerequisite");
-    ImGui::TextUnformatted(Quest::PrerequisiteKindName(node.kind));
-    ImGui::Separator();
-
-    switch (node.kind) {
-        case Quest::PrerequisiteKind::StoryProgress:
-            changed |= draw_story_milestone_combo("Available after",
-                                                   node.story_start);
-            changed |= draw_story_milestone_combo("Unavailable after",
-                                                   node.story_end, true);
-            break;
-        case Quest::PrerequisiteKind::QuestState: {
-            ImGui::SetNextItemWidth(330.0f);
-            changed |= ImGui::InputText("Quest", &node.other_quest);
-            ImGui::SetNextItemWidth(330.0f);
-            if (ImGui::BeginCombo(
-                    "State",
-                    Quest::RequiredQuestStateName(node.quest_state))) {
-                for (Quest::RequiredQuestState state : {
-                         Quest::RequiredQuestState::Registered,
-                         Quest::RequiredQuestState::Activated,
-                         Quest::RequiredQuestState::Active,
-                         Quest::RequiredQuestState::Completed,
-                         Quest::RequiredQuestState::Unlocked}) {
-                    const bool selected = node.quest_state == state;
-                    if (ImGui::Selectable(
-                            Quest::RequiredQuestStateName(state), selected)) {
-                        node.quest_state = state;
-                        changed = true;
-                    }
-                    if (selected) ImGui::SetItemDefaultFocus();
-                }
-                ImGui::EndCombo();
-            }
-            changed |= ImGui::Checkbox("Must be in this state",
-                                       &node.expected);
-            break;
-        }
-        case Quest::PrerequisiteKind::GameflowFlag:
-            ImGui::SetNextItemWidth(330.0f);
-            changed |= ImGui::InputText("Gameflow flag",
-                                        &node.gameflow_flag);
-            changed |= ImGui::Checkbox("Must be true", &node.expected);
-            break;
-        case Quest::PrerequisiteKind::LuaCondition:
-            ImGui::SetNextItemWidth(440.0f);
-            changed |= ImGui::InputTextMultiline(
-                "##lua_condition", &node.lua_condition,
-                ImVec2(440.0f, ImGui::GetTextLineHeight() * 3.0f));
-            changed |= ImGui::Checkbox("Must be true##lua",
-                                       &node.expected);
-            break;
-    }
-
-    ImGui::SetCursorPosX(content_x);
-    ImGui::Dummy(ImVec2(kNodeContentWidth, 1.0f));
-    draw_output_pin(node.id, content_x);
-    ImGui::PopID();
-    ed::EndNode();
-    ed::PopStyleColor(2);
-
-    if (g_apply_layout || g_place_authored_node == node.id) {
-        ed::SetNodePosition(node_id(node.id), ImVec2(node.x, node.y));
-    }
-    return changed;
-}
-
-bool contains_case_insensitive(std::string_view text,
-                               std::string_view query) {
-    if (query.empty()) return true;
-    auto lower = [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    };
-    std::string haystack(text);
-    std::string needle(query);
-    std::transform(haystack.begin(), haystack.end(), haystack.begin(), lower);
-    std::transform(needle.begin(), needle.end(), needle.begin(), lower);
-    return haystack.find(needle) != std::string::npos;
-}
-
-void draw_authored_quest(Quest::AuthoredQuest& quest) {
-    ensure_editor();
-    ed::SetCurrentEditor(g_editor);
-    ed::Begin("quest_node_canvas", ImGui::GetContentRegionAvail());
-
-    draw_authored_start_node(quest);
-    draw_authored_acquire_node(quest);
-    draw_authored_return_node(quest);
-    draw_authored_reward_node(quest);
-    ed::Link(link_id(400001), output_pin_id(Quest::AuthoredQuest::kStartNodeId),
-             input_pin_id(Quest::AuthoredQuest::kAcquireItemNodeId),
-             ImVec4(0.58f, 0.76f, 0.88f, 0.92f), 2.5f);
-    ed::Link(link_id(400002),
-             output_pin_id(Quest::AuthoredQuest::kAcquireItemNodeId),
-             input_pin_id(Quest::AuthoredQuest::kReturnNodeId),
-             ImVec4(0.58f, 0.76f, 0.88f, 0.92f), 2.5f);
-    ed::Link(link_id(400003),
-             output_pin_id(Quest::AuthoredQuest::kReturnNodeId),
-             input_pin_id(Quest::AuthoredQuest::kRewardNodeId),
-             ImVec4(0.58f, 0.76f, 0.88f, 0.92f), 2.5f);
-    bool changed = false;
-    for (Quest::PrerequisiteNode& prerequisite : quest.prerequisites) {
-        changed |= draw_authored_prerequisite(prerequisite);
-        ed::Link(link_id(500000 + prerequisite.id),
-                 output_pin_id(prerequisite.id),
-                 input_pin_id(Quest::AuthoredQuest::kStartNodeId),
-                 ImVec4(0.84f, 0.72f, 0.48f, 0.92f), 2.5f);
-    }
-
-    int delete_node = 0;
-    if (ed::BeginDelete()) {
-        ed::NodeId deleted;
-        while (ed::QueryDeletedNode(&deleted)) {
-            const int id = static_cast<int>(deleted.Get());
-            if (id < 100) {
-                ed::RejectDeletedItem();
-            } else {
-                ed::AcceptDeletedItem(true);
-                delete_node = id;
-            }
-        }
-        ed::LinkId deleted_link;
-        while (ed::QueryDeletedLink(&deleted_link)) {
-
-            ed::RejectDeletedItem();
-        }
-        ed::EndDelete();
-    }
-
-    const ImVec2 popup_screen = ImGui::GetMousePos();
-    const ImVec2 popup_canvas = ed::ScreenToCanvas(popup_screen);
-    ed::NodeId context_node;
-    ed::Suspend();
-    if (ed::ShowNodeContextMenu(&context_node)) {
-        g_context_authored_node = static_cast<int>(context_node.Get());
-        ImGui::OpenPopup("##authored_quest_node_context");
-    } else if (ed::ShowBackgroundContextMenu()) {
-        g_create_node_position = popup_canvas;
-        g_create_node_filter[0] = 0;
-        ImGui::OpenPopup("##authored_quest_add_node");
-    }
-    ed::Resume();
-
-    ed::Suspend();
-    if (ImGui::BeginPopup("##authored_quest_node_context")) {
-        const int id = g_context_authored_node;
-        if (id < 100) {
-            ImGui::TextDisabled("Quest flow nodes cannot be removed");
-        } else if (ImGui::MenuItem("Delete")) {
-            delete_node = id;
-        }
-        ImGui::EndPopup();
-    }
-
-    if (ImGui::BeginPopup("##authored_quest_add_node")) {
-        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        ImGui::SetNextItemWidth(360.0f);
-        ImGui::InputTextWithHint("##quest_node_search", "Search nodes...",
-                                 g_create_node_filter,
-                                 sizeof(g_create_node_filter));
-        ImGui::Separator();
-        ImGui::TextDisabled("PREREQUISITES");
-
-        const bool has_story_progress = std::any_of(
-            quest.prerequisites.begin(), quest.prerequisites.end(),
-            [](const Quest::PrerequisiteNode& node) {
-                return node.kind == Quest::PrerequisiteKind::StoryProgress;
-            });
-        auto add_entry = [&](const char* name,
-                             Quest::PrerequisiteKind kind,
-                             bool enabled = true) {
-            if (!contains_case_insensitive(name, g_create_node_filter)) return;
-            ImGui::BeginDisabled(!enabled);
-            if (ImGui::Selectable(name)) {
-                const int id = Quest::AddPrerequisite(
-                    quest, kind, g_create_node_position.x,
-                    g_create_node_position.y);
-                g_place_authored_node = id;
-                changed = true;
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndDisabled();
-        };
-        add_entry("Story progression", Quest::PrerequisiteKind::StoryProgress,
-                  !has_story_progress);
-        add_entry("Quest state", Quest::PrerequisiteKind::QuestState);
-        add_entry("Gameflow flag", Quest::PrerequisiteKind::GameflowFlag);
-        add_entry("Lua condition", Quest::PrerequisiteKind::LuaCondition);
-        ImGui::EndPopup();
-    }
-    ed::Resume();
-
-    ed::End();
-
-    if (g_apply_layout) {
-        ed::NavigateToContent(0.0f);
-    }
-    if (delete_node && Quest::RemovePrerequisite(quest, delete_node)) {
-        changed = true;
-    }
-    for (std::size_t slot = 0; slot < 4; ++slot) {
-        const int id = slot == 0 ? Quest::AuthoredQuest::kStartNodeId
-                     : slot == 1 ? Quest::AuthoredQuest::kAcquireItemNodeId
-                     : slot == 2 ? Quest::AuthoredQuest::kReturnNodeId
-                                 : Quest::AuthoredQuest::kRewardNodeId;
-        const ImVec2 position = ed::GetNodePosition(node_id(id));
-        quest.flow_x[slot] = position.x;
-        quest.flow_y[slot] = position.y;
-    }
-    for (Quest::PrerequisiteNode& prerequisite : quest.prerequisites) {
-        if (prerequisite.id == g_place_authored_node &&
-            !g_apply_layout) continue;
-        const ImVec2 position = ed::GetNodePosition(node_id(prerequisite.id));
-        prerequisite.x = position.x;
-        prerequisite.y = position.y;
-    }
-    if (g_place_authored_node && !g_apply_layout) {
-
-
-        bool submitted = false;
-        for (const Quest::PrerequisiteNode& prerequisite :
-             quest.prerequisites) {
-            if (prerequisite.id == g_place_authored_node) {
-                submitted = ed::GetNodeSize(node_id(prerequisite.id)).x > 0.0f;
-                break;
-            }
-        }
-        if (submitted) g_place_authored_node = 0;
-    } else if (g_apply_layout) {
-        g_place_authored_node = 0;
-    }
-    ed::SetCurrentEditor(nullptr);
-    g_apply_layout = false;
-
-    if (changed) refresh_authored_lua();
-}
-#endif
 
 bool contains_case_insensitive(std::string_view text,
                                std::string_view query) {
@@ -755,11 +393,20 @@ const char* authored_node_badge(Quest::AuthoredNodeKind kind) {
         case Quest::AuthoredNodeKind::ApproachNpc: return "Trigger";
         case Quest::AuthoredNodeKind::Dialogue: return "Dialogue";
         case Quest::AuthoredNodeKind::AcceptQuest: return "Choice";
+        case Quest::AuthoredNodeKind::HoldInteraction:
+            return "Interaction";
         case Quest::AuthoredNodeKind::ObtainItem: return "Objective";
         case Quest::AuthoredNodeKind::ReturnToNpc: return "Objective";
         case Quest::AuthoredNodeKind::CompleteQuest: return "Completion";
+        case Quest::AuthoredNodeKind::SkipChildhoodEnding:
+            return "Existing quest action";
         default: return "Quest";
     }
+}
+
+bool authored_node_is_terminal(Quest::AuthoredNodeKind kind) {
+    return kind == Quest::AuthoredNodeKind::CompleteQuest ||
+           kind == Quest::AuthoredNodeKind::SkipChildhoodEnding;
 }
 
 ImVec4 authored_node_colour(Quest::AuthoredNodeKind kind) {
@@ -771,8 +418,12 @@ ImVec4 authored_node_colour(Quest::AuthoredNodeKind kind) {
             return node_color(Quest::NodeKind::Thread);
         case Quest::AuthoredNodeKind::AcceptQuest:
             return node_color(Quest::NodeKind::Quest);
+        case Quest::AuthoredNodeKind::HoldInteraction:
+            return node_color(Quest::NodeKind::Quest);
         case Quest::AuthoredNodeKind::ObtainItem:
             return node_color(Quest::NodeKind::State);
+        case Quest::AuthoredNodeKind::SkipChildhoodEnding:
+            return node_color(Quest::NodeKind::Action);
         default:
             return node_color(Quest::NodeKind::Action);
     }
@@ -786,7 +437,7 @@ std::string authored_node_summary(const Quest::AuthoredNode& node) {
             return node.entity.valid()
                 ? node.entity.entity_name + " within " +
                       std::to_string(node.approach_radius) + " units"
-                : "NPC not assigned";
+                : "Entity not assigned";
         case Quest::AuthoredNodeKind::Dialogue:
             if (node.text.empty()) return "Dialogue text not entered";
             return node.entity.valid()
@@ -794,6 +445,8 @@ std::string authored_node_summary(const Quest::AuthoredNode& node) {
                 : "Speaker not assigned: \"" + node.text + "\"";
         case Quest::AuthoredNodeKind::AcceptQuest:
             return node.text.empty() ? "Question not entered" : node.text;
+        case Quest::AuthoredNodeKind::HoldInteraction:
+            return node.text.empty() ? "Prompt text not entered" : node.text;
         case Quest::AuthoredNodeKind::ObtainItem:
             return node.item.valid()
                 ? "Get " + std::to_string(node.item_count) + " x " +
@@ -804,6 +457,8 @@ std::string authored_node_summary(const Quest::AuthoredNode& node) {
                                        : "NPC not assigned";
         case Quest::AuthoredNodeKind::CompleteQuest:
             return "Finish the quest and grant its rewards";
+        case Quest::AuthoredNodeKind::SkipChildhoodEnding:
+            return "Run QC010's ending movie, cleanup, and adulthood handoff";
         case Quest::AuthoredNodeKind::PrerequisiteStoryProgress:
             return node.story_start.empty() ? "Progress range not set"
                                             : node.story_start + " to " +
@@ -825,43 +480,6 @@ std::string authored_node_summary(const Quest::AuthoredNode& node) {
     return {};
 }
 
-void draw_authored_node(const Quest::AuthoredQuest& quest,
-                        const Quest::AuthoredNode& node) {
-    ed::PushStyleColor(ed::StyleColor_NodeBg,
-                       authored_node_colour(node.kind));
-    ed::PushStyleColor(ed::StyleColor_NodeBorder,
-                       ImVec4(0.66f, 0.72f, 0.82f, 0.80f));
-    ed::BeginNode(node_id(node.id));
-    ImGui::PushID(node.id);
-    const float content_x = ImGui::GetCursorPosX();
-    draw_input_pin(node.id, content_x);
-    ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.76f, 0.82f, 0.92f, 1.0f), "%s",
-                       authored_node_badge(node.kind));
-    if (node.kind != Quest::AuthoredNodeKind::CompleteQuest) {
-        draw_output_pin(node.id, content_x);
-    }
-    ImGui::SetCursorPosX(content_x);
-    ImGui::TextUnformatted(
-        node.kind == Quest::AuthoredNodeKind::QuestStart
-            ? quest.quest_title.c_str()
-            : Quest::AuthoredNodeKindName(node.kind));
-    ImGui::Separator();
-    if (node.kind != Quest::AuthoredNodeKind::QuestStart) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + kNodeContentWidth);
-        ImGui::TextWrapped("%s", authored_node_summary(node).c_str());
-        ImGui::PopTextWrapPos();
-    }
-    ImGui::SetCursorPosX(content_x);
-    ImGui::Dummy(ImVec2(kNodeContentWidth, 1.0f));
-    ImGui::PopID();
-    ed::EndNode();
-    ed::PopStyleColor(2);
-    if (g_apply_layout || g_place_authored_node == node.id) {
-        ed::SetNodePosition(node_id(node.id), ImVec2(node.x, node.y));
-    }
-}
-
 bool decode_authored_pin(ed::PinId pin, int& node, bool& input) {
     const std::uintptr_t raw = pin.Get();
     if (raw < 100000) return false;
@@ -869,191 +487,6 @@ bool decode_authored_pin(ed::PinId pin, int& node, bool& input) {
     node = static_cast<int>(value / 2);
     input = (value % 2) == 0;
     return node > 0;
-}
-
-void draw_authored_quest(Quest::AuthoredQuest& quest) {
-    ensure_editor();
-    ed::SetCurrentEditor(g_editor);
-    ed::Begin("quest_node_canvas", ImGui::GetContentRegionAvail());
-
-    for (const Quest::AuthoredNode& node : quest.nodes) {
-        draw_authored_node(quest, node);
-    }
-    for (const Quest::AuthoredLink& link : quest.links) {
-        ed::Link(authored_link_id(link.id), output_pin_id(link.from_node),
-                 input_pin_id(link.to_node),
-                 ImVec4(0.58f, 0.76f, 0.88f, 0.92f), 2.5f);
-    }
-
-    bool changed = false;
-    if (ed::BeginCreate()) {
-        ed::PinId first_pin;
-        ed::PinId second_pin;
-        if (ed::QueryNewLink(&first_pin, &second_pin)) {
-
-
-
-            if (first_pin && second_pin) {
-                int first_node = 0;
-                int second_node = 0;
-                bool first_input = false;
-                bool second_input = false;
-                const bool valid_pins =
-                    decode_authored_pin(first_pin, first_node, first_input) &&
-                    decode_authored_pin(second_pin, second_node,
-                                        second_input);
-                if (!valid_pins || first_input == second_input ||
-                    first_node == second_node) {
-                    ed::RejectNewItem(ImVec4(0.95f, 0.35f, 0.30f, 1.0f));
-                } else {
-                    const int from = first_input ? second_node : first_node;
-                    const int to = first_input ? first_node : second_node;
-                    const Quest::AuthoredNode* target =
-                        Quest::FindAuthoredNode(quest, to);
-                    if (!target || Quest::IsPrerequisiteNode(target->kind)) {
-                        ed::RejectNewItem(
-                            ImVec4(0.95f, 0.35f, 0.30f, 1.0f));
-                    } else if (ed::AcceptNewItem(
-                                   ImVec4(0.58f, 0.76f, 0.88f, 1.0f),
-                                   3.0f)) {
-                        changed |=
-                            Quest::AddAuthoredLink(quest, from, to) != 0;
-                    }
-                }
-            }
-        }
-        ed::EndCreate();
-    }
-
-    std::vector<int> delete_nodes;
-    std::vector<int> delete_links;
-    if (ed::BeginDelete()) {
-        ed::NodeId deleted_node;
-        while (ed::QueryDeletedNode(&deleted_node)) {
-            ed::AcceptDeletedItem(true);
-            delete_nodes.push_back(static_cast<int>(deleted_node.Get()));
-        }
-        ed::LinkId deleted_link;
-        while (ed::QueryDeletedLink(&deleted_link)) {
-            const std::uintptr_t raw = deleted_link.Get();
-            if (raw >= 600000) {
-                ed::AcceptDeletedItem(true);
-                delete_links.push_back(static_cast<int>(raw - 600000));
-            } else {
-                ed::RejectDeletedItem();
-            }
-        }
-        ed::EndDelete();
-    }
-
-    const ImVec2 popup_screen = ImGui::GetMousePos();
-    const ImVec2 popup_canvas = ed::ScreenToCanvas(popup_screen);
-    ed::NodeId context_node;
-    ed::Suspend();
-    if (ed::ShowNodeContextMenu(&context_node)) {
-        g_context_authored_node = static_cast<int>(context_node.Get());
-        g_selected_authored_node = g_context_authored_node;
-        ImGui::OpenPopup("##authored_quest_node_context");
-    } else if (ed::ShowBackgroundContextMenu()) {
-        g_create_node_position = popup_canvas;
-        g_create_node_filter[0] = 0;
-        ImGui::OpenPopup("##authored_quest_add_node");
-    }
-    ed::Resume();
-
-    ed::Suspend();
-    if (ImGui::BeginPopup("##authored_quest_node_context")) {
-        const Quest::AuthoredNode* context =
-            Quest::FindAuthoredNode(quest, g_context_authored_node);
-        const bool is_quest_start = context &&
-            context->kind == Quest::AuthoredNodeKind::QuestStart;
-        if (is_quest_start) ImGui::BeginDisabled();
-        if (ImGui::MenuItem("Delete")) {
-            delete_nodes.push_back(g_context_authored_node);
-        }
-        if (is_quest_start) ImGui::EndDisabled();
-        ImGui::EndPopup();
-    }
-    if (ImGui::BeginPopup("##authored_quest_add_node")) {
-        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        ImGui::SetNextItemWidth(360.0f);
-        ImGui::InputTextWithHint("##quest_node_search", "Search nodes...",
-                                 g_create_node_filter,
-                                 sizeof(g_create_node_filter));
-        ImGui::SeparatorText("QUEST");
-        auto add_entry = [&](const char* name, Quest::AuthoredNodeKind kind) {
-            if (!contains_case_insensitive(name, g_create_node_filter)) return;
-            if (ImGui::Selectable(name)) {
-                const int id = Quest::AddAuthoredNode(
-                    quest, kind, g_create_node_position.x,
-                    g_create_node_position.y);
-                g_place_authored_node = id;
-                g_selected_authored_node = id;
-                changed = true;
-                ImGui::CloseCurrentPopup();
-            }
-        };
-        add_entry("Approach NPC",
-                  Quest::AuthoredNodeKind::ApproachNpc);
-        add_entry("Dialogue", Quest::AuthoredNodeKind::Dialogue);
-        add_entry("Accept quest",
-                  Quest::AuthoredNodeKind::AcceptQuest);
-        add_entry("Obtain item",
-                  Quest::AuthoredNodeKind::ObtainItem);
-        add_entry("Return to NPC",
-                  Quest::AuthoredNodeKind::ReturnToNpc);
-        const bool has_completion = std::any_of(
-            quest.nodes.begin(), quest.nodes.end(),
-            [](const Quest::AuthoredNode& node) {
-                return node.kind == Quest::AuthoredNodeKind::CompleteQuest;
-            });
-        if (!has_completion) {
-            add_entry("Complete quest",
-                      Quest::AuthoredNodeKind::CompleteQuest);
-        }
-        ImGui::EndPopup();
-    }
-    ed::Resume();
-
-    ed::End();
-
-    ed::NodeId selected[1];
-    const int selected_count = ed::GetSelectedNodes(selected, 1);
-    if (selected_count == 1) {
-        const int id = static_cast<int>(selected[0].Get());
-        if (Quest::FindAuthoredNode(quest, id)) g_selected_authored_node = id;
-    } else if (selected_count == 0 &&
-               ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
-               ImGui::IsItemHovered()) {
-        g_selected_authored_node = 0;
-    }
-
-    for (int id : delete_links) {
-        changed |= Quest::RemoveAuthoredLink(quest, id);
-    }
-    for (int id : delete_nodes) {
-        changed |= Quest::RemoveAuthoredNode(quest, id);
-        if (g_selected_authored_node == id) g_selected_authored_node = 0;
-        if (g_level_reference_node == id) g_level_reference_node = 0;
-        if (g_pending_npc_node == id) CancelPendingNpcCreation();
-    }
-    for (Quest::AuthoredNode& node : quest.nodes) {
-        if (node.id == g_place_authored_node && !g_apply_layout) continue;
-        const ImVec2 position = ed::GetNodePosition(node_id(node.id));
-        node.x = position.x;
-        node.y = position.y;
-    }
-    if (g_place_authored_node && !g_apply_layout) {
-        if (ed::GetNodeSize(node_id(g_place_authored_node)).x > 0.0f) {
-            g_place_authored_node = 0;
-        }
-    } else if (g_apply_layout) {
-        g_place_authored_node = 0;
-    }
-    if (g_apply_layout && !quest.nodes.empty()) ed::NavigateToContent(0.0f);
-    ed::SetCurrentEditor(nullptr);
-    g_apply_layout = false;
-    if (changed) refresh_authored_lua();
 }
 
 bool draw_item_picker(const char* id, Quest::ItemReference& selected) {
@@ -1177,304 +610,64 @@ void draw_npc_gdb_summary(const Quest::WorldReference& reference) {
 
 }
 
-bool CreateNewQuest(const std::string& quest_id, std::string& error) {
+bool CreateNewBlueprintQuest(const std::string& quest_id,
+                             std::string& error) {
     error.clear();
-    if (!Quest::IsValidQuestId(quest_id)) {
-        error = "Use letters, numbers and underscores; the first character "
-                "must be a letter or underscore.";
-        return false;
+    for (const Quest::AuthoredQuest& quest : g_authored_quests) {
+        if (quest.quest_id == quest_id) {
+            error = "A custom quest with this ID already exists.";
+            return false;
+        }
     }
-    auto equal_id = [&](const Quest::AuthoredQuest& quest) {
-        if (quest.quest_id.size() != quest_id.size()) return false;
-        return std::equal(quest.quest_id.begin(), quest.quest_id.end(),
-                          quest_id.begin(),
-                          [](unsigned char a, unsigned char b) {
-                              return std::tolower(a) == std::tolower(b);
-                          });
-    };
-    if (std::any_of(g_authored_quests.begin(), g_authored_quests.end(),
-                    equal_id)) {
-        error = "A custom quest with this ID already exists.";
-        return false;
-    }
-
-    g_authored_quests.push_back(Quest::CreateAuthoredQuest(quest_id));
-    g_active_authored_quest =
-        static_cast<int>(g_authored_quests.size() - 1);
-    g_level_reference_target = LevelReferenceTarget::QuestGiver;
-    g_level_reference_node = 0;
-
-
-
-    g_selected_authored_node = g_authored_quests.back().nodes.empty()
-        ? 0 : g_authored_quests.back().nodes.front().id;
-    {
-        std::lock_guard<std::mutex> lock(g_graph_mutex);
-        g_graph.reset();
-        ++g_graph_generation;
-    }
-    reset_editor();
+    if (!BlueprintUI::CreateQuest(quest_id, error)) return false;
+    g_active_authored_quest = -1;
     refresh_authored_lua();
     return true;
 }
 
 bool OpenAuthoredQuest(const std::string& quest_id) {
-    for (std::size_t i = 0; i < g_authored_quests.size(); ++i) {
-        if (g_authored_quests[i].quest_id != quest_id) continue;
-        g_active_authored_quest = static_cast<int>(i);
-        g_level_reference_target = LevelReferenceTarget::QuestGiver;
-        g_level_reference_node = 0;
-        g_selected_authored_node = 0;
-        {
-            std::lock_guard<std::mutex> lock(g_graph_mutex);
-            g_graph.reset();
-            ++g_graph_generation;
-        }
-        reset_editor();
-        refresh_authored_lua();
-        return true;
-    }
-    return false;
-}
-
-std::vector<std::string> AuthoredQuestIds() {
-    std::vector<std::string> ids;
-    ids.reserve(g_authored_quests.size());
-    for (const Quest::AuthoredQuest& quest : g_authored_quests) {
-        ids.push_back(quest.quest_id);
-    }
-    return ids;
-}
-
-bool IsAuthoredQuestActive() {
-    return active_authored_quest_const() != nullptr;
-}
-
-std::string ActiveAuthoredQuestId() {
-    const Quest::AuthoredQuest* quest = active_authored_quest_const();
-    return quest ? quest->quest_id : std::string{};
-}
-
-std::string ActiveAuthoredLua() {
-    const Quest::AuthoredQuest* quest = active_authored_quest_const();
-    return quest ? Quest::GenerateAuthoringPreview(*quest) : std::string{};
-}
-
-std::string ActiveAuthoredQuestLua() {
-    const Quest::AuthoredQuest* quest = active_authored_quest_const();
-    return quest ? Quest::GenerateQuestLua(*quest) : std::string{};
-}
-
-std::string ActiveAuthoredEligibilityLua() {
-    const Quest::AuthoredQuest* quest = active_authored_quest_const();
-    return quest ? Quest::GenerateEligibilityLua(*quest) : std::string{};
-}
-
-std::vector<std::pair<std::string, std::string>>
-ActiveAuthoredTextEntries() {
-    const Quest::AuthoredQuest* quest = active_authored_quest_const();
-    return quest ? Quest::AuthoredTextEntries(*quest)
-                 : std::vector<std::pair<std::string, std::string>>{};
-}
-
-bool ValidateActiveAuthoredQuest(std::string& error) {
-    const Quest::AuthoredQuest* quest = active_authored_quest_const();
-    if (!quest) {
-        error = "No custom quest is selected.";
-        return false;
-    }
-    return Quest::ValidateSimpleQuest(*quest, error);
-}
-
-#if 0
-LevelReferenceTarget PendingLevelReferenceTarget() {
-    return g_level_reference_target;
-}
-
-std::string PendingLevelReferenceLabel() {
-    switch (g_level_reference_target) {
-        case LevelReferenceTarget::QuestGiver:
-            return "quest giver";
-        case LevelReferenceTarget::StartItemSource:
-            return "quest-start item source";
-        case LevelReferenceTarget::RequiredItemSource:
-            return "required item source";
-    }
-    return "quest reference";
-}
-
-uint32_t PendingLevelReferenceItemHash() {
-    const Quest::AuthoredQuest* quest = active_authored_quest_const();
-    if (!quest) return 0;
-    if (g_level_reference_target ==
-        LevelReferenceTarget::StartItemSource) {
-        return quest->start_item.record_hash;
-    }
-    if (g_level_reference_target ==
-        LevelReferenceTarget::RequiredItemSource) {
-        return quest->required_item.record_hash;
-    }
-    return 0;
-}
-
-bool BindActiveLevelReference(const LevelReferenceCandidate& candidate,
-                              std::string& error) {
-    error.clear();
-    Quest::AuthoredQuest* quest = active_authored_quest();
-    if (!quest) {
-        error = "No custom quest is selected.";
-        return false;
-    }
-    Quest::WorldReference reference;
-    reference.level_path = candidate.level_path;
-    reference.level_id = candidate.level_id;
-    reference.entity_name = candidate.entity_name;
-    reference.entity_hash = candidate.entity_hash;
-    reference.x = candidate.x;
-    reference.y = candidate.y;
-    reference.z = candidate.z;
-    reference.model_hashes = candidate.model_hashes;
-    reference.authored_instance = candidate.authored_instance;
-    if (!reference.valid()) {
-        error = "The selected level entity has no usable GDB name.";
-        return false;
-    }
-
-    switch (g_level_reference_target) {
-        case LevelReferenceTarget::QuestGiver:
-            if (!candidate.is_npc) {
-                error = "Right-click an NPC marker for the quest giver.";
-                return false;
-            }
-            quest->quest_giver = std::move(reference);
-            break;
-        case LevelReferenceTarget::StartItemSource:
-            if (!candidate.is_container) {
-                error = "Right-click a container for the quest-start item.";
-                return false;
-            }
-            if (!quest->start_item.valid()) {
-                error = "Choose the quest-start item first.";
-                return false;
-            }
-            quest->start_item.source = std::move(reference);
-            break;
-        case LevelReferenceTarget::RequiredItemSource:
-            if (!candidate.is_container) {
-                error = "Right-click a container for the required item.";
-                return false;
-            }
-            if (!quest->required_item.valid()) {
-                error = "Choose the required item first.";
-                return false;
-            }
-            quest->required_item.source = std::move(reference);
-            break;
-    }
+    if (!BlueprintUI::OpenQuest(quest_id)) return false;
     refresh_authored_lua();
     return true;
 }
 
-void DrawReferenceView() {
-    Quest::AuthoredQuest* quest = active_authored_quest();
-    if (!quest) {
-        ImGui::TextDisabled("References are available for custom quests.");
-        return;
-    }
-
-    bool changed = false;
-    ImGui::BeginChild("##quest_references", ImVec2(0.0f, 0.0f), false);
-    ImGui::SetNextItemWidth(-1.0f);
-    changed |= ImGui::InputText("Quest title", &quest->quest_title);
-
-    ImGui::SeparatorText("Quest start");
-    ImGui::SetNextItemWidth(260.0f);
-    if (ImGui::BeginCombo("Method",
-                          Quest::QuestStartMethodName(quest->start_method))) {
-        for (Quest::QuestStartMethod method : {
-                 Quest::QuestStartMethod::Npc,
-                 Quest::QuestStartMethod::Item,
-                 Quest::QuestStartMethod::Automatic}) {
-            const bool selected = quest->start_method == method;
-            if (ImGui::Selectable(Quest::QuestStartMethodName(method),
-                                  selected)) {
-                quest->start_method = method;
-                changed = true;
-            }
-            if (selected) ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-    }
-
-    ImGui::TextUnformatted("Quest giver NPC");
-    draw_reference_summary(quest->quest_giver);
-    if (ImGui::Button("Assign NPC with next level right-click")) {
-        g_level_reference_target = LevelReferenceTarget::QuestGiver;
-    }
-    draw_npc_gdb_summary(quest->quest_giver);
-
-    if (quest->start_method == Quest::QuestStartMethod::Item) {
-        ImGui::Spacing();
-        ImGui::TextUnformatted("Item that starts the quest");
-        changed |= draw_item_picker("##start_item", quest->start_item);
-        draw_reference_summary(quest->start_item.source);
-        if (ImGui::Button("Assign start-item container with next level right-click")) {
-            g_level_reference_target =
-                LevelReferenceTarget::StartItemSource;
-        }
-    }
-
-    if (quest->start_method == Quest::QuestStartMethod::Npc) {
-        ImGui::SetNextItemWidth(-1.0f);
-        changed |= ImGui::InputTextMultiline(
-            "Offer text", &quest->accept_text,
-            ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.0f));
-    }
-
-    ImGui::SeparatorText("Retrieve item");
-    changed |= draw_item_picker("##required_item", quest->required_item);
-    draw_reference_summary(quest->required_item.source);
-    if (ImGui::Button("Assign item container with next level right-click")) {
-        g_level_reference_target = LevelReferenceTarget::RequiredItemSource;
-    }
-    ImGui::SetNextItemWidth(-1.0f);
-    changed |= ImGui::InputTextMultiline(
-        "Objective text", &quest->acquire_text,
-        ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.0f));
-
-    ImGui::SeparatorText("Return and reward");
-    ImGui::SetNextItemWidth(-1.0f);
-    changed |= ImGui::InputTextMultiline(
-        "Return text", &quest->return_text,
-        ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.0f));
-    ImGui::SetNextItemWidth(-1.0f);
-    changed |= ImGui::InputTextMultiline(
-        "Completion text", &quest->completion_text,
-        ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.0f));
-    changed |= ImGui::InputInt("Gold reward", &quest->reward_gold);
-    if (quest->reward_gold < 0) quest->reward_gold = 0;
-
-    ImGui::Spacing();
-    ImGui::TextDisabled("Next level right-click assigns: %s",
-                        PendingLevelReferenceLabel().c_str());
-    ImGui::EndChild();
-    if (changed) refresh_authored_lua();
-}
-#endif
-
-bool HasSelectedAuthoredNode() {
-    const Quest::AuthoredQuest* quest = active_authored_quest_const();
-    return quest && Quest::FindAuthoredNode(*quest,
-                                            g_selected_authored_node);
+std::vector<std::string> AuthoredQuestIds() {
+    return BlueprintUI::QuestIds();
 }
 
-void ClearSelectedAuthoredNode() {
-    g_selected_authored_node = 0;
-    if (!g_editor) return;
-    ed::SetCurrentEditor(g_editor);
-    ed::ClearSelection();
-    ed::SetCurrentEditor(nullptr);
+bool DeleteAuthoredQuest(const std::string& quest_id, std::string& error) {
+    return BlueprintUI::DeleteQuest(quest_id, error);
 }
+
+bool IsAuthoredQuestActive() {
+    return BlueprintUI::IsActive();
+}
+
+std::string ActiveAuthoredQuestId() {
+    return BlueprintUI::ActiveQuestId();
+}
+
+std::string ActiveAuthoredLua() {
+    return BlueprintUI::ActiveLua();
+}
+
+std::string ActiveAuthoredQuestLua() {
+    return BlueprintUI::ActiveQuestLua();
+}
+
+std::string ActiveAuthoredEligibilityLua() {
+    return BlueprintUI::ActiveEligibilityLua();
+}
+
+std::vector<std::pair<std::string, std::string>>
+ActiveAuthoredTextEntries() {
+    return BlueprintUI::ActiveTextEntries();
+}
+
+bool ValidateActiveAuthoredQuest(std::string& error) {
+    return BlueprintUI::ValidateActive(error);
+}
+
 
 void RequestOpenPrerequisiteMenu() {
     g_open_prerequisite_menu = true;
@@ -1529,6 +722,9 @@ LevelReferenceTarget PendingLevelReferenceTarget() {
 }
 
 std::string PendingLevelReferenceLabel() {
+    if (BlueprintUI::PendingPickPin() != 0) {
+        return "blueprint pin reference";
+    }
     const Quest::AuthoredQuest* quest = active_authored_quest_const();
     const Quest::AuthoredNode* node = quest
         ? Quest::FindAuthoredNode(*quest, g_level_reference_node) : nullptr;
@@ -1553,6 +749,12 @@ uint32_t PendingLevelReferenceItemHash() {
 bool BindActiveLevelReference(const LevelReferenceCandidate& candidate,
                               std::string& error) {
     error.clear();
+    if (BlueprintUI::PendingPickPin() != 0) {
+        return BlueprintUI::BindPendingPin(
+            candidate.level_path, candidate.level_id, candidate.entity_name,
+            candidate.entity_hash, candidate.x, candidate.y, candidate.z,
+            candidate.model_hashes, candidate.authored_instance, error);
+    }
     Quest::AuthoredQuest* quest = active_authored_quest();
     Quest::AuthoredNode* node = quest
         ? Quest::FindAuthoredNode(*quest, g_level_reference_node) : nullptr;
@@ -1892,196 +1094,6 @@ bool draw_hero_requirement(Quest::AuthoredNode& prerequisite) {
     return changed;
 }
 
-bool draw_quest_start_prerequisites(Quest::AuthoredQuest& quest) {
-    bool changed = false;
-    std::vector<int> remove_ids;
-
-    ImGui::Spacing();
-    const bool open_prerequisite_menu = g_open_prerequisite_menu;
-    g_open_prerequisite_menu = false;
-    ImGui::TextUnformatted("Prerequisites");
-    const float add_width = ImGui::CalcTextSize(ICON_FA_CIRCLE_PLUS).x +
-                            ImGui::GetStyle().FramePadding.x * 2.0f;
-    ImGui::SameLine();
-    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),
-                                 ImGui::GetContentRegionMax().x -
-                                     add_width));
-    if (ImGui::SmallButton(ICON_FA_CIRCLE_PLUS "##add_prerequisite") ||
-        open_prerequisite_menu) {
-        ImGui::OpenPopup("##add_quest_prerequisite");
-    }
-    const ImVec2 prerequisite_menu_position(
-        ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 4.0f);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add prerequisite");
-    ImGui::Separator();
-    if (quest.prerequisites.empty()) {
-        ImGui::TextDisabled("None");
-    }
-
-    for (Quest::AuthoredNode& prerequisite : quest.prerequisites) {
-        ImGui::PushID(prerequisite.id);
-        ImGui::TextColored(ImVec4(0.76f, 0.82f, 0.92f, 1.0f), "%s",
-                           authored_prerequisite_title(prerequisite.kind));
-        const float remove_width = ImGui::CalcTextSize(ICON_FA_TRASH_CAN).x +
-                                   ImGui::GetStyle().FramePadding.x * 2.0f;
-        ImGui::SameLine();
-        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),
-                                     ImGui::GetContentRegionMax().x -
-                                         remove_width));
-        if (ImGui::SmallButton(ICON_FA_TRASH_CAN "##remove")) {
-            remove_ids.push_back(prerequisite.id);
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove prerequisite");
-
-        switch (prerequisite.kind) {
-            case Quest::AuthoredNodeKind::PrerequisiteStoryProgress:
-                changed |= draw_story_milestone_combo(
-                    "Available after", prerequisite.story_start);
-                changed |= draw_story_milestone_combo(
-                    "Unavailable after", prerequisite.story_end, true);
-                break;
-            case Quest::AuthoredNodeKind::PrerequisiteQuestState:
-                ImGui::TextUnformatted("Quest");
-                ImGui::SetNextItemWidth(-1.0f);
-                changed |= ImGui::InputText("##quest", &prerequisite.other_quest);
-                ImGui::TextUnformatted("State");
-                changed |= draw_required_quest_state(
-                    "##state", prerequisite.quest_state);
-                changed |= ImGui::Checkbox("Must be in this state",
-                                           &prerequisite.expected);
-                break;
-            case Quest::AuthoredNodeKind::PrerequisiteGameflowFlag:
-                changed |= draw_named_gameflow_condition(prerequisite);
-                break;
-            case Quest::AuthoredNodeKind::PrerequisiteLuaCondition:
-                ImGui::TextUnformatted("Lua condition");
-                ImGui::SetNextItemWidth(-1.0f);
-                changed |= ImGui::InputTextMultiline(
-                    "##condition", &prerequisite.lua_condition,
-                    ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.0f));
-                changed |= ImGui::Checkbox("Must be true",
-                                           &prerequisite.expected);
-                break;
-            case Quest::AuthoredNodeKind::PrerequisiteHeroRequirement:
-                changed |= draw_hero_requirement(prerequisite);
-                break;
-            default:
-                break;
-        }
-        ImGui::Separator();
-        ImGui::PopID();
-    }
-
-    for (int id : remove_ids) {
-        changed |= Quest::RemoveAuthoredPrerequisite(quest, id);
-    }
-
-    if (open_prerequisite_menu) {
-        ImGui::SetNextWindowPos(prerequisite_menu_position,
-                                ImGuiCond_Appearing);
-    }
-    if (ImGui::BeginPopup("##add_quest_prerequisite")) {
-        auto add = [&](const char* label, Quest::AuthoredNodeKind kind) {
-            if (ImGui::MenuItem(label)) {
-                changed |= Quest::AddAuthoredPrerequisite(quest, kind) != 0;
-            }
-        };
-        add("Story progression",
-            Quest::AuthoredNodeKind::PrerequisiteStoryProgress);
-        add("Quest state", Quest::AuthoredNodeKind::PrerequisiteQuestState);
-        add("Named gameflow condition",
-            Quest::AuthoredNodeKind::PrerequisiteGameflowFlag);
-        add("Hero requirement",
-            Quest::AuthoredNodeKind::PrerequisiteHeroRequirement);
-        ImGui::EndPopup();
-    }
-    return changed;
-}
-
-bool draw_quest_completion_rewards(Quest::AuthoredQuest& quest) {
-    bool changed = false;
-    std::vector<int> remove_ids;
-
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Rewards");
-    const float add_width = ImGui::CalcTextSize(ICON_FA_CIRCLE_PLUS).x +
-                            ImGui::GetStyle().FramePadding.x * 2.0f;
-    ImGui::SameLine();
-    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),
-                                 ImGui::GetContentRegionMax().x -
-                                     add_width));
-    if (ImGui::SmallButton(ICON_FA_CIRCLE_PLUS "##add_reward")) {
-        ImGui::OpenPopup("##add_quest_reward");
-    }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add reward");
-    ImGui::Separator();
-    if (quest.rewards.empty()) ImGui::TextDisabled("None");
-
-    for (Quest::AuthoredReward& reward : quest.rewards) {
-        ImGui::PushID(reward.id);
-        ImGui::TextColored(ImVec4(0.76f, 0.82f, 0.92f, 1.0f), "%s",
-                           Quest::QuestRewardKindName(reward.kind));
-        const float remove_width =
-            ImGui::CalcTextSize(ICON_FA_TRASH_CAN).x +
-            ImGui::GetStyle().FramePadding.x * 2.0f;
-        ImGui::SameLine();
-        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),
-                                     ImGui::GetContentRegionMax().x -
-                                         remove_width));
-        if (ImGui::SmallButton(ICON_FA_TRASH_CAN "##remove")) {
-            remove_ids.push_back(reward.id);
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove reward");
-
-        if (reward.kind == Quest::QuestRewardKind::Item) {
-            changed |= draw_item_picker("##reward_item", reward.item);
-            ImGui::TextUnformatted("Amount");
-            ImGui::SetNextItemWidth(-1.0f);
-            changed |= ImGui::InputInt("##reward_item_count",
-                                       &reward.item_count);
-            if (reward.item_count < 1) reward.item_count = 1;
-        } else {
-            ImGui::TextUnformatted(
-                reward.kind == Quest::QuestRewardKind::Morality ||
-                        reward.kind == Quest::QuestRewardKind::Purity
-                    ? "Change"
-                    : "Amount");
-            ImGui::SetNextItemWidth(-1.0f);
-            changed |= ImGui::InputInt("##reward_amount", &reward.amount);
-            if (reward.kind != Quest::QuestRewardKind::Morality &&
-                reward.kind != Quest::QuestRewardKind::Purity &&
-                reward.amount < 0) {
-                reward.amount = 0;
-            }
-        }
-        ImGui::Separator();
-        ImGui::PopID();
-    }
-
-    for (int id : remove_ids) {
-        changed |= Quest::RemoveAuthoredReward(quest, id);
-    }
-
-    if (ImGui::BeginPopup("##add_quest_reward")) {
-        auto add = [&](Quest::QuestRewardKind kind) {
-            if (ImGui::MenuItem(Quest::QuestRewardKindName(kind))) {
-                changed |= Quest::AddAuthoredReward(quest, kind) != 0;
-            }
-        };
-        add(Quest::QuestRewardKind::Gold);
-        add(Quest::QuestRewardKind::Renown);
-        add(Quest::QuestRewardKind::GeneralExperience);
-        add(Quest::QuestRewardKind::StrengthExperience);
-        add(Quest::QuestRewardKind::SkillExperience);
-        add(Quest::QuestRewardKind::WillExperience);
-        add(Quest::QuestRewardKind::Item);
-        add(Quest::QuestRewardKind::Morality);
-        add(Quest::QuestRewardKind::Purity);
-        ImGui::EndPopup();
-    }
-    return changed;
-}
-
 std::string quest_npc_role(const Quest::AuthoredNode& node) {
     switch (node.kind) {
         case Quest::AuthoredNodeKind::ApproachNpc: return "QuestGiver";
@@ -2141,6 +1153,7 @@ void draw_create_npc_picker(Quest::AuthoredQuest& quest,
              index < g_global_entity_catalog.size(); ++index) {
             const Gdb::CreatureCatalogEntry& entity =
                 g_global_entity_catalog[index];
+            if (entity.kind != Gdb::EntityCatalogKind::Creature) continue;
             std::string searchable = entity.display_name + " " + entity.name;
             std::transform(searchable.begin(), searchable.end(),
                            searchable.begin(), [](unsigned char c) {
@@ -2246,7 +1259,8 @@ std::vector<PlacedNpcChoice> current_level_npc_instances() {
          marker_index < g_level_spawn_markers.size(); ++marker_index) {
         const LevelSpawnMarker& marker =
             g_level_spawn_markers[marker_index];
-        if (marker.kind != 3 || marker.name.empty() ||
+        if ((marker.kind != 3 && marker.kind != 6) ||
+            marker.name.empty() ||
             (marker.entity_hash != 0 &&
              LevelEdit::EntityRemovalPending(marker.entity_hash))) {
             continue;
@@ -2272,7 +1286,8 @@ std::vector<PlacedNpcChoice> current_level_npc_instances() {
         reference.model_hashes = marker.model_hashes;
         reference.authored_instance =
             marker.pending_addition_index >= 0 &&
-            LevelEdit::AdditionIsNpc(marker.pending_addition_index);
+            LevelEdit::AdditionIsNamedEntity(
+                marker.pending_addition_index);
         if (!reference.valid()) continue;
 
         char coords[128]{};
@@ -2314,7 +1329,7 @@ std::vector<PlacedNpcChoice> current_level_npc_instances() {
 bool draw_npc_instance_picker(Quest::AuthoredNode& node) {
     const std::string preview = node.entity.valid()
         ? node.entity.entity_name + "  |  " + node.entity.level_id
-        : std::string("Select NPC instance...");
+        : std::string("Select named entity...");
     bool changed = false;
     ImGui::SetNextItemWidth(-1.0f);
     if (ImGui::BeginCombo("##npc_instance", preview.c_str(),
@@ -2322,7 +1337,7 @@ bool draw_npc_instance_picker(Quest::AuthoredNode& node) {
         if (ImGui::IsWindowAppearing()) g_npc_instance_filter[0] = 0;
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputTextWithHint("##npc_instance_search",
-                                 "Search placed NPC instances...",
+                                 "Search placed named entities...",
                                  g_npc_instance_filter,
                                  sizeof(g_npc_instance_filter));
         std::string filter = g_npc_instance_filter;
@@ -2334,7 +1349,8 @@ bool draw_npc_instance_picker(Quest::AuthoredNode& node) {
             current_level_npc_instances();
         ImGui::Separator();
         if (choices.empty()) {
-            ImGui::TextDisabled("No named NPC instances in the loaded level.");
+            ImGui::TextDisabled(
+                "No named NPC or static-prop instances in the loaded level.");
         } else {
             ImGui::BeginChild("##npc_instance_results",
                               ImVec2(0.0f, 260.0f), false);
@@ -2364,138 +1380,6 @@ bool draw_npc_instance_picker(Quest::AuthoredNode& node) {
         ImGui::EndCombo();
     }
     return changed;
-}
-
-void DrawSelectedAuthoredNodeInspector() {
-    Quest::AuthoredQuest* quest = active_authored_quest();
-    Quest::AuthoredNode* node = quest
-        ? Quest::FindAuthoredNode(*quest, g_selected_authored_node) : nullptr;
-    if (!quest || !node) return;
-
-    bool changed = false;
-    ImGui::TextColored(ImVec4(0.55f, 0.78f, 1.0f, 1.0f), "NODE");
-    ImGui::TextWrapped("%s", Quest::AuthoredNodeKindName(node->kind));
-    ImGui::Separator();
-
-    auto disabled_wrapped = [](const char* text) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(
-                                                  ImGuiCol_TextDisabled));
-        ImGui::TextWrapped("%s", text);
-        ImGui::PopStyleColor();
-    };
-    auto assign_npc = [&]() {
-        changed |= draw_npc_instance_picker(*node);
-        if (node->entity.valid()) draw_reference_summary(node->entity);
-        draw_create_npc_picker(*quest, *node);
-        draw_npc_gdb_summary(node->entity);
-    };
-    auto text_box = [&](const char* label, std::string& value) {
-        ImGui::TextUnformatted(label);
-        ImGui::PushID(label);
-        ImGui::SetNextItemWidth(-1.0f);
-        const bool edited = ImGui::InputTextMultiline(
-            "##text", &value,
-            ImVec2(-1.0f, ImGui::GetTextLineHeight() * 4.0f));
-        ImGui::PopID();
-        return edited;
-    };
-    auto string_field = [](const char* label, const char* id,
-                           std::string& value) {
-        ImGui::TextUnformatted(label);
-        ImGui::SetNextItemWidth(-1.0f);
-        return ImGui::InputText(id, &value);
-    };
-    auto int_field = [](const char* label, const char* id, int& value) {
-        ImGui::TextUnformatted(label);
-        ImGui::SetNextItemWidth(-1.0f);
-        return ImGui::InputInt(id, &value);
-    };
-
-    switch (node->kind) {
-        case Quest::AuthoredNodeKind::QuestStart:
-            changed |= string_field("Quest name", "##quest_name",
-                                    quest->quest_title);
-            changed |= draw_quest_start_prerequisites(*quest);
-            break;
-        case Quest::AuthoredNodeKind::ApproachNpc:
-            ImGui::TextUnformatted("NPC");
-            assign_npc();
-            ImGui::TextUnformatted("Approach radius");
-            ImGui::SetNextItemWidth(-1.0f);
-            changed |= ImGui::InputFloat("##approach_radius",
-                                         &node->approach_radius, 0.25f,
-                                         1.0f, "%.2f");
-            break;
-        case Quest::AuthoredNodeKind::Dialogue:
-            ImGui::TextUnformatted("Speaker");
-            assign_npc();
-            changed |= text_box("Dialogue text", node->text);
-            break;
-        case Quest::AuthoredNodeKind::AcceptQuest:
-            changed |= string_field("Quest title", "##quest_title",
-                                    quest->quest_title);
-            changed |= text_box("Quest offer text", node->text);
-            disabled_wrapped(
-                "Hold A accepts the quest, adds it to the quest log, and starts tracking its first objective.");
-            break;
-        case Quest::AuthoredNodeKind::ObtainItem:
-            ImGui::TextUnformatted("Required item");
-            changed |= draw_item_picker("##obtain_item", node->item);
-            changed |= int_field("Amount", "##item_amount", node->item_count);
-            if (node->item_count < 1) node->item_count = 1;
-            ImGui::TextWrapped("Container / dig spot containing it");
-            draw_reference_summary(node->item.source);
-            if (ImGui::Button("Select source in level",
-                              ImVec2(-1.0f, 0.0f))) {
-                g_level_reference_target =
-                    LevelReferenceTarget::RequiredItemSource;
-                g_level_reference_node = node->id;
-            }
-            disabled_wrapped(
-                "The next level right-click assigns this container or dig spot.");
-            changed |= text_box("Objective text", node->text);
-            break;
-        case Quest::AuthoredNodeKind::ReturnToNpc:
-            ImGui::TextUnformatted("NPC");
-            assign_npc();
-            changed |= text_box("Objective text", node->text);
-            changed |= ImGui::Checkbox("Remove an item here",
-                                       &node->remove_item);
-            if (node->remove_item) {
-                ImGui::TextUnformatted("Item removed");
-                changed |= draw_item_picker("##return_item", node->item);
-            }
-            break;
-        case Quest::AuthoredNodeKind::CompleteQuest:
-            changed |= draw_quest_completion_rewards(*quest);
-            break;
-        case Quest::AuthoredNodeKind::PrerequisiteStoryProgress:
-            changed |= draw_story_milestone_combo("Available after",
-                                                   node->story_start);
-            changed |= draw_story_milestone_combo("Unavailable after",
-                                                   node->story_end, true);
-            break;
-        case Quest::AuthoredNodeKind::PrerequisiteQuestState:
-            changed |= string_field("Quest", "##required_quest",
-                                    node->other_quest);
-            ImGui::TextUnformatted("State");
-            changed |= draw_required_quest_state("##required_state",
-                                                 node->quest_state);
-            changed |= ImGui::Checkbox("Must be in this state",
-                                       &node->expected);
-            break;
-        case Quest::AuthoredNodeKind::PrerequisiteGameflowFlag:
-            changed |= draw_named_gameflow_condition(*node);
-            break;
-        case Quest::AuthoredNodeKind::PrerequisiteLuaCondition:
-            changed |= text_box("Lua condition", node->lua_condition);
-            changed |= ImGui::Checkbox("Must be true", &node->expected);
-            break;
-        case Quest::AuthoredNodeKind::PrerequisiteHeroRequirement:
-            changed |= draw_hero_requirement(*node);
-            break;
-    }
-    if (changed) refresh_authored_lua();
 }
 
 const Quest::GraphNode* find_graph_node(const Quest::Graph& graph, int id) {
@@ -2763,6 +1647,7 @@ void RefreshReferenceCatalog() {
 void SetQuestSource(const std::string& title,
                     const std::string& decompiled_lua) {
     g_active_authored_quest = -1;
+    BlueprintUI::CloseActive();
     Quest::ReferenceCatalog references;
     std::string root;
     std::shared_ptr<const std::vector<uint8_t>> cutscene_database;
@@ -2867,6 +1752,7 @@ void SetInitialFocusNodeRange(std::size_t start, std::size_t count) {
 
 void Clear() {
     g_active_authored_quest = -1;
+    BlueprintUI::CloseActive();
     CancelPendingNpcCreation();
     std::lock_guard<std::mutex> lock(g_graph_mutex);
     g_graph.reset();
@@ -2874,27 +1760,8 @@ void Clear() {
 }
 
 void DrawNodeView() {
-    if (Quest::AuthoredQuest* authored = active_authored_quest()) {
-        if (HasSelectedAuthoredNode()) {
-            constexpr float inspector_width = 360.0f;
-            const float inspector_height =
-                ImGui::GetContentRegionAvail().y * 0.5f;
-            ImGui::BeginChild("##authored_node_inspector",
-                              ImVec2(inspector_width, inspector_height), true);
-            DrawSelectedAuthoredNodeInspector();
-            if (g_prerequisite_capture_scroll_fraction >= 0.0f) {
-                ImGui::SetScrollY(ImGui::GetScrollMaxY() *
-                                  g_prerequisite_capture_scroll_fraction);
-            }
-            ImGui::EndChild();
-            ImGui::SameLine();
-            ImGui::BeginChild("##authored_node_canvas", ImVec2(0.0f, 0.0f),
-                              false);
-            draw_authored_quest(*authored);
-            ImGui::EndChild();
-        } else {
-            draw_authored_quest(*authored);
-        }
+    if (BlueprintUI::IsActive()) {
+        BlueprintUI::Draw();
         return;
     }
     std::shared_ptr<const Quest::Graph> graph;
@@ -3081,6 +1948,7 @@ void RequestSelectCompletionNode(std::size_t index) {
 }
 
 void Shutdown() {
+    BlueprintUI::Shutdown();
     if (g_editor) {
         ed::DestroyEditor(g_editor);
         g_editor = nullptr;

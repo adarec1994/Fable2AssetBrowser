@@ -1621,7 +1621,7 @@ bool DecodeEhfTerrainAlbedoFromBytes(const std::vector<uint8_t>& ehf,
         OutputLog::info(os.str());
         if (best.bytes < per_cell_bytes / 2) {
             OutputLog::warn("ehf: picked page too small to be per-cell"
-                            " baked albedo — falling back to atlas");
+                            " baked albedo - falling back to atlas");
             return false;
         }
     }
@@ -2000,7 +2000,7 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
     }
     out_picked_name = "chunkgrid["
         + std::to_string(parsed.chunk_w) + "x"
-        + std::to_string(parsed.chunk_h) + " × "
+        + std::to_string(parsed.chunk_h) + " x "
         + std::to_string(mats.size()) + " LODs]";
 
     if (g_capture_splat_output && g_splat_output_rgba) {
@@ -2263,7 +2263,7 @@ bool BakeEhfTerrainCompositeWithBnk(const std::vector<uint8_t>& ehf,
     std::ostringstream os;
     os << "bake composite: " << lm_w << "x" << lm_h
        << " (chunk grid " << parsed.chunk_w << "x" << parsed.chunk_h
-       << " × " << parsed.lods.size() << " LODs × multi-layer)";
+       << " x " << parsed.lods.size() << " LODs x multi-layer)";
     OutputLog::success(os.str());
     return true;
 }

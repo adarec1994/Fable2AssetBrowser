@@ -849,7 +849,11 @@ void draw_main(GLFWwindow* window) {
 
     tex_export_drive();
 
+#ifdef _WIN32
+    ImportDialog::Draw(device);
+#else
     ImportDialog::Draw();
+#endif
 
     {
         ImVec2 vp = ImGui::GetMainViewport()->WorkSize;

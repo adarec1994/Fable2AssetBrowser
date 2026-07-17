@@ -2244,6 +2244,8 @@ void process_pending_loads() {
 
             std::vector<uint8_t> picked_rgba;
             int picked_w = 0, picked_h = 0;
+            std::vector<uint8_t> picked_normal_rgba;
+            int picked_normal_w = 0, picked_normal_h = 0;
             std::string picked_label;
             float uv_scale = 1.0f;
             std::vector<GeneratedTerrainTexture> generated_terrain_textures;
@@ -2271,6 +2273,9 @@ void process_pending_loads() {
                     TerrainPaint::BuildComposite(picked_rgba, picked_w,
                                                  picked_h)) {
                     picked_label = "painted_layers";
+                    TerrainPaint::BuildNormalComposite(
+                        picked_normal_rgba, picked_normal_w,
+                        picked_normal_h);
                 }
             } else if (Level::BakeEhfTerrainCompositeAndSplat(
                     g_pending_terrain_ehf_bytes,
@@ -2714,6 +2719,23 @@ void process_pending_loads() {
             } else if (!custom_blank_terrain) {
                 OutputLog::warn("terrain: no albedo texture decoded "
                                 "(.ehf and .texture_atlas both failed)");
+            }
+
+            if (!picked_normal_rgba.empty() && picked_normal_w > 0 &&
+                picked_normal_h > 0 && !g_mp.meshes.empty()) {
+                ID3D11ShaderResourceView* normal_srv =
+                    create_srv_from_rgba_mipped(
+                        device, picked_normal_w, picked_normal_h,
+                        picked_normal_rgba);
+                if (normal_srv) {
+                    MPPerMesh& m = g_mp.meshes[0];
+                    if (m.srv_normal && m.srv_normal != g_mp.default_srv) {
+                        m.srv_normal->Release();
+                    }
+                    m.srv_normal = normal_srv;
+                    m.normal_visible = true;
+                    m.normal_tex_name = "painted_layer_normals";
+                }
             }
 
             const std::vector<TerrainTextureRegistry::LodPaletteEntry>

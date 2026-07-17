@@ -572,31 +572,7 @@ std::string lower_slash(std::string s)
     return s;
 }
 
-std::mutex g_bridge_debug_mutex;
-
-std::filesystem::path bridge_debug_log_path()
-{
-#ifdef _WIN32
-    std::array<wchar_t, 32768> executable{};
-    const DWORD length = GetModuleFileNameW(
-        nullptr, executable.data(), static_cast<DWORD>(executable.size()));
-    if (length > 0 && length < executable.size()) {
-        return std::filesystem::path(
-                   std::wstring(executable.data(), length)).parent_path() /
-               L"bridge_debug.log";
-    }
-#endif
-    return std::filesystem::current_path() / "bridge_debug.log";
-}
-
-void bridge_debug_write(const std::string& text, bool truncate = false)
-{
-    std::lock_guard<std::mutex> lock(g_bridge_debug_mutex);
-    std::ofstream log(
-        bridge_debug_log_path(),
-        std::ios::out | (truncate ? std::ios::trunc : std::ios::app));
-    if (log) log << text << '\n';
-}
+void bridge_debug_write(const std::string&, bool = false) {}
 
 bool is_bridge_debug_path(const std::string& path)
 {

@@ -13,7 +13,7 @@ void ax::Drawing::DrawIcon(ImDrawList* drawList, const ImVec2& a, const ImVec2& 
           auto rect_center_y  = (rect.Min.y + rect.Max.y) * 0.5f;
           auto rect_center    = ImVec2(rect_center_x, rect_center_y);
     const auto outline_scale  = rect_w / 24.0f;
-    const auto extra_segments = static_cast<int>(2 * outline_scale); // for full circle
+    const auto extra_segments = static_cast<int>(2 * outline_scale);
 
     if (type == IconType::Flow)
     {
@@ -23,8 +23,7 @@ void ax::Drawing::DrawIcon(ImDrawList* drawList, const ImVec2& a, const ImVec2& 
         const auto offset_y  = 0.0f * origin_scale;
         const auto margin     = (filled ? 2.0f : 2.0f) * origin_scale;
         const auto rounding   = 0.1f * origin_scale;
-        const auto tip_round  = 0.7f; // percentage of triangle edge (for tip)
-        //const auto edge_round = 0.7f; // percentage of triangle edge (for corner)
+        const auto tip_round  = 0.7f;
         const auto canvas = ImRect(
             rect.Min.x + margin + offset_x,
             rect.Min.y + margin + offset_y,
@@ -40,8 +39,6 @@ void ax::Drawing::DrawIcon(ImDrawList* drawList, const ImVec2& a, const ImVec2& 
         const auto top    = canvas_y + canvas_h            * 0.5f * 0.2f;
         const auto bottom = canvas_y + canvas_h - canvas_h * 0.5f * 0.2f;
         const auto center_y = (top + bottom) * 0.5f;
-        //const auto angle = AX_PI * 0.5f * 0.5f * 0.5f;
-
         const auto tip_top    = ImVec2(canvas_x + canvas_w * 0.5f, top);
         const auto tip_right  = ImVec2(right, center_y);
         const auto tip_bottom = ImVec2(canvas_x + canvas_w * 0.5f, bottom);

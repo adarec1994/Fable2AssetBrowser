@@ -16,7 +16,8 @@ namespace TerrainPaint {
 constexpr int kMaxLayers = 16;
 
 struct Layer {
-    std::string tex_path;    
+    std::string tex_path;
+    std::string normal_path;
     float       tiling = 8.0f;   
 };
 
@@ -27,7 +28,8 @@ void Clear();
 
 bool Active();   
 const std::vector<Layer>& Layers();
-int  AddLayer(const std::string& tex_path);   
+int  AddLayer(const std::string& tex_path,
+              const std::string& normal_path = {});
 void RemoveLayer(int index);
 void SetLayerTiling(int index, float metres);
 int  ActiveLayer();
@@ -45,6 +47,8 @@ void EndStroke();
 
 
 bool BuildComposite(std::vector<uint8_t>& rgba, int& out_w, int& out_h);
+bool BuildNormalComposite(std::vector<uint8_t>& rgba,
+                          int& out_w, int& out_h);
 
 bool SaveSidecar(std::string& error);
 

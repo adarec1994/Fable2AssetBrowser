@@ -6176,6 +6176,24 @@ void draw_model_in_panel(ID3D11Device* device) {
                     m.diffuse_tex_name = "painted_layers";
                 }
             }
+            std::vector<uint8_t> normal_rgba;
+            int nw = 0;
+            int nh = 0;
+            if (TerrainPaint::BuildNormalComposite(
+                    normal_rgba, nw, nh) && !g_mp.meshes.empty()) {
+                ID3D11ShaderResourceView* srv =
+                    create_srv_from_rgba_mipped(
+                        device, nw, nh, normal_rgba);
+                if (srv) {
+                    MPPerMesh& m = g_mp.meshes[0];
+                    if (m.srv_normal && m.srv_normal != g_mp.default_srv) {
+                        m.srv_normal->Release();
+                    }
+                    m.srv_normal = srv;
+                    m.normal_visible = true;
+                    m.normal_tex_name = "painted_layer_normals";
+                }
+            }
         }
     }
 

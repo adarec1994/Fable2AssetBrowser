@@ -5,6 +5,8 @@
 #include "../ModelPreview.h"
 #include "../../Entity/StaticPropAuthoring.h"
 #include "../../Import/AssetImport.h"
+#include "../../Import/GlbImport.h"
+#include "../../Import/ImageLoad.h"
 #include "../../Level/Core/LevelLoader.h"
 #include "../../Utilities/GameBackup.h"
 #include "../../Utilities/DebugTrace.h"
@@ -15,12 +17,18 @@
 #include "imgui_stdlib.h"
 #include "ImGuiFileDialog.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
+
+#ifndef _WIN32
+#include <GL/glew.h>
+#endif
 
 namespace ImportDialog {
 
@@ -42,6 +50,27 @@ bool        s_create_template = true;
 std::string s_entity_id;
 bool        s_open_settings = false;
 
+struct EmbeddedTexturePreview {
+    std::string name;
+    std::string error;
+    int source_width = 0;
+    int source_height = 0;
+    int preview_width = 0;
+    int preview_height = 0;
+    std::vector<uint8_t> rgba;
+#ifdef _WIN32
+    ID3D11ShaderResourceView* srv = nullptr;
+#else
+    unsigned int texture = 0;
+#endif
+};
+
+GlbImport::Scene s_glb_scene;
+std::vector<AssetImport::MaterialTextureAssignment> s_material_textures;
+std::vector<EmbeddedTexturePreview> s_texture_previews;
+std::string s_glb_error;
+int s_selected_material = 0;
+
 struct WorkerHolder {
     std::thread t;
     ~WorkerHolder() { if (t.joinable()) t.join(); }
@@ -55,6 +84,134 @@ AssetImport::Result s_result;
 std::string        s_error;
 bool               s_ok = false;
 Mode               s_done_mode = Mode::None;
+
+void release_texture_previews() {
+    for (auto& preview : s_texture_previews) {
+#ifdef _WIN32
+        if (preview.srv) {
+            preview.srv->Release();
+            preview.srv = nullptr;
+        }
+#else
+        if (preview.texture) {
+            glDeleteTextures(1, &preview.texture);
+            preview.texture = 0;
+        }
+#endif
+    }
+}
+
+void clear_glb_editor() {
+    release_texture_previews();
+    s_glb_scene = GlbImport::Scene{};
+    s_material_textures.clear();
+    s_texture_previews.clear();
+    s_glb_error.clear();
+    s_selected_material = 0;
+}
+
+std::vector<uint8_t> make_thumbnail(const ImageLoad::Image& image,
+                                    int& width, int& height) {
+    constexpr int kMaxPreviewDimension = 256;
+    if (image.width <= 0 || image.height <= 0 || image.rgba.empty()) {
+        width = 0;
+        height = 0;
+        return {};
+    }
+    const float scale = std::min(
+        1.0f, float(kMaxPreviewDimension) /
+                  float(std::max(image.width, image.height)));
+    width = std::max(1, int(float(image.width) * scale));
+    height = std::max(1, int(float(image.height) * scale));
+    if (width == image.width && height == image.height) return image.rgba;
+
+    std::vector<uint8_t> result(size_t(width) * size_t(height) * 4);
+    for (int y = 0; y < height; ++y) {
+        const int source_y = std::min(
+            image.height - 1, int((int64_t(y) * image.height) / height));
+        for (int x = 0; x < width; ++x) {
+            const int source_x = std::min(
+                image.width - 1, int((int64_t(x) * image.width) / width));
+            const size_t source =
+                (size_t(source_y) * size_t(image.width) + size_t(source_x)) * 4;
+            const size_t target =
+                (size_t(y) * size_t(width) + size_t(x)) * 4;
+            std::copy_n(image.rgba.data() + source, 4,
+                        result.data() + target);
+        }
+    }
+    return result;
+}
+
+void load_glb_editor() {
+    clear_glb_editor();
+    if (!GlbImport::load_glb(s_source_path, s_glb_scene, s_glb_error)) return;
+
+    s_material_textures.reserve(s_glb_scene.materials.size());
+    for (const auto& material : s_glb_scene.materials) {
+        AssetImport::MaterialTextureAssignment assignment;
+        assignment.diffuse = material.base_color;
+        assignment.normal = material.normal;
+        assignment.specular = material.occlusion;
+        assignment.metallic = material.metallic_rough;
+        assignment.extra = material.emissive;
+        s_material_textures.push_back(assignment);
+    }
+
+    s_texture_previews.reserve(s_glb_scene.images.size());
+    for (const auto& image : s_glb_scene.images) {
+        EmbeddedTexturePreview preview;
+        preview.name = image.name;
+        ImageLoad::Image decoded;
+        std::string error;
+        if (!ImageLoad::load_memory(image.bytes.data(), image.bytes.size(),
+                                    image.name, decoded, error)) {
+            preview.error = error;
+        } else {
+            preview.source_width = decoded.width;
+            preview.source_height = decoded.height;
+            preview.rgba = make_thumbnail(
+                decoded, preview.preview_width, preview.preview_height);
+        }
+        s_texture_previews.push_back(std::move(preview));
+    }
+}
+
+#ifdef _WIN32
+void ensure_texture_previews(ID3D11Device* device) {
+    if (!device) return;
+    for (auto& preview : s_texture_previews) {
+        if (!preview.srv && preview.error.empty() && !preview.rgba.empty()) {
+            preview.srv = create_srv_from_rgba(
+                device, preview.preview_width, preview.preview_height,
+                preview.rgba);
+        }
+    }
+}
+
+ImTextureID preview_texture_id(const EmbeddedTexturePreview& preview) {
+    return (ImTextureID)(intptr_t)preview.srv;
+}
+#else
+void ensure_texture_previews() {
+    for (auto& preview : s_texture_previews) {
+        if (preview.texture || !preview.error.empty() || preview.rgba.empty())
+            continue;
+        glGenTextures(1, &preview.texture);
+        glBindTexture(GL_TEXTURE_2D, preview.texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, preview.preview_width,
+                     preview.preview_height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                     preview.rgba.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+}
+
+ImTextureID preview_texture_id(const EmbeddedTexturePreview& preview) {
+    return (ImTextureID)(intptr_t)preview.texture;
+}
+#endif
 
 const char* kFormatNames[] = {
     "Auto (BC1, BC3 when alpha)", "BC1 (opaque)", "BC3 (alpha)",
@@ -109,6 +266,7 @@ void open_picker(Mode mode) {
 }
 
 void prime_settings_from_source() {
+    clear_glb_editor();
     const std::string stem =
         std::filesystem::path(s_source_path).stem().string();
     s_asset_name = AssetImport::sanitize_name(stem);
@@ -141,6 +299,7 @@ void prime_settings_from_source() {
         for (char& c : s_entity_id) {
             if (!std::isalnum((unsigned char)c) && c != '_') c = '_';
         }
+        load_glb_editor();
     }
     s_open_settings = true;
 }
@@ -155,6 +314,9 @@ void launch_worker() {
     opt.create_gdb_template =
         s_create_template && (s_mode == Mode::Glb || s_mode == Mode::Folder);
     opt.entity_id = (s_mode == Mode::Glb) ? s_entity_id : std::string();
+    if (s_mode == Mode::Glb) {
+        opt.material_textures = s_material_textures;
+    }
 
     const std::string src = s_source_path;
     const Mode mode = s_mode;
@@ -218,7 +380,185 @@ void launch_worker() {
     });
 }
 
+std::string texture_choice_name(int index) {
+    if (index < 0) return "None";
+    if (size_t(index) >= s_texture_previews.size()) return "Invalid texture";
+    const auto& preview = s_texture_previews[index];
+    std::string name = preview.name.empty()
+                           ? "image_" + std::to_string(index)
+                           : preview.name;
+    if (preview.source_width > 0 && preview.source_height > 0) {
+        name += " (" + std::to_string(preview.source_width) + "x" +
+                std::to_string(preview.source_height) + ")";
+    }
+    return name;
+}
+
+void draw_texture_choice(const char* label, int& selected) {
+    ImGui::PushID(label);
+    const std::string current = texture_choice_name(selected);
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::BeginCombo("##texture", current.c_str())) {
+        if (ImGui::Selectable("None", selected < 0)) selected = -1;
+        for (size_t image = 0; image < s_texture_previews.size(); ++image) {
+            const auto& preview = s_texture_previews[image];
+            const bool active = selected == int(image);
+            ImGui::PushID(int(image));
+            const bool chosen = ImGui::Selectable(
+                "##choice", active, ImGuiSelectableFlags_None,
+                ImVec2(0.0f, 52.0f));
+            const ImVec2 minimum = ImGui::GetItemRectMin();
+            const ImVec2 maximum = ImGui::GetItemRectMax();
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            draw->PushClipRect(minimum, maximum, true);
+            const float box = 44.0f;
+            ImVec2 image_size(box, box);
+            if (preview.preview_width > 0 && preview.preview_height > 0) {
+                const float scale = std::min(
+                    box / float(preview.preview_width),
+                    box / float(preview.preview_height));
+                image_size = ImVec2(float(preview.preview_width) * scale,
+                                    float(preview.preview_height) * scale);
+            }
+            const ImVec2 image_min(
+                minimum.x + 4.0f,
+                minimum.y + (52.0f - image_size.y) * 0.5f);
+            const ImVec2 image_max(image_min.x + image_size.x,
+                                   image_min.y + image_size.y);
+            const ImTextureID texture = preview_texture_id(preview);
+            if (texture) {
+                draw->AddImage(texture, image_min, image_max);
+            } else {
+                draw->AddRectFilled(
+                    image_min, ImVec2(image_min.x + box, image_min.y + box),
+                    ImGui::GetColorU32(ImGuiCol_FrameBg));
+            }
+            const float text_x = minimum.x + box + 12.0f;
+            const std::string name = preview.name.empty()
+                                         ? "image_" + std::to_string(image)
+                                         : preview.name;
+            draw->AddText(ImVec2(text_x, minimum.y + 6.0f),
+                          ImGui::GetColorU32(ImGuiCol_Text), name.c_str());
+            const std::string detail = preview.error.empty()
+                ? std::to_string(preview.source_width) + "x" +
+                      std::to_string(preview.source_height)
+                : "Preview unavailable";
+            draw->AddText(
+                ImVec2(text_x, minimum.y + 28.0f),
+                preview.error.empty()
+                    ? ImGui::GetColorU32(ImGuiCol_TextDisabled)
+                    : ImGui::GetColorU32(ImVec4(0.95f, 0.42f, 0.38f, 1.0f)),
+                detail.c_str());
+            draw->PopClipRect();
+            if (active) ImGui::SetItemDefaultFocus();
+            ImGui::PopID();
+            if (chosen) selected = int(image);
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::PopID();
+}
+
+void reset_material_assignment(size_t index) {
+    if (index >= s_glb_scene.materials.size() ||
+        index >= s_material_textures.size()) {
+        return;
+    }
+    const auto& material = s_glb_scene.materials[index];
+    auto& assignment = s_material_textures[index];
+    assignment.diffuse = material.base_color;
+    assignment.normal = material.normal;
+    assignment.specular = material.occlusion;
+    assignment.metallic = material.metallic_rough;
+    assignment.extra = material.emissive;
+}
+
+bool selected_textures_valid() {
+    if (!s_glb_error.empty()) return false;
+    for (const auto& material : s_material_textures) {
+        for (int image : {material.diffuse, material.normal,
+                          material.specular, material.metallic,
+                          material.extra}) {
+            if (image < 0) continue;
+            if (size_t(image) >= s_texture_previews.size() ||
+                !s_texture_previews[image].error.empty()) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+void draw_material_mapping_panel() {
+    ImGui::TextUnformatted("Game material mapping");
+    ImGui::Separator();
+    if (!s_glb_error.empty()) {
+        ImGui::TextColored(ImVec4(0.95f, 0.42f, 0.38f, 1.0f),
+                           "%s", s_glb_error.c_str());
+        return;
+    }
+    if (s_glb_scene.materials.empty()) {
+        ImGui::TextDisabled("This GLB has no material records.");
+        return;
+    }
+
+    s_selected_material = std::clamp(
+        s_selected_material, 0, int(s_glb_scene.materials.size()) - 1);
+    const std::string& current_name =
+        s_glb_scene.materials[s_selected_material].name;
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Material:");
+    ImGui::SameLine(132.0f);
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::BeginCombo("##material", current_name.c_str())) {
+        for (size_t material = 0; material < s_glb_scene.materials.size();
+             ++material) {
+            const auto& source = s_glb_scene.materials[material];
+            const bool selected = s_selected_material == int(material);
+            ImGui::PushID(int(material));
+            const bool chosen = ImGui::Selectable(source.name.c_str(), selected);
+            if (selected) ImGui::SetItemDefaultFocus();
+            ImGui::PopID();
+            if (chosen) {
+                s_selected_material = int(material);
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    auto& assignment = s_material_textures[s_selected_material];
+    if (ImGui::BeginTable("##material_texture_slots", 2,
+                          ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed,
+                                124.0f);
+        ImGui::TableSetupColumn("Texture",
+                                ImGuiTableColumnFlags_WidthStretch);
+        auto slot = [&](const char* role, const char* id, int& texture) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("%s:", role);
+            ImGui::TableSetColumnIndex(1);
+            draw_texture_choice(id, texture);
+        };
+        slot("Diffuse / color", "diffuse", assignment.diffuse);
+        slot("Normal", "normal", assignment.normal);
+        slot("Specular", "specular", assignment.specular);
+        slot("Metallic", "metallic", assignment.metallic);
+        slot("Extra / emissive", "extra", assignment.extra);
+        ImGui::EndTable();
+    }
+
+    if (ImGui::Button("Reset this material to GLB defaults")) {
+        reset_material_assignment(size_t(s_selected_material));
+    }
+}
+
+#ifdef _WIN32
+void draw_settings_modal(ID3D11Device* device) {
+#else
 void draw_settings_modal() {
+#endif
     if (s_open_settings) {
         ImGui::OpenPopup("Import Settings");
         s_open_settings = false;
@@ -226,11 +566,28 @@ void draw_settings_modal() {
 
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Appearing);
+    const bool show_glb_materials = s_mode == Mode::Glb;
+    if (show_glb_materials) {
+        const ImVec2 work = ImGui::GetMainViewport()->WorkSize;
+        ImGui::SetNextWindowSize(
+            ImVec2(std::min(720.0f, work.x * 0.92f),
+                   std::min(760.0f, work.y * 0.92f)),
+            ImGuiCond_Appearing);
+    } else {
+        ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Appearing);
+    }
+    ImGuiWindowFlags popup_flags = ImGuiWindowFlags_NoSavedSettings;
+    if (!show_glb_materials) popup_flags |= ImGuiWindowFlags_AlwaysAutoResize;
     if (!ImGui::BeginPopupModal("Import Settings", nullptr,
-                                ImGuiWindowFlags_AlwaysAutoResize)) {
+                                popup_flags)) {
         return;
     }
+
+#ifdef _WIN32
+    if (show_glb_materials) ensure_texture_previews(device);
+#else
+    if (show_glb_materials) ensure_texture_previews();
+#endif
 
     ImGui::TextUnformatted("Source:");
     ImGui::SameLine();
@@ -267,6 +624,13 @@ void draw_settings_modal() {
     ImGui::Checkbox("Generate mip chain (down to 16px, like retail)",
                     &s_gen_mips);
 
+    if (show_glb_materials) {
+        ImGui::Separator();
+        ImGui::BeginChild("##glb_material_mapping", ImVec2(0, 310.0f), false);
+        draw_material_mapping_panel();
+        ImGui::EndChild();
+    }
+
     bool entity_id_ok = true;
     if (s_mode == Mode::Glb || s_mode == Mode::Folder) {
         ImGui::Separator();
@@ -299,17 +663,20 @@ void draw_settings_modal() {
     ImGui::Separator();
     const bool can_import =
         !s_busy.load() && entity_id_ok &&
+        (!show_glb_materials || selected_textures_valid()) &&
         (s_mode == Mode::Folder || s_mode == Mode::TextureReplace ||
          !s_asset_name.empty());
     if (!can_import) ImGui::BeginDisabled();
     if (ImGui::Button(s_mode == Mode::TextureReplace ? "Replace" : "Import",
                       ImVec2(120, 0))) {
         launch_worker();
+        clear_glb_editor();
         ImGui::CloseCurrentPopup();
     }
     if (!can_import) ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+        clear_glb_editor();
         s_mode = Mode::None;
         ImGui::CloseCurrentPopup();
     }
@@ -337,8 +704,6 @@ void poll_worker() {
         return;
     }
     if (s_result.gdb_template_created) {
-        // catalog rebuild on the UI thread so the Add-Entity list picks the
-        // new prop up immediately
         Level::BuildGlobalEntityCatalog();
         OutputLog::success(
             "import: spawnable entity " + s_result.entity_id +
@@ -378,7 +743,11 @@ void OpenTextureReplacement(const std::string& bnk_path, int file_index,
 }
 bool Busy()       { return s_busy.load(); }
 
+#ifdef _WIN32
+void Draw(ID3D11Device* device) {
+#else
 void Draw() {
+#endif
     ImVec2 vp = ImGui::GetMainViewport()->WorkSize;
     ImVec2 minSize(680, 440);
     ImVec2 maxSize(vp.x * 0.9f, vp.y * 0.9f);
@@ -393,6 +762,7 @@ void Draw() {
                         : ImGuiFileDialog::Instance()->GetFilePathName();
                 prime_settings_from_source();
             } else {
+                clear_glb_editor();
                 s_mode = Mode::None;
             }
             ImGuiFileDialog::Instance()->Close();
@@ -403,7 +773,11 @@ void Draw() {
     handle_picker("ImportPickFolder");
     handle_picker("ReplaceTexturePickImage");
 
+#ifdef _WIN32
+    draw_settings_modal(device);
+#else
     draw_settings_modal();
+#endif
     poll_worker();
     tree_apply_pending_injections();
 }

@@ -298,13 +298,6 @@ static void loader_progress_update(int current,
 
 bool Open(const FlatAssetEntry& entry)
 {
-    bridge_debug_write(
-        "Fable 2 Asset Browser - bridge placement trace\nlevel_name=" +
-            entry.name + "\nlevel_path=" + entry.full_path +
-            "\nlevel_bnk=" + entry.bnk_path,
-        true);
-    OutputLog::info("bridge debug log: " +
-                    bridge_debug_log_path().string());
     if (!g_level_export_only_load.load()) {
         OutputLog::info("loading level '" + entry.name + "' ...");
     }

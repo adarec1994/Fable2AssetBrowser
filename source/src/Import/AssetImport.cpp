@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -558,9 +559,6 @@ std::string derive_entity_id(const std::string& asset)
     return id;
 }
 
-// Authors (or recognizes) the spawnable static-prop template in globals.gdb
-// for an imported model. Soft-fails: the import itself already succeeded, so
-// problems are reported through res.notes.
 void create_spawn_template(const std::string& mdl_vpath,
                            const Options& opt,
                            const std::string& asset,
@@ -652,93 +650,166 @@ bool import_glb(const std::string& glb_path, const Options& opt,
     GlbImport::Scene scene;
     if (!GlbImport::load_glb(glb_path, scene, err)) return false;
 
-    
-    
-    
-    std::vector<int> image_role(scene.images.size(), 0);   
-    for (const auto& mt : scene.materials)
-        if (mt.normal >= 0 && (size_t)mt.normal < scene.images.size())
-            image_role[mt.normal] = 1;
+    if (!opt.material_textures.empty()) {
+        if (opt.material_textures.size() != scene.materials.size()) {
+            err = "GLB material assignments no longer match the source file";
+            return false;
+        }
+        auto valid_image = [&](int idx) {
+            return idx == -1 ||
+                   (idx >= 0 && size_t(idx) < scene.images.size());
+        };
+        for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
+            const auto& assignment = opt.material_textures[mi];
+            for (const auto& slot : {
+                     std::pair<const char*, int>{"diffuse", assignment.diffuse},
+                     {"normal", assignment.normal},
+                     {"specular", assignment.specular},
+                     {"metallic", assignment.metallic},
+                     {"extra", assignment.extra}}) {
+                if (!valid_image(slot.second)) {
+                    err = "material '" + scene.materials[mi].name +
+                          "' has an invalid " + slot.first +
+                          " texture selection";
+                    return false;
+                }
+            }
+            auto& material = scene.materials[mi];
+            material.base_color = assignment.diffuse;
+            material.normal = assignment.normal;
+            material.occlusion = assignment.specular;
+            material.metallic_rough = assignment.metallic;
+            material.emissive = assignment.extra;
+        }
+    }
 
-    std::set<int> used_images;
-    for (const auto& mt : scene.materials)
-        for (int idx : {mt.base_color, mt.normal, mt.metallic_rough,
-                        mt.occlusion, mt.emissive})
-            if (idx >= 0 && (size_t)idx < scene.images.size())
-                used_images.insert(idx);
+    for (const auto& material : scene.materials) {
+        for (const auto& slot : {
+                 std::pair<const char*, int>{"diffuse", material.base_color},
+                 {"normal", material.normal},
+                 {"specular", material.occlusion},
+                 {"metallic", material.metallic_rough},
+                 {"extra", material.emissive}}) {
+            if (slot.second < -1 ||
+                (slot.second >= 0 &&
+                 size_t(slot.second) >= scene.images.size())) {
+                err = "material '" + material.name + "' references an invalid " +
+                      slot.first + " texture";
+                return false;
+            }
+        }
+    }
+
+    std::set<int> generic_images;
+    std::set<int> normal_images;
+    for (const auto& material : scene.materials) {
+        if (material.normal >= 0) normal_images.insert(material.normal);
+        for (int idx : {material.occlusion, material.metallic_rough,
+                        material.emissive}) {
+            if (idx >= 0) generic_images.insert(idx);
+        }
+        if (material.base_color >= 0) {
+            generic_images.insert(material.base_color);
+        }
+    }
 
     std::vector<PendingEntry> pending;
     std::set<std::string> used_names;
     std::vector<std::string> image_vpath(scene.images.size());
+    std::vector<std::string> normal_vpath(scene.images.size());
+    std::vector<ImageLoad::Image> decoded_images(scene.images.size());
+    std::vector<bool> image_decoded(scene.images.size(), false);
 
     int prog = 5;
     progress_update(prog, 100, "Encoding textures");
-    for (int idx : used_images) {
+    auto decode_image = [&](int idx) -> ImageLoad::Image* {
+        if (idx < 0 || size_t(idx) >= scene.images.size()) return nullptr;
+        if (image_decoded[idx]) return &decoded_images[idx];
         const auto& img = scene.images[idx];
-        ImageLoad::Image decoded;
         if (!ImageLoad::load_memory(img.bytes.data(), img.bytes.size(),
-                                    img.name, decoded, err)) {
+                                    img.name, decoded_images[idx], err)) {
             err = "texture '" + img.name + "': " + err;
-            return false;
+            return nullptr;
         }
-        TexWriter::Options topt;
-        topt.max_dimension = opt.max_tex_dim;
-        topt.generate_mips = opt.generate_mips;
-        topt.format = (image_role[idx] == 1) ? TexWriter::Format::BC5Normal
-                                             : opt.tex_format;
-        TexWriter::BuiltTex built;
-        if (!TexWriter::build_from_rgba(decoded.rgba.data(), decoded.width,
-                                        decoded.height, topt, built, err)) {
-            err = "texture '" + img.name + "': " + err;
-            return false;
-        }
-        if (!verify_tex(built, err)) return false;
-
-        const std::string name = unique_name(used_names,
-                                             sanitize_name(img.name));
+        image_decoded[idx] = true;
+        return &decoded_images[idx];
+    };
+    auto add_texture = [&](const std::string& raw_name,
+                           const TexWriter::BuiltTex& built) {
+        const std::string name = unique_name(
+            used_names, sanitize_name(raw_name));
         const std::string vpath = folder + "\\" + name + ".tex";
-        image_vpath[idx] = vpath;
         queue_tex(vpath, built, pending);
         res.tex_virtual_paths.push_back(vpath);
         res.notes.push_back("texture " + vpath + " (" +
                             std::to_string(built.width) + "x" +
                             std::to_string(built.height) + ", " +
                             std::to_string(built.mip_count) + " mips)");
-        prog = std::min(prog + 5, 55);
+        prog = std::min(prog + 4, 55);
         progress_update(prog, 100, "Encoded " + name);
+        return vpath;
+    };
+    auto encode_image = [&](int idx, bool normal,
+                            std::string& out_path) -> bool {
+        ImageLoad::Image* decoded = decode_image(idx);
+        if (!decoded) return false;
+        TexWriter::Options topt;
+        topt.max_dimension = opt.max_tex_dim;
+        topt.generate_mips = opt.generate_mips;
+        topt.format = normal ? TexWriter::Format::BC5Normal : opt.tex_format;
+        TexWriter::BuiltTex built;
+        if (!TexWriter::build_from_rgba(decoded->rgba.data(), decoded->width,
+                                        decoded->height, topt, built, err)) {
+            err = "texture '" + scene.images[idx].name + "': " + err;
+            return false;
+        }
+        if (!verify_tex(built, err)) return false;
+        std::string name = scene.images[idx].name;
+        if (normal && generic_images.count(idx)) name += "_normal";
+        out_path = add_texture(name, built);
+        return true;
+    };
+    for (int idx : generic_images) {
+        if (!encode_image(idx, false, image_vpath[idx])) return false;
+    }
+    for (int idx : normal_images) {
+        if (!encode_image(idx, true, normal_vpath[idx])) return false;
     }
 
-    
-    std::vector<std::string> mat_fallback(scene.materials.size());
+    std::vector<std::string> material_diffuse(scene.materials.size());
     for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
         const auto& mt = scene.materials[mi];
-        if (mt.base_color >= 0) continue;
-        uint8_t rgba[8 * 8 * 4];
-        for (int p = 0; p < 64; ++p) {
-            rgba[p * 4 + 0] = (uint8_t)std::min(255.0f, mt.base_color_factor[0] * 255.0f);
-            rgba[p * 4 + 1] = (uint8_t)std::min(255.0f, mt.base_color_factor[1] * 255.0f);
-            rgba[p * 4 + 2] = (uint8_t)std::min(255.0f, mt.base_color_factor[2] * 255.0f);
-            rgba[p * 4 + 3] = (uint8_t)std::min(255.0f, mt.base_color_factor[3] * 255.0f);
+        if (mt.base_color >= 0) {
+            material_diffuse[mi] = image_vpath[mt.base_color];
+            continue;
+        }
+
+        ImageLoad::Image color_image;
+        color_image.width = 8;
+        color_image.height = 8;
+        color_image.rgba.resize(8 * 8 * 4);
+        for (int pixel = 0; pixel < 64; ++pixel) {
+            for (int channel = 0; channel < 4; ++channel) {
+                color_image.rgba[pixel * 4 + channel] = uint8_t(
+                    std::lround(mt.base_color_factor[channel] * 255.0f));
+            }
         }
         TexWriter::Options topt;
         topt.max_dimension = 8;
         topt.generate_mips = opt.generate_mips;
-        topt.format = TexWriter::Format::Auto;
+        topt.format = opt.tex_format;
         TexWriter::BuiltTex built;
-        if (!TexWriter::build_from_rgba(rgba, 8, 8, topt, built, err))
+        if (!TexWriter::build_from_rgba(
+                color_image.rgba.data(), color_image.width,
+                color_image.height, topt, built, err)) {
             return false;
+        }
         if (!verify_tex(built, err)) return false;
-        const std::string name = unique_name(
-            used_names, sanitize_name(mt.name.empty()
-                                          ? asset + "_flat"
-                                          : mt.name + "_flat"));
-        const std::string vpath = folder + "\\" + name + ".tex";
-        mat_fallback[mi] = vpath;
-        queue_tex(vpath, built, pending);
-        res.tex_virtual_paths.push_back(vpath);
+        std::string name = mt.name.empty() ? asset : mt.name;
+        name += "_flat";
+        material_diffuse[mi] = add_texture(name, built);
     }
 
-    
     progress_update(60, 100, "Building model");
     std::vector<MdlWriter::MeshInput> meshes;
     for (const auto& prim : scene.prims) {
@@ -755,16 +826,13 @@ bool import_glb(const std::string& glb_path, const Options& opt,
                 return (idx >= 0 && (size_t)idx < image_vpath.size())
                            ? image_vpath[idx] : std::string();
             };
-            m.tex_diffuse = pathof(mt.base_color);
-            if (m.tex_diffuse.empty())
-                m.tex_diffuse = mat_fallback[prim.material];
+            m.tex_diffuse = material_diffuse[prim.material];
             m.tex_specular = pathof(mt.occlusion);
-            m.tex_normal   = pathof(mt.normal);
+            if (mt.normal >= 0 && size_t(mt.normal) < normal_vpath.size())
+                m.tex_normal = normal_vpath[mt.normal];
             m.tex_metallic = pathof(mt.metallic_rough);
             m.tex_extra    = pathof(mt.emissive);
         }
-        if (m.tex_diffuse.empty() && !res.tex_virtual_paths.empty())
-            m.tex_diffuse = res.tex_virtual_paths.front();
         meshes.push_back(std::move(m));
     }
 
@@ -968,7 +1036,7 @@ bool import_folder(const std::string& folder_path, const Options& opt,
                         fs::path(g).filename().string());
         Options one = opt;
         one.asset_name.clear();
-        one.entity_id.clear();              // per-asset PROP_<name> IDs
+        one.entity_id.clear();
         one.dest_folder = opt.dest_folder;
         Result r;
         std::string e;

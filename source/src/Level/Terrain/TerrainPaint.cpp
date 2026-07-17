@@ -149,6 +149,9 @@ void load_sidecar() {
             continue;
         }
         const size_t t2 = line.find('\t', t1 + 1);
+        const size_t t3 = t2 == std::string::npos
+                              ? std::string::npos
+                              : line.find('\t', t2 + 1);
         Layer layer;
         layer.tex_path = line.substr(
             t1 + 1, t2 == std::string::npos ? std::string::npos
@@ -156,6 +159,9 @@ void load_sidecar() {
         if (t2 != std::string::npos) {
             layer.tiling = std::strtof(line.c_str() + t2 + 1, nullptr);
             if (layer.tiling <= 0.0f) layer.tiling = 8.0f;
+        }
+        if (t3 != std::string::npos) {
+            layer.normal_path = line.substr(t3 + 1);
         }
         if ((int)s.layers.size() < kMaxLayers) {
             s.layers.push_back(std::move(layer));
@@ -229,7 +235,8 @@ bool Active() {
 
 const std::vector<Layer>& Layers() { return st().layers; }
 
-int AddLayer(const std::string& tex_path) {
+int AddLayer(const std::string& tex_path,
+             const std::string& normal_path) {
     auto& s = st();
     if (s.level_key.empty()) return -1;
     if ((int)s.layers.size() >= kMaxLayers) return -1;
@@ -238,6 +245,7 @@ int AddLayer(const std::string& tex_path) {
     }
     Layer layer;
     layer.tex_path = tex_path;
+    layer.normal_path = normal_path;
     s.layers.push_back(std::move(layer));
     s.weights.emplace_back((size_t)s.paint_w * s.paint_h, 0);
     s.active_layer = (int)s.layers.size() - 1;
@@ -435,6 +443,110 @@ bool BuildComposite(std::vector<uint8_t>& rgba, int& out_w, int& out_h) {
     return true;
 }
 
+bool BuildNormalComposite(std::vector<uint8_t>& rgba,
+                          int& out_w, int& out_h) {
+    auto& s = st();
+    if (s.layers.empty()) return false;
+
+    const int W = s.paint_w;
+    const int H = s.paint_h;
+    const float span_x = float(s.grid_w - 1) * s.tile_size;
+    const float span_z = float(s.grid_h - 1) * s.tile_size;
+
+    struct LayerSample {
+        const DecodedTexture* tex = nullptr;
+        float repeat_x = 1.0f;
+        float repeat_z = 1.0f;
+    };
+    std::vector<LayerSample> samples(s.layers.size());
+    bool have_normal = false;
+    for (size_t li = 0; li < s.layers.size(); ++li) {
+        if (s.layers[li].normal_path.empty()) continue;
+        const DecodedTexture& dt =
+            decoded_texture(s.layers[li].normal_path);
+        if (!dt.ok) continue;
+        samples[li].tex = &dt;
+        samples[li].repeat_x = span_x / s.layers[li].tiling;
+        samples[li].repeat_z = span_z / s.layers[li].tiling;
+        have_normal = true;
+    }
+    if (!have_normal) return false;
+
+    out_w = W;
+    out_h = H;
+    rgba.assign((size_t)W * H * 4, 0);
+    for (int z = 0; z < H; ++z) {
+        const float v = float(z) / float(H - 1);
+        for (int x = 0; x < W; ++x) {
+            const float u = float(x) / float(W - 1);
+            const size_t idx = (size_t)z * W + x;
+            float nx = 0.0f;
+            float ny = 0.0f;
+            float nz = 1.0f;
+            for (size_t li = 0; li < s.layers.size(); ++li) {
+                const float weight = float(s.weights[li][idx]) / 255.0f;
+                if (weight <= 0.003f || !samples[li].tex) continue;
+                const DecodedTexture& dt = *samples[li].tex;
+                const float tu = u * samples[li].repeat_x;
+                const float tv = v * samples[li].repeat_z;
+                const float txf =
+                    (tu - std::floor(tu)) * float(dt.w);
+                const float tzf =
+                    (tv - std::floor(tv)) * float(dt.h);
+                const int tx0 = int(std::floor(txf)) % dt.w;
+                const int tz0 = int(std::floor(tzf)) % dt.h;
+                const int tx1 = (tx0 + 1) % dt.w;
+                const int tz1 = (tz0 + 1) % dt.h;
+                const float fx = txf - std::floor(txf);
+                const float fz = tzf - std::floor(tzf);
+                const uint8_t* p00 = dt.rgba.data() +
+                    ((size_t)tz0 * dt.w + tx0) * 4;
+                const uint8_t* p10 = dt.rgba.data() +
+                    ((size_t)tz0 * dt.w + tx1) * 4;
+                const uint8_t* p01 = dt.rgba.data() +
+                    ((size_t)tz1 * dt.w + tx0) * 4;
+                const uint8_t* p11 = dt.rgba.data() +
+                    ((size_t)tz1 * dt.w + tx1) * 4;
+                auto sample = [&](int channel) {
+                    const float top = float(p00[channel]) +
+                        (float(p10[channel]) - float(p00[channel])) * fx;
+                    const float bottom = float(p01[channel]) +
+                        (float(p11[channel]) - float(p01[channel])) * fx;
+                    return (top + (bottom - top) * fz) / 127.5f - 1.0f;
+                };
+                float sx = sample(0);
+                float sy = sample(1);
+                float sz = sample(2);
+                const float sample_length =
+                    std::sqrt(sx * sx + sy * sy + sz * sz);
+                if (sample_length > 0.0001f) {
+                    sx /= sample_length;
+                    sy /= sample_length;
+                    sz /= sample_length;
+                }
+                nx = nx * (1.0f - weight) + sx * weight;
+                ny = ny * (1.0f - weight) + sy * weight;
+                nz = nz * (1.0f - weight) + sz * weight;
+            }
+            const float length = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (length > 0.0001f) {
+                nx /= length;
+                ny /= length;
+                nz /= length;
+            }
+            uint8_t* out = rgba.data() + idx * 4;
+            out[0] = uint8_t(std::clamp(
+                int((nx * 0.5f + 0.5f) * 255.0f + 0.5f), 0, 255));
+            out[1] = uint8_t(std::clamp(
+                int((ny * 0.5f + 0.5f) * 255.0f + 0.5f), 0, 255));
+            out[2] = uint8_t(std::clamp(
+                int((nz * 0.5f + 0.5f) * 255.0f + 0.5f), 0, 255));
+            out[3] = 255;
+        }
+    }
+    return true;
+}
+
 bool SaveSidecar(std::string& error) {
     auto& s = st();
     if (s.level_key.empty()) {
@@ -458,7 +570,7 @@ bool SaveSidecar(std::string& error) {
         }
         for (const Layer& layer : s.layers) {
             meta << "LAYER\t" << layer.tex_path << '\t' << layer.tiling
-                 << '\n';
+                 << '\t' << layer.normal_path << '\n';
         }
     }
     {

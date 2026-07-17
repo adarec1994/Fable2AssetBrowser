@@ -65,6 +65,7 @@ std::string s_entity_filter;
 
 struct PaintTexOption {
     std::string full_path;
+    std::string normal_path;
     std::string bnk_path;
     int         file_index = -1;
     uint32_t    size = 0;
@@ -75,34 +76,128 @@ std::vector<PaintTexOption> s_paint_tex_options;
 size_t s_paint_tex_options_key = (size_t)-1;
 void*  s_thumb_device = nullptr;
 
+enum class PaintTexRole { Unknown, Diffuse, Normal, Ignore };
+
+std::string lower_slash(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) {
+                       return c == '\\' ? '/' : char(std::tolower(c));
+                   });
+    return value;
+}
+
+bool is_ground_texture_path(const std::string& path) {
+    return path.rfind("art/environment/_groundtextures/", 0) == 0 ||
+           path.find("/art/environment/_groundtextures/") !=
+               std::string::npos;
+}
+
+bool has_word(const std::string& value,
+              std::initializer_list<const char*> words) {
+    size_t start = 0;
+    while (start < value.size()) {
+        while (start < value.size() &&
+               !std::isalnum(static_cast<unsigned char>(value[start]))) {
+            ++start;
+        }
+        size_t end = start;
+        while (end < value.size() &&
+               std::isalnum(static_cast<unsigned char>(value[end]))) {
+            ++end;
+        }
+        const std::string token = value.substr(start, end - start);
+        for (const char* word : words) {
+            if (token == word) return true;
+        }
+        start = end;
+    }
+    return false;
+}
+
+PaintTexRole paint_texture_role(const std::string& path) {
+    const std::string stem =
+        std::filesystem::path(path).stem().string();
+    if (has_word(stem, {"normal", "normalmap", "norm", "nrm", "nm",
+                        "nor", "n"}) ||
+        path.find("/normal/") != std::string::npos ||
+        path.find("/normals/") != std::string::npos) {
+        return PaintTexRole::Normal;
+    }
+    if (has_word(stem, {"diffuse", "diff", "dif", "albedo", "colour",
+                        "color", "col", "d"}) ||
+        path.find("/diffuse/") != std::string::npos ||
+        path.find("/diffuses/") != std::string::npos ||
+        path.find("/albedo/") != std::string::npos) {
+        return PaintTexRole::Diffuse;
+    }
+    if (has_word(stem, {"specular", "spec", "rough", "roughness",
+                        "metal", "metallic", "height", "mask",
+                        "occlusion", "gloss", "bump", "ao", "rph"})) {
+        return PaintTexRole::Ignore;
+    }
+    return PaintTexRole::Unknown;
+}
+
+std::string paint_texture_pair_key(const std::string& path) {
+    const size_t slash = path.find_last_of('/');
+    std::string folder =
+        slash == std::string::npos ? std::string() : path.substr(0, slash);
+    std::string stem =
+        std::filesystem::path(path).stem().string();
+    for (const char* part : {"/diffuse", "/diffuses", "/albedo",
+                             "/normal", "/normals"}) {
+        size_t pos = std::string::npos;
+        while ((pos = folder.find(part)) != std::string::npos) {
+            folder.erase(pos, std::strlen(part));
+        }
+    }
+    std::string base;
+    size_t start = 0;
+    while (start < stem.size()) {
+        while (start < stem.size() &&
+               !std::isalnum(static_cast<unsigned char>(stem[start]))) {
+            ++start;
+        }
+        size_t end = start;
+        while (end < stem.size() &&
+               std::isalnum(static_cast<unsigned char>(stem[end]))) {
+            ++end;
+        }
+        const std::string token = stem.substr(start, end - start);
+        if (!has_word(token,
+                      {"normal", "normalmap", "norm", "nrm", "nm",
+                       "nor", "n", "diffuse", "diff", "dif",
+                       "albedo", "colour", "color", "col", "d",
+                       "specular", "spec", "rough", "roughness",
+                       "metal", "metallic", "height", "mask",
+                       "occlusion", "gloss", "bump", "ao", "rph"})) {
+            if (!base.empty()) base.push_back('_');
+            base += token;
+        }
+        start = end;
+    }
+    return folder + "/" + base;
+}
+
 void rebuild_paint_tex_options() {
     if (s_paint_tex_options_key == S.all_tex_files.size()) return;
     s_paint_tex_options_key = S.all_tex_files.size();
     s_paint_tex_options.clear();
 
-    std::unordered_map<std::string, size_t> by_leaf;
+    std::vector<PaintTexOption> candidates;
+    std::vector<PaintTexRole> roles;
+    std::unordered_map<std::string, size_t> by_path;
     for (const FlatAssetEntry& e : S.all_tex_files) {
-        std::string low = e.full_path;
-        std::transform(low.begin(), low.end(), low.begin(),
-                       [](unsigned char c) {
-                           return c == '\\' ? '/' : (char)std::tolower(c);
-                       });
-        if (low.find("environment") == std::string::npos) continue;
-        std::string bnk_low = e.bnk_path;
-        std::transform(bnk_low.begin(), bnk_low.end(), bnk_low.begin(),
-                       [](unsigned char c) {
-                           return (char)std::tolower(c);
-                       });
-        
+        const std::string low = lower_slash(e.full_path);
+        if (!is_ground_texture_path(low)) continue;
+        const std::string bnk_low = lower_slash(e.bnk_path);
         if (bnk_low.find("texture_header") != std::string::npos) {
             continue;
         }
-        std::string leaf =
-            std::filesystem::path(low).stem().string();
+        const std::string leaf = std::filesystem::path(low).stem().string();
         if (leaf.empty()) continue;
 
-        auto [it, inserted] =
-            by_leaf.emplace(leaf, s_paint_tex_options.size());
+        auto [it, inserted] = by_path.emplace(low, candidates.size());
         if (inserted) {
             PaintTexOption opt;
             opt.full_path = e.full_path;
@@ -112,16 +207,41 @@ void rebuild_paint_tex_options() {
             opt.label =
                 std::filesystem::path(e.name).stem().string();
             opt.low = low;
-            s_paint_tex_options.push_back(std::move(opt));
-        } else if (e.size > s_paint_tex_options[it->second].size) {
-            
-            PaintTexOption& opt = s_paint_tex_options[it->second];
+            candidates.push_back(std::move(opt));
+            roles.push_back(paint_texture_role(low));
+        } else if (e.size > candidates[it->second].size) {
+            PaintTexOption& opt = candidates[it->second];
             opt.full_path = e.full_path;
             opt.bnk_path = e.bnk_path;
             opt.file_index = e.file_index;
             opt.size = e.size;
             opt.low = low;
         }
+    }
+
+    std::unordered_map<std::string, size_t> normal_by_key;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (roles[i] == PaintTexRole::Normal) {
+            const std::string key = paint_texture_pair_key(candidates[i].low);
+            auto it = normal_by_key.find(key);
+            if (it == normal_by_key.end() ||
+                candidates[i].size > candidates[it->second].size) {
+                normal_by_key[key] = i;
+            }
+        }
+    }
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (roles[i] == PaintTexRole::Normal ||
+            roles[i] == PaintTexRole::Ignore) {
+            continue;
+        }
+        const auto normal = normal_by_key.find(
+            paint_texture_pair_key(candidates[i].low));
+        if (normal != normal_by_key.end()) {
+            candidates[i].normal_path =
+                candidates[normal->second].full_path;
+        }
+        s_paint_tex_options.push_back(std::move(candidates[i]));
     }
     std::sort(s_paint_tex_options.begin(), s_paint_tex_options.end(),
               [](const PaintTexOption& a, const PaintTexOption& b) {
@@ -494,7 +614,8 @@ void draw_paint() {
 #endif
                     if (ImGui::Selectable(opt.label.c_str(), false, 0,
                                           ImVec2(0.0f, kRowH - 4.0f))) {
-                        if (TerrainPaint::AddLayer(opt.full_path) < 0) {
+                        if (TerrainPaint::AddLayer(
+                                opt.full_path, opt.normal_path) < 0) {
                             OutputLog::warn(
                                 "paint: layer not added (duplicate or "
                                 "at the 16-layer limit)");

@@ -24,12 +24,6 @@
                 }
             }
 
-            if (S.dev_mode) {
-                ImGui::TextDisabled("%d / %zu scripts",
-                                    (int)vis.size(), S.lua_files.size());
-                ImGui::Separator();
-            }
-
             ImGui::BeginChild("lua_scripts_list", ImVec2(0, 0), false);
             if (S.lua_files.empty()) {
                 ImGui::TextDisabled("No Lua scripts indexed yet.");
@@ -68,4 +62,3 @@
         if (s_active_tab == 11) {
             DetailsPanel::Draw();
         }
-

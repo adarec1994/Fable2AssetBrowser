@@ -51,14 +51,6 @@
                                (entity.display_name.empty()
                                     ? entity.name : entity.display_name)
                                    .c_str());
-            if (S.dev_mode) {
-                if (!entity.display_name.empty() &&
-                    entity.display_name != entity.name) {
-                    ImGui::TextDisabled("Internal: %s", entity.name.c_str());
-                }
-                ImGui::TextDisabled("Entity 0x%08X", entity.entity_hash);
-            }
-
             static std::uint32_t cached_animation_entity = 0;
             static std::uint64_t cached_animation_binding_revision = 0;
             static std::uint64_t cached_animation_catalog_revision = 0;

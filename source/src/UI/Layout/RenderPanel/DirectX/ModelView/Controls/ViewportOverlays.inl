@@ -202,15 +202,6 @@
                 }
                 ImGui::Checkbox("Text objects", &S.show_ent_text);
             }
-            if (S.dev_mode) {
-                ImGui::Checkbox("Terrain: engine blend",
-                                &S.terrain_landscape_blend);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip(
-                        "Dev-only: engine-reconciled LANDSCAPEMATERIAL terrain "
-                        "blend (per-material tiling, 16/dim). A/B vs the current "
-                        "shared-scale shader.");
-            }
             if (g_mp.has_sky_theme) {
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),

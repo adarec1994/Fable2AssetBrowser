@@ -17,7 +17,6 @@ static void mp_release(ModelPreview& mp){
     if(mp.vs_terrain){ mp.vs_terrain->Release(); mp.vs_terrain=nullptr; }
     if(mp.ps_terrain){ mp.ps_terrain->Release(); mp.ps_terrain=nullptr; }
     if(mp.ps_terrain_direct){ mp.ps_terrain_direct->Release(); mp.ps_terrain_direct=nullptr; }
-    if(mp.ps_terrain_landscape){ mp.ps_terrain_landscape->Release(); mp.ps_terrain_landscape=nullptr; }
     if(mp.ps_terrain_paint){ mp.ps_terrain_paint->Release(); mp.ps_terrain_paint=nullptr; }
     if(mp.cbuffer_terrain){ mp.cbuffer_terrain->Release(); mp.cbuffer_terrain=nullptr; }
     if(mp.cbuffer_terrain_paint){ mp.cbuffer_terrain_paint->Release(); mp.cbuffer_terrain_paint=nullptr; }

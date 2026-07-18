@@ -220,13 +220,6 @@ void draw_details_overlays_gl(const ImVec2& origin, const ImVec2& region) {
             const std::string& name = entity.display_name.empty()
                 ? entity.name : entity.display_name;
             ImGui::TextColored(ImVec4(.65f, .85f, 1, 1), "%s", name.c_str());
-            if (S.dev_mode) {
-                if (!entity.display_name.empty() &&
-                    entity.display_name != entity.name)
-                    ImGui::TextDisabled("Internal: %s", entity.name.c_str());
-                ImGui::TextDisabled("Entity 0x%08X", entity.entity_hash);
-            }
-
             static uint32_t cached_entity = 0;
             static uint64_t cached_bindings = 0;
             static uint64_t cached_catalog = 0;

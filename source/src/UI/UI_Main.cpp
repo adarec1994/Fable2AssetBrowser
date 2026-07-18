@@ -29,8 +29,6 @@
 #include "ModelPreview.h"
 #include "../textures/export/TextureExport.h"
 #include "../animations/AnimPlayer.h"
-#include "../ISO/IsoMount.h"
-#include "../ISO/IsoDump.h"
 #include "OutputLog.h"
 #include "../Level/Editing/LevelEdit.h"
 #include "../Level/Core/LevelLoader.h"
@@ -437,72 +435,6 @@ void draw_main(GLFWwindow* window) {
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("File")) {
 
-                if (S.dev_mode) {
-                    if (ImGui::BeginMenu("Dump")) {
-                        if (ISO::IsoMount::instance().is_mounted()) {
-                            if (ImGui::MenuItem("BNK's")) {
-                                ISO::dump_iso_contents();
-                            }
-                        } else {
-                            ImGui::MenuItem("BNK's (ISO only)", nullptr,
-                                            false, false);
-                        }
-
-                        if (!S.bnk_paths.empty() ||
-                            !S.nested_bnk_paths.empty()) {
-                            if (ImGui::MenuItem("BNK contents (raw)")) {
-                                ISO::dump_bnk_contents();
-                            }
-                            if (ImGui::MenuItem(".gdb + .save (preserve paths)")) {
-                                ISO::dump_gdb_save_files();
-                            }
-                        } else {
-                            ImGui::MenuItem(
-                                "BNK contents (no BNKs indexed)",
-                                nullptr, false, false);
-                            ImGui::MenuItem(
-                                ".gdb + .save (no BNKs indexed)",
-                                nullptr, false, false);
-                        }
-                        if (!S.all_mdl_files.empty()) {
-                            if (ImGui::MenuItem(".mdl")) {
-                                ISO::dump_mdl_files();
-                            }
-                        } else {
-                            ImGui::MenuItem(".mdl (no MDLs indexed)",
-                                            nullptr, false, false);
-                        }
-                        if (!S.all_tex_files.empty()) {
-                            if (ImGui::MenuItem(".tex")) {
-                                ISO::dump_tex_files();
-                            }
-                        } else {
-                            ImGui::MenuItem(".tex (no TEXs indexed)",
-                                            nullptr, false, false);
-                        }
-                        if (!S.all_wav_files.empty()) {
-                            if (ImGui::MenuItem(".wav")) {
-                                ISO::dump_wav_files();
-                            }
-                        } else {
-                            ImGui::MenuItem(".wav (no WAVs indexed)",
-                                            nullptr, false, false);
-                        }
-
-                        if (!S.all_anim_files.empty()) {
-                            ImGui::MenuItem(
-                                (".anim (" +
-                                 std::to_string(S.all_anim_files.size()) +
-                                 " indexed - dump TBD)").c_str(),
-                                nullptr, false, false);
-                        } else {
-                            ImGui::MenuItem(".anim (none indexed)",
-                                            nullptr, false, false);
-                        }
-                        ImGui::EndMenu();
-                    }
-                    ImGui::Separator();
-                }
                 {
                     const bool import_busy = ImportDialog::Busy();
                     if (ImGui::BeginMenu("Import", !import_busy)) {
@@ -610,10 +542,6 @@ void draw_main(GLFWwindow* window) {
                     S.hide_tooltips = !S.show_paths;
                     settings_save();
                 }
-                if (ImGui::Checkbox("Developer mode", &S.dev_mode)) {
-                    settings_save();
-                }
-
                 ImGui::Separator();
                 ImGui::TextUnformatted("Font size");
                 bool changed = false;

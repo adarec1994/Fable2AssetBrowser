@@ -40,14 +40,12 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
 
     {
         ID3DBlob* tvsb = nullptr; ID3DBlob* tpsb = nullptr;
-        ID3DBlob* tdpsb = nullptr; ID3DBlob* tlpsb = nullptr;
+        ID3DBlob* tdpsb = nullptr;
         ID3DBlob* tppsb = nullptr;
         const std::string tps_live_src =
             std::string(g_fog_hlsl) + g_terrain_ps_live;
         const std::string tps_direct_src =
             std::string(g_fog_hlsl) + g_terrain_ps;
-        const std::string tps_landscape_src =
-            std::string(g_fog_hlsl) + g_terrain_ps_landscape;
         const std::string tps_paint_src =
             std::string(g_fog_hlsl) + g_terrain_ps_paint;
         if (compile_shader(g_terrain_vs, "VS", "vs_5_0", &tvsb) &&
@@ -65,11 +63,6 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
                                    tdpsb->GetBufferSize(),
                                    nullptr, &mp.ps_terrain_direct);
         }
-        if (compile_shader(tps_landscape_src.c_str(), "PS", "ps_5_0", &tlpsb)) {
-            dev->CreatePixelShader(tlpsb->GetBufferPointer(),
-                                   tlpsb->GetBufferSize(),
-                                   nullptr, &mp.ps_terrain_landscape);
-        }
         if (compile_shader(tps_paint_src.c_str(), "PS", "ps_5_0", &tppsb)) {
             dev->CreatePixelShader(tppsb->GetBufferPointer(),
                                    tppsb->GetBufferSize(),
@@ -78,7 +71,6 @@ static bool create_pipeline(ID3D11Device* dev, ModelPreview& mp){
         if (tvsb) tvsb->Release();
         if (tpsb) tpsb->Release();
         if (tdpsb) tdpsb->Release();
-        if (tlpsb) tlpsb->Release();
         if (tppsb) tppsb->Release();
     }
     {

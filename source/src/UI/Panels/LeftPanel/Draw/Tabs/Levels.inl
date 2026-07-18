@@ -159,12 +159,6 @@
             std::string flow = S.level_filter;
             std::transform(flow.begin(), flow.end(), flow.begin(), ::tolower);
 
-            if (S.dev_mode) {
-                ImGui::TextDisabled("%zu entries indexed",
-                                    S.all_level_files.size());
-                ImGui::Separator();
-            }
-
             ImGui::BeginChild("levels_list", ImVec2(0, 0), false);
             static FlatAssetEntry s_delete_level_entry{};
             static std::string s_delete_level_name;
@@ -208,24 +202,6 @@
                                 g_pending_heightmap_view_h    = hh;
                                 g_pending_heightmap_view_name = friendly;
                                 g_pending_heightmap_view_kind = "Heightmap";
-                                g_pending_heightmap_view_load = true;
-                            }
-                        }
-                        if (S.dev_mode && ImGui::MenuItem("Open PF99")) {
-                            std::vector<uint8_t> rgba;
-                            int pw = 0, ph = 0;
-                            if (Level::RenderPf99ToRGBA(e, rgba, pw, ph)) {
-                                extern std::atomic<bool>    g_pending_heightmap_view_load;
-                                extern std::vector<uint8_t> g_pending_heightmap_view_rgba;
-                                extern int                  g_pending_heightmap_view_w;
-                                extern int                  g_pending_heightmap_view_h;
-                                extern std::string          g_pending_heightmap_view_name;
-                                extern std::string          g_pending_heightmap_view_kind;
-                                g_pending_heightmap_view_rgba = std::move(rgba);
-                                g_pending_heightmap_view_w    = pw;
-                                g_pending_heightmap_view_h    = ph;
-                                g_pending_heightmap_view_name = friendly + "_pf99";
-                                g_pending_heightmap_view_kind = "PF99";
                                 g_pending_heightmap_view_load = true;
                             }
                         }
@@ -402,4 +378,3 @@
             }
             ImGui::EndChild();
         }
-

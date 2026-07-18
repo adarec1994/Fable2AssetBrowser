@@ -70,9 +70,9 @@ void load_flat_asset_entry(const FlatAssetEntry& e, int kind);
 
 void extract_single_bnk_contents(const std::string& bnk_path);
 
-void file_hex_context_menu(const std::string& bnk_path,
-                           int file_index, bool is_nested,
-                           const std::string& file_name);
+void file_context_menu(const std::string& bnk_path,
+                       int file_index, bool is_nested,
+                       const std::string& file_name);
 
 #ifdef _WIN32
 void draw_tree_node(TreeNode& node, ID3D11Device* device);

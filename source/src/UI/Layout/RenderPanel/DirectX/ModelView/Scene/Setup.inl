@@ -9,7 +9,7 @@
         ::g_selected_level_pick_id = 0;
         ::g_selected_level_hash = 0;
     }
-    if (::g_selected_level_mesh_idx >= 0 && !S.dev_mode &&
+    if (::g_selected_level_mesh_idx >= 0 &&
         is_adjacent_terrain_mesh_name(
             g_mp.meshes[(size_t)::g_selected_level_mesh_idx].name))
     {
@@ -51,4 +51,3 @@
     bool active  = ImGui::IsItemActive();
     const bool player_start_place_active =
         g_player_start_placement != std::numeric_limits<size_t>::max();
-

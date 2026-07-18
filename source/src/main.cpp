@@ -27,7 +27,6 @@
 #include "UI/UI_Main.h"
 #include "UI/UI_Panels.h"
 #include "Utilities/Progress.h"
-#include "UI/HexView.h"
 #include "UI/OutputLog.h"
 #include "UI/Quest/QuestNodeView.h"
 #include "Splashscreen/Splashscreen.h"
@@ -126,9 +125,6 @@ void settings_load() {
         S.show_paths = (it->second != "0");
         S.hide_tooltips = !S.show_paths;
     }
-    if (auto it = kv.find("dev_mode"); it != kv.end()) {
-        S.dev_mode = (it->second == "1");
-    }
     if (auto it = kv.find("font_size"); it != kv.end()) {
         try {
             float v = std::stof(it->second);
@@ -176,7 +172,6 @@ void settings_load() {
 void settings_save() {
     auto kv = read_config_kv();
     kv["show_paths"] = S.show_paths ? "1" : "0";
-    kv["dev_mode"]   = S.dev_mode ? "1" : "0";
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.0f", S.font_size_dirty ? S.pending_font_size : S.font_size);
     kv["font_size"] = buf;
@@ -560,11 +555,6 @@ int main() {
             if (ImGui::Button("OK", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
-#ifdef _WIN32
-        draw_hex_window(g_pd3dDevice);
-#else
-        draw_hex_window();
-#endif
         ImGui::Render();
 #ifdef _WIN32
         const float clear_color[4] = {0.10f, 0.10f, 0.10f, 1.0f};

@@ -4,8 +4,6 @@
 
 namespace ISO {
 
-void dump_iso_contents();
-
 void dump_mdl_files();
 
 enum class MdlExportFormat {
@@ -36,9 +34,5 @@ enum class AudioExportFormat {
 };
 
 void dump_wav_files_as(AudioExportFormat fmt);
-
-void dump_bnk_contents();
-
-void dump_gdb_save_files();
 
 }

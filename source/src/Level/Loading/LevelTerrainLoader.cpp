@@ -42,7 +42,6 @@ extern const std::string& mp_last_decode_info();
 namespace Level {
 
 #include "LevelTerrainLoader/Preview/Heightmap.inl"
-#include "LevelTerrainLoader/Preview/Pf99.inl"
 #include "LevelTerrainLoader/Atlas/Decode.inl"
 
 namespace {

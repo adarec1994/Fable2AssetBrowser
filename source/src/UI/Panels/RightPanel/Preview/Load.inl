@@ -37,7 +37,7 @@ if (!can_preview) {
                     }
 
                     if (any_success && !all_meshes.empty()) {
-                        S.hex_data.clear();
+                        S.preview_data.clear();
                         S.mdl_info_ok = true;
                         S.mdl_info = combined_info;
                         S.mdl_meshes = all_meshes;
@@ -117,7 +117,7 @@ if (!can_preview) {
                         }
 
                         if (any_success && !all_meshes.empty()) {
-                            S.hex_data.clear();
+                            S.preview_data.clear();
                             S.mdl_info_ok = true;
                             S.mdl_info = combined_info;
                             S.mdl_meshes = all_meshes;
@@ -222,10 +222,10 @@ if (!can_preview) {
             }
 
             if (ok) {
-                S.hex_data = buf;
+                S.preview_data = buf;
 
                 if (can_tex) {
-                    S.tex_info_ok = parse_tex_info(S.hex_data, S.tex_info);
+                    S.tex_info_ok = parse_tex_info(S.preview_data, S.tex_info);
                     if (S.tex_info_ok && !S.tex_info.Mips.empty()) {
 
                         int best_mip = -1;
@@ -247,10 +247,10 @@ if (!can_preview) {
                     } else if (!S.tex_info_ok) {
                     }
                 } else if (can_mdl) {
-                    S.mdl_info_ok = parse_mdl_info(S.hex_data, S.mdl_info, name);
+                    S.mdl_info_ok = parse_mdl_info(S.preview_data, S.mdl_info, name);
                     if (S.mdl_info_ok) {
                         S.mdl_meshes.clear();
-                        build_mdl_engine_geometry(S.hex_data, S.mdl_meshes);
+                        build_mdl_engine_geometry(S.preview_data, S.mdl_meshes);
                         S.current_mdl_path = name;
                         S.current_mdl_path_hash =
                             Anim::gdb_model_path_hash(name);
@@ -304,7 +304,7 @@ if (!can_preview) {
                     }
 
                     if (any_success && !all_meshes.empty()) {
-                        S.hex_data.clear();
+                        S.preview_data.clear();
                         S.mdl_info_ok = true;
                         S.mdl_info = combined_info;
                         S.mdl_meshes = all_meshes;
@@ -338,7 +338,7 @@ if (!can_preview) {
                     if (parse_mdl_info(buf, mdl_info, name)) {
                         std::vector<MDLMeshGeom> meshes;
                         if (build_mdl_engine_geometry(buf, meshes)) {
-                            S.hex_data.clear();
+                            S.preview_data.clear();
                             S.mdl_info_ok = true;
                             S.mdl_info = mdl_info;
                             S.mdl_meshes = meshes;

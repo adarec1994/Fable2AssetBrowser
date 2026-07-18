@@ -130,12 +130,12 @@ set(APP_SOURCES
         src/Utilities/operations/Global/Audio.inl
         src/Utilities/operations/Global/Textures.inl
         src/Utilities/operations/Global/Models.inl
+        src/Utilities/operations/Animation/AdbDecompress.inl
         src/Utilities/operations/Animation/Selected.inl
         src/Utilities/operations/Animation/All.inl
         src/Utilities/operations/Glb/Selected.inl
         src/Utilities/operations/Glb/All.inl
         src/Utilities/operations/Glb/Global.inl
-        src/UI/HexView.cpp
         src/UI/OutputLog.cpp
         src/UI/IconButton.cpp
         src/UI/UI_Main.cpp
@@ -186,7 +186,7 @@ set(APP_SOURCES
         src/UI/Panels/FolderDialog.cpp
         src/UI/Panels/RightPanel.cpp
         src/UI/Panels/RightPanel/Actions/Primary.inl
-        src/UI/Panels/RightPanel/Actions/HexAndSelection.inl
+        src/UI/Panels/RightPanel/Actions/Selection.inl
         src/UI/Panels/RightPanel/Preview/Load.inl
         src/UI/Panels/RightPanel/Export/Glb.inl
         src/UI/Panels/RightPanel/Filters/Extension.inl
@@ -279,8 +279,6 @@ set(APP_SOURCES
         src/ISO/IsoExtract.cpp
         src/ISO/IsoMount.cpp
         src/ISO/IsoDump.cpp
-        src/ISO/IsoDump/Internal/IsoCopy.inl
-        src/ISO/IsoDump/Dump/IsoContents.inl
         src/ISO/IsoDump/Common/OutputAndBnk.inl
         src/ISO/IsoDump/Models/Reconstruct.inl
         src/ISO/IsoDump/Models/DumpRaw.inl
@@ -291,8 +289,6 @@ set(APP_SOURCES
         src/ISO/IsoDump/Textures/DumpConverted.inl
         src/ISO/IsoDump/Audio/DumpRaw.inl
         src/ISO/IsoDump/Audio/DumpConverted.inl
-        src/ISO/IsoDump/Bnk/DumpContents.inl
-        src/ISO/IsoDump/Gdb/DumpSave.inl
         src/MDL/mdl_converter.cpp
         src/Level/Core/LevelLoader.cpp
         src/Level/Core/LevelLoader/State/Globals.inl
@@ -320,7 +316,6 @@ set(APP_SOURCES
         src/Level/Loading/LevelCatalogLoaderInternal.h
         src/Level/Loading/LevelTerrainLoader.cpp
         src/Level/Loading/LevelTerrainLoader/Preview/Heightmap.inl
-        src/Level/Loading/LevelTerrainLoader/Preview/Pf99.inl
         src/Level/Loading/LevelTerrainLoader/Atlas/Decode.inl
         src/Level/Loading/LevelTerrainLoader/Tiles/DescriptorsAndParsing.inl
         src/Level/Loading/LevelTerrainLoader/Tiles/EmbeddedBc1.inl
@@ -1055,14 +1050,6 @@ if(TARGET ImGuiFileDialog)
 endif()
 
 FetchContent_Declare(
-        imgui_hex_editor
-        GIT_REPOSITORY https://github.com/Teselka/imgui_hex_editor.git
-        GIT_TAG main
-        GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(imgui_hex_editor)
-
-FetchContent_Declare(
         stb
         GIT_REPOSITORY https://github.com/nothings/stb.git
         GIT_TAG master
@@ -1112,7 +1099,6 @@ if(WIN32)
             ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp
             ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp
             ${imguifiledialog_SOURCE_DIR}/ImGuiFileDialog.cpp
-            ${imgui_hex_editor_SOURCE_DIR}/imgui_hex.cpp
     )
 
     target_include_directories(Fable_2_Asset_Browser PRIVATE
@@ -1122,7 +1108,6 @@ if(WIN32)
             ${imgui_SOURCE_DIR}/misc/cpp
             ${imgui_SOURCE_DIR}/backends
             ${imguifiledialog_SOURCE_DIR}
-            ${imgui_hex_editor_SOURCE_DIR}
             ${directxmath_SOURCE_DIR}/Inc
             ${stb_SOURCE_DIR}
             ${iconfontcpp_SOURCE_DIR}
@@ -1152,7 +1137,6 @@ else()
             ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
             ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
             ${imguifiledialog_SOURCE_DIR}/ImGuiFileDialog.cpp
-            ${imgui_hex_editor_SOURCE_DIR}/imgui_hex.cpp
     )
 
     target_include_directories(Fable_2_Asset_Browser PRIVATE
@@ -1162,7 +1146,6 @@ else()
             ${imgui_SOURCE_DIR}/misc/cpp
             ${imgui_SOURCE_DIR}/backends
             ${imguifiledialog_SOURCE_DIR}
-            ${imgui_hex_editor_SOURCE_DIR}
             ${iconfontcpp_SOURCE_DIR}
             ${stb_SOURCE_DIR}
             ${miniaudio_SOURCE_DIR}
@@ -1192,7 +1175,6 @@ if(FABLE_BUILD_TESTS)
     target_include_directories(bnk_writer_tests PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${imgui_SOURCE_DIR}
-            ${imgui_hex_editor_SOURCE_DIR}
             ${directxmath_SOURCE_DIR}/Inc
     )
     if(WIN32)

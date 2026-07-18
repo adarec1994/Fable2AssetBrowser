@@ -13,8 +13,9 @@
 #include <unordered_map>
 #include <algorithm>
 #include <optional>
-#include "../UI/HexView.h"
 #include "../MDL/mdl_converter.h"
+#include <cstring>
+#include <zlib.h>
 
 #include "operations/Paths/Output.inl"
 #include "operations/Extraction/SelectedRaw.inl"
@@ -29,6 +30,7 @@
 #include "operations/Global/Audio.inl"
 #include "operations/Global/Textures.inl"
 #include "operations/Global/Models.inl"
+#include "operations/Animation/AdbDecompress.inl"
 #include "operations/Animation/Selected.inl"
 #include "operations/Animation/All.inl"
 #include "operations/Glb/Selected.inl"

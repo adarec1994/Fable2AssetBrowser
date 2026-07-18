@@ -211,7 +211,7 @@ void draw_tree_node(TreeNode& node) {
         std::string label = node.name;
         ImGui::TreeNodeEx(label.c_str(), flags);
 
-        file_hex_context_menu(node.bnk_source, node.bnk_index,
+        file_context_menu(node.bnk_source, node.bnk_index,
                               node.is_nested_source, node.name);
 
         if (ImGui::IsItemClicked()) {
@@ -344,14 +344,7 @@ void draw_tree_node(TreeNode& node) {
         if (!S.hide_tooltips && ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
 
-            if (S.dev_mode) {
-                ImGui::Text("%s", node.full_path.c_str());
-                ImGui::Text("Size: %u bytes", node.file_size);
-                ImGui::Text("BNK: %s",
-                    std::filesystem::path(node.bnk_source).filename().string().c_str());
-            } else {
-                ImGui::TextUnformatted(node.name.c_str());
-            }
+            ImGui::TextUnformatted(node.name.c_str());
             ImGui::EndTooltip();
         }
     } else {

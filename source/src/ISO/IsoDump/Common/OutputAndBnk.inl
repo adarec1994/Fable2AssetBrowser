@@ -27,28 +27,6 @@ static std::filesystem::path build_asset_out_path(const FlatAssetEntry& e,
     return root / p;
 }
 
-static bool ends_with_ci(const std::string& s, const char* suffix) {
-    const size_t n = std::strlen(suffix);
-    if (s.size() < n) return false;
-    for (size_t i = 0; i < n; ++i) {
-        unsigned char a = static_cast<unsigned char>(s[s.size() - n + i]);
-        unsigned char b = static_cast<unsigned char>(suffix[i]);
-        if (std::tolower(a) != std::tolower(b)) return false;
-    }
-    return true;
-}
-
-static std::string nested_asset_prefix_for_bnk(const std::string& bnk_path) {
-    auto it = S.nested_bnk_virtual_paths.find(bnk_path);
-    if (it == S.nested_bnk_virtual_paths.end()) return {};
-
-    std::string nested_path = it->second;
-    std::replace(nested_path.begin(), nested_path.end(), '\\', '/');
-    const size_t slash = nested_path.find_last_of('/');
-    if (slash == std::string::npos) return {};
-    return nested_path.substr(0, slash + 1);
-}
-
 struct BnkCacheEntry {
     std::unique_ptr<BNKReader> reader;
 

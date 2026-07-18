@@ -175,7 +175,7 @@
                             }
                         }
 
-                        file_hex_context_menu(g_tree_drill.bnk_path,
+                        file_context_menu(g_tree_drill.bnk_path,
                                               it.index,
                                               g_tree_drill.from_nested,
                                               it.name);
@@ -194,4 +194,3 @@
             ImGui::EndChild();
             ImGui::EndChild();
         }
-

@@ -46,7 +46,7 @@ static void apply_entity_preview_completions() {
             OutputLog::warn("entity preview: no renderable model parts found");
             continue;
         }
-        S.hex_data.clear();
+        S.preview_data.clear();
         S.mdl_info_ok = true;
         S.mdl_info = std::move(result.model_info);
         S.mdl_meshes = std::move(result.meshes);

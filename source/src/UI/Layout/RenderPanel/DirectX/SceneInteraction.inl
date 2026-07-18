@@ -223,7 +223,7 @@ int pick_level_mesh_at(const ImVec2& mouse,
             m.lod_index != (uint32_t)g_mp.selected_lod) continue;
         if (m.is_terrain) continue;
         if (m.is_water)   continue;
-        if (!S.dev_mode && is_adjacent_terrain_mesh_name(m.name)) continue;
+        if (is_adjacent_terrain_mesh_name(m.name)) continue;
         if (!m.pick_ranges.empty()) {
             for (const auto& pr : m.pick_ranges) {
                 if (pr.selection_id == 0 || pr.radius <= 0.0f) continue;

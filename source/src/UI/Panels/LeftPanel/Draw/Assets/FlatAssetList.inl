@@ -19,7 +19,6 @@
             std::string filter_lc;
             bool        dedup = false;
             std::vector<int> vis;
-            size_t      dups_skipped = 0;
         };
         static std::unordered_map<std::string, CacheEntry> cache;
         CacheEntry& c = cache[child_id];
@@ -37,8 +36,6 @@
             c.dedup        = dedup_by_name_size;
             c.vis.clear();
             c.vis.reserve(entries.size());
-            c.dups_skipped = 0;
-
             std::unordered_set<std::string> seen_keys;
             for (size_t i = 0; i < entries.size(); ++i) {
                 const auto& e = entries[i];
@@ -53,26 +50,12 @@
                     std::transform(nlow.begin(), nlow.end(), nlow.begin(),
                                    ::tolower);
                     std::string k = nlow + "|" + std::to_string(e.size);
-                    if (!seen_keys.insert(std::move(k)).second) {
-                        ++c.dups_skipped;
-                        continue;
-                    }
+                    if (!seen_keys.insert(std::move(k)).second) continue;
                 }
                 c.vis.push_back((int)i);
             }
         }
         auto& vis = c.vis;
-        const size_t dups_skipped = c.dups_skipped;
-
-        if (S.dev_mode) {
-            if (dedup_by_name_size && dups_skipped > 0) {
-                ImGui::TextDisabled("%d / %zu  (%zu dup hidden)",
-                    (int)vis.size(), entries.size(), dups_skipped);
-            } else {
-                ImGui::TextDisabled("%d / %zu", (int)vis.size(), entries.size());
-            }
-            ImGui::Separator();
-        }
 
         const float child_h = (footer_h > 0.0f) ? -footer_h : 0.0f;
         ImGui::BeginChild(child_id, ImVec2(0, child_h), false);
@@ -101,19 +84,11 @@
                     ImGui::EndDragDropSource();
                 }
 
-                file_hex_context_menu(e.bnk_path, e.file_index,
+                file_context_menu(e.bnk_path, e.file_index,
                                       e.from_nested, e.name);
                 if (!S.hide_tooltips && ImGui::IsItemHovered()) {
                     ImGui::BeginTooltip();
-                    if (S.dev_mode) {
-                        ImGui::TextUnformatted(e.full_path.c_str());
-                        ImGui::Text("Size: %u bytes", e.size);
-                        ImGui::Text("BNK: %s",
-                            std::filesystem::path(e.bnk_path).filename().string().c_str());
-                        if (e.from_nested) ImGui::TextDisabled("(nested)");
-                    } else {
-                        ImGui::TextUnformatted(e.name.c_str());
-                    }
+                    ImGui::TextUnformatted(e.name.c_str());
                     ImGui::EndTooltip();
                 }
                 ImGui::PopID();
@@ -122,4 +97,3 @@
         clipper.End();
         ImGui::EndChild();
     };
-

@@ -10,7 +10,6 @@
 #include "../UI_Main.h"
 #include "../AudioPlayerWindow.h"
 #include "../OutputLog.h"
-#include "../HexView.h"
 #include "ImportDialog.h"
 #include "../../textures/export/TextureExport.h"
 #include "../../Utilities/GameBackup.h"

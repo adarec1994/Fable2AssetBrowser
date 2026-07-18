@@ -114,9 +114,6 @@
                     ImGui::SameLine();
                     ImGui::TextDisabled("(%zu exact)", authored_count);
                 }
-                if (S.dev_mode) {
-                    ImGui::Separator();
-                }
             }
             ImGui::BeginChild("anim_list", ImVec2(0, 0), false);
             if (S.anim_clips.empty()) {
@@ -170,13 +167,6 @@
                                                 : 0u);
                             }
                             ImGui::Text("Events: %zu", c.events.size());
-                            if (S.dev_mode) {
-                                ImGui::Text("offset=0x%08X frames=%u bytes=%u",
-                                            c.data_offset, c.toc_frame_count,
-                                            c.data_size_bytes);
-                                ImGui::Text("key0=0x%08X key1=0x%08X",
-                                            c.key0, c.key1);
-                            }
                             ImGui::EndTooltip();
                         }
                         ImGui::PopID();
@@ -186,4 +176,3 @@
             }
             ImGui::EndChild();
         }
-

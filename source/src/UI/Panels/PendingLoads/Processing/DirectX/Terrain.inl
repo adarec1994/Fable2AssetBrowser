@@ -837,7 +837,6 @@
                         lm_h    = lm_entry->height;
                     }
                     const auto& fresh_thumbs = EhfLodThumbnails::Get();
-                    bool splat_has_material_weights = true;
                     bool splat_ok = TerrainSplat::Build(
                         device,
                         splat_parsed,
@@ -848,19 +847,6 @@
                         0.0f,
                         0.0f,
                         true);
-                    if (!splat_ok && S.dev_mode) {
-                        splat_has_material_weights = false;
-                        splat_ok = TerrainSplat::Build(
-                            device,
-                            splat_parsed,
-                            fresh_thumbs,
-                            lm_rgba,
-                            lm_w,
-                            lm_h,
-                            0.0f,
-                            0.0f,
-                            false);
-                    }
                     if (splat_ok)
                     {
                         if (!g_mp.meshes.empty()) {
@@ -868,9 +854,8 @@
                             g_mp.meshes[0].diffuse_tex_name =
                                 "ehf_splat_terrain";
                         }
-                        OutputLog::success(splat_has_material_weights
-                            ? "terrain SPLAT shader bound: global EHF material weights"
-                            : "terrain direct layer fallback bound");
+                        OutputLog::success(
+                            "terrain SPLAT shader bound: global EHF material weights");
                     } else {
                         OutputLog::warn(
                             "terrain SPLAT shader unavailable; using EHF composite texture");

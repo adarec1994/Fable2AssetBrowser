@@ -83,10 +83,6 @@
                     }
                     cached_filter = filter;
                 }
-                if (S.dev_mode) {
-                    ImGui::TextDisabled("%zu / %zu entities", visible.size(),
-                                        g_global_entity_catalog.size());
-                }
                 ImGui::BeginChild("entities_list", ImVec2(0, 0), false);
                 ImGuiListClipper clipper;
                 clipper.Begin(static_cast<int>(visible.size()));
@@ -108,9 +104,6 @@
                         if (!S.hide_tooltips && ImGui::IsItemHovered()) {
                             ImGui::BeginTooltip();
                             ImGui::TextUnformatted(label.c_str());
-                            if (S.dev_mode && label != entity.name) {
-                                ImGui::TextDisabled("%s", entity.name.c_str());
-                            }
                             ImGui::Text("Model parts: %zu",
                                         entity.model_hashes.size());
                             ImGui::EndTooltip();
@@ -122,4 +115,3 @@
                 ImGui::EndChild();
             }
         }
-

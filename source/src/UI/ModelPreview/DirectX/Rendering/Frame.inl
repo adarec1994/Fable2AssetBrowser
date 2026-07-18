@@ -419,13 +419,9 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 ctx->Unmap(mp.cbuffer_terrain, 0);
             }
 
-            const bool use_landscape_blend =
-                !use_direct_terrain && S.dev_mode &&
-                S.terrain_landscape_blend && mp.ps_terrain_landscape;
             ctx->VSSetShader(mp.vs_terrain, nullptr, 0);
             ctx->PSSetShader(use_direct_terrain ? mp.ps_terrain_direct
-                : (use_landscape_blend ? mp.ps_terrain_landscape
-                                       : mp.ps_terrain), nullptr, 0);
+                                                : mp.ps_terrain, nullptr, 0);
             ctx->VSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
             ctx->PSSetConstantBuffers(2, 1, &mp.cbuffer_terrain);
 

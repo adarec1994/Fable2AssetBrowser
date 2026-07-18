@@ -25,13 +25,6 @@
                         : "Move (W)";
                 ImGui::TextDisabled("%s", mode_name);
             }
-            if (S.dev_mode) {
-                ImGui::TextDisabled(
-                    "sel 0x%016llX link 0x%08X text %s(%zu)",
-                    (unsigned long long)::g_selected_level_hash,
-                    sel_gdb_entity_hash, sel_text ? "HIT" : "miss",
-                    g_level_entity_text.size());
-            }
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Position:");
             if (edit_active) {
                 static const char* kAxis[3] = { "X##selpos", "Y##selpos",

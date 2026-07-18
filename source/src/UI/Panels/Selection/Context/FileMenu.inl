@@ -1,39 +1,9 @@
-void file_hex_context_menu(const std::string& bnk_path,
-                           int file_index, bool is_nested,
-                           const std::string& file_name) {
-    const bool show_hex = S.dev_mode;
+void file_context_menu(const std::string& bnk_path,
+                       int file_index, bool is_nested,
+                       const std::string& file_name) {
     const bool is_tex   = is_tex_file(file_name);
 
     if (ImGui::BeginPopupContextItem()) {
-        if (show_hex) {
-            if (ImGui::MenuItem("Hex View")) {
-
-                if (S.selected_bnk != bnk_path) {
-                    S.viewing_adb = false;
-                    S.viewing_lua = false;
-                    S.global_search.clear();
-                    S.selected_nested_bnk.clear();
-                    S.selected_nested_index = -1;
-                    pick_bnk(bnk_path);
-                }
-
-                if (is_nested) {
-                    S.selected_nested_temp_path = bnk_path;
-                    S.selected_nested_index = 0;
-                }
-
-                S.selected_file_index = -1;
-                for (size_t i = 0; i < S.files.size(); ++i) {
-                    if (S.files[i].index == file_index) {
-                        S.selected_file_index = (int)i;
-                        break;
-                    }
-                }
-                if (S.selected_file_index >= 0) {
-                    open_hex_for_selected();
-                }
-            }
-        }
         if (is_tex) {
 
             std::string backup_error;

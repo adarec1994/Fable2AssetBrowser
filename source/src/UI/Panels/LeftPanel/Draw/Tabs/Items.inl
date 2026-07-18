@@ -24,11 +24,6 @@
                         vis.push_back(i);
                     }
                 }
-                if (S.dev_mode) {
-                    ImGui::TextDisabled("%zu items (%zu shown)",
-                                        g_item_details.size(),
-                                        vis.size());
-                }
                 ImGui::BeginChild("items_list", ImVec2(0, 0), false);
                 ImGuiListClipper clipper;
                 clipper.Begin((int)vis.size());
@@ -74,4 +69,3 @@
                 ImGui::EndChild();
             }
         }
-

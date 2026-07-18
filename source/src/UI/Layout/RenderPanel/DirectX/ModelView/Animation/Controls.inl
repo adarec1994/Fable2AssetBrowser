@@ -201,9 +201,6 @@
                         "Show clips referenced by GDB animation records for "
                         "this exact model path hash.");
                 }
-            } else if (S.dev_mode &&
-                       g_mp.has_model && S.current_mdl_path_hash != 0) {
-                ImGui::TextDisabled("No authored animation set");
             }
             const bool can_filter_by_skeleton =
                 Anim::global_data_file().is_open() &&
@@ -218,8 +215,6 @@
                         "track-count gate when no track map is available.",
                         want_bones);
                 }
-            } else if (S.dev_mode) {
-                ImGui::TextDisabled("Track-count filter unavailable");
             }
             const bool filter_by_authored =
                 S.anim_authored_only && has_authored_filter;
@@ -283,67 +278,6 @@
                 }
             }
 
-            if (S.dev_mode &&
-                S.anim_selected_clip >= 0 &&
-                S.anim_selected_clip < (int)S.anim_clips.size())
-            {
-                const auto& c = S.anim_clips[(size_t)S.anim_selected_clip];
-                ImGui::Separator();
-                if (Anim::global_data_file().is_open()) {
-                    auto h = Anim::global_data_file().parse_clip_header(c);
-                    if (h.ok) {
-                        ImGui::TextDisabled(
-                            "tracks=%u frames=%u fmt=%u",
-                            h.bone_count, h.frame_count, h.bone_idx_bits);
-                        if (ImGui::TreeNodeEx("##anim_bone_view",
-                                              ImGuiTreeNodeFlags_None,
-                                              "Per-bone bodies")) {
-                            auto sp = Anim::global_data_file().clip_bytes(c);
-                            const size_t total = sp.size;
-                            ImGui::BeginChild("##anim_bone_list",
-                                              ImVec2(0, 120), false,
-                                              ImGuiWindowFlags_HorizontalScrollbar);
-                            for (uint32_t bi = 0; bi < h.bone_count; ++bi) {
-                                uint32_t bo_bits = h.bone_offsets[bi];
-                                uint32_t be_bits = (bi + 1 < h.bone_count)
-                                    ? h.bone_offsets[bi + 1]
-                                    : (uint32_t)((total > h.packed_body_offset)
-                                        ? (total - h.packed_body_offset) * 8
-                                        : 0);
-                                if (be_bits < bo_bits) continue;
-                                uint32_t bo = (uint32_t)h.packed_body_offset
-                                            + bo_bits / 8;
-                                uint32_t be = (uint32_t)h.packed_body_offset
-                                            + (be_bits + 7) / 8;
-                                if (be < bo || be > total) continue;
-                                uint32_t blen = be - bo;
-                                char hexbuf[3 * 4 + 1] = "??";
-                                if (bo + 4 <= total) {
-                                    std::snprintf(hexbuf, sizeof(hexbuf),
-                                                  "%02X %02X %02X %02X",
-                                                  sp.data[bo + 0],
-                                                  sp.data[bo + 1],
-                                                  sp.data[bo + 2],
-                                                  sp.data[bo + 3]);
-                                }
-                                ImGui::TextDisabled(
-                                    "track %3u  bits=%6u  bytes=%5u  first4: %s",
-                                    bi, be_bits - bo_bits, blen, hexbuf);
-                            }
-                            ImGui::EndChild();
-                            ImGui::TreePop();
-                        }
-                    } else {
-                        ImGui::TextDisabled(
-                            "(unrecognised clip header: m=0x%08X v=%u)",
-                            h.magic, h.version);
-                    }
-                } else {
-                    ImGui::TextDisabled("(data file not loaded)");
-                }
-                ImGui::Separator();
-            }
-
             ImGui::BeginChild("##anims_overlay_list", ImVec2(0, 0), false);
             ImGuiListClipper clipper;
             clipper.Begin((int)vis.size());
@@ -395,11 +329,6 @@
                                             : 0u);
                         }
                         ImGui::Text("Events: %zu", c.events.size());
-                        if (S.dev_mode) {
-                            ImGui::Text("offset=0x%08X frames=%u bytes=%u",
-                                        c.data_offset, c.toc_frame_count,
-                                        c.data_size_bytes);
-                        }
                         ImGui::EndTooltip();
                     }
                     ImGui::PopID();

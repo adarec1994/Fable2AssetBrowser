@@ -6,7 +6,7 @@
 #include <mutex>
 #include <set>
 #include <cstdint>
-#include "imgui_hex.h"
+#include "imgui.h"
 #include "../MDL/ModelParser.h"
 #include "../animations/AnimBank.h"
 #include "../GDB/GdbParser.h"
@@ -165,10 +165,6 @@ struct State {
 
     bool show_paths = true;
 
-    bool dev_mode = false;
-
-    bool terrain_landscape_blend = false;
-
     bool show_adjacent_terrain = true;
 
     float font_size           = 17.0f;
@@ -208,14 +204,9 @@ struct State {
     std::string global_search;
     std::string last_dir;
     std::string selected_folder_path;
-    std::atomic<bool> hex_loading{false};
-    bool hex_open = false;
-    std::string hex_title;
-    std::vector<unsigned char> hex_data;
-    ImGuiHexEditorState hex_state;
+    std::vector<unsigned char> preview_data;
     bool tex_info_ok = false;
     TexInfo tex_info;
-    size_t pending_goto = (size_t) -1;
     bool show_preview_popup = false;
     int preview_mip_index = -1;
 #ifdef _WIN32
@@ -223,8 +214,6 @@ struct State {
 #else
     unsigned int preview_tex = 0;
 #endif
-    std::string hex_file_path;
-
     bool show_texture_window = false;
     std::string texture_window_name;
     int texture_window_width = 0;

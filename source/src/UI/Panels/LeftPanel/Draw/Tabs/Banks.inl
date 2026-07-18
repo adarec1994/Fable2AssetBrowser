@@ -362,7 +362,7 @@
                     }
 
                     if (g_bnk_drill.kind == DrillKind::Bnk) {
-                        file_hex_context_menu(g_bnk_drill.bnk_path,
+                        file_context_menu(g_bnk_drill.bnk_path,
                                               it.index,
                                               g_bnk_drill.from_nested,
                                               it.name);
@@ -382,4 +382,3 @@
             ImGui::EndChild();
             ImGui::EndChild();
         }
-

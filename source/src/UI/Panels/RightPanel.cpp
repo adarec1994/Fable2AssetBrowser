@@ -1,7 +1,6 @@
 #include "../UI_Panels.h"
 #include "PanelInternal.h"
 #include "../UI_Main.h"
-#include "../HexView.h"
 #include "../ModelPreview.h"
 #include "../ContentTabs.h"
 #include "../../textures/TexParser.h"
@@ -35,7 +34,7 @@ void draw_right_panel() {
 #endif
 
 #include "RightPanel/Actions/Primary.inl"
-#include "RightPanel/Actions/HexAndSelection.inl"
+#include "RightPanel/Actions/Selection.inl"
 #include "RightPanel/Preview/Load.inl"
 #include "RightPanel/Export/Glb.inl"
 #include "RightPanel/Filters/Extension.inl"

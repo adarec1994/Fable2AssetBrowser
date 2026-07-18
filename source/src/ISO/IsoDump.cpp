@@ -1,6 +1,5 @@
 #include "IsoDump.h"
 
-#include "IsoMount.h"
 #include "../Utilities/State.h"
 #include "../Utilities/Progress.h"
 #include "../Utilities/Utils.h"
@@ -20,7 +19,6 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <ctime>
 #include <exception>
 #include <filesystem>
@@ -31,13 +29,10 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace ISO {
 
-#include "IsoDump/Internal/IsoCopy.inl"
-#include "IsoDump/Dump/IsoContents.inl"
 #include "IsoDump/Common/OutputAndBnk.inl"
 #include "IsoDump/Models/Reconstruct.inl"
 #include "IsoDump/Models/DumpRaw.inl"
@@ -48,7 +43,5 @@ namespace ISO {
 #include "IsoDump/Textures/DumpConverted.inl"
 #include "IsoDump/Audio/DumpRaw.inl"
 #include "IsoDump/Audio/DumpConverted.inl"
-#include "IsoDump/Bnk/DumpContents.inl"
-#include "IsoDump/Gdb/DumpSave.inl"
 
 }

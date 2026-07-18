@@ -98,7 +98,7 @@ void draw_file_table() {
                                       !S.selected_nested_temp_path.empty());
                     const std::string& bp = is_nested ? S.selected_nested_temp_path
                                                       : S.selected_bnk;
-                    file_hex_context_menu(bp, S.files[i].index, is_nested,
+                    file_context_menu(bp, S.files[i].index, is_nested,
                                           S.files[i].name);
                 }
                 if (!S.hide_tooltips && ImGui::IsItemHovered()) {
@@ -191,7 +191,7 @@ void draw_global_results_table() {
 
                 {
                     bool is_nested = (S.nested_bnk_parents.count(hit.bnk_path) > 0);
-                    file_hex_context_menu(hit.bnk_path, hit.index, is_nested,
+                    file_context_menu(hit.bnk_path, hit.index, is_nested,
                                           hit.file_name);
                 }
 

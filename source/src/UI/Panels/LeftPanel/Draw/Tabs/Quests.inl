@@ -86,13 +86,6 @@
                 }
             }
 
-            if (S.dev_mode) {
-                ImGui::TextDisabled("%d / %zu quest scripts",
-                                    (int)vis.size(),
-                                    S.all_quest_files.size());
-                ImGui::Separator();
-            }
-
             ImGui::BeginChild("quests_list", ImVec2(0, 0), false);
             static std::string s_delete_quest_id;
             const std::vector<std::string> authored_quests =
@@ -200,4 +193,3 @@
             }
             ImGui::EndChild();
         }
-

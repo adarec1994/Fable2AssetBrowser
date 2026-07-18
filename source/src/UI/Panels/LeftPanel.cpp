@@ -7,6 +7,7 @@
 #include "../EntityModelResolver.h"
 #include "../ContentTabs.h"
 #include "DetailsPanel.h"
+#include "../../Level/Creation/GameRegistry.h"
 #include "../../Level/Creation/LandscapeAuthoring.h"
 #include "../../Level/Creation/NewLevel.h"
 #include "../Quest/QuestNodeView.h"
@@ -3063,7 +3064,10 @@ void draw_left_panel() {
                     
                     auto region = p.parent_path().parent_path()
                                       .filename().string();
-                    std::string label = region.empty() ? e.name : region;
+                    std::string label = region.empty()
+                        ? e.name
+                        : Level::Creation::GetCustomLevelDisplayName(
+                              Level::Creation::ResolveGameDataDir(), region);
                     if (!matches_filter(label, e.full_path)) continue;
                     custom.push_back({&e, label});
                     placed.insert(&e);

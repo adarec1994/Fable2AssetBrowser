@@ -27,6 +27,14 @@ bool UnregisterLevel(const std::string& data_dir,
 
 std::vector<std::string> ListCustomLevels(const std::string& data_dir);
 
+std::string GetCustomLevelDisplayName(const std::string& data_dir,
+                                      const std::string& region);
+
+bool SetCustomLevelDisplayName(const std::string& data_dir,
+                               const std::string& region,
+                               const std::string& display_name,
+                               std::string& error);
+
 
 
 

@@ -132,7 +132,9 @@ struct ModelPreview {
     ID3D11PixelShader*  ps_terrain = nullptr;
     ID3D11PixelShader*  ps_terrain_direct = nullptr;
     ID3D11PixelShader*  ps_terrain_landscape = nullptr;
+    ID3D11PixelShader*  ps_terrain_paint = nullptr;
     ID3D11Buffer*       cbuffer_terrain = nullptr;
+    ID3D11Buffer*       cbuffer_terrain_paint = nullptr;
     ID3D11VertexShader* vs_sky = nullptr;
     ID3D11PixelShader*  ps_sky = nullptr;
     ID3D11Buffer*       cbuffer_sky = nullptr;

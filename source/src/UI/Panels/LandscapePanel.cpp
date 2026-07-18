@@ -5,9 +5,11 @@
 #include "../Layout/RenderPanel.h"
 #include "../../Level/Core/LevelLoader.h"
 #include "../../Level/Creation/LandscapeAuthoring.h"
+#include "../../Level/Creation/GameRegistry.h"
 #include "../../Level/Creation/NewLevel.h"
 #include "../../Level/Creation/SkyAuthoring.h"
 #include "../../Level/Creation/WaterAuthoring.h"
+#include "../../Level/Editing/LevelEdit.h"
 #include "../../Level/Terrain/TerrainPaint.h"
 #include "../../Utilities/State.h"
 
@@ -23,6 +25,7 @@
 #include <cfloat>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -45,6 +48,9 @@ float       s_tool_strength = 0.3f;
 float       s_brush_size = 8.0f;
 float       s_brush_falloff = 0.5f;
 std::string s_heightmap_path;
+std::string s_level_name_region;
+std::string s_level_display_name;
+std::string s_level_saved_display_name;
 
 
 
@@ -275,7 +281,7 @@ ID3D11ShaderResourceView* paint_tex_thumbnail(
             std::vector<uint8_t> rgba;
             int w = 0, h = 0;
             bool has_alpha = false;
-            if (decode_tex_to_rgba(copy, rgba, w, h, &has_alpha, 0) &&
+            if (decode_tex_to_rgba(copy, rgba, w, h, &has_alpha, -1) &&
                 w > 0 && h > 0) {
                 constexpr int kThumb = 48;
                 std::vector<uint8_t> thumb_rgba((size_t)kThumb * kThumb *
@@ -370,6 +376,45 @@ void draw_size_rows() {
 }
 
 void draw_manage(const FlatAssetEntry& entry) {
+    std::string region;
+    Level::Creation::IsCustomLooseLevel(entry, &region);
+    const std::string data_dir = Level::Creation::ResolveGameDataDir();
+    if (s_level_name_region != region) {
+        s_level_name_region = region;
+        s_level_display_name =
+            Level::Creation::GetCustomLevelDisplayName(data_dir, region);
+        s_level_saved_display_name = s_level_display_name;
+    }
+
+    if (ImGui::CollapsingHeader("Level Name",
+                                ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (begin_props("##ls_level_name")) {
+            prop_label("In-game Name");
+            ImGui::InputText("##ls_display_name", &s_level_display_name);
+            ImGui::EndTable();
+        }
+        const bool name_blocked =
+            Level::IsAsyncLoadInProgress() || s_level_display_name.empty() ||
+            s_level_display_name == s_level_saved_display_name;
+        if (name_blocked) ImGui::BeginDisabled();
+        if (ImGui::Button("Apply Name", ImVec2(-FLT_MIN, 0.0f))) {
+            std::string error;
+            if (Level::Creation::SetCustomLevelDisplayName(
+                    data_dir, region, s_level_display_name, error)) {
+                s_level_display_name =
+                    Level::Creation::GetCustomLevelDisplayName(data_dir,
+                                                               region);
+                s_level_saved_display_name = s_level_display_name;
+                OutputLog::success("level name: in-game name set to '" +
+                                   s_level_display_name + "'");
+            } else {
+                OutputLog::error("level name: " + error);
+            }
+        }
+        if (name_blocked) ImGui::EndDisabled();
+    }
+
+    ImGui::Separator();
     if (tool_button(ICON_FA_PLUS, "New", s_manage_tool == 0)) {
         s_manage_tool = 0;
     }
@@ -554,7 +599,7 @@ void draw_paint() {
                                           : ImGui::GetStyleColorVec4(
                                                 ImGuiCol_FrameBg);
             ImGui::PushStyleColor(ImGuiCol_ChildBg, background);
-            ImGui::BeginChild("##layer_card", ImVec2(0.0f, 96.0f), true,
+            ImGui::BeginChild("##layer_card", ImVec2(0.0f, 78.0f), true,
                               ImGuiWindowFlags_NoScrollbar |
                                   ImGuiWindowFlags_NoScrollWithMouse);
             if (ImGui::BeginTable("##layer_layout", 3,
@@ -590,21 +635,6 @@ void draw_paint() {
                 ImGui::TextDisabled(
                     layers[i].normal_path.empty() ? "Normal not found"
                                                   : "Normal paired");
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextDisabled("Texture size");
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip(
-                        "World-space size of one texture tile. Smaller "
-                        "values repeat the texture more often. This is "
-                        "independent of brush size.");
-                }
-                ImGui::SameLine();
-                float tiling = layers[i].tiling;
-                ImGui::SetNextItemWidth(80.0f);
-                if (ImGui::DragFloat("##tiling", &tiling, 0.1f, 0.5f,
-                                     256.0f, "%.1f m")) {
-                    TerrainPaint::SetLayerTiling((int)i, tiling);
-                }
                 ImGui::TableSetColumnIndex(2);
                 if (ImGui::SmallButton("X")) remove_index = (int)i;
                 ImGui::EndTable();
@@ -795,10 +825,25 @@ void draw_entities(const FlatAssetEntry& entry) {
     if (ImGui::CollapsingHeader("Player Start",
                                 ImGuiTreeNodeFlags_DefaultOpen)) {
         bool found = false;
+        size_t start_from = std::numeric_limits<size_t>::max();
+        size_t teleport_to = std::numeric_limits<size_t>::max();
         for (size_t mi = 0; mi < g_level_spawn_markers.size(); ++mi) {
             const LevelSpawnMarker& m = g_level_spawn_markers[mi];
             if (!is_player_start_marker(m)) continue;
             found = true;
+            std::string low_name = m.name;
+            std::transform(low_name.begin(), low_name.end(), low_name.begin(),
+                           [](unsigned char c) {
+                               return (char)std::tolower(c);
+                           });
+            if (low_name.rfind("startfrom", 0) == 0 &&
+                start_from == std::numeric_limits<size_t>::max()) {
+                start_from = mi;
+            }
+            if (low_name.rfind("teleportto", 0) == 0 &&
+                teleport_to == std::numeric_limits<size_t>::max()) {
+                teleport_to = mi;
+            }
             char label[192];
             std::snprintf(label, sizeof(label),
                           "%s  (%.1f, %.1f, %.1f)##ps_%zu",
@@ -812,6 +857,27 @@ void draw_entities(const FlatAssetEntry& entry) {
         if (!found) {
             ImGui::TextDisabled("(no player start in this level)");
         }
+        const bool can_edit = LevelEdit::Enabled() && !LevelEdit::Saving();
+        if (!can_edit) ImGui::BeginDisabled();
+        if (start_from != std::numeric_limits<size_t>::max()) {
+            const bool pending =
+                UI::player_start_placement_pending(start_from);
+            if (ImGui::Button(pending ? "Cancel Start From Placement"
+                                      : "Set Start From on Terrain",
+                              ImVec2(-FLT_MIN, 0.0f))) {
+                UI::request_player_start_placement(start_from);
+            }
+        }
+        if (teleport_to != std::numeric_limits<size_t>::max()) {
+            const bool pending =
+                UI::player_start_placement_pending(teleport_to);
+            if (ImGui::Button(pending ? "Cancel Teleport To Placement"
+                                      : "Set Teleport To on Terrain",
+                              ImVec2(-FLT_MIN, 0.0f))) {
+                UI::request_player_start_placement(teleport_to);
+            }
+        }
+        if (!can_edit) ImGui::EndDisabled();
     }
 
     if (ImGui::CollapsingHeader("Place Entities",

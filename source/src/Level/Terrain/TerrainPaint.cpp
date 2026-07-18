@@ -6,6 +6,7 @@
 #include "../../Utilities/State.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -42,6 +43,8 @@ struct State {
     float stroke_z = 0.0f;
     int stroke_layer = -1;
     bool stroke_erase = false;
+    bool render_layers_dirty = true;
+    uint32_t render_weight_dirty_mask = 0xFFFFFFFFu;
 
     std::unordered_map<std::string, DecodedTexture> tex_cache;
 };
@@ -50,6 +53,33 @@ State& st() {
     static State s;
     return s;
 }
+
+#ifdef _WIN32
+struct GpuState {
+    RenderResources resources;
+    ID3D11Texture2D* weights_texture = nullptr;
+};
+
+GpuState& gpu() {
+    static GpuState value;
+    return value;
+}
+
+void release_gpu() {
+    auto& value = gpu();
+    for (int i = 0; i < kMaxLayers; ++i) {
+        if (value.resources.diffuse[i]) {
+            value.resources.diffuse[i]->Release();
+        }
+        if (value.resources.normal[i]) {
+            value.resources.normal[i]->Release();
+        }
+    }
+    if (value.resources.weights) value.resources.weights->Release();
+    if (value.weights_texture) value.weights_texture->Release();
+    value = GpuState{};
+}
+#endif
 
 std::string sanitize_key(const std::string& key) {
     std::string out = key;
@@ -81,19 +111,28 @@ const DecodedTexture& decoded_texture(const std::string& tex_path) {
     if (it != s.tex_cache.end()) return it->second;
 
     DecodedTexture dt;
+    const FlatAssetEntry* best = nullptr;
     for (const FlatAssetEntry& e : S.all_tex_files) {
         if (e.full_path != tex_path) continue;
+        std::string bank = e.bnk_path;
+        std::transform(bank.begin(), bank.end(), bank.begin(),
+                       [](unsigned char c) {
+                           return (char)std::tolower(c);
+                       });
+        if (bank.find("texture_header") != std::string::npos) continue;
+        if (!best || e.size > best->size) best = &e;
+    }
+    if (best) {
         try {
             const std::vector<uint8_t> blob =
-                BnkCache::extract_bytes(e.bnk_path, e.file_index);
+                BnkCache::extract_bytes(best->bnk_path, best->file_index);
             std::vector<unsigned char> copy(blob.begin(), blob.end());
             bool has_alpha = false;
             dt.ok = decode_tex_to_rgba(copy, dt.rgba, dt.w, dt.h,
-                                       &has_alpha, 0);
+                                       &has_alpha, -1);
         } catch (...) {
             dt.ok = false;
         }
-        break;
     }
     if (!dt.ok) {
         OutputLog::warn("paint: could not decode texture " + tex_path);
@@ -217,23 +256,154 @@ void load_sidecar() {
 void InitForLevel(const std::string& level_key, int grid_w, int grid_h,
                   float tile_size) {
     auto& s = st();
+#ifdef _WIN32
+    release_gpu();
+#endif
     s = State{};
     s.level_key = level_key;
     s.grid_w = std::max(2, grid_w);
     s.grid_h = std::max(2, grid_h);
     s.tile_size = tile_size > 0.0f ? tile_size : 1.0f;
-    s.paint_w = std::clamp(s.grid_w * 4, 64, 2048);
-    s.paint_h = std::clamp(s.grid_h * 4, 64, 2048);
+    s.paint_w = s.grid_w;
+    s.paint_h = s.grid_h;
     load_sidecar();
 }
 
-void Clear() { st() = State{}; }
+void Clear() {
+#ifdef _WIN32
+    release_gpu();
+#endif
+    st() = State{};
+}
 
 bool Active() {
     return !st().level_key.empty() && !st().layers.empty();
 }
 
 const std::vector<Layer>& Layers() { return st().layers; }
+
+#ifdef _WIN32
+const RenderResources& GetRenderResources() {
+    return gpu().resources;
+}
+
+bool SyncRenderResources(ID3D11Device* device) {
+    auto& s = st();
+    if (!device || s.level_key.empty() || s.layers.empty() ||
+        s.layers.size() != s.weights.size()) {
+        return false;
+    }
+
+    if (s.render_layers_dirty) {
+        release_gpu();
+        auto& resources = gpu().resources;
+        resources.layer_count =
+            std::min((int)s.layers.size(), kMaxLayers);
+        for (int i = 0; i < resources.layer_count; ++i) {
+            const Layer& layer = s.layers[(size_t)i];
+            const DecodedTexture& diffuse = decoded_texture(layer.tex_path);
+            if (diffuse.ok) {
+                resources.diffuse[i] = create_srv_from_rgba_mipped(
+                    device, diffuse.w, diffuse.h, diffuse.rgba);
+            }
+            if (!layer.normal_path.empty()) {
+                const DecodedTexture& normal =
+                    decoded_texture(layer.normal_path);
+                if (normal.ok) {
+                    resources.normal[i] = create_srv_from_rgba_mipped(
+                        device, normal.w, normal.h, normal.rgba);
+                }
+                if (resources.normal[i]) {
+                    resources.normal_mask |= uint32_t(1u << i);
+                }
+            }
+            resources.tile_scale[i] =
+                1.0f / std::max(layer.tiling, 0.5f);
+        }
+        static uint32_t next_generation = 1;
+        resources.generation = next_generation++;
+        s.render_layers_dirty = false;
+        s.render_weight_dirty_mask =
+            (1u << resources.layer_count) - 1u;
+    }
+
+    auto& resources = gpu().resources;
+    const bool recreate_weights =
+        !gpu().weights_texture || !resources.weights ||
+        resources.weight_w != s.paint_w ||
+        resources.weight_h != s.paint_h ||
+        resources.layer_count != (int)s.layers.size();
+    if (s.render_weight_dirty_mask != 0 && recreate_weights) {
+        if (resources.weights) {
+            resources.weights->Release();
+            resources.weights = nullptr;
+        }
+        if (gpu().weights_texture) {
+            gpu().weights_texture->Release();
+            gpu().weights_texture = nullptr;
+        }
+
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = (UINT)s.paint_w;
+        desc.Height = (UINT)s.paint_h;
+        desc.MipLevels = 1;
+        desc.ArraySize = (UINT)resources.layer_count;
+        desc.Format = DXGI_FORMAT_R8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        desc.CPUAccessFlags = 0;
+
+        std::vector<D3D11_SUBRESOURCE_DATA> data(
+            (size_t)resources.layer_count);
+        for (int i = 0; i < resources.layer_count; ++i) {
+            data[(size_t)i].pSysMem = s.weights[(size_t)i].data();
+            data[(size_t)i].SysMemPitch = (UINT)s.paint_w;
+        }
+        if (FAILED(device->CreateTexture2D(
+                &desc, data.data(), &gpu().weights_texture))) {
+            resources.ok = false;
+            return false;
+        }
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+        view.Format = desc.Format;
+        view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        view.Texture2DArray.MostDetailedMip = 0;
+        view.Texture2DArray.MipLevels = 1;
+        view.Texture2DArray.FirstArraySlice = 0;
+        view.Texture2DArray.ArraySize = desc.ArraySize;
+        if (FAILED(device->CreateShaderResourceView(
+                gpu().weights_texture, &view, &resources.weights))) {
+            gpu().weights_texture->Release();
+            gpu().weights_texture = nullptr;
+            resources.ok = false;
+            return false;
+        }
+        resources.weight_w = s.paint_w;
+        resources.weight_h = s.paint_h;
+        s.render_weight_dirty_mask = 0;
+    } else if (s.render_weight_dirty_mask != 0) {
+        ID3D11DeviceContext* context = nullptr;
+        device->GetImmediateContext(&context);
+        if (context) {
+            for (int i = 0; i < resources.layer_count; ++i) {
+                const uint32_t layer_bit = 1u << i;
+                if ((s.render_weight_dirty_mask & layer_bit) == 0) continue;
+                const UINT subresource = D3D11CalcSubresource(0, (UINT)i, 1);
+                context->UpdateSubresource(
+                    gpu().weights_texture, subresource, nullptr,
+                    s.weights[(size_t)i].data(), (UINT)s.paint_w, 0);
+            }
+            context->Release();
+            s.render_weight_dirty_mask = 0;
+        }
+    }
+
+    resources.ok = resources.weights && resources.layer_count > 0;
+    return resources.ok;
+}
+#endif
 
 int AddLayer(const std::string& tex_path,
              const std::string& normal_path) {
@@ -243,13 +413,17 @@ int AddLayer(const std::string& tex_path,
     for (const Layer& layer : s.layers) {
         if (layer.tex_path == tex_path) return -1;
     }
+    const uint8_t initial_weight = s.layers.empty() ? 255 : 0;
     Layer layer;
     layer.tex_path = tex_path;
     layer.normal_path = normal_path;
     s.layers.push_back(std::move(layer));
-    s.weights.emplace_back((size_t)s.paint_w * s.paint_h, 0);
+    s.weights.emplace_back((size_t)s.paint_w * s.paint_h,
+                           initial_weight);
     s.active_layer = (int)s.layers.size() - 1;
     s.dirty = true;
+    s.render_layers_dirty = true;
+    s.render_weight_dirty_mask = 0xFFFFFFFFu;
     return s.active_layer;
 }
 
@@ -262,6 +436,11 @@ void RemoveLayer(int index) {
         s.active_layer = (int)s.layers.size() - 1;
     }
     s.dirty = true;
+    s.render_layers_dirty = true;
+    s.render_weight_dirty_mask = 0xFFFFFFFFu;
+#ifdef _WIN32
+    if (s.layers.empty()) release_gpu();
+#endif
 }
 
 void SetLayerTiling(int index, float metres) {
@@ -360,6 +539,7 @@ void ApplyBrush(float wx, float wz, float radius_m, float strength01,
     s.stroke_layer = s.active_layer;
     s.stroke_erase = erase;
     s.dirty = true;
+    s.render_weight_dirty_mask |= 1u << s.active_layer;
 }
 
 void EndStroke() { st().stroke_active = false; }

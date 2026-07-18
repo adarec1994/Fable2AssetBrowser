@@ -4,6 +4,8 @@
 #include "../ModelPreview.h"
 #include "../OutputLog.h"
 #include "../../Level/Creation/LandscapeAuthoring.h"
+#include "../../Level/Creation/WaterAuthoring.h"
+#include "../../Level/Core/LevelLoader.h"
 #include "../../Level/Editing/LevelEdit.h"
 #include "../../Utilities/State.h"
 
@@ -28,10 +30,24 @@ namespace {
 
 constexpr uint64_t kAdditionHashBase = 0xADD0000000000000ull;
 
-enum class SelKind { None, Landscape, Sky, Addition, Generator, SpawnPoint };
+enum class SelKind {
+    None,
+    Landscape,
+    Sky,
+    Water,
+    Addition,
+    Generator,
+    SpawnPoint
+};
 
 SelKind s_kind = SelKind::None;
 int     s_index = -1;   
+Level::Creation::WaterPlaneSettings s_water_settings;
+Level::Creation::WaterPlaneSettings s_water_original_settings;
+std::string s_water_level_key;
+std::string s_water_error;
+bool s_water_loaded = false;
+bool s_water_dirty = false;
 
 bool begin_props(const char* id) {
     if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingFixedFit)) {
@@ -147,6 +163,45 @@ bool select_addition_model(size_t addition_index, float out_center[3],
     return true;
 }
 
+bool water_bounds(float out_center[3], float& out_radius) {
+    float bounds_min[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+    float bounds_max[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+    bool found = false;
+    for (const MPPerMesh& mesh : g_mp.meshes) {
+        if (!mesh.is_water) continue;
+        for (int axis = 0; axis < 3; ++axis) {
+            bounds_min[axis] = std::min(bounds_min[axis],
+                                        mesh.center[axis] - mesh.radius);
+            bounds_max[axis] = std::max(bounds_max[axis],
+                                        mesh.center[axis] + mesh.radius);
+        }
+        found = true;
+    }
+    if (!found) return false;
+    out_radius = 0.0f;
+    for (int axis = 0; axis < 3; ++axis) {
+        out_center[axis] = (bounds_min[axis] + bounds_max[axis]) * 0.5f;
+        out_radius = std::max(
+            out_radius, (bounds_max[axis] - bounds_min[axis]) * 0.5f);
+    }
+    return true;
+}
+
+bool has_water() {
+    for (const MPPerMesh& mesh : g_mp.meshes) {
+        if (mesh.is_water) return true;
+    }
+    return false;
+}
+
+void load_water_settings(const FlatAssetEntry& entry) {
+    s_water_error.clear();
+    s_water_loaded = Level::Creation::GetWaterPlaneSettings(
+        entry, s_water_settings, s_water_error);
+    if (s_water_loaded) s_water_original_settings = s_water_settings;
+    s_water_dirty = false;
+}
+
 struct OutlinerRowAction {
     bool clicked = false;
     bool double_clicked = false;
@@ -172,7 +227,8 @@ OutlinerRowAction outliner_row(const char* name, const char* type,
 
 void draw_outliner(const std::vector<LevelEdit::Addition>& adds,
                    const std::vector<LevelEdit::GeneratorAddition>& gens,
-                   const std::vector<LevelEdit::PendingSpawnPoint>& sps) {
+                   const std::vector<LevelEdit::PendingSpawnPoint>& sps,
+                   const FlatAssetEntry& level) {
     if (!ImGui::BeginTable("##outliner", 2,
                            ImGuiTableFlags_RowBg |
                                ImGuiTableFlags_BordersInnerV |
@@ -203,6 +259,24 @@ void draw_outliner(const std::vector<LevelEdit::Addition>& adds,
             s_kind = SelKind::Sky;
             s_index = -1;
             clear_model_selection();
+        }
+    }
+
+    if (has_water()) {
+        const OutlinerRowAction water_action = outliner_row(
+            "Water", "Water", s_kind == SelKind::Water, 3);
+        if (water_action.clicked) {
+            s_kind = SelKind::Water;
+            s_index = -1;
+            clear_model_selection();
+            load_water_settings(level);
+            if (water_action.double_clicked) {
+                float center[3] = {};
+                float radius = 0.0f;
+                if (water_bounds(center, radius)) {
+                    focus_camera(center, radius);
+                }
+            }
         }
     }
 
@@ -449,11 +523,99 @@ void draw_sky_details() {
     ImGui::EndTable();
 }
 
+void draw_water_details(const FlatAssetEntry& level) {
+    if (!has_water()) {
+        s_kind = SelKind::None;
+        return;
+    }
+    if (!s_water_loaded) load_water_settings(level);
+    if (!s_water_loaded) {
+        ImGui::TextDisabled("%s", s_water_error.empty()
+                                      ? "Water settings are unavailable."
+                                      : s_water_error.c_str());
+        return;
+    }
+    if (begin_props("##det_water")) {
+        prop_label("Item");
+        ImGui::TextUnformatted("Water");
+        prop_label("Type");
+        ImGui::TextUnformatted("Water Plane");
+        prop_label("Width");
+        if (ImGui::DragFloat("##det_water_width", &s_water_settings.width,
+                             0.25f, 0.1f, 1000000.0f, "%.2f m",
+                             ImGuiSliderFlags_AlwaysClamp)) {
+            s_water_dirty = true;
+        }
+        prop_label("Length");
+        if (ImGui::DragFloat("##det_water_length", &s_water_settings.length,
+                             0.25f, 0.1f, 1000000.0f, "%.2f m",
+                             ImGuiSliderFlags_AlwaysClamp)) {
+            s_water_dirty = true;
+        }
+        prop_label("Height");
+        if (ImGui::DragFloat("##det_water_height", &s_water_settings.height,
+                             0.05f, -100000.0f, 100000.0f, "%.2f m",
+                             ImGuiSliderFlags_AlwaysClamp)) {
+            s_water_dirty = true;
+        }
+        ImGui::EndTable();
+    }
+    const bool blocked = !s_water_dirty || Level::IsAsyncLoadInProgress();
+    if (blocked) ImGui::BeginDisabled();
+    if (ImGui::Button("Apply Water Changes", ImVec2(-FLT_MIN, 0.0f))) {
+        std::string error;
+        if (Level::Creation::UpdateWaterPlane(level, s_water_settings,
+                                              error)) {
+            s_water_original_settings = s_water_settings;
+            s_water_dirty = false;
+        } else {
+            OutputLog::error("water: " + error);
+        }
+    }
+    if (blocked) ImGui::EndDisabled();
+}
+
 }
 
 bool Active() {
     const FlatAssetEntry* lv = ContentTabs::ActiveLevelEntry();
     return lv && Level::Creation::IsCustomLooseLevel(*lv);
+}
+
+bool WaterSelected() {
+    return s_kind == SelKind::Water && s_water_loaded && has_water();
+}
+
+bool SelectedWaterPosition(float out_engine_pos[3]) {
+    if (!out_engine_pos || !WaterSelected()) return false;
+    out_engine_pos[0] = s_water_settings.center_x;
+    out_engine_pos[1] = s_water_settings.center_z;
+    out_engine_pos[2] = s_water_settings.height;
+    return true;
+}
+
+void MoveSelectedWater(const float engine_step[3]) {
+    if (!engine_step || !WaterSelected()) return;
+    s_water_settings.center_x += engine_step[0];
+    s_water_settings.center_z += engine_step[1];
+    s_water_settings.height += engine_step[2];
+    s_water_dirty = true;
+}
+
+bool WaterPreviewOffset(float out_render_offset[3]) {
+    if (!out_render_offset || !s_water_loaded || !has_water()) return false;
+    out_render_offset[0] =
+        s_water_settings.center_x - s_water_original_settings.center_x;
+    out_render_offset[1] =
+        s_water_settings.height - s_water_original_settings.height;
+    out_render_offset[2] =
+        s_water_settings.center_z - s_water_original_settings.center_z;
+    return true;
+}
+
+void ClearSelection() {
+    s_kind = SelKind::None;
+    s_index = -1;
 }
 
 void Draw() {
@@ -462,12 +624,26 @@ void Draw() {
         return;
     }
 
-    
+    const FlatAssetEntry* level = ContentTabs::ActiveLevelEntry();
+    if (!level) return;
+    const std::string level_key = level->bnk_path + "|" + level->full_path;
+    if (s_water_level_key != level_key) {
+        s_water_level_key = level_key;
+        s_water_loaded = false;
+        s_water_dirty = false;
+        s_water_error.clear();
+        s_kind = SelKind::None;
+        s_index = -1;
+    }
+
     if (g_selected_level_hash >= kAdditionHashBase) {
         s_kind = SelKind::Addition;
         s_index = int(g_selected_level_hash - kAdditionHashBase);
     }
     if (s_kind == SelKind::Sky && !g_mp.has_sky_theme) {
+        s_kind = SelKind::None;
+    }
+    if (s_kind == SelKind::Water && !has_water()) {
         s_kind = SelKind::None;
     }
 
@@ -481,7 +657,7 @@ void Draw() {
     const float outliner_h =
         ImGui::GetContentRegionAvail().y * 0.45f;
     ImGui::BeginChild("##details_outliner", ImVec2(0, outliner_h), true);
-    draw_outliner(adds, gens, sps);
+    draw_outliner(adds, gens, sps, *level);
     ImGui::EndChild();
 
     ImGui::BeginChild("##details_props", ImVec2(0, 0), true);
@@ -501,6 +677,7 @@ void Draw() {
             }
             break;
         case SelKind::Sky:        draw_sky_details(); break;
+        case SelKind::Water:      draw_water_details(*level); break;
         case SelKind::Addition:   draw_addition_details(adds); break;
         case SelKind::Generator:  draw_generator_details(gens); break;
         case SelKind::SpawnPoint: draw_spawn_point_details(sps); break;

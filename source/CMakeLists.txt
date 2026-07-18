@@ -75,6 +75,28 @@ set(APP_SOURCES
         src/UI/Panels/FolderDialog.cpp
         src/UI/Panels/RightPanel.cpp
         src/UI/Panels/PendingLoads.cpp
+        src/UI/Panels/PendingLoads/Cache/State.inl
+        src/UI/Panels/PendingLoads/Editing/ContainerSpawning.inl
+        src/UI/Panels/PendingLoads/Editing/EntitySpawning.inl
+        src/UI/Panels/PendingLoads/Editing/Guard.inl
+        src/UI/Panels/PendingLoads/Editing/ModelSpawning.inl
+        src/UI/Panels/PendingLoads/Geometry/Batching.inl
+        src/UI/Panels/PendingLoads/Geometry/PropAppending.inl
+        src/UI/Panels/PendingLoads/Geometry/Transforms.inl
+        src/UI/Panels/PendingLoads/Models/Loading.inl
+        src/UI/Panels/PendingLoads/Models/Paths.inl
+        src/UI/Panels/PendingLoads/Processing/DirectX/HeightmapViews.inl
+        src/UI/Panels/PendingLoads/Processing/DirectX/Terrain.inl
+        src/UI/Panels/PendingLoads/Processing/Guards.inl
+        src/UI/Panels/PendingLoads/Processing/ModelLoads.inl
+        src/UI/Panels/PendingLoads/Processing/OpenGL/Terrain.inl
+        src/UI/Panels/PendingLoads/Processing/PreviewBuild.inl
+        src/UI/Panels/PendingLoads/Processing/TextureLoads.inl
+        src/UI/Panels/PendingLoads/Streaming/Start.inl
+        src/UI/Panels/PendingLoads/Streaming/State.inl
+        src/UI/Panels/PendingLoads/Streaming/Upload.inl
+        src/UI/Panels/PendingLoads/Streaming/Worker.inl
+        src/UI/Panels/PendingLoads/Terrain/GeneratedTextures.inl
         src/UI/Panels/NewLevelDialog.cpp
         src/UI/Panels/LandscapePanel.cpp
         src/UI/Panels/DetailsPanel.cpp
@@ -83,6 +105,19 @@ set(APP_SOURCES
         src/UI/Layout/LoadingScreen.cpp
         src/UI/Layout/MainLayout.cpp
         src/UI/Layout/RenderPanel.cpp
+        src/UI/Layout/RenderPanel/Shared/ContentViews.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView.inl
+        src/UI/Layout/RenderPanel/DirectX/Popouts.inl
+        src/UI/Layout/RenderPanel/DirectX/PublicApi.inl
+        src/UI/Layout/RenderPanel/DirectX/SceneInteraction.inl
+        src/UI/Layout/RenderPanel/DirectX/SceneProjection.inl
+        src/UI/Layout/RenderPanel/DirectX/TexturePreview.inl
+        src/UI/Layout/RenderPanel/OpenGL/ModelView.inl
+        src/UI/Layout/RenderPanel/OpenGL/Overlays.inl
+        src/UI/Layout/RenderPanel/OpenGL/Popouts.inl
+        src/UI/Layout/RenderPanel/OpenGL/PublicApi.inl
+        src/UI/Layout/RenderPanel/OpenGL/TexturePreview.inl
         src/UI/About/AboutWindow.cpp
         src/Splashscreen/Splashscreen.cpp
         src/Splashscreen/SplashSparkles.cpp
@@ -129,6 +164,25 @@ set(APP_SOURCES
         src/Level/Terrain/TerrainEdit.h
         src/Level/Editing/LevelEdit.cpp
         src/Level/Editing/LevelEdit.h
+        src/Level/Editing/LevelEdit/Assets/DependencyLookup.inl
+        src/Level/Editing/LevelEdit/Diagnostics/LevProbe.inl
+        src/Level/Editing/LevelEdit/Editing/Containers.inl
+        src/Level/Editing/LevelEdit/Editing/Lifecycle.inl
+        src/Level/Editing/LevelEdit/Editing/Spawns.inl
+        src/Level/Editing/LevelEdit/Editing/Transforms.inl
+        src/Level/Editing/LevelEdit/Internal/Compression.inl
+        src/Level/Editing/LevelEdit/Internal/State.inl
+        src/Level/Editing/LevelEdit/Internal/Transforms.inl
+        src/Level/Editing/LevelEdit/Persistence/Sidecars.inl
+        src/Level/Editing/LevelEdit/Saving/ContainerEdits.inl
+        src/Level/Editing/LevelEdit/Saving/EntityCreation.inl
+        src/Level/Editing/LevelEdit/Saving/EntityRemoval.inl
+        src/Level/Editing/LevelEdit/Saving/Generators.inl
+        src/Level/Editing/LevelEdit/Saving/Save.inl
+        src/Level/Editing/LevelEdit/Saving/SaveRouting.inl
+        src/Level/Editing/LevelEdit/Saving/SpawnPoints.inl
+        src/Level/Editing/LevelEdit/Saving/WorkingCopy.inl
+        src/Level/Editing/LevelEdit/Serialization/LevelPlacements.inl
         src/Level/Creation/NewLevel.cpp
         src/Level/Creation/LandscapeAuthoring.cpp
         src/Level/Creation/TiffHeightmap.cpp
@@ -188,6 +242,33 @@ set(APP_SOURCES
         src/GDB/GdbEdit.h
         src/GDB/GdbParser.cpp
         src/GDB/GdbParser.h
+        src/GDB/GdbParser/Core/Definitions.inl
+        src/GDB/GdbParser/Core/EmbeddedDictionary.inl
+        src/GDB/GdbParser/Core/Names.inl
+        src/GDB/GdbParser/Entities/Contents.inl
+        src/GDB/GdbParser/Entities/CreatureCatalog.inl
+        src/GDB/GdbParser/Entities/Gameplay.inl
+        src/GDB/GdbParser/Entities/GameplayOptions.inl
+        src/GDB/GdbParser/Entities/ModelResolution.inl
+        src/GDB/GdbParser/Entities/MultiGdb.inl
+        src/GDB/GdbParser/Entities/Properties.inl
+        src/GDB/GdbParser/Entities/PropTemplates.inl
+        src/GDB/GdbParser/Entities/Spawns.inl
+        src/GDB/GdbParser/Entities/TextTags.inl
+        src/GDB/GdbParser/Items/Catalog.inl
+        src/GDB/GdbParser/Items/Details.inl
+        src/GDB/GdbParser/Items/LabelFormatting.inl
+        src/GDB/GdbParser/Models/FieldReaders.inl
+        src/GDB/GdbParser/Models/ModelResolution.inl
+        src/GDB/GdbParser/Particles/Attachments.inl
+        src/GDB/GdbParser/Particles/Effects.inl
+        src/GDB/GdbParser/Particles/NameLookup.inl
+        src/GDB/GdbParser/Particles/Placements.inl
+        src/GDB/GdbParser/Records/ModelLookup.inl
+        src/GDB/GdbParser/Records/Parsing.inl
+        src/GDB/GdbParser/Records/Rows.inl
+        src/GDB/GdbParser/Transforms/InlineTransforms.inl
+        src/GDB/GdbParser/Transforms/RecordTransforms.inl
         src/GDB/GdbReaderInternal.h
         src/Level/Skybox/CloudBackgroundGeneration.cpp
         src/Level/Skybox/CloudBackgroundGeneration.h
@@ -239,6 +320,31 @@ set(APP_SOURCES
         src/Audio/Xma2Codec/XmaWmaProDecoder.cpp
         src/UI/ModelPreview.cpp
         src/UI/ModelPreview.h
+        src/UI/ModelPreview/Camera/FlyCam.inl
+        src/UI/ModelPreview/Common/Helpers.inl
+        src/UI/ModelPreview/DirectX/Animation/Cloth.inl
+        src/UI/ModelPreview/DirectX/Animation/Skeleton.inl
+        src/UI/ModelPreview/DirectX/Animation/WorldPose.inl
+        src/UI/ModelPreview/DirectX/Lifecycle.inl
+        src/UI/ModelPreview/DirectX/Model/Build.inl
+        src/UI/ModelPreview/DirectX/Particles.inl
+        src/UI/ModelPreview/DirectX/Pipeline/Pipeline.inl
+        src/UI/ModelPreview/DirectX/Rendering/Frame.inl
+        src/UI/ModelPreview/DirectX/Resources/Release.inl
+        src/UI/ModelPreview/DirectX/Resources/RenderTarget.inl
+        src/UI/ModelPreview/DirectX/Resources/TextureCache.inl
+        src/UI/ModelPreview/DirectX/Resources/Textures.inl
+        src/UI/ModelPreview/DirectX/Shaders/Shaders.inl
+        src/UI/ModelPreview/OpenGL/Lifecycle.inl
+        src/UI/ModelPreview/OpenGL/Math/Matrices.inl
+        src/UI/ModelPreview/OpenGL/Model/Build.inl
+        src/UI/ModelPreview/OpenGL/Rendering/Frame.inl
+        src/UI/ModelPreview/OpenGL/Resources.inl
+        src/UI/ModelPreview/OpenGL/Textures.inl
+        src/UI/ModelPreview/Textures/BlockCompression.inl
+        src/UI/ModelPreview/Textures/Decoder.inl
+        src/UI/ModelPreview/Textures/Lookup.inl
+        src/UI/ModelPreview/Textures/XboxTiling.inl
         src/UI/EntityModelResolver.cpp
         src/UI/EntityModelResolver.h
         src/Lua.cpp
@@ -247,6 +353,20 @@ set(APP_SOURCES
         src/lua/lua_parse.cpp
         src/lua/lua_decompile.cpp
         src/lua/lua_decompiler.cpp
+        src/lua/Decompiler/Analysis/Variables.inl
+        src/lua/Decompiler/ControlFlow/Blocks.inl
+        src/lua/Decompiler/ControlFlow/Branches.inl
+        src/lua/Decompiler/Core/Types.inl
+        src/lua/Decompiler/Decompiler/Definition.inl
+        src/lua/Decompiler/Expressions/Nodes.inl
+        src/lua/Decompiler/Model/Runtime.inl
+        src/lua/Decompiler/Output/Blocks.inl
+        src/lua/Decompiler/Output/Expressions.inl
+        src/lua/Decompiler/Processing/Branches.inl
+        src/lua/Decompiler/Processing/Conditions.inl
+        src/lua/Decompiler/Processing/Instructions.inl
+        src/lua/Decompiler/Processing/Sequences.inl
+        src/lua/Decompiler/Statements/Operations.inl
         src/Quest/QuestGraph.cpp
         src/Quest/QuestGraph.h
         src/Quest/QuestAuthoring.cpp

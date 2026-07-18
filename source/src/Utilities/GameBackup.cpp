@@ -64,6 +64,7 @@ std::vector<std::string> writable_files() {
         "data/gamescripts_r.bnk",
         "data/scenarios.list",
         "data/dir.manifest",
+        "data/miscellaneous/fasttravellist.txt",
         "data/Globals/Globals.gdb",
         "data/scripts/Mods/DebugMenuMod/DebugMenuEntries.lua",
     };

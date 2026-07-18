@@ -1,8 +1,5 @@
 static bool compile_shader(const char* src, const char* entry, const char* profile, ID3DBlob** blob){
     UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
-#if defined(_DEBUG)
-    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#endif
     ID3DBlob* err = nullptr;
     HRESULT hr = D3DCompile(src, strlen(src), nullptr, nullptr, nullptr, entry, profile, flags, 0, blob, &err);
     if (FAILED(hr) && err) {

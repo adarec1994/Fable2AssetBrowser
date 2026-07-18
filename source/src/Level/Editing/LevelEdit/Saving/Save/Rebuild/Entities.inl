@@ -58,15 +58,6 @@
             contents_ok = false;
             gerr = "no .gdb target";
         }
-        DebugTrace::log(
-            "save: gdb contents rewrite %s (%zu edit(s), %zu new "
-            "entit(ies), %zu deleted entit(ies), %zu deleted spawn "
-            "point(s), %zu repaired spawn point(s), %zu repaired "
-            "generator(s)) %s",
-            contents_ok ? "OK" : "FAILED", contents_applied,
-            new_entities_created, gdb_entities_deleted,
-            spawn_points_deleted,
-            spawn_points_repaired, generators_repaired, gerr.c_str());
     }
 
     if (rebuilt && contents_ok && gdb_rewrite_bytes.empty() &&
@@ -84,7 +75,4 @@
                 gerr);
         }
         BnkCache::invalidate(save_rewrite_bnk);
-        DebugTrace::log("save: .save physics rewrite %s (%zu entit(ies)) %s",
-                        contents_ok ? "OK" : "FAILED",
-                        save_physics_patched, gerr.c_str());
     }

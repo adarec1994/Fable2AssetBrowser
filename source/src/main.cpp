@@ -31,9 +31,6 @@
 #include "UI/Quest/QuestNodeView.h"
 #include "Splashscreen/Splashscreen.h"
 #include "Utilities/Files.h"
-#include "Utilities/AutoPilot.h"
-#include "Utilities/CrashLog.h"
-#include "Utilities/DebugTrace.h"
 #include "Audio/AudioPlayer.h"
 #include "Splashscreen/IconFont.h"
 #include <cmath>
@@ -271,9 +268,6 @@ static void build_theme() {
 }
 #ifdef _WIN32
 int main() {
-    DebugTrace::install_crash_handler();
-    CrashLog::Install();
-
     HINSTANCE hInstance = GetModuleHandle(nullptr);
     WNDCLASSEXA wc{};
     wc.cbSize = sizeof(WNDCLASSEX);
@@ -336,10 +330,6 @@ int main() {
     Splashscreen_init_icon_font_at_startup();
     build_theme();
     S.last_dir = load_last_dir();
-#ifdef _WIN32
-    AutoPilot_Init();
-#endif
-
     settings_load();
     if (S.font_size != 17.0f) {
 
@@ -389,7 +379,6 @@ int main() {
         ImGui::NewFrame();
 #ifdef _WIN32
         draw_main(hwnd, g_pd3dDevice);
-        AutoPilot_Tick();
 #else
         draw_main(g_window);
 #endif
@@ -561,7 +550,6 @@ int main() {
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        AutoPilot_Capture(g_pd3dDevice, g_pd3dDeviceContext, g_pSwapChain);
         g_pSwapChain->Present(1, 0);
 #else
         int display_w, display_h;

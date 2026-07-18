@@ -61,7 +61,7 @@ struct FetchConstantWordWrite {
     std::uint32_t value = 0;
 };
 
-struct FetchConstantMergeTrace {
+struct FetchConstantMergeResult {
     std::array<FetchConstantWordWrite, 8> writes{};
     std::array<std::uint32_t, 6> final_words{};
 };
@@ -81,9 +81,8 @@ struct CommonBinderLayout {
 
 const std::array<BindingRecipe, 3>& ExactCloudBindings() noexcept;
 const CommonBinderLayout& ExactCommonBinderLayout() noexcept;
-FetchConstantMergeTrace BuildExactMergeTrace(
+FetchConstantMergeResult BuildExactMergeResult(
     const FetchConstantMergeInput& input) noexcept;
-
 DescriptorSummary DecodeDescriptor(
     const std::array<std::uint32_t, 6>& descriptor_words) noexcept;
 

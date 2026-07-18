@@ -6,25 +6,6 @@ void DrawClouds(ID3D11DeviceContext* context,
                 const XMMATRIX& view,
                 const XMMATRIX& projection)
 {
-    static int cloud_debug_frame = 0;
-    const bool cloud_debug =
-        (cloud_debug_frame < 5) || (cloud_debug_frame % 300 == 0);
-    ++cloud_debug_frame;
-    if (cloud_debug) {
-        std::ostringstream log;
-        log << "clouds frame " << cloud_debug_frame
-            << ": has_cloud_theme=" << frame.has_cloud_theme
-            << " show_sky=" << preview.show_sky
-            << " vs_cloud=" << (preview.vs_cloud != nullptr)
-            << " ps_cloud=" << (preview.ps_cloud != nullptr)
-            << " layer_count=" << preview.cloud_layer_count
-            << " density_srv=["
-            << (preview.cloud_density_srv[0] != nullptr) << ','
-            << (preview.cloud_density_srv[1] != nullptr) << ','
-            << (preview.cloud_density_srv[2] != nullptr) << ','
-            << (preview.cloud_density_srv[3] != nullptr) << ']';
-        SkyDomeDebug(log.str());
-    }
     if (!frame.has_cloud_theme || !preview.show_sky ||
         !preview.vs_cloud || !preview.ps_cloud || !preview.layout_cloud ||
         !preview.cbuffer_cloud || !preview.cloud_vb || !preview.cloud_ib ||

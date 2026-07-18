@@ -132,9 +132,6 @@
                                      replace_loot, aerr)) {
                 ++contents_applied;
             } else {
-                DebugTrace::log(
-                    "save: contents edit 0x%08X skipped: %s",
-                    entity_hash, aerr.c_str());
             }
         }
 
@@ -145,8 +142,6 @@
             const uint32_t eh =
                 create_entity_addition(g, a, babel_edits, aerr);
             if (!eh) {
-                DebugTrace::log("save: entity addition skipped: %s",
-                                aerr.c_str());
                 continue;
             }
             const char* name_fmt = a.is_dig_spot
@@ -176,9 +171,6 @@
         if (!s.generators.empty() || !s.spawn_point_adds.empty()) {
             const Gdb::SpawnDonorInfo& donor = g_level_spawn_donor;
             if (!donor.valid()) {
-                DebugTrace::log(
-                    "save: generator author skipped: no donor "
-                    "generator/spawn point in this level");
             } else {
                 for (const auto& ga : s.generators) {
                     if (ga.removed || ga.creature_name.empty()) {
@@ -190,9 +182,6 @@
                                                 gerr2)) {
                         ++generators_created;
                     } else {
-                        DebugTrace::log(
-                            "save: generator author failed: %s",
-                            gerr2.c_str());
                     }
                 }
                 for (const auto& spa : s.spawn_point_adds) {
@@ -200,9 +189,6 @@
                     const uint32_t sp = create_spawn_point_entity(
                         g, donor, spa.pos, serr2);
                     if (!sp) {
-                        DebugTrace::log(
-                            "save: spawn point author failed: %s",
-                            serr2.c_str());
                         continue;
                     }
                     char nm[32];
@@ -220,16 +206,10 @@
                         }
                     }
                     if (fname.empty()) {
-                        DebugTrace::log(
-                            "save: no free native spawn point field for "
-                            "0x%08X", spa.spawn_points_record);
                         continue;
                     }
                     if (!g.AddField(spa.spawn_points_record,
                                     fnv1_32(fname), 7, sp)) {
-                        DebugTrace::log(
-                            "save: spawn list append failed for "
-                            "0x%08X", spa.spawn_points_record);
                     } else {
                         g.AddNameMapping(nm, sp);
                         new_save_entities.emplace_back(nm, sp);
@@ -277,9 +257,6 @@
                 }
             }
             if (save_rewrite_index < 0) {
-                DebugTrace::log(
-                    "save: chest .save registry rewrite skipped: %s",
-                    serr.c_str());
                 save_rewrite_bytes.clear();
                 new_entities_created = 0;
                 if (!s.spawn_point_deletes.empty()) {

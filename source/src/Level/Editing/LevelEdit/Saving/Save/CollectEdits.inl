@@ -4,12 +4,6 @@
     if (!s.available) { msg = "no level loaded"; return false; }
     if (s.saving) { msg = "a save is already in progress"; return false; }
 
-    DebugTrace::log("save: lev bnk='%s' idx=%d iso=%d comp=%d valid=%d "
-                    "gdb bnk='%s' additions=%zu edits=%zu",
-                    s.lev.bnk_path.c_str(), s.lev.file_index,
-                    s.lev.in_iso ? 1 : 0, s.lev.compressed ? 1 : 0,
-                    s.lev.valid ? 1 : 0, s.gdb.bnk_path.c_str(),
-                    s.additions.size(), s.edits.size());
 
     progress_update(2, 100, "Writing level patches...");
 

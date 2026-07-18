@@ -62,12 +62,12 @@ const CommonBinderLayout& ExactCommonBinderLayout() noexcept
     return layout;
 }
 
-FetchConstantMergeTrace BuildExactMergeTrace(
+FetchConstantMergeResult BuildExactMergeResult(
     const FetchConstantMergeInput& input) noexcept
 {
     const auto& old = input.old_slot_words;
     const auto& source = input.descriptor_words;
-    FetchConstantMergeTrace result{};
+    FetchConstantMergeResult result{};
     result.final_words = old;
 
     const auto store = [&](std::size_t index, std::uint32_t address,
@@ -117,6 +117,7 @@ FetchConstantMergeTrace BuildExactMergeTrace(
               (word4_after_a & 0xfffffc3fu));
     return result;
 }
+
 
 DescriptorSummary DecodeDescriptor(
     const std::array<std::uint32_t, 6>& words) noexcept

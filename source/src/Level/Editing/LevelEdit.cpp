@@ -20,9 +20,10 @@
 
 #include "BNKCore.cpp"
 #include "ISO/IsoMount.h"
+#include "ISO/IsoWriteback.h"
 #include "UI/OutputLog.h"
-#include "Utilities/DebugTrace.h"
 #include "Utilities/Progress.h"
+#include "Utilities/DebugLog.h"
 #include "Utilities/State.h"
 #include "Level/IO/BnkWriter.h"
 #include "GDB/GdbEdit.h"
@@ -58,6 +59,5 @@ namespace {
 
 #include "LevelEdit/Saving/Save.inl"
 #include "LevelEdit/Saving/WorkingCopy.inl"
-#include "LevelEdit/Diagnostics/LevProbe.inl"
 
 }

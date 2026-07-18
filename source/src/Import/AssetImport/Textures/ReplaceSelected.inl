@@ -2,16 +2,13 @@ bool replace_texture(const std::string& img_path,
                      const std::string& target_bnk_path,
                      int target_file_index, const Options& opt,
                      Result& res, std::string& err) {
+    DebugLog::Scope debug_scope("Replace texture", img_path + " | " +
+        target_bnk_path + " | index=" +
+        std::to_string(target_file_index));
     res = Result{};
-    DebugTrace::log(
-        "=== texture-replace start image='%s' bank='%s' index=%d max_dim=%d mips=%d format=%d ===",
-        img_path.c_str(), target_bnk_path.c_str(), target_file_index,
-        opt.max_tex_dim, opt.generate_mips ? 1 : 0, (int)opt.tex_format);
     TextureTargets target;
     if (!resolve_texture_targets(target_bnk_path, target_file_index,
                                  target, err)) {
-        DebugTrace::log("texture-replace: resolve failed error='%s'",
-                        err.c_str());
         return false;
     }
 
@@ -19,12 +16,8 @@ bool replace_texture(const std::string& img_path,
         std::filesystem::path(img_path).filename().string());
     ImageLoad::Image decoded;
     if (!ImageLoad::load_file(img_path, decoded, err)) {
-        DebugTrace::log("texture-replace: image load failed error='%s'",
-                        err.c_str());
         return false;
     }
-    DebugTrace::log("texture-replace: image loaded width=%d height=%d rgba=%zu",
-                    decoded.width, decoded.height, decoded.rgba.size());
 
     TexWriter::Options texture_options;
     texture_options.max_dimension = opt.max_tex_dim;
@@ -59,24 +52,14 @@ bool replace_texture(const std::string& img_path,
     if (!TexWriter::build_from_rgba(
             decoded.rgba.data(), decoded.width, decoded.height,
             texture_options, built, err)) {
-        DebugTrace::log("texture-replace: encode failed error='%s'",
-                        err.c_str());
         return false;
     }
-    DebugTrace::log(
-        "texture-replace: encoded width=%u height=%u mips=%u header=%zu mip=%zu body=%zu",
-        built.width, built.height, built.mip_count, built.header.size(),
-        built.mip0.size(), built.body.size());
     if (!verify_tex(built, err)) {
-        DebugTrace::log("texture-replace: verify failed error='%s'",
-                        err.c_str());
         return false;
     }
 
     progress_update(65, 100, "Checking backup coverage");
     if (!apply_texture_replacement(target, built, err)) {
-        DebugTrace::log("texture-replace: apply failed error='%s'",
-                        err.c_str());
         return false;
     }
 
@@ -86,7 +69,6 @@ bool replace_texture(const std::string& img_path,
                         std::to_string(built.width) + "x" +
                         std::to_string(built.height) + ", " +
                         std::to_string(built.mip_count) + " mips)");
-    DebugTrace::log("=== texture-replace success entry='%s' ===",
-                    target.virtual_path.c_str());
+    debug_scope.Result("success | " + target.virtual_path);
     return true;
 }

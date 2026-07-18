@@ -1,6 +1,7 @@
 bool import_glb(const std::string& glb_path, const Options& opt,
                 Result& res, std::string& err)
 {
+    DebugLog::Scope debug_scope("Import GLB", glb_path);
     res = Result{};
     const std::string stem =
         std::filesystem::path(glb_path).stem().string();
@@ -230,5 +231,8 @@ bool import_glb(const std::string& glb_path, const Options& opt,
         progress_update(98, 100, "Creating spawnable entity");
         create_spawn_template(mdl_vpath, opt, asset, res);
     }
+    debug_scope.Result("success | meshes=" +
+                       std::to_string(res.meshes) + " | textures=" +
+                       std::to_string(res.tex_virtual_paths.size()));
     return true;
 }

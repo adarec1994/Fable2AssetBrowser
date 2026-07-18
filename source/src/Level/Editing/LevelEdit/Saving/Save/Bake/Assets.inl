@@ -1,22 +1,35 @@
-                            const std::filesystem::path data_dir =
-                                std::filesystem::path(s.lev.bnk_path)
-                                    .parent_path();
-                            const std::string streaming_path =
-                                (data_dir / "streaming.bnk").string();
-                            const std::string globals_path =
-                                (data_dir / "Globals" /
-                                 "globals_models.bnk").string();
+                            const std::filesystem::path data_dir = bake_iso
+                                ? std::filesystem::path(bake_vpath)
+                                      .parent_path()
+                                : std::filesystem::path(s.lev.bnk_path)
+                                      .parent_path();
+                            const std::string streaming_path = bake_iso
+                                ? ISO::IsoMount::make_iso_path(
+                                      (data_dir / "streaming.bnk")
+                                          .generic_string())
+                                : (data_dir / "streaming.bnk").string();
+                            const std::string globals_path = bake_iso
+                                ? ISO::IsoMount::make_iso_path(
+                                      (data_dir / "Globals" /
+                                       "globals_models.bnk")
+                                          .generic_string())
+                                : (data_dir / "Globals" /
+                                   "globals_models.bnk").string();
                             const std::string models_key =
                                 stem + "_models.bnk";
                             std::vector<BnkWriter::EntryAddition>
                                 mdl_adds;
                             std::vector<BnkWriter::EntryAddition>
                                 stream_adds;
-                            const int models_idx =
-                                std::filesystem::exists(streaming_path)
-                                    ? BnkCache::find_index(streaming_path,
-                                                           models_key)
-                                    : -1;
+                            const bool streaming_exists = bake_iso
+                                ? ISO::IsoMount::instance().find(
+                                      ISO::IsoMount::strip_iso_prefix(
+                                          streaming_path)) != nullptr
+                                : std::filesystem::exists(streaming_path);
+                            const int models_idx = streaming_exists
+                                ? BnkCache::find_index(streaming_path,
+                                                       models_key)
+                                : -1;
                             std::vector<uint8_t> models_blob;
                             if (models_idx >= 0) {
                                 models_blob = BnkCache::extract_bytes(
@@ -60,9 +73,6 @@
                                     !find_in_nested_banks(
                                         streaming_path, "_models.bnk",
                                         want, src_name, src_payload)) {
-                                    DebugTrace::log(
-                                        "save: model body not found "
-                                        "anywhere: %s", want.c_str());
                                     continue;
                                 }
                                 mdl_adds.push_back(
@@ -87,18 +97,10 @@
                                                 other, "_streaming.bnk",
                                                 folder, stream_adds);
                                             if (got) {
-                                                DebugTrace::log(
-                                                    "save: streaming donor "
-                                                    "bnk %s",
-                                                    other.c_str());
                                                 break;
                                             }
                                         }
                                     }
-                                    DebugTrace::log(
-                                        "save: inject %s (+%zu streaming "
-                                        "file(s))", src_name.c_str(),
-                                        got);
                                 }
                             }
                             if (!mdl_adds.empty()) {
@@ -181,10 +183,6 @@
                                                      std::move(sp)});
                                                 have_hdr.insert(t);
                                             } else {
-                                                DebugTrace::log(
-                                                    "save: tex header "
-                                                    "not found: %s",
-                                                    t.c_str());
                                             }
                                         }
                                         if (!have_body.count(t)) {
@@ -206,10 +204,6 @@
                                                     "\"" + tl + "\" \"" +
                                                     tl + "\" 0 0 3\r\n";
                                             } else {
-                                                DebugTrace::log(
-                                                    "save: tex body not "
-                                                    "found: %s",
-                                                    t.c_str());
                                             }
                                         }
                                     }
@@ -223,13 +217,7 @@
                                     r.file_index = hdrs_idx;
                                     r.payload = std::move(hdrs_blob);
                                     bake_more.push_back(std::move(r));
-                                    DebugTrace::log(
-                                        "save: +%zu texture header(s)",
-                                        hdr_adds.size());
                                 } else if (!hdr_adds.empty()) {
-                                    DebugTrace::log(
-                                        "save: tex header add failed: "
-                                        "%s", terr.c_str());
                                 }
                                 if (!body_adds.empty() &&
                                     body_idx >= 0 &&
@@ -239,9 +227,6 @@
                                     r.file_index = body_idx;
                                     r.payload = std::move(body_blob);
                                     bake_more.push_back(std::move(r));
-                                    DebugTrace::log(
-                                        "save: +%zu texture bodies",
-                                        body_adds.size());
                                     if (mani_idx >= 0 &&
                                         !mani_append.empty()) {
                                         std::vector<uint8_t> mani =
@@ -270,7 +255,4 @@
                                             std::move(r2));
                                     }
                                 } else if (!body_adds.empty()) {
-                                    DebugTrace::log(
-                                        "save: tex body add failed: %s",
-                                        terr.c_str());
                                 }

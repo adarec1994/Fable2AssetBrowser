@@ -286,20 +286,12 @@
         if (!day_set.valid) {
             day_set = findDaySet(false);
         }
-#ifdef FABLE_THEME_PARSER_TRACE
-        std::fprintf(stderr, "[timeline] day_set valid=%d db=%zu\n",
-                     day_set.valid ? 1 : 0, day_set.db);
-#endif
         if (!day_set.valid) return false;
 
         const GdbView& v = view(day_set);
         size_t sch = 0;
         uint32_t n = 0;
         if (!v.schema(day_set.record, sch, n)) return false;
-#ifdef FABLE_THEME_PARSER_TRACE
-        std::fprintf(stderr, "[timeline] fields=%u\n", n);
-#endif
-
         const size_t descs = sch + 4 + size_t(n) * 4;
         if (descs + size_t(n) * 4 > v.hash_base) return false;
 

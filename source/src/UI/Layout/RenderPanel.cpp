@@ -12,7 +12,6 @@
 #include "../../Level/Core/LevelLoader.h"
 #include "../../Level/Database/TextBank.h"
 #include "../../textures/TexParser.h"
-#include "../../Utilities/DebugTrace.h"
 #include "../LevelGizmo.h"
 #include "../../animations/AnimBank.h"
 #include "../../animations/AnimDataFile.h"

@@ -87,17 +87,8 @@
         uint32_t picked_id = 0;
         uint64_t picked_hash = 0;
         const ImVec2 mouse = ImGui::GetIO().MousePos;
-        DebugTrace::log("pick: begin mouse=(%.0f,%.0f) meshes=%zu edit=%d",
-                        mouse.x, mouse.y, g_mp.meshes.size(),
-                        LevelEdit::Enabled() ? 1 : 0);
         const int picked = pick_level_mesh_at(mouse, origin, region,
                                               &picked_id, &picked_hash);
-        DebugTrace::log("pick: done mesh=%d id=%u hash=%llu name='%s'",
-                        picked, picked_id,
-                        (unsigned long long)picked_hash,
-                        picked >= 0
-                            ? g_mp.meshes[(size_t)picked].name.c_str()
-                            : "");
         ::g_selected_level_mesh_idx = picked;
         ::g_selected_level_pick_id = picked >= 0 ? picked_id : 0;
         ::g_selected_level_hash = picked >= 0 ? picked_hash : 0;

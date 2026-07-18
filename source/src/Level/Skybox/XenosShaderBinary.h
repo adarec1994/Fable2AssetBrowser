@@ -88,7 +88,6 @@ struct ControlFlowInstruction {
     std::uint8_t allocation_size = 0;
     std::uint8_t allocation_type = 0;
     bool allocation_do_not_serialize = false;
-    bool allocation_debug = false;
 };
 
 struct VertexFetchInstruction {

@@ -48,18 +48,6 @@ std::string ResolveEnvironmentTextureHash(std::uint32_t hash)
     return {};
 }
 
-std::string ResolveEnvironmentTextureHashLogged(std::uint32_t hash,
-                                                const char* label)
-{
-    std::string name = ResolveEnvironmentTextureHash(hash);
-    std::ostringstream log;
-    log << "bind " << label << " hash=0x" << std::hex << hash << std::dec
-        << " -> '" << name << "' (tex index size="
-        << S.all_tex_files.size() << ")";
-    Skybox::DebugLog(log.str().c_str());
-    return name;
-}
-
 void ApplySkyTextureHashes(ModelPreview& preview, const Gdb::SkyTheme& sky)
 {
 #ifdef _WIN32
@@ -121,23 +109,18 @@ void ApplySkyTextureHashes(ModelPreview& preview, const Gdb::SkyTheme& sky)
     reset_glare();
     reset_sun_beams();
     reset_sun_glare();
-    preview.sky_overlay_tex_name = ResolveEnvironmentTextureHashLogged(
-        sky.has_sky_overlay_texture ? sky.sky_overlay_texture_hash : 0,
-        "sky_overlay");
-    preview.sky_sun_disc_tex_name = ResolveEnvironmentTextureHashLogged(
-        sky.has_sun_disc_texture ? sky.sun_disc_texture_hash : 0,
-        "sun_disc");
-    preview.sky_moon_tex_name = ResolveEnvironmentTextureHashLogged(
-        sky.has_moon_texture ? sky.moon_texture_hash : 0, "moon");
-    preview.sky_moon_glare_tex_name = ResolveEnvironmentTextureHashLogged(
-        sky.has_moon_glare_texture ? sky.moon_glare_texture_hash : 0,
-        "moon_glare");
-    preview.sky_sun_beams_tex_name = ResolveEnvironmentTextureHashLogged(
-        sky.has_sun_beams_texture ? sky.sun_beams_texture_hash : 0,
-        "sun_beams");
-    preview.sky_sun_glare_tex_name = ResolveEnvironmentTextureHashLogged(
-        sky.has_sun_glare_texture ? sky.sun_glare_texture_hash : 0,
-        "sun_glare");
+    preview.sky_overlay_tex_name = ResolveEnvironmentTextureHash(
+        sky.has_sky_overlay_texture ? sky.sky_overlay_texture_hash : 0);
+    preview.sky_sun_disc_tex_name = ResolveEnvironmentTextureHash(
+        sky.has_sun_disc_texture ? sky.sun_disc_texture_hash : 0);
+    preview.sky_moon_tex_name = ResolveEnvironmentTextureHash(
+        sky.has_moon_texture ? sky.moon_texture_hash : 0);
+    preview.sky_moon_glare_tex_name = ResolveEnvironmentTextureHash(
+        sky.has_moon_glare_texture ? sky.moon_glare_texture_hash : 0);
+    preview.sky_sun_beams_tex_name = ResolveEnvironmentTextureHash(
+        sky.has_sun_beams_texture ? sky.sun_beams_texture_hash : 0);
+    preview.sky_sun_glare_tex_name = ResolveEnvironmentTextureHash(
+        sky.has_sun_glare_texture ? sky.sun_glare_texture_hash : 0);
 #else
     (void)preview;
     (void)sky;
@@ -221,10 +204,8 @@ void CopyCloudThemeToKeyframe(MPSkyCloudKeyframe& key,
         key.cloud_light[i][3] = layer.translucency_strength;
         key.cloud_density_token[i] = layer.has_density_map
             ? layer.density_map_hash : 0;
-        key.cloud_density_tex_name[i] =
-            ResolveEnvironmentTextureHashLogged(
-                layer.has_density_map ? layer.density_map_hash : 0,
-                "cloud_density");
+        key.cloud_density_tex_name[i] = ResolveEnvironmentTextureHash(
+            layer.has_density_map ? layer.density_map_hash : 0);
     }
 }
 
@@ -368,8 +349,7 @@ void ApplyCloudTheme(ModelPreview& preview, const Gdb::CloudTheme& clouds)
             ? layer.density_map_hash : 0;
         if (layer.enabled && layer.has_density_map) {
             preview.cloud_density_tex_name[i] =
-                ResolveEnvironmentTextureHashLogged(
-                    layer.density_map_hash, "cloud_density_base");
+                ResolveEnvironmentTextureHash(layer.density_map_hash);
             if (!preview.cloud_density_tex_name[i].empty()) {
                 ++density_resolved;
             } else {

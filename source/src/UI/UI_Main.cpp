@@ -3,6 +3,7 @@
 #include "../Utilities/State.h"
 #include "../Utilities/Utils.h"
 #include "../Utilities/Files.h"
+#include "../Utilities/DebugLog.h"
 #include "../Utilities/Progress.h"
 #include "UI_Panels.h"
 #include "Panels/ImportDialog.h"
@@ -538,6 +539,21 @@ void draw_main(GLFWwindow* window) {
                 }
             }
             if (ImGui::BeginMenu("Settings")) {
+                bool debug_log_enabled = DebugLog::Enabled();
+                if (ImGui::Checkbox("Debug log print",
+                                    &debug_log_enabled)) {
+                    std::string debug_log_error;
+                    if (!DebugLog::SetEnabled(debug_log_enabled,
+                                              debug_log_error)) {
+                        OutputLog::error(debug_log_error);
+                    }
+                }
+                if (DebugLog::Enabled()) {
+                    const std::string debug_log_path =
+                        DebugLog::CurrentPath().string();
+                    ImGui::TextDisabled("%s", debug_log_path.c_str());
+                }
+                ImGui::Separator();
                 if (ImGui::Checkbox("Show file paths in tree tooltips", &S.show_paths)) {
                     S.hide_tooltips = !S.show_paths;
                     settings_save();

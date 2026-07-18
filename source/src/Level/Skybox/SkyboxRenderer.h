@@ -16,8 +16,6 @@ struct XMMATRIX;
 
 namespace Skybox {
 
-void DebugLog(const char* line);
-
 struct CameraFrame {
     float view_forward[3] = {};
     float forward[3] = {};

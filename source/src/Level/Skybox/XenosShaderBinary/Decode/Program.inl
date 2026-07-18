@@ -171,7 +171,6 @@ bool DecodeProgram(ByteView compiled_shader,
                 ExtractControlFlowBits(cf, available, 41, 1, ok) != 0;
             decoded.allocation_type = static_cast<std::uint8_t>(
                 ExtractControlFlowBits(cf, available, 42, 2, ok));
-            decoded.allocation_debug = decoded.address_mode;
         }
         if (!ok) {
             return Fail(error, "truncated opcode-specific control-flow fields");

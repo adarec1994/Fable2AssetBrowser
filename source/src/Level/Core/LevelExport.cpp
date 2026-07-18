@@ -8,6 +8,7 @@
 #include "MDL/MdlTexExport.h"
 #include "textures/TexParser.h"
 #include "textures/export/TextureExport.h"
+#include "Utilities/DebugLog.h"
 #include "Utilities/Progress.h"
 #include "UI/OutputLog.h"
 

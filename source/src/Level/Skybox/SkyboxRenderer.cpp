@@ -29,7 +29,8 @@ using namespace DirectX;
 
 namespace Skybox {
 
-#include "SkyboxRenderer/Diagnostics.inl"
+namespace {
+
 #include "SkyboxRenderer/Shaders/Sources.inl"
 #include "SkyboxRenderer/Shaders/Compile.inl"
 #include "SkyboxRenderer/Textures/Create.inl"
@@ -53,8 +54,6 @@ namespace Skybox {
 
 #else
 
-namespace Skybox {
-void DebugLog(const char*) {}
-}
+namespace Skybox {}
 
 #endif

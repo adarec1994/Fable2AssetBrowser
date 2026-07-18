@@ -3,6 +3,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "IconsFontAwesome6.h"
+#include "../Utilities/DebugLog.h"
 
 #include <chrono>
 #include <cmath>
@@ -228,6 +229,14 @@ bool is_noisy_message(Level lvl, const std::string& msg) {
 }
 
 void log(Level lvl, std::string msg) {
+    const char* category = "INFO";
+    switch (lvl) {
+        case Level::Success: category = "SUCCESS"; break;
+        case Level::Warn: category = "WARNING"; break;
+        case Level::Error: category = "ERROR"; break;
+        case Level::Info: break;
+    }
+    DebugLog::Write(category, msg);
     if (is_noisy_message(lvl, msg)) return;
 
     Entry e;

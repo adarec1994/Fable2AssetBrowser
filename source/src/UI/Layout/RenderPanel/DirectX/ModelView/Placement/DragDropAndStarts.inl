@@ -8,10 +8,6 @@
             float engine_pos[3] = {};
             if (level_placement_surface_at(mouse, origin, region, false,
                                            engine_pos)) {
-                DebugTrace::log(
-                    "drop: '%s' at (%.2f, %.2f, %.2f)",
-                    drop_model.c_str(), engine_pos[0],
-                    engine_pos[1], engine_pos[2]);
                 spawn_level_model_at(device, drop_model, engine_pos);
             }
         }

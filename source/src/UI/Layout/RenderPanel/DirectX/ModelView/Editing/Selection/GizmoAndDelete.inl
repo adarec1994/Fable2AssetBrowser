@@ -1,16 +1,12 @@
         }
         ImGui::End();
         }   
-        if (dbg_sel_changed) DebugTrace::log("sel: overlay done");
-
         if (edit_active) {
-            if (dbg_sel_changed) DebugTrace::log("gz: call");
             LevelGizmo::Result gz = LevelGizmo::DrawAndHandle(
                 g_flycam, origin, region, sel_pos, true);
             static bool s_was_dragging = false;
             if (gz.dragging && !s_was_dragging) {
                 LevelEdit::PushUndoSnapshot(collect_group_ids());
-                DebugTrace::log("gizmo: drag begin");
             }
             s_was_dragging = gz.dragging;
             if (gz.moved) {
@@ -27,13 +23,8 @@
         } else {
             LevelGizmo::CancelDrag();
         }
-        if (dbg_sel_changed) DebugTrace::log("sel: gizmo done");
-
         if (edit_active && !ImGui::GetIO().WantTextInput &&
             ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
-            DebugTrace::log("del: id=%u hash=%llu",
-                            ::g_selected_level_pick_id,
-                            (unsigned long long)::g_selected_level_hash);
             bool removed_spawn_point = false;
             const int marker_index = selected_level_spawn_marker_index();
             if (marker_index >= 0) {

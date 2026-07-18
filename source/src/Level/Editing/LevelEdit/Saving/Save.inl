@@ -1,4 +1,5 @@
 bool Save(std::string& msg) {
+    DebugLog::Scope debug_scope("Save level edits");
 #include "Save/Setup.inl"
 #include "Save/CollectEdits.inl"
 #include "Save/Patching/LevelAndGdb.inl"

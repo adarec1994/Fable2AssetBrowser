@@ -1,8 +1,10 @@
 #include "GameBackup.h"
 
+#include "DebugLog.h"
 #include "State.h"
 #include "../BNKCore.cpp"
 #include "../ISO/IsoMount.h"
+#include "../ISO/IsoWriteback.h"
 #include "../UI/OutputLog.h"
 #include "../UI/Panels/PanelInternal.h"
 
@@ -34,6 +36,12 @@ void set_status(const std::string& s) {
     g_status = s;
 }
 
+bool iso_session() {
+    ISO::IsoMount& iso = ISO::IsoMount::instance();
+    return iso.is_mounted() && !S.root_dir.empty() &&
+           S.root_dir == iso.iso_path();
+}
+
 std::filesystem::path game_root() {
     if (S.root_dir.empty() || ISO::IsoMount::is_iso_path(S.root_dir)) {
         return {};
@@ -45,6 +53,7 @@ std::filesystem::path game_root() {
 }
 
 std::filesystem::path backup_dir() {
+    if (iso_session()) return ISO::Writeback::BackupDirectory();
     const std::filesystem::path root = game_root();
     return root.empty() ? root : root / "f2ab_backup";
 }
@@ -68,6 +77,42 @@ std::vector<std::string> writable_files() {
         "data/Globals/Globals.gdb",
         "data/scripts/Mods/DebugMenuMod/DebugMenuEntries.lua",
     };
+
+    if (iso_session()) {
+        std::set<std::string> wanted;
+        for (const std::string& path : out) {
+            std::string value = path;
+            std::transform(value.begin(), value.end(), value.begin(),
+                           [](unsigned char c) {
+                               return static_cast<char>(std::tolower(c));
+                           });
+            wanted.insert(std::move(value));
+        }
+        out.clear();
+        for (const ISO::MountedFile& file :
+             ISO::IsoMount::instance().list_recursive(std::string())) {
+            std::string path = file.path;
+            std::replace(path.begin(), path.end(), '\\', '/');
+            std::string lowered = path;
+            std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                           [](unsigned char c) {
+                               return static_cast<char>(std::tolower(c));
+                           });
+            const bool texture_bank =
+                lowered.size() >= 4 &&
+                lowered.compare(lowered.size() - 4, 4, ".bnk") == 0 &&
+                lowered.find("texture") != std::string::npos;
+            const bool language_bank =
+                lowered.size() >= 11 &&
+                lowered.compare(lowered.size() - 11, 11,
+                                "/book.babel") == 0;
+            if (wanted.count(lowered) || texture_bank || language_bank) {
+                out.push_back(std::move(path));
+            }
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }
     
     const std::filesystem::path root = game_root();
     std::error_code ec;
@@ -122,6 +167,32 @@ bool copy_with_status(const std::filesystem::path& from,
 }
 
 void worker(bool restore) {
+    DebugLog::Scope debug_scope(restore ? "Restore game backup"
+                                        : "Create game backup");
+    if (iso_session()) {
+        std::string error;
+        const auto progress = [restore](std::size_t index,
+                                        std::size_t count,
+                                        const std::string& member) {
+            if (index >= count) return;
+            set_status(std::string(restore ? "Restoring " : "Backing up ") +
+                       member + " (" + std::to_string(index + 1) + "/" +
+                       std::to_string(count) + ")...");
+        };
+        const bool ok = restore
+            ? ISO::Writeback::RestoreBackup(progress, error)
+            : ISO::Writeback::CreateBackup(writable_files(), progress,
+                                           error);
+        set_status(ok ? (restore ? "Restore complete."
+                                 : "Backup complete.")
+                      : "FAILED - " + error);
+        g_last_ok = ok;
+        g_was_restore = restore;
+        g_finished = true;
+        g_busy = false;
+        debug_scope.Result(ok ? "success" : "failed | " + error);
+        return;
+    }
     const std::filesystem::path root = game_root();
     const std::filesystem::path dir = backup_dir();
     bool ok = !root.empty();
@@ -172,6 +243,7 @@ void worker(bool restore) {
     g_was_restore = restore;
     g_finished = true;
     g_busy = false;
+    debug_scope.Result(ok ? "success" : "failed");
 }
 
 void start(bool restore) {
@@ -183,6 +255,7 @@ void start(bool restore) {
 }
 
 bool Exists() {
+    if (iso_session()) return ISO::Writeback::BackupExists();
     const std::filesystem::path manifest = manifest_path();
     if (manifest.empty()) return false;
     std::error_code ec;
@@ -197,9 +270,8 @@ std::string StatusText() {
 }
 
 bool RequireBackup(std::string& error) {
-    if (game_root().empty()) {
-        error = "Open a Fable 2 game folder first (ISO roots are "
-                "read-only).";
+    if (game_root().empty() && !iso_session()) {
+        error = "Open a Fable 2 game folder or ISO first.";
         return false;
     }
     if (Busy()) {
@@ -215,8 +287,11 @@ bool RequireBackup(std::string& error) {
 }
 
 bool EnsureFilesCovered(const std::vector<std::string>& paths,
-                        std::string& error) {
+                         std::string& error) {
     if (!RequireBackup(error)) return false;
+    if (iso_session()) {
+        return ISO::Writeback::EnsureBackedUp(paths, error);
+    }
     const std::filesystem::path root = game_root();
     const std::filesystem::path dir = backup_dir();
     std::set<std::string> manifest_entries;
@@ -284,12 +359,17 @@ bool EnsureFilesCovered(const std::vector<std::string>& paths,
 }
 
 void CreateAsync() {
-    if (game_root().empty()) {
-        OutputLog::error("backup: open a game folder first");
+    if (game_root().empty() && !iso_session()) {
+        OutputLog::error("backup: open a game folder or ISO first");
         return;
     }
-    OutputLog::info("backup: creating pristine copy under f2ab_backup\\ "
-                    "(this copies the large game banks - please wait)");
+    if (iso_session()) {
+        OutputLog::info("backup: extracting pristine ISO files to " +
+                        ISO::Writeback::BackupDirectory().string());
+    } else {
+        OutputLog::info("backup: creating pristine copy under f2ab_backup\\ "
+                        "(this copies the large game banks - please wait)");
+    }
     start(false);
 }
 
@@ -306,6 +386,7 @@ void DrawMainMenu() {
             OutputLog::success("backup: " + StatusText());
             if (g_was_restore) {
                 BnkCache::clear();
+                ISO::IsoMount::instance().clear_cache();
                 g_tree_last_root_dir.clear();
                 g_tree_built.store(false);
                 OutputLog::info(

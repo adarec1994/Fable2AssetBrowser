@@ -14,8 +14,6 @@ void DrawSky(ID3D11Device* device,
         const std::string& texture_name =
             preview.cloud_density_tex_name[index];
         if (texture_name.empty()) {
-            SkyDomeDebug("texload skip(empty name) cloud_density " +
-                         std::to_string(index));
             return;
         }
 
@@ -24,8 +22,6 @@ void DrawSky(ID3D11Device* device,
                 texture_name, texture_data, PreferredTextureBank())) {
             OutputLog::warn(
                 "cloud density texture not found: " + texture_name);
-            SkyDomeDebug("texload FAIL(not found) cloud_density name=" +
-                         texture_name + " bank=" + PreferredTextureBank());
             return;
         }
         ID3D11ShaderResourceView* view = nullptr;
@@ -49,19 +45,6 @@ void DrawSky(ID3D11Device* device,
         preview.vs_sky_dome && preview.ps_sky_dome &&
         preview.cbuffer_sky_dome && preview.sky_lut_tex &&
         preview.sky_lut_srv;
-    static int debug_frame = 0;
-    const bool debug_now = (debug_frame < 5) || (debug_frame % 300 == 0);
-    ++debug_frame;
-    if (debug_now) {
-        std::ostringstream log;
-        log << "frame " << debug_frame
-            << ": has_sky_theme=" << preview.has_sky_theme
-            << " show_sky=" << preview.show_sky
-            << " exact_ready=" << exact_dome_ready
-            << " old_ready="
-            << (preview.vs_sky && preview.ps_sky && preview.cbuffer_sky);
-        SkyDomeDebug(log.str());
-    }
     if (!preview.has_sky_theme || !preview.show_sky) {
         return;
     }
@@ -80,8 +63,6 @@ void DrawSky(ID3D11Device* device,
             if (target || tried) return;
             tried = true;
             if (texture_name.empty()) {
-                SkyDomeDebug(std::string("texload skip(empty name) ") +
-                             label);
                 return;
             }
 
@@ -91,9 +72,6 @@ void DrawSky(ID3D11Device* device,
                 OutputLog::warn(
                     std::string(label) + " texture not found: " +
                     texture_name);
-                SkyDomeDebug(std::string("texload FAIL(not found) ") +
-                             label + " name=" + texture_name + " bank=" +
-                             PreferredTextureBank());
                 return;
             }
             ID3D11ShaderResourceView* view = nullptr;
@@ -103,8 +81,6 @@ void DrawSky(ID3D11Device* device,
                 OutputLog::error(
                     std::string(label) + " texture failed to decode: " +
                     texture_name);
-                SkyDomeDebug(std::string("texload FAIL(decode) ") + label +
-                             " name=" + texture_name);
                 return;
             }
             target = view;
@@ -167,4 +143,3 @@ void DrawSky(ID3D11Device* device,
                      preview.sky_sun_glare_tried,
                      preview.sky_sun_glare_srv,
                      "sky sun glare");
-

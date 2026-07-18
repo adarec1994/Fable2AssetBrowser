@@ -25,14 +25,11 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 
 set(APP_SOURCES
         src/main.cpp
-        src/Utilities/CrashLog.cpp
-        src/Utilities/CrashLog.h
         src/Utilities/GameBackup.cpp
         src/Utilities/GameBackup.h
         src/Utilities/State.cpp
         src/Utilities/Utils.cpp
         src/Utilities/Files.cpp
-        src/Utilities/AutoPilot.cpp
         src/textures/TexParser.cpp
         src/textures/LhTexCodec.cpp
         src/animations/AnimBank.cpp
@@ -278,6 +275,8 @@ set(APP_SOURCES
         src/Splashscreen/IconFont.cpp
         src/ISO/IsoExtract.cpp
         src/ISO/IsoMount.cpp
+        src/ISO/IsoWriteback.cpp
+        src/ISO/IsoWriteback.h
         src/ISO/IsoDump.cpp
         src/ISO/IsoDump/Common/OutputAndBnk.inl
         src/ISO/IsoDump/Models/Reconstruct.inl
@@ -337,7 +336,7 @@ set(APP_SOURCES
         src/Level/Loading/Stages/LoadEnvironment.inl
         src/Level/Loading/Stages/LoadProps.inl
         src/Level/Loading/Stages/LoadProps/Finalize/Append.inl
-        src/Level/Loading/Stages/LoadProps/Gdb/Diagnostics.inl
+        src/Level/Loading/Stages/LoadProps/Gdb/Finalise.inl
         src/Level/Loading/Stages/LoadProps/Gdb/GmdLayouts.inl
         src/Level/Loading/Stages/LoadProps/Gdb/MarketShells.inl
         src/Level/Loading/Stages/LoadProps/Gdb/NoHashShells.inl
@@ -350,7 +349,7 @@ set(APP_SOURCES
         src/Level/Loading/Stages/LevelPropSupport/Models/Sockets.inl
         src/Level/Loading/Stages/LevelPropSupport/Models/Types.inl
         src/Level/Loading/Stages/LevelPropSupport/Transforms/Math.inl
-        src/Level/Loading/Stages/LevelPropSupport/Diagnostics/Bridge.inl
+        src/Level/Loading/Stages/LevelPropSupport/Paths/Normalise.inl
         src/Level/Loading/Stages/LevelPropSupport/Models/NamesAndPayload.inl
         src/Level/Loading/Stages/LevelPropSupport/Filtering/Shells.inl
         src/Level/Loading/Stages/LevelPropSupport/Keys/Identification.inl
@@ -393,7 +392,6 @@ set(APP_SOURCES
         src/Level/Editing/LevelEdit.cpp
         src/Level/Editing/LevelEdit.h
         src/Level/Editing/LevelEdit/Assets/DependencyLookup.inl
-        src/Level/Editing/LevelEdit/Diagnostics/LevProbe.inl
         src/Level/Editing/LevelEdit/Editing/Containers.inl
         src/Level/Editing/LevelEdit/Editing/Lifecycle.inl
         src/Level/Editing/LevelEdit/Editing/Spawns.inl
@@ -541,7 +539,6 @@ set(APP_SOURCES
         src/Level/Skybox/SkyboxPreviewBinding.cpp
         src/Level/Skybox/SkyboxPreviewBinding.h
         src/Level/Skybox/SkyboxRenderer.cpp
-        src/Level/Skybox/SkyboxRenderer/Diagnostics.inl
         src/Level/Skybox/SkyboxRenderer/Shaders/Sources.inl
         src/Level/Skybox/SkyboxRenderer/Shaders/Compile.inl
         src/Level/Skybox/SkyboxRenderer/Textures/Create.inl
@@ -754,11 +751,9 @@ set(APP_SOURCES
         src/UI/ContentTabs.h
 )
 
-# The parsing/terrain/texture hot paths dominate level-load time; compile
-# them optimized even in Debug so the debug build stays usable. /RTC1 is
-# stripped globally because it cannot coexist with per-file /O2.
 if(MSVC)
     string(REPLACE "/RTC1" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+    string(REPLACE "/Od" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
     set(F2AB_HOT_SOURCES
         src/BNKReader.cpp
         src/GDB/GdbParser.cpp
@@ -799,6 +794,21 @@ else()
     )
 endif()
 
+add_library(F2AB_DebugLogger STATIC
+        src/Utilities/DebugLog.cpp
+        src/Utilities/DebugLog.h
+)
+target_include_directories(F2AB_DebugLogger PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+if(WIN32)
+    target_compile_definitions(F2AB_DebugLogger PRIVATE
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX
+    )
+endif()
+target_link_libraries(Fable_2_Asset_Browser PRIVATE F2AB_DebugLogger)
+
 target_compile_definitions(Fable_2_Asset_Browser PRIVATE
         _CRT_SECURE_NO_WARNINGS
         FABLE_ENABLE_RECONSTRUCTED_CLOUD_PREVIEW=$<BOOL:${FABLE_ENABLE_RECONSTRUCTED_CLOUD_PREVIEW}>
@@ -809,6 +819,12 @@ if(FABLE_BUILD_TESTS)
     include(CTest)
 endif()
 if(FABLE_BUILD_TESTS)
+    add_executable(debug_log_tests
+            tests/DebugLogTests.cpp
+    )
+    target_link_libraries(debug_log_tests PRIVATE F2AB_DebugLogger)
+    add_test(NAME debug_log_tests COMMAND debug_log_tests)
+
     add_executable(cloud_runtime_tests
             tests/CloudRuntimeTests.cpp
             src/Level/Skybox/CloudRuntime.cpp
@@ -942,6 +958,7 @@ if(FABLE_BUILD_TESTS)
     add_executable(npc_authoring_tests
             tests/NpcAuthoringTests.cpp
             src/Entity/NpcAuthoring.cpp
+            src/Entity/tests/GameBackupStub.cpp
             src/GDB/GdbEdit.cpp
     )
     target_include_directories(npc_authoring_tests PRIVATE
@@ -951,6 +968,7 @@ if(FABLE_BUILD_TESTS)
     add_executable(static_prop_authoring_tests
             tests/StaticPropAuthoringTests.cpp
             src/Entity/StaticPropAuthoring.cpp
+            src/Entity/tests/GameBackupStub.cpp
             src/GDB/GdbEdit.cpp
     )
     target_include_directories(static_prop_authoring_tests PRIVATE
@@ -994,6 +1012,7 @@ target_link_libraries(shader_bank_extract PRIVATE ZLIB::ZLIB)
 add_executable(quest_script_probe
         tools/quests/QuestScriptProbe.cpp
         src/ISO/IsoMount.cpp
+        src/ISO/IsoWriteback.cpp
         src/Level/Database/TextBank.cpp
         src/Quest/QuestGraph.cpp
         src/Quest/QuestReferences.cpp
@@ -1171,6 +1190,7 @@ if(FABLE_BUILD_TESTS)
             tests/BnkWriterTests.cpp
             src/Level/IO/BnkWriter.cpp
             src/ISO/IsoMount.cpp
+            src/ISO/IsoWriteback.cpp
     )
     target_include_directories(bnk_writer_tests PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -1180,8 +1200,29 @@ if(FABLE_BUILD_TESTS)
     if(WIN32)
         target_compile_definitions(bnk_writer_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     endif()
-    target_link_libraries(bnk_writer_tests PRIVATE ZLIB::ZLIB)
+    target_link_libraries(bnk_writer_tests PRIVATE
+            ZLIB::ZLIB
+            F2AB_DebugLogger
+    )
+    if(MSVC)
+        target_compile_options(bnk_writer_tests PRIVATE
+                "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/Utilities/tests/EnableAssertions.h")
+    else()
+        target_compile_options(bnk_writer_tests PRIVATE
+                "-include${CMAKE_CURRENT_SOURCE_DIR}/src/Utilities/tests/EnableAssertions.h")
+    endif()
     add_test(NAME bnk_writer_tests COMMAND bnk_writer_tests)
+
+    add_executable(iso_writeback_tests
+            src/ISO/tests/IsoWritebackTests.cpp
+            src/ISO/IsoMount.cpp
+            src/ISO/IsoWriteback.cpp
+    )
+    target_include_directories(iso_writeback_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(iso_writeback_tests PRIVATE F2AB_DebugLogger)
+    add_test(NAME iso_writeback_tests COMMAND iso_writeback_tests)
 
     add_executable(blueprint_tests
             src/Quest/Blueprint/tests/BlueprintTests.cpp
@@ -1208,5 +1249,6 @@ if(FABLE_BUILD_TESTS)
             ${iconfontcpp_SOURCE_DIR}
             ${imgui_node_editor_SOURCE_DIR}
     )
+    target_link_libraries(blueprint_tests PRIVATE F2AB_DebugLogger)
     add_test(NAME blueprint_tests COMMAND blueprint_tests)
 endif()

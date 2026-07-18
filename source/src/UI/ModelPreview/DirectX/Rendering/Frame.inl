@@ -567,39 +567,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 std::memcpy(wms.pData, &w, sizeof(w));
                 ctx->Unmap(mp.cbuffer_water, 0);
 
-                UINT tex_mips = 0, tex_w = 0;
-                if (m.srv_diffuse) {
-                    ID3D11Resource* res = nullptr;
-                    m.srv_diffuse->GetResource(&res);
-                    ID3D11Texture2D* t2 = nullptr;
-                    if (res && SUCCEEDED(res->QueryInterface(
-                            __uuidof(ID3D11Texture2D), (void**)&t2))) {
-                        D3D11_TEXTURE2D_DESC tdd{};
-                        t2->GetDesc(&tdd);
-                        tex_mips = tdd.MipLevels;
-                        tex_w = tdd.Width;
-                        t2->Release();
-                    }
-                    if (res) res->Release();
-                }
-                water_debug_line(
-                    "W t=%.4f tex='%s' mips=%u w=%u "
-                    "eye=(%.2f,%.2f,%.2f) sun=(%.5f,%.5f,%.5f) "
-                    "L=(%.5f,%.5f,%.5f) suncol=(%.3f,%.3f,%.3f) "
-                    "ph=(%.5f,%.5f,%.5f,%.5f) sc=(%.4f,%.4f,%.4f,%.4f) "
-                    "bias=(%.3f,%.3f) ns=%.4f "
-                    "reflstr=%.3f glit(bend=%.3f str=%.3f pow=%.1f)\n",
-                    water_time, m.diffuse_tex_name.c_str(),
-                    tex_mips, tex_w,
-                    cam.pos[0], cam.pos[1], cam.pos[2],
-                    sun_dir_f.x, sun_dir_f.y, sun_dir_f.z,
-                    w.w_light[0], w.w_light[1], w.w_light[2],
-                    w.w_sun[0], w.w_sun[1], w.w_sun[2],
-                    w.w_ph01[0], w.w_ph01[1], w.w_ph01[2], w.w_ph01[3],
-                    w.w_sc01[0], w.w_sc01[1], w.w_sc01[2], w.w_sc01[3],
-                    w.w_bias[0], w.w_bias[1], w.w_bias[2],
-                    w.w_deep[3], w.w_reflp[2], w.w_reflp[3],
-                    w.w_glit[0]);
             }
 
             ctx->VSSetShader(mp.vs_water, nullptr, 0);
@@ -842,13 +809,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 ctx->Unmap(mp.cbuffer_weather, 0);
             }
 
-            water_debug_line(
-                "X t=%.4f rain=%d snow=%d rain_size=%.3f snow_size=%.3f "
-                "wind=(%.2f,%.2f)\n",
-                sky_time, (int)rain_count, (int)snow_count,
-                rain_size, snow_size,
-                mp.weather_wind[0], mp.weather_wind[1]);
-
             ctx->IASetInputLayout(nullptr);
             ctx->IASetPrimitiveTopology(
                 D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -969,18 +929,6 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
 
     if ((mp.selected_pick_id != 0 || mp.selected_pick_hash != 0) &&
         mp.dssNoWriteLEqual) {
-        static uint32_t s_dbg_id = 0;
-        static uint64_t s_dbg_hash = 0;
-        const bool dbg_new = s_dbg_id != mp.selected_pick_id ||
-                             s_dbg_hash != mp.selected_pick_hash;
-        if (dbg_new) {
-            s_dbg_id = mp.selected_pick_id;
-            s_dbg_hash = mp.selected_pick_hash;
-            DebugTrace::log("hl: begin id=%u hash=%llu",
-                            mp.selected_pick_id,
-                            (unsigned long long)mp.selected_pick_hash);
-        }
-        size_t dbg_matched = 0;
         ctx->VSSetConstantBuffers(0, 1, &mp.cbuffer);
         ctx->PSSetConstantBuffers(0, 1, &mp.cbuffer);
         ctx->OMSetDepthStencilState(mp.dssNoWriteLEqual, 0);
@@ -1005,11 +953,7 @@ void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam){
                 if (ex && ex->deleted) continue;
                 upload_per_mesh_cb(true, false, false, false, ex);
                 draw_regular_range(m, pr.index_start, pr.index_count, bs);
-                ++dbg_matched;
             }
-        }
-        if (dbg_new) {
-            DebugTrace::log("hl: done matched=%zu", dbg_matched);
         }
     }
     ctx->Release();

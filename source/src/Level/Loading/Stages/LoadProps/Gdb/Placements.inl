@@ -130,33 +130,11 @@
                     continue;
                 }
                 if (hit) {
-                    if (is_bridge_debug_path(hit->full_path)) {
-                        std::ostringstream bridge;
-                        bridge << "GDB CANDIDATE entity=\"" << p.entity_name
-                               << "\" entity_key=\"" << entity_key
-                               << "\" entity_hash=0x" << std::hex << p.hash_a
-                               << " parent_hash=0x" << p.parent_hash
-                               << " model_path_hash=0x" << p.model_path_hash
-                               << std::dec << " indexed=" << p.indexed_record
-                               << " exact_model_hash="
-                               << matched_model_path_hash
-                               << " pos=(" << p.x << ", " << p.y << ", "
-                               << p.z << ") scale=" << p.scale
-                               << " resolved_model=" << hit->full_path;
-                        bridge_debug_write(bridge.str());
-                    }
-
-
-
-
-                    if (is_bridge_debug_path(hit->full_path) &&
+                    if (is_bridge_path(hit->full_path) &&
                         !matched_model_path_hash) {
                         add_gdb_interest_row(
                             p, entity_key, gdb_interest_category,
                             "rejected_fuzzy_bridge_match", hit->full_path);
-                        bridge_debug_write(
-                            "REJECTED FUZZY BRIDGE CANDIDATE entity=\"" +
-                            p.entity_name + "\" model=" + hit->full_path);
                         continue;
                     }
                     const std::string path_category =
@@ -555,4 +533,3 @@
                 }
                 ++gdb_instances_emitted;
             }
-

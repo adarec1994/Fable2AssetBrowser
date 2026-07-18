@@ -7,10 +7,6 @@ bool resolve_texture_targets(const std::string& preferred_bnk,
         preferred_nested_it != S.nested_bnk_parents.end();
     const std::string preferred_nested_parent =
         preferred_is_nested ? preferred_nested_it->second : std::string();
-    DebugTrace::log(
-        "texture-replace: resolve selected='%s' index=%d nested=%d parent='%s'",
-        preferred_bnk.c_str(), preferred_index, preferred_is_nested ? 1 : 0,
-        preferred_nested_parent.c_str());
     BnkCache::Entry selected;
     try {
         selected = BnkCache::get(preferred_bnk);
@@ -25,8 +21,6 @@ bool resolve_texture_targets(const std::string& preferred_bnk,
         return false;
     }
     out.virtual_path = selected_files[(size_t)preferred_index].name;
-    DebugTrace::log("texture-replace: selected entry='%s' bank_entries=%zu",
-                    out.virtual_path.c_str(), selected_files.size());
     const std::string key = normalized_path(out.virtual_path);
     const std::filesystem::path preferred_parent =
         std::filesystem::path(preferred_bnk).parent_path();
@@ -95,9 +89,5 @@ bool resolve_texture_targets(const std::string& preferred_bnk,
             }
         }
     }
-    DebugTrace::log(
-        "texture-replace: targets header='%s'[%d] mip='%s'[%d] body='%s'[%d]",
-        out.header.path.c_str(), out.header.index, out.mip0.path.c_str(),
-        out.mip0.index, out.body.path.c_str(), out.body.index);
     return true;
 }

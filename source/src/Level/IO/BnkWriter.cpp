@@ -9,6 +9,7 @@
 
 #include "BNKReader.cpp"
 #include "ISO/IsoMount.h"
+#include "ISO/IsoWriteback.h"
 #include "UI/OutputLog.h"
 #include "Utilities/Progress.h"
 #include "Utilities/State.h"
@@ -329,15 +330,30 @@ bool RebuildWithChanges(const std::string& bnk_path,
         err = "no BNK changes given";
         return false;
     }
+    const bool iso_path = ISO::IsoMount::is_iso_path(bnk_path);
     std::error_code ec;
-    if (!std::filesystem::is_regular_file(bnk_path, ec)) {
-        err = "BNK is not a loose file on disk";
+    if (!iso_path && !std::filesystem::is_regular_file(bnk_path, ec)) {
+        err = "BNK was not found";
         return false;
     }
 
     progress_update(10, 100, "Reading level BNK...");
     std::vector<uint8_t> src;
-    {
+    if (iso_path) {
+        const std::string member =
+            ISO::IsoMount::strip_iso_prefix(bnk_path);
+        const ISO::MountedFile* file =
+            ISO::IsoMount::instance().find(member);
+        if (!file) {
+            err = "BNK was not found in the ISO";
+            return false;
+        }
+        src = ISO::IsoMount::instance().read_file(member);
+        if (src.size() != file->size) {
+            err = "short read of " + bnk_path;
+            return false;
+        }
+    } else {
         std::ifstream f(bnk_path, std::ios::binary);
         if (!f) { err = "could not open " + bnk_path; return false; }
         f.seekg(0, std::ios::end);
@@ -613,6 +629,18 @@ bool RebuildWithChanges(const std::string& bnk_path,
     }
 
     progress_update(80, 100, "Writing level BNK...");
+    if (iso_path) {
+        if (!ISO::Writeback::WriteMember(bnk_path, out, true, err)) {
+            return false;
+        }
+        OutputLog::success("bnk: rebuilt " +
+                           std::filesystem::path(
+                               ISO::IsoMount::strip_iso_prefix(bnk_path))
+                               .filename().string() +
+                           " inside the ISO (" +
+                           std::to_string(out.size()) + " bytes)");
+        return true;
+    }
     const std::string tmp = bnk_path + ".tmp_write";
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
@@ -662,6 +690,10 @@ bool RebuildIsoLevelBnk(const std::string& virtual_path,
                         std::string& err) {
     auto& iso = ISO::IsoMount::instance();
     if (!iso.is_mounted()) { err = "no ISO mounted"; return false; }
+    if (!ISO::Writeback::EnsureBackedUp(
+            {ISO::IsoMount::make_iso_path(virtual_path)}, err)) {
+        return false;
+    }
     const ISO::MountedFile* mf = iso.find(virtual_path);
     if (!mf) { err = "not found in ISO: " + virtual_path; return false; }
 

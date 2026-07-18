@@ -1,9 +1,6 @@
                                 std::string aerr;
                                 if (!BnkWriter::AddEntriesToBnkBytes(
                                         models_blob, mdl_adds, aerr)) {
-                                    DebugTrace::log(
-                                        "save: models bank add failed: "
-                                        "%s", aerr.c_str());
                                 } else {
                                     bake_models_index = models_idx;
                                     bake_models_bytes =
@@ -45,10 +42,6 @@
                                             bake_lvstream_bytes =
                                                 std::move(lvs);
                                         } else if (!fresh.empty()) {
-                                            DebugTrace::log(
-                                                "save: level streaming "
-                                                "add failed: %s",
-                                                serr.c_str());
                                         }
                                     }
                                 }
@@ -59,16 +52,12 @@
                         bake_ed_bytes.clear();
                         bake_lmp_index = -1;
                         bake_lmp_bytes.clear();
-                        DebugTrace::log(
-                            "save: engine_data/lmp patch failed: %s",
-                            ex.what());
                     } catch (...) {
                         bake_ed_index = -1;
                         bake_ed_bytes.clear();
                         bake_lmp_index = -1;
                         bake_lmp_bytes.clear();
                     }
-                }
                 s.saving = true;
             }
         } else {
@@ -83,7 +72,5 @@
                                           : "no locator") + ")";
         }
         if (!need_bake) {
-            DebugTrace::log("save: bake not started:%s",
-                            bake_note.c_str());
         }
     }

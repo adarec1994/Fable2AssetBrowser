@@ -101,7 +101,3 @@
                                     " placed model(s)");
                             }
                         }
-
-                        bridge_debug_dump_blocks(
-                            "FINAL RENDER PROP PIPELINE",
-                            g_pending_level_prop_blocks);

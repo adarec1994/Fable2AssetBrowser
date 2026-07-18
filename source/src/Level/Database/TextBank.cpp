@@ -1,6 +1,7 @@
 #include "TextBank.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -8,6 +9,8 @@
 
 #include <zlib.h>
 
+#include "ISO/IsoMount.h"
+#include "ISO/IsoWriteback.h"
 #include "UI/OutputLog.h"
 
 namespace TextBank {
@@ -193,6 +196,14 @@ bool parse_bank(const std::vector<uint8_t>& d, Bank& b) {
 }
 
 bool read_file(const std::string& path, std::vector<uint8_t>& out) {
+    if (ISO::IsoMount::is_iso_path(path)) {
+        const std::string member = ISO::IsoMount::strip_iso_prefix(path);
+        const ISO::MountedFile* file =
+            ISO::IsoMount::instance().find(member);
+        if (!file) return false;
+        out = ISO::IsoMount::instance().read_file(member);
+        return out.size() == file->size;
+    }
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
     f.seekg(0, std::ios::end);
@@ -206,6 +217,30 @@ bool read_file(const std::string& path, std::vector<uint8_t>& out) {
 std::vector<std::string> find_babels(const std::string& root_dir) {
     namespace fs = std::filesystem;
     std::vector<std::string> out;
+    ISO::IsoMount& iso = ISO::IsoMount::instance();
+    if (iso.is_mounted() && root_dir == iso.iso_path()) {
+        for (const ISO::MountedFile& file : iso.list_recursive(".babel")) {
+            std::string lowered = file.path;
+            std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                           [](unsigned char c) {
+                               return static_cast<char>(std::tolower(c));
+                           });
+            std::replace(lowered.begin(), lowered.end(), '\\', '/');
+            if (lowered.size() >= 16 &&
+                lowered.compare(lowered.size() - 16, 16,
+                                "/text/book.babel") == 0) {
+                out.push_back(ISO::IsoMount::make_iso_path(file.path));
+            }
+        }
+        std::sort(out.begin(), out.end(),
+                  [](const std::string& a, const std::string& b) {
+                      const bool ea = a.find("en-") != std::string::npos;
+                      const bool eb = b.find("en-") != std::string::npos;
+                      if (ea != eb) return ea;
+                      return a < b;
+                  });
+        return out;
+    }
     std::error_code ec;
     fs::path lang = fs::path(root_dir) / "data" / "language";
     if (!fs::is_directory(lang, ec)) return out;
@@ -354,6 +389,9 @@ bool rewrite_file(const std::string& path,
     out.insert(out.end(), comp.begin(), comp.end());
     out.insert(out.end(), d.begin() + tail_start, d.end());
 
+    if (ISO::IsoMount::is_iso_path(path)) {
+        return ISO::Writeback::WriteMember(path, out, true, err);
+    }
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) {
         err = "cannot write " + path;

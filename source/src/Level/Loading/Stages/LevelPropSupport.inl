@@ -1,7 +1,7 @@
 #include "LevelPropSupport/Models/Sockets.inl"
 #include "LevelPropSupport/Models/Types.inl"
 #include "LevelPropSupport/Transforms/Math.inl"
-#include "LevelPropSupport/Diagnostics/Bridge.inl"
+#include "LevelPropSupport/Paths/Normalise.inl"
 #include "LevelPropSupport/Models/NamesAndPayload.inl"
 #include "LevelPropSupport/Filtering/Shells.inl"
 #include "LevelPropSupport/Keys/Identification.inl"

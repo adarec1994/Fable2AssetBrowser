@@ -47,9 +47,6 @@ void CreateD3D11Resources(ID3D11Device* device, ModelPreview& preview)
                 &preview.ps_sky_dome);
             OutputLog::info("sky dome: retail xenos translation active");
         }
-        SkyDomeDebug(std::string("create: vs_dome=") +
-                     (preview.vs_sky_dome ? "ok" : "null") +
-                     " ps_dome=" + (preview.ps_sky_dome ? "ok" : "null"));
         if (vertex_blob) vertex_blob->Release();
         if (pixel_blob) pixel_blob->Release();
 
@@ -154,12 +151,6 @@ void CreateD3D11Resources(ID3D11Device* device, ModelPreview& preview)
         if (stars_vs_blob) stars_vs_blob->Release();
         if (stars_ps_blob) stars_ps_blob->Release();
 
-        SkyDomeDebug(std::string("create: vs_element=") +
-                     (preview.vs_sky_element ? "ok" : "null") +
-                     " ps_element=" +
-                     (preview.ps_sky_element ? "ok" : "null") +
-                     " vs_stars=" +
-                     (preview.vs_sky_stars ? "ok" : "null"));
     }
 
     {

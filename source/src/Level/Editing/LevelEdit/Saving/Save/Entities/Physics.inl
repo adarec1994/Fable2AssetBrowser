@@ -18,9 +18,6 @@
         if (!save_rewrite_bytes.empty()) {
             save_physics_patched = apply_save_physics_patches(
                 save_rewrite_bytes, save_physics_patches);
-            DebugTrace::log(
-                "save: .save PhysicsData patched %zu of %zu entit(ies)",
-                save_physics_patched, save_physics_patches.size());
             if (save_physics_patched == 0 &&
                 new_entities_created == 0 &&
                 generators_created == 0 &&
@@ -30,7 +27,5 @@
                 save_rewrite_bnk.clear();
             }
         } else {
-            DebugTrace::log(
-                "save: .save entry unavailable for PhysicsData patches");
         }
     }

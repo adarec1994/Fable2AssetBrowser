@@ -5,6 +5,6 @@
 #include "LoadProps/Gdb/Placements.inl"
 #include "LoadProps/Gdb/MarketShells.inl"
 #include "LoadProps/Gdb/NoHashShells.inl"
-#include "LoadProps/Gdb/Diagnostics.inl"
+#include "LoadProps/Gdb/Finalise.inl"
 #include "LoadProps/Havok/Fallback.inl"
 #include "LoadProps/Finalize/Append.inl"

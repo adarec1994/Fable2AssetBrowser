@@ -62,12 +62,9 @@ bool inject_entries(const std::vector<PendingEntry>& entries,
     struct Snap { std::string path; std::vector<uint8_t> bytes; };
     std::vector<Snap> snaps;
     for (auto& [path, t] : targets) {
-        std::ifstream f(path, std::ios::binary);
-        if (!f) { err = "could not read " + path; return false; }
         Snap s;
         s.path = path;
-        s.bytes.assign((std::istreambuf_iterator<char>(f)),
-                       std::istreambuf_iterator<char>());
+        if (!read_mutable_file(path, s.bytes, err)) return false;
         snaps.push_back(std::move(s));
     }
 
@@ -83,9 +80,8 @@ bool inject_entries(const std::vector<PendingEntry>& entries,
 
     if (done != targets.size()) {
         for (const Snap& s : snaps) {
-            std::ofstream f(s.path, std::ios::binary | std::ios::trunc);
-            if (f) f.write((const char*)s.bytes.data(),
-                           (std::streamsize)s.bytes.size());
+            std::string restore_error;
+            restore_mutable_file(s.path, s.bytes, restore_error);
             BnkCache::invalidate(s.path);
         }
         return false;

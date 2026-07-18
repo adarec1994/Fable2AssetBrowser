@@ -15,14 +15,6 @@ constexpr float kMinLife = 0.02f;
 
 constexpr float kFallGravity = 3.0f;
 
-bool name_is_faller(const std::string& n) {
-    std::string s;
-    for (char c : n) s.push_back((char)std::tolower((unsigned char)c));
-    auto has = [&](const char* k) { return s.find(k) != std::string::npos; };
-    return has("water") || has("fall") || has("splash") || has("dust") ||
-           has("rain") || has("drip") || has("pour");
-}
-
 std::string to_lower(std::string s) {
     for (char& c : s) c = (char)std::tolower((unsigned char)c);
     return s;
@@ -99,7 +91,6 @@ void System::build(const Bank& bank, std::vector<Placement>& places) {
 
         const float sc = (p.scale > 0.0001f) ? p.scale : 1.0f;
         const float cy = std::cos(p.yaw), sy = std::sin(p.yaw);
-        (void)name_is_faller;
 
         auto rot_game = [&](const float v[3], float out[3]) {
             if (p.has_rot) {

@@ -1,6 +1,7 @@
 #include "BlueprintCompiler.h"
 
 #include "BlueprintNodeRegistry.h"
+#include "Utilities/DebugLog.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -467,6 +468,7 @@ std::vector<Quest::AuthoredNode> CollectPrerequisites(
 }
 
 CompileResult Compile(const BlueprintQuest& quest) {
+    DebugLog::Scope debug_scope("Compile quest blueprint", quest.quest_id);
     CompileResult result;
     std::vector<const Node*> events;
     validate(quest, result, events);
@@ -645,6 +647,8 @@ CompileResult Compile(const BlueprintQuest& quest) {
     }
 
     result.quest_lua = lua.str();
+    debug_scope.Result("success | nodes=" +
+                       std::to_string(quest.nodes.size()));
     return result;
 }
 

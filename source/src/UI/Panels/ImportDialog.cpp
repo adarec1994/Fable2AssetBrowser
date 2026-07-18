@@ -9,7 +9,6 @@
 #include "../../Import/ImageLoad.h"
 #include "../../Level/Core/LevelLoader.h"
 #include "../../Utilities/GameBackup.h"
-#include "../../Utilities/DebugTrace.h"
 #include "../../Utilities/Progress.h"
 #include "../../Utilities/State.h"
 
@@ -356,16 +355,9 @@ void launch_worker() {
         } catch (const std::exception& ex) {
             ok = false;
             err = std::string("unhandled exception: ") + ex.what();
-            if (mode == Mode::TextureReplace) {
-                DebugTrace::log(
-                    "texture-replace: worker exception='%s'", ex.what());
-            }
         } catch (...) {
             ok = false;
             err = "unhandled exception";
-            if (mode == Mode::TextureReplace) {
-                DebugTrace::log("texture-replace: worker unknown exception");
-            }
         }
         progress_done();
         {

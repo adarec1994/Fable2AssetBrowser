@@ -1,6 +1,7 @@
 bool import_folder(const std::string& folder_path, const Options& opt,
                    Result& res, std::string& err)
 {
+    DebugLog::Scope debug_scope("Import folder", folder_path);
     res = Result{};
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -80,5 +81,7 @@ bool import_folder(const std::string& folder_path, const Options& opt,
         err = "every file in the folder failed to import";
         return false;
     }
+    debug_scope.Result("success | files=" + std::to_string(total) +
+                       " | failures=" + std::to_string(failures));
     return true;
 }

@@ -1,5 +1,7 @@
 bool Open(const FlatAssetEntry& entry)
 {
+    DebugLog::Scope debug_scope("Load level", entry.name + " | " +
+                                entry.full_path);
     if (!g_level_export_only_load.load()) {
         OutputLog::info("loading level '" + entry.name + "' ...");
     }
@@ -45,7 +47,6 @@ bool Open(const FlatAssetEntry& entry)
                          + info.error);
         return false;
     }
-    bridge_debug_dump_blocks("RAW ENGINE_LEVEL BLOCKS", info.prop_blocks);
     if (bail_if_cancelled("after-parse")) return false;
 
     info.source_path = entry.full_path;
@@ -161,4 +162,3 @@ bool Open(const FlatAssetEntry& entry)
         }
         return true;
     };
-

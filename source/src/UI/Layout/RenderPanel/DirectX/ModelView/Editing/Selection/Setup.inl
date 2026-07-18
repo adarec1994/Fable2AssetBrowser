@@ -121,21 +121,3 @@
                                  !LevelEdit::Saving() &&
                                  (whole_mesh_sel || sel_found) &&
                                  sel_finite;
-
-        static int      s_dbg_idx = -2;
-        static uint32_t s_dbg_id  = 0xFFFFFFFFu;
-        const bool dbg_sel_changed =
-            s_dbg_idx != ::g_selected_level_mesh_idx ||
-            s_dbg_id  != ::g_selected_level_pick_id;
-        if (dbg_sel_changed) {
-            s_dbg_idx = ::g_selected_level_mesh_idx;
-            s_dbg_id  = ::g_selected_level_pick_id;
-            DebugTrace::log(
-                "sel: idx=%d id=%u hash=%llu ranges=%zu found=%d whole=%d "
-                "finite=%d pos=(%.2f,%.2f,%.2f) edit_active=%d",
-                ::g_selected_level_mesh_idx, ::g_selected_level_pick_id,
-                (unsigned long long)::g_selected_level_hash,
-                sel_mesh.pick_ranges.size(), sel_found ? 1 : 0,
-                whole_mesh_sel ? 1 : 0, sel_finite ? 1 : 0,
-                sel_pos[0], sel_pos[1], sel_pos[2], edit_active ? 1 : 0);
-        }

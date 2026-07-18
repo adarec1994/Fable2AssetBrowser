@@ -4,9 +4,6 @@ bool CompileShader(const char* source,
                    ID3DBlob** blob)
 {
     UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
-#ifdef _DEBUG
-    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#endif
     ID3DBlob* errors = nullptr;
     const HRESULT result = D3DCompile(
         source, std::strlen(source), nullptr, nullptr, nullptr,

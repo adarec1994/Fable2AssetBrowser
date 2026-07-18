@@ -98,4 +98,6 @@
         }
     }
     if (reload_needed) Level::OpenAsync(reload_entry);
-    return rebuilt && contents_ok;
+    const bool success = rebuilt && contents_ok;
+    debug_scope.Result(success ? "success" : "failed | " + msg);
+    return success;

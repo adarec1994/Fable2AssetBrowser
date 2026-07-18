@@ -1,6 +1,7 @@
 bool import_image(const std::string& img_path, const Options& opt,
                   Result& res, std::string& err)
 {
+    DebugLog::Scope debug_scope("Import texture", img_path);
     res = Result{};
     const std::string stem =
         std::filesystem::path(img_path).stem().string();
@@ -38,5 +39,6 @@ bool import_image(const std::string& img_path, const Options& opt,
                         std::to_string(built.width) + "x" +
                         std::to_string(built.height) + ", " +
                         std::to_string(built.mip_count) + " mips)");
+    debug_scope.Result("success | " + vpath);
     return true;
 }

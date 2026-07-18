@@ -125,8 +125,11 @@ bool write_bytes_at(const std::string& path_or_bnk,
     if (ISO::IsoMount::is_iso_path(path_or_bnk)) {
         const std::string vpath =
             ISO::IsoMount::strip_iso_prefix(path_or_bnk);
+        if (!ISO::Writeback::EnsureBackedUp({path_or_bnk}, err)) {
+            return false;
+        }
         if (!ISO::IsoMount::instance().write_at(vpath, offset, data,
-                                                size)) {
+                                                 size)) {
             err = "ISO in-place write failed (" + vpath + ")";
             return false;
         }

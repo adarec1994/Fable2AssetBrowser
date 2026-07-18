@@ -20,12 +20,18 @@ bool collect_quest_injection_targets(
         std::filesystem::path(S.root_dir) / "data";
     for (const char* filename : {"gamescripts.bnk",
                                  "gamescripts_r.bnk"}) {
-        const std::filesystem::path path = data / filename;
-        std::error_code ec;
-        if (!std::filesystem::is_regular_file(path, ec)) continue;
-
         QuestInjection::BankTarget target;
-        target.path = path.string();
+        if (ISO::IsoMount::instance().is_mounted() &&
+            S.root_dir == ISO::IsoMount::instance().iso_path()) {
+            const std::string member = std::string("data/") + filename;
+            if (!ISO::IsoMount::instance().find(member)) continue;
+            target.path = ISO::IsoMount::make_iso_path(member);
+        } else {
+            const std::filesystem::path path = data / filename;
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(path, ec)) continue;
+            target.path = path.string();
+        }
         target.gameflow_lua_index = BnkCache::find_index(
             target.path, "scripts/quests/gameflow.lua");
         target.gameflow_text_index = BnkCache::find_index(
@@ -49,8 +55,8 @@ bool collect_quest_injection_targets(
         targets.push_back(std::move(target));
     }
     if (targets.empty()) {
-        error = "No loose gamescripts.bnk files were found under the "
-                "selected Fable 2 root.";
+        error = "No gamescripts.bnk files were found in the selected "
+                "Fable 2 source.";
         return false;
     }
     return true;
@@ -114,4 +120,3 @@ void inject_active_authored_quest() {
         g_quest_injection_busy = false;
     }).detach();
 }
-

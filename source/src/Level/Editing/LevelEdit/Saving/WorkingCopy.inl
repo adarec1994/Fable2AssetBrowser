@@ -1,4 +1,5 @@
 bool SaveWorkingCopy(std::string& msg) {
+    DebugLog::Scope debug_scope("Save level working copy");
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
     if (!s.available) {
@@ -21,6 +22,8 @@ bool SaveWorkingCopy(std::string& msg) {
     s.dirty = false;
     msg = "level saved: " + std::to_string(models) +
           " placed model(s), " + std::to_string(gens) + " generator(s)";
+    debug_scope.Result("success | models=" + std::to_string(models) +
+                       " | generators=" + std::to_string(gens));
     return true;
 }
 

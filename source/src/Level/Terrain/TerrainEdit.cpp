@@ -3,6 +3,7 @@
 #include "UI/ModelPreview.h"
 #include "Utilities/State.h"
 #include "ISO/IsoMount.h"
+#include "ISO/IsoWriteback.h"
 #include "UI/OutputLog.h"
 
 #ifdef _WIN32
@@ -520,6 +521,11 @@ bool Save(std::string& out_path_or_error) {
 
     const std::string bnk_vpath =
         ISO::IsoMount::strip_iso_prefix(s.ghf_bnk_path);
+    std::string backup_error;
+    if (!ISO::Writeback::EnsureBackedUp({s.ghf_bnk_path}, backup_error)) {
+        out_path_or_error = backup_error;
+        return false;
+    }
     if (!ISO::IsoMount::instance().write_at(
             bnk_vpath, s.ghf_bnk_entry_offset,
             padded.data(), padded.size()))

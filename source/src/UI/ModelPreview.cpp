@@ -21,15 +21,12 @@
 #include "../Level/Terrain/TerrainPaint.h"
 #include "../Level/Terrain/TerrainSplat.h"
 #include "../Level/Skybox/SkyboxRenderer.h"
-static void water_debug_line(const char*, ...) {}
-
 extern std::vector<Fx::Placement> g_pending_level_fx;
 extern Fx::Bank                   g_particle_bank;
 extern bool                       g_particle_bank_loaded;
 #include "../Utilities/Files.h"
 #include "../Utilities/Utils.h"
 #include "../Utilities/State.h"
-#include "../Utilities/DebugTrace.h"
 #include "../BNKCore.cpp"
 #include "../textures/TexParser.h"
 #include "../textures/LhTexCodec.h"

@@ -4,6 +4,9 @@
 #include "../BNKCore.cpp"
 #include "../Level/IO/BnkWriter.h"
 #include "../Level/Database/TextBank.h"
+#include "../ISO/IsoMount.h"
+#include "../ISO/IsoWriteback.h"
+#include "../Utilities/DebugLog.h"
 
 #include <algorithm>
 #include <cctype>
@@ -17,6 +20,21 @@ namespace {
 
 bool read_file(const std::string& path, std::vector<uint8_t>& bytes,
                std::string& error) {
+    if (ISO::IsoMount::is_iso_path(path)) {
+        const std::string member = ISO::IsoMount::strip_iso_prefix(path);
+        const ISO::MountedFile* file =
+            ISO::IsoMount::instance().find(member);
+        if (!file) {
+            error = "could not find " + path;
+            return false;
+        }
+        bytes = ISO::IsoMount::instance().read_file(member);
+        if (bytes.size() != file->size) {
+            error = "short read of " + path;
+            return false;
+        }
+        return true;
+    }
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         error = "could not read " + path;
@@ -41,6 +59,9 @@ bool read_file(const std::string& path, std::vector<uint8_t>& bytes,
 bool write_file_atomically(const std::string& path,
                            const std::vector<uint8_t>& bytes,
                            std::string& error) {
+    if (ISO::IsoMount::is_iso_path(path)) {
+        return ISO::Writeback::WriteMember(path, bytes, false, error);
+    }
     namespace fs = std::filesystem;
     const std::string temporary = path + ".quest_restore_tmp";
     {
@@ -96,6 +117,8 @@ bool Inject(const std::string& root_dir,
             const std::vector<BankTarget>& targets,
             std::string& result,
             std::string& error) {
+    DebugLog::Scope debug_scope("Inject quest", quest_id + " | banks=" +
+        std::to_string(targets.size()));
     result.clear();
     error.clear();
     if (!Quest::IsValidQuestId(quest_id) || quest_lua.empty() ||
@@ -208,6 +231,7 @@ bool Inject(const std::string& root_dir,
     message << "Saved " << quest_id << " to " << targets.size()
             << " script bank" << (targets.size() == 1 ? "" : "s") << ".";
     result = message.str();
+    debug_scope.Result("success");
     return true;
 }
 

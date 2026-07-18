@@ -46,7 +46,7 @@
                 if (bake_iso) {
                     bake_vpath =
                         ISO::IsoMount::strip_iso_prefix(s.lev.bnk_path);
-                } else {
+                }
                     std::vector<uint32_t> mdl_hashes;
                     for (const auto& a : s.additions) {
                         if (a.removed) continue;
@@ -97,26 +97,13 @@
                                         changed, perr)) {
                                     if (changed) {
                                         bake_ed_index = ed_idx;
-                                        DebugTrace::log(
-                                            "save: engine_data idx=%d "
-                                            "resource list +%zu hash(es)",
-                                            ed_idx, mdl_hashes.size());
                                     } else {
                                         bake_ed_bytes.clear();
-                                        DebugTrace::log(
-                                            "save: engine_data already "
-                                            "lists all placed models");
                                     }
                                 } else {
                                     bake_ed_bytes.clear();
-                                    DebugTrace::log(
-                                        "save: engine_data patch "
-                                        "skipped: %s", perr.c_str());
                                 }
                             } else {
-                                DebugTrace::log(
-                                    "save: engine_data entry not found "
-                                    "(%s)", key.c_str());
                             }
                             const std::string lmp_key = stem + ".lmp";
                             const int lmp_idx = BnkCache::find_index(
@@ -132,24 +119,11 @@
                                                      perr)) {
                                     if (changed) {
                                         bake_lmp_index = lmp_idx;
-                                        DebugTrace::log(
-                                            "save: lmp idx=%d probe "
-                                            "record(s) appended",
-                                            lmp_idx);
                                     } else {
                                         bake_lmp_bytes.clear();
-                                        DebugTrace::log(
-                                            "save: lmp already has all "
-                                            "placed instances");
                                     }
                                 } else {
                                     bake_lmp_bytes.clear();
-                                    DebugTrace::log(
-                                        "save: lmp patch skipped: %s",
-                                        perr.c_str());
                                 }
                             } else {
-                                DebugTrace::log(
-                                    "save: lmp entry not found (%s)",
-                                    lmp_key.c_str());
                             }

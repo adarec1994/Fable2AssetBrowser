@@ -22,6 +22,7 @@
 #include "Utilities/State.h"
 #include "Utilities/Utils.h"
 #include "Utilities/Progress.h"
+#include "Utilities/DebugLog.h"
 #include "BNKCore.cpp"
 #include "UI/OutputLog.h"
 #include "textures/TexParser.h"

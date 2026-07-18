@@ -244,9 +244,4 @@ bool SaveWorkingCopy(std::string& msg);
 
 void ClearEdits();
 
-bool RunLevProbe(const std::string& bnk_path, std::string& msg);
-
-bool RunLevProbeMode(const std::string& bnk_path, bool float_only,
-                     std::string& msg);
-
 }

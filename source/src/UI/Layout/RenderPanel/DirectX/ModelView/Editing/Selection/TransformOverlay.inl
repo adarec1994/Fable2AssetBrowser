@@ -17,7 +17,6 @@
                              | ImGuiWindowFlags_AlwaysAutoResize
                              | ImGuiWindowFlags_NoFocusOnAppearing;
         if (ImGui::Begin("##sel_transform_overlay", nullptr, ofl)) {
-            if (dbg_sel_changed) DebugTrace::log("ov: begin");
             if (edit_active) {
                 const char* mode_name =
                     LevelGizmo::GetMode() == LevelGizmo::Mode::Rotate
@@ -47,7 +46,6 @@
                         apply_group_edit(kEditMove, step);
                     }
                 }
-                if (dbg_sel_changed) DebugTrace::log("ov: pos done");
             } else {
                 ImGui::Text("X: %.3f", sel_pos[0]);
                 ImGui::Text("Y: %.3f", sel_pos[1]);

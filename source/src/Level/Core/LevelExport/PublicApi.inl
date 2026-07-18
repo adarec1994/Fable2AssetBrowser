@@ -13,6 +13,7 @@ void ExportAsync(const FlatAssetEntry& entry, ExportFormat format)
     S.cancel_requested.store(false);
     progress_open(100, "Exporting level...");
     std::thread([entry, format]() {
+        DebugLog::Scope debug_scope("Export level", entry.name);
         struct Guard {
             ~Guard()
             {
@@ -32,7 +33,10 @@ void ExportAsync(const FlatAssetEntry& entry, ExportFormat format)
         }
 
         if (S.cancel_requested.load()) {
+            debug_scope.Result("cancelled");
             OutputLog::warn("Level export cancelled.");
+        } else {
+            debug_scope.Result(ok ? "success" : "failed");
         }
     }).detach();
 }

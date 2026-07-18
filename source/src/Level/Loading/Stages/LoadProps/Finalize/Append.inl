@@ -1,18 +1,4 @@
             size_t extra_blocks = 0, extra_insts = 0;
-            {
-                std::vector<Level::PropBlock> derived_bridge_blocks;
-                for (const auto& kv : blocks_by_path) {
-                    if (is_bridge_debug_path(kv.second.model_path) ||
-                        is_bridge_debug_path(kv.second.lod_model_path) ||
-                        is_bridge_debug_path(kv.second.shadow_model_path) ||
-                        is_bridge_debug_path(kv.second.extra_model_path)) {
-                        derived_bridge_blocks.push_back(kv.second);
-                    }
-                }
-                bridge_debug_dump_blocks(
-                    "DERIVED BLOCKS BEFORE PROP PIPELINE",
-                    derived_bridge_blocks);
-            }
             for (auto& kv : blocks_by_path) {
                 if (kv.second.instances.empty()) continue;
                 ++extra_blocks;

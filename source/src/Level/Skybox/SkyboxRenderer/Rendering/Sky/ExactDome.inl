@@ -63,43 +63,6 @@
             context->Unmap(preview.cbuffer_sky_dome, 0);
         }
 
-        if (debug_now) {
-            std::ostringstream log;
-            log << "  theme: sun_int=" << theme.sun_intensity
-                << " bias=" << theme.complementary_bias
-                << " rayM=" << theme.beta_rayleigh_multiplier
-                << " mieM=" << theme.beta_mie_multiplier
-                << " fogstart=" << theme.fogging_start
-                << "\n  sky=(" << theme.sky_colour[0] << ','
-                << theme.sky_colour[1] << ',' << theme.sky_colour[2]
-                << ") comp=(" << theme.complementary_colour[0] << ','
-                << theme.complementary_colour[1] << ','
-                << theme.complementary_colour[2]
-                << ") sun_engine=(" << theme.sun_direction[0] << ','
-                << theme.sun_direction[1] << ',' << theme.sun_direction[2]
-                << ")\n  betaR=(" << state.beta_rayleigh[0] << ','
-                << state.beta_rayleigh[1] << ',' << state.beta_rayleigh[2]
-                << ") betaM=(" << state.beta_mie[0] << ','
-                << state.beta_mie[1] << ',' << state.beta_mie[2]
-                << ") hg=(" << state.lut_hg[0] << ',' << state.lut_hg[1]
-                << ',' << state.lut_hg[2] << ") cosElev="
-                << state.lut_cos_sun_elevation;
-            std::array<float, SkyDomeXex::kLutWidth * 4> lut_debug{};
-            SkyDomeXex::BuildInScatterLutFloat(state, lut_debug);
-            log << "\n  lut[0]=(" << lut_debug[0] << ',' << lut_debug[1]
-                << ',' << lut_debug[2] << ") lut[63]=("
-                << lut_debug[63 * 4 + 0] << ',' << lut_debug[63 * 4 + 1]
-                << ',' << lut_debug[63 * 4 + 2] << ')'
-                << "\n  cam fwd_engine=(" << constants.camera_forward[0]
-                << ',' << constants.camera_forward[1] << ','
-                << constants.camera_forward[2] << ") tan=("
-                << constants.camera_right[3] << ','
-                << constants.camera_up[3] << ") exposure="
-                << constants.dome_misc[2]
-                << " overlay_srv=" << (preview.sky_overlay_srv != nullptr)
-                << " -> draw";
-            SkyDomeDebug(log.str());
-        }
 
         float blend_factor[4] = {0, 0, 0, 0};
         context->RSSetState(preview.rs);
@@ -355,26 +318,6 @@
             context->VSSetConstantBuffers(6, 1, &null_buffer);
             context->PSSetConstantBuffers(6, 1, &null_buffer);
             context->PSSetShaderResources(0, 1, &null_srv);
-            if (debug_now) {
-                std::ostringstream log;
-                log << "  elements: beams_srv="
-                    << (preview.sky_sun_beams_srv != nullptr)
-                    << " disc_srv="
-                    << (preview.sky_sun_disc_srv != nullptr)
-                    << " glare_srv="
-                    << (preview.sky_sun_glare_srv != nullptr)
-                    << " moon_srv=" << (preview.sky_moon_srv != nullptr)
-                    << " moonglare_srv="
-                    << (preview.sky_moon_glare_srv != nullptr)
-                    << " ep=[";
-                for (int i = 0; i < 16; ++i) {
-                    log << element[i] << (i == 15 ? "]" : ",");
-                }
-                log << " moon_dir=(" << frame.moon_direction[0] << ','
-                    << frame.moon_direction[1] << ','
-                    << frame.moon_direction[2] << ')';
-                SkyDomeDebug(log.str());
-            }
         }
         return;
     }

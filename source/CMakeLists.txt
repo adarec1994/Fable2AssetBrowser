@@ -36,6 +36,23 @@ set(APP_SOURCES
         src/textures/TexParser.cpp
         src/textures/LhTexCodec.cpp
         src/animations/AnimBank.cpp
+        src/animations/AnimBank/State/Reader.inl
+        src/animations/AnimBank/Toc/Parse.inl
+        src/animations/AnimBank/Toc/Load.inl
+        src/animations/AnimBank/Clips/Duration.inl
+        src/animations/AnimBank/Gdb/BasicHelpers.inl
+        src/animations/AnimBank/Gdb/View.inl
+        src/animations/AnimBank/Gdb/StatsAndNames.inl
+        src/animations/AnimBank/Gdb/Traversal.inl
+        src/animations/AnimBank/Gdb/ClipRefs.inl
+        src/animations/AnimBank/Gdb/Bindings.inl
+        src/animations/AnimBank/Gdb/Scanning.inl
+        src/animations/AnimBank/Resolve/Lua.inl
+        src/animations/AnimBank/Resolve/Gdb.inl
+        src/animations/AnimBank/Cache/Internals.inl
+        src/animations/AnimBank/Cache/Load.inl
+        src/animations/AnimBank/Cache/Save.inl
+        src/animations/AnimBank/Bindings/Public.inl
         src/animations/AnimDataFile.cpp
         src/animations/AnimDecoder.cpp
         src/animations/Locomotion.cpp
@@ -46,7 +63,34 @@ set(APP_SOURCES
         src/textures/export/TiffExport.cpp
         src/textures/export/DdsExport.cpp
         src/MDL/ModelParser.cpp
+        src/MDL/ModelParser/Cloth/Blocks.inl
+        src/MDL/ModelParser/Cloth/Geometry.inl
+        src/MDL/ModelParser/Core/BinaryUtilities.inl
+        src/MDL/ModelParser/Engine/Geometry.inl
+        src/MDL/ModelParser/Engine/Records.inl
+        src/MDL/ModelParser/Geometry/Main.inl
+        src/MDL/ModelParser/Loading/BufferAssembly.inl
+        src/MDL/ModelParser/Parsing/Info/Foliage.inl
+        src/MDL/ModelParser/Parsing/Info/HeaderAndMaterials.inl
+        src/MDL/ModelParser/Parsing/Info/StandardBuffers.inl
+        src/MDL/ModelParser/Reparse/Foliage.inl
+        src/MDL/ModelParser/Reparse/MissingBuffers.inl
+        src/MDL/ModelParser/Reparse/MultiInstance.inl
+        src/MDL/ModelParser/Reparse/Polymsh.inl
         src/MDL/MdlFbxExport.cpp
+        src/MDL/MdlFbxExport/Encoding/BufferAndProperties.inl
+        src/MDL/MdlFbxExport/Encoding/Nodes.inl
+        src/MDL/MdlFbxExport/Math/Types.inl
+        src/MDL/MdlFbxExport/Math/Transforms.inl
+        src/MDL/MdlFbxExport/Export/Setup.inl
+        src/MDL/MdlFbxExport/Export/Materials.inl
+        src/MDL/MdlFbxExport/Export/Animations.inl
+        src/MDL/MdlFbxExport/Export/Document.inl
+        src/MDL/MdlFbxExport/Export/Objects/Bones.inl
+        src/MDL/MdlFbxExport/Export/Objects/Meshes.inl
+        src/MDL/MdlFbxExport/Export/Objects/Animation.inl
+        src/MDL/MdlFbxExport/Export/Connections.inl
+        src/MDL/MdlFbxExport/Export/Write.inl
         src/MDL/MdlTexExport.cpp
         src/Import/ImageLoad.cpp
         src/Import/ImageLoad.h
@@ -57,23 +101,101 @@ set(APP_SOURCES
         src/Import/MdlWriter.cpp
         src/Import/MdlWriter.h
         src/Import/AssetImport.cpp
+        src/Import/AssetImport/Bank/InjectionAndValidation.inl
+        src/Import/AssetImport/Textures/Targets.inl
+        src/Import/AssetImport/Textures/Resolve.inl
+        src/Import/AssetImport/Textures/Replace.inl
+        src/Import/AssetImport/Models/SpawnTemplate.inl
+        src/Import/AssetImport/Naming/Sanitize.inl
+        src/Import/AssetImport/Models/ImportGlb.inl
+        src/Import/AssetImport/Textures/ImportImage.inl
+        src/Import/AssetImport/Textures/ReplaceSelected.inl
+        src/Import/AssetImport/Folders/Import.inl
         src/Import/AssetImport.h
         src/Import/Xbox360Tiling.h
         src/UI/Panels/ImportDialog.cpp
         src/UI/Panels/ImportDialog.h
         src/Utilities/Progress.cpp
         src/Utilities/operations.cpp
+        src/Utilities/operations/Paths/Output.inl
+        src/Utilities/operations/Extraction/SelectedRaw.inl
+        src/Utilities/operations/Audio/SelectedWav.inl
+        src/Utilities/operations/Extraction/DumpAll.inl
+        src/Utilities/operations/Audio/Export.inl
+        src/Utilities/operations/Textures/RebuildAll.inl
+        src/Utilities/operations/Models/RebuildAll.inl
+        src/Utilities/operations/Textures/RebuildOne.inl
+        src/Utilities/operations/Models/RebuildOne.inl
+        src/Utilities/operations/Global/DumpAll.inl
+        src/Utilities/operations/Global/Audio.inl
+        src/Utilities/operations/Global/Textures.inl
+        src/Utilities/operations/Global/Models.inl
+        src/Utilities/operations/Animation/Selected.inl
+        src/Utilities/operations/Animation/All.inl
+        src/Utilities/operations/Glb/Selected.inl
+        src/Utilities/operations/Glb/All.inl
+        src/Utilities/operations/Glb/Global.inl
         src/UI/HexView.cpp
         src/UI/OutputLog.cpp
         src/UI/IconButton.cpp
         src/UI/UI_Main.cpp
         src/UI/Panels/Selection.cpp
+        src/UI/Panels/Selection/Audio/Player.inl
+        src/UI/Panels/Selection/Models/Helpers.inl
+        src/UI/Panels/Selection/Gdb/Cache.inl
+        src/UI/Panels/Selection/Banks/Pick.inl
+        src/UI/Panels/Selection/Sources/Iso.inl
+        src/UI/Panels/Selection/Sources/Folder.inl
+        src/UI/Panels/Selection/Models/ReconstructNested.inl
+        src/UI/Panels/Selection/Audio/Paths.inl
+        src/UI/Panels/Selection/Banks/Extract.inl
+        src/UI/Panels/Selection/Models/ReconstructPaired.inl
+        src/UI/Panels/Selection/Export/Helpers.inl
+        src/UI/Panels/Selection/Export/RawAudio.inl
+        src/UI/Panels/Selection/Export/EncodedAudio.inl
+        src/UI/Panels/Selection/Export/Asset.inl
+        src/UI/Panels/Selection/Context/FileMenu.inl
         src/UI/Panels/TreeBuilder.cpp
         src/UI/Panels/TreeRender.cpp
         src/UI/Panels/LeftPanel.cpp
+        src/UI/Panels/LeftPanel/Assets/Selection.inl
+        src/UI/Panels/LeftPanel/Draw/Assets/FlatAssetList.inl
+        src/UI/Panels/LeftPanel/Draw/Layout/Tabs.inl
+        src/UI/Panels/LeftPanel/Draw/Tabs/Animations.inl
+        src/UI/Panels/LeftPanel/Draw/Tabs/AssetLists.inl
+        src/UI/Panels/LeftPanel/Draw/Tabs/Banks.inl
+        src/UI/Panels/LeftPanel/Draw/Tabs/Entities.inl
+        src/UI/Panels/LeftPanel/Draw/Tabs/FileTree.inl
+        src/UI/Panels/LeftPanel/Draw/Tabs/Items.inl
+        src/UI/Panels/LeftPanel/Draw/Tabs/Levels.inl
+        src/UI/Panels/LeftPanel/Draw/Tabs/Quests.inl
+        src/UI/Panels/LeftPanel/Draw/Tabs/ScriptsAndDetails.inl
+        src/UI/Panels/LeftPanel/Drill/Navigation.inl
+        src/UI/Panels/LeftPanel/Drill/State.inl
+        src/UI/Panels/LeftPanel/Drill/TreeOpening.inl
+        src/UI/Panels/LeftPanel/EntityAuthoring/Fields.inl
+        src/UI/Panels/LeftPanel/EntityAuthoring/Modal.inl
+        src/UI/Panels/LeftPanel/EntityAuthoring/Pickers.inl
+        src/UI/Panels/LeftPanel/Layout/Dimensions.inl
+        src/UI/Panels/LeftPanel/Quests/Injection.inl
+        src/UI/Panels/LeftPanel/Quests/Search.inl
+        src/UI/Panels/LeftPanel/Quests/Selection.inl
+        src/UI/Panels/LeftPanel/Scripts/Selection.inl
+        src/UI/Panels/LeftPanel/State/EntityCreation.inl
         src/UI/Panels/FileTable.cpp
         src/UI/Panels/FolderDialog.cpp
         src/UI/Panels/RightPanel.cpp
+        src/UI/Panels/RightPanel/Actions/Primary.inl
+        src/UI/Panels/RightPanel/Actions/HexAndSelection.inl
+        src/UI/Panels/RightPanel/Preview/Load.inl
+        src/UI/Panels/RightPanel/Export/Glb.inl
+        src/UI/Panels/RightPanel/Filters/Extension.inl
+        src/UI/Panels/RightPanel/Search/Global.inl
+        src/UI/Panels/RightPanel/Content/LuaAndTable.inl
+        src/UI/Panels/RightPanel/Pending/Model.inl
+        src/UI/Panels/RightPanel/Pending/Texture.inl
+        src/UI/Panels/RightPanel/Pending/Build.inl
+        src/UI/Panels/RightPanel/Finalize.inl
         src/UI/Panels/PendingLoads.cpp
         src/UI/Panels/PendingLoads/Cache/State.inl
         src/UI/Panels/PendingLoads/Editing/ContainerSpawning.inl
@@ -107,7 +229,38 @@ set(APP_SOURCES
         src/UI/Layout/RenderPanel.cpp
         src/UI/Layout/RenderPanel/Shared/ContentViews.inl
         src/UI/Layout/RenderPanel/DirectX/EntityDetails.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/Overlays/GdbPlacements.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/State/Selection.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/Containers/Labels.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/Containers/AuthoredRules.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/Containers/LootEditor.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/Details/EntityGameplay.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/Details/Property.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/Details/ExistingContainer.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/Details/AdditionContainer.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/Containers/SpawnChoices.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/Quest/LevelReference.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/Selection/SpawnMarker.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/Quest/AddItem.inl
+        src/UI/Layout/RenderPanel/DirectX/EntityDetails/Overlays/SpawnMarkers.inl
         src/UI/Layout/RenderPanel/DirectX/ModelView.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Scene/Setup.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Placement/DragDropAndStarts.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Placement/AddMenu.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Interaction/SkeletonCameraAndRender.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Editing/Markers.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Editing/Selection/Setup.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Editing/Selection/Metadata.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Editing/Selection/TransformOverlay.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Editing/Selection/Inventory.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Editing/Selection/GizmoAndDelete.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Controls/ViewportOverlays.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Materials/MaterialsAndLods.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Editing/Terrain.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Animation/Controls.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Details/Item.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Details/Entity.inl
+        src/UI/Layout/RenderPanel/DirectX/ModelView/Popout/Texture.inl
         src/UI/Layout/RenderPanel/DirectX/Popouts.inl
         src/UI/Layout/RenderPanel/DirectX/PublicApi.inl
         src/UI/Layout/RenderPanel/DirectX/SceneInteraction.inl
@@ -126,14 +279,61 @@ set(APP_SOURCES
         src/ISO/IsoExtract.cpp
         src/ISO/IsoMount.cpp
         src/ISO/IsoDump.cpp
+        src/ISO/IsoDump/Internal/IsoCopy.inl
+        src/ISO/IsoDump/Dump/IsoContents.inl
+        src/ISO/IsoDump/Common/OutputAndBnk.inl
+        src/ISO/IsoDump/Models/Reconstruct.inl
+        src/ISO/IsoDump/Models/DumpRaw.inl
+        src/ISO/IsoDump/Models/ExportHelpers.inl
+        src/ISO/IsoDump/Models/DumpConverted.inl
+        src/ISO/IsoDump/Textures/Reconstruct.inl
+        src/ISO/IsoDump/Textures/DumpRaw.inl
+        src/ISO/IsoDump/Textures/DumpConverted.inl
+        src/ISO/IsoDump/Audio/DumpRaw.inl
+        src/ISO/IsoDump/Audio/DumpConverted.inl
+        src/ISO/IsoDump/Bnk/DumpContents.inl
+        src/ISO/IsoDump/Gdb/DumpSave.inl
         src/MDL/mdl_converter.cpp
         src/Level/Core/LevelLoader.cpp
+        src/Level/Core/LevelLoader/State/Globals.inl
+        src/Level/Core/LevelLoader/Platform/LinuxPreview.inl
+        src/Level/Core/LevelLoader/Models/GlobalLookup.inl
+        src/Level/Core/LevelLoader/Async/Loading.inl
+        src/Level/Core/LevelLoader/Open/Progress.inl
+        src/Level/Core/LevelLoader/Open/Parsing.inl
+        src/Level/Core/LevelLoader/Open/Resources/Heightfields.inl
+        src/Level/Core/LevelLoader/Open/Resources/Vfs.inl
+        src/Level/Core/LevelLoader/Open/Content.inl
+        src/Level/Core/LevelLoader/Open/Collision.inl
+        src/Level/Core/LevelLoader/Open/Terrain/Main.inl
+        src/Level/Core/LevelLoader/Open/Terrain/Adjacent/Helpers.inl
+        src/Level/Core/LevelLoader/Open/Terrain/Adjacent/Loading.inl
+        src/Level/Core/LevelLoader/Open/Terrain/PendingState.inl
+        src/Level/Core/LevelLoader/Open/Terrain/Props.inl
+        src/Level/Core/LevelLoader/Open/Terrain/PlacementValidation.inl
+        src/Level/Core/LevelLoader/Open/Terrain/Water.inl
+        src/Level/Core/LevelLoader/Open/Terrain/Handoff.inl
         src/Level/Core/LevelLoader.h
         src/Level/Loading/LevelBinaryReader.h
         src/Level/Loading/EngineLevelParser.cpp
         src/Level/Loading/LevelCatalogLoader.cpp
         src/Level/Loading/LevelCatalogLoaderInternal.h
         src/Level/Loading/LevelTerrainLoader.cpp
+        src/Level/Loading/LevelTerrainLoader/Preview/Heightmap.inl
+        src/Level/Loading/LevelTerrainLoader/Preview/Pf99.inl
+        src/Level/Loading/LevelTerrainLoader/Atlas/Decode.inl
+        src/Level/Loading/LevelTerrainLoader/Tiles/DescriptorsAndParsing.inl
+        src/Level/Loading/LevelTerrainLoader/Tiles/EmbeddedBc1.inl
+        src/Level/Loading/LevelTerrainLoader/Tiles/Compositing.inl
+        src/Level/Loading/LevelTerrainLoader/Vista/PageDecode.inl
+        src/Level/Loading/LevelTerrainLoader/Vista/PatchGeometry.inl
+        src/Level/Loading/LevelTerrainLoader/Vista/Public.inl
+        src/Level/Loading/LevelTerrainLoader/Albedo/Decode.inl
+        src/Level/Loading/LevelTerrainLoader/Albedo/PaletteFallback.inl
+        src/Level/Loading/LevelTerrainLoader/Composite/Wrappers.inl
+        src/Level/Loading/LevelTerrainLoader/Composite/Setup.inl
+        src/Level/Loading/LevelTerrainLoader/Composite/Sampling.inl
+        src/Level/Loading/LevelTerrainLoader/Composite/Paint.inl
         src/Level/Loading/LevelTerrainMesh.cpp
         src/Level/Loading/LevelTerrainLoaderInternal.h
         src/Level/Loading/Stages/LoadContainers.inl
@@ -141,8 +341,41 @@ set(APP_SOURCES
         src/Level/Loading/Stages/LoadEntities.inl
         src/Level/Loading/Stages/LoadEnvironment.inl
         src/Level/Loading/Stages/LoadProps.inl
+        src/Level/Loading/Stages/LoadProps/Finalize/Append.inl
+        src/Level/Loading/Stages/LoadProps/Gdb/Diagnostics.inl
+        src/Level/Loading/Stages/LoadProps/Gdb/GmdLayouts.inl
+        src/Level/Loading/Stages/LoadProps/Gdb/MarketShells.inl
+        src/Level/Loading/Stages/LoadProps/Gdb/NoHashShells.inl
+        src/Level/Loading/Stages/LoadProps/Gdb/Placements.inl
+        src/Level/Loading/Stages/LoadProps/Gdb/State.inl
+        src/Level/Loading/Stages/LoadProps/Havok/Fallback.inl
+        src/Level/Loading/Stages/LoadProps/Placements/Initial.inl
+        src/Level/Loading/Stages/LoadProps/Resolution/ModelIndex.inl
         src/Level/Loading/Stages/LevelPropSupport.inl
+        src/Level/Loading/Stages/LevelPropSupport/Models/Sockets.inl
+        src/Level/Loading/Stages/LevelPropSupport/Models/Types.inl
+        src/Level/Loading/Stages/LevelPropSupport/Transforms/Math.inl
+        src/Level/Loading/Stages/LevelPropSupport/Diagnostics/Bridge.inl
+        src/Level/Loading/Stages/LevelPropSupport/Models/NamesAndPayload.inl
+        src/Level/Loading/Stages/LevelPropSupport/Filtering/Shells.inl
+        src/Level/Loading/Stages/LevelPropSupport/Keys/Identification.inl
+        src/Level/Loading/Stages/LevelPropSupport/Streaming/Resolution.inl
+        src/Level/Loading/Stages/LevelPropSupport/Streaming/Scoring.inl
         src/Level/Core/LevelExport.cpp
+        src/Level/Core/LevelExport/State/Helpers.inl
+        src/Level/Core/LevelExport/IO/Files.inl
+        src/Level/Core/LevelExport/Terrain/Glb.inl
+        src/Level/Core/LevelExport/Terrain/Fbx/Encoding.inl
+        src/Level/Core/LevelExport/Terrain/Fbx/Write.inl
+        src/Level/Core/LevelExport/Terrain/Weights.inl
+        src/Level/Core/LevelExport/Scene/Instances.inl
+        src/Level/Core/LevelExport/Scene/Json.inl
+        src/Level/Core/LevelExport/Run/SetupAndModels.inl
+        src/Level/Core/LevelExport/Run/Terrain.inl
+        src/Level/Core/LevelExport/Run/ManifestModels.inl
+        src/Level/Core/LevelExport/Run/ManifestTerrain.inl
+        src/Level/Core/LevelExport/Run/Finish.inl
+        src/Level/Core/LevelExport/PublicApi.inl
         src/Level/Core/LevelExport.h
         src/Level/Terrain/HeightfieldLoader.cpp
         src/Level/Terrain/HeightfieldLoader.h
@@ -179,6 +412,20 @@ set(APP_SOURCES
         src/Level/Editing/LevelEdit/Saving/EntityRemoval.inl
         src/Level/Editing/LevelEdit/Saving/Generators.inl
         src/Level/Editing/LevelEdit/Saving/Save.inl
+        src/Level/Editing/LevelEdit/Saving/Save/Setup.inl
+        src/Level/Editing/LevelEdit/Saving/Save/CollectEdits.inl
+        src/Level/Editing/LevelEdit/Saving/Save/Patching/LevelAndGdb.inl
+        src/Level/Editing/LevelEdit/Saving/Save/Entities/Rewrite.inl
+        src/Level/Editing/LevelEdit/Saving/Save/Entities/Physics.inl
+        src/Level/Editing/LevelEdit/Saving/Save/Bake/Setup.inl
+        src/Level/Editing/LevelEdit/Saving/Save/Bake/LevelData.inl
+        src/Level/Editing/LevelEdit/Saving/Save/Bake/Assets.inl
+        src/Level/Editing/LevelEdit/Saving/Save/Bake/Streaming.inl
+        src/Level/Editing/LevelEdit/Saving/Save/Finalize/DeferredState.inl
+        src/Level/Editing/LevelEdit/Saving/Save/Rebuild/Level.inl
+        src/Level/Editing/LevelEdit/Saving/Save/Rebuild/Entities.inl
+        src/Level/Editing/LevelEdit/Saving/Save/Rebuild/Text.inl
+        src/Level/Editing/LevelEdit/Saving/Save/Finalize/Commit.inl
         src/Level/Editing/LevelEdit/Saving/SaveRouting.inl
         src/Level/Editing/LevelEdit/Saving/SpawnPoints.inl
         src/Level/Editing/LevelEdit/Saving/WorkingCopy.inl
@@ -286,10 +533,35 @@ set(APP_SOURCES
         src/Level/Skybox/CloudXenosSubmission.h
         src/Level/Skybox/EnvironmentTheme.h
         src/Level/Skybox/EnvironmentThemeParser.cpp
+        src/Level/Skybox/EnvironmentThemeParser/Schema/ConstantsAndTypes.inl
+        src/Level/Skybox/EnvironmentThemeParser/Extractor/Public.inl
+        src/Level/Skybox/EnvironmentThemeParser/Extractor/Lookup.inl
+        src/Level/Skybox/EnvironmentThemeParser/Extractor/Apply/Water.inl
+        src/Level/Skybox/EnvironmentThemeParser/Extractor/Apply/Sky.inl
+        src/Level/Skybox/EnvironmentThemeParser/Extractor/Apply/Weather.inl
+        src/Level/Skybox/EnvironmentThemeParser/Extractor/Apply/Cloud.inl
+        src/Level/Skybox/EnvironmentThemeParser/Extractor/Selection.inl
+        src/Level/Skybox/EnvironmentThemeParser/PublicApi.inl
         src/Level/Skybox/EnvironmentThemeParser.h
         src/Level/Skybox/SkyboxPreviewBinding.cpp
         src/Level/Skybox/SkyboxPreviewBinding.h
         src/Level/Skybox/SkyboxRenderer.cpp
+        src/Level/Skybox/SkyboxRenderer/Diagnostics.inl
+        src/Level/Skybox/SkyboxRenderer/Shaders/Sources.inl
+        src/Level/Skybox/SkyboxRenderer/Shaders/Compile.inl
+        src/Level/Skybox/SkyboxRenderer/Textures/Create.inl
+        src/Level/Skybox/SkyboxRenderer/Textures/Release.inl
+        src/Level/Skybox/SkyboxRenderer/Textures/PreferredBank.inl
+        src/Level/Skybox/SkyboxRenderer/Frame/Camera.inl
+        src/Level/Skybox/SkyboxRenderer/Frame/Evaluate.inl
+        src/Level/Skybox/SkyboxRenderer/Resources/ClearColour.inl
+        src/Level/Skybox/SkyboxRenderer/Resources/Create.inl
+        src/Level/Skybox/SkyboxRenderer/Resources/Release.inl
+        src/Level/Skybox/SkyboxRenderer/Resources/Reset.inl
+        src/Level/Skybox/SkyboxRenderer/Rendering/Sky/Setup.inl
+        src/Level/Skybox/SkyboxRenderer/Rendering/Sky/ExactDome.inl
+        src/Level/Skybox/SkyboxRenderer/Rendering/Sky/Fallback.inl
+        src/Level/Skybox/SkyboxRenderer/Rendering/Clouds.inl
         src/Level/Skybox/SkyboxRenderer.h
         src/Level/Skybox/SkyboxTypes.h
         src/Level/Skybox/SkyDomeXex.cpp
@@ -297,6 +569,18 @@ set(APP_SOURCES
         src/Level/Skybox/SkyXexDecomp.cpp
         src/Level/Skybox/SkyXexDecomp.h
         src/Level/Skybox/XenosShaderBinary.cpp
+        src/Level/Skybox/XenosShaderBinary/Metadata/Tables.inl
+        src/Level/Skybox/XenosShaderBinary/Formatting/Destinations.inl
+        src/Level/Skybox/XenosShaderBinary/Formatting/Sources.inl
+        src/Level/Skybox/XenosShaderBinary/Formatting/Instructions.inl
+        src/Level/Skybox/XenosShaderBinary/Decode/ControlFlowBits.inl
+        src/Level/Skybox/XenosShaderBinary/Decode/AluCore.inl
+        src/Level/Skybox/XenosShaderBinary/Decode/VertexFetch.inl
+        src/Level/Skybox/XenosShaderBinary/Patching/VertexFetch.inl
+        src/Level/Skybox/XenosShaderBinary/Decode/Alu.inl
+        src/Level/Skybox/XenosShaderBinary/Decode/TextureFetch.inl
+        src/Level/Skybox/XenosShaderBinary/Decode/Program.inl
+        src/Level/Skybox/XenosShaderBinary/Metadata/OpcodeNames.inl
         src/Level/Skybox/XenosShaderBinary.h
         src/Level/Environment/WaterParser.cpp
         src/Level/Environment/WaterParser.h
@@ -318,6 +602,18 @@ set(APP_SOURCES
         src/Audio/Xma2Codec/XmaBitstream.cpp
         src/Audio/Xma2Codec/XmaTx.cpp
         src/Audio/Xma2Codec/XmaWmaProDecoder.cpp
+        src/Audio/Xma2Codec/XmaWmaProDecoder/State/TablesAndState.inl
+        src/Audio/Xma2Codec/XmaWmaProDecoder/Math/Vector.inl
+        src/Audio/Xma2Codec/XmaWmaProDecoder/Decode/Initialize.inl
+        src/Audio/Xma2Codec/XmaWmaProDecoder/Decode/TilesAndTransforms.inl
+        src/Audio/Xma2Codec/XmaWmaProDecoder/Decode/Coefficients.inl
+        src/Audio/Xma2Codec/XmaWmaProDecoder/Decode/TransformsAndWindow.inl
+        src/Audio/Xma2Codec/XmaWmaProDecoder/Decode/Subframe.inl
+        src/Audio/Xma2Codec/XmaWmaProDecoder/Decode/Frame.inl
+        src/Audio/Xma2Codec/XmaWmaProDecoder/Packet/Bits.inl
+        src/Audio/Xma2Codec/XmaWmaProDecoder/Packet/Decode.inl
+        src/Audio/Xma2Codec/XmaWmaProDecoder/Decoder/Impl.inl
+        src/Audio/Xma2Codec/XmaWmaProDecoder/Decoder/Public.inl
         src/UI/ModelPreview.cpp
         src/UI/ModelPreview.h
         src/UI/ModelPreview/Camera/FlyCam.inl
@@ -348,6 +644,20 @@ set(APP_SOURCES
         src/UI/EntityModelResolver.cpp
         src/UI/EntityModelResolver.h
         src/Lua.cpp
+        src/lua/Bytecode/Definitions.inl
+        src/lua/Bytecode/Reader.inl
+        src/lua/Decompiler/StateAndHelpers.inl
+        src/lua/Decompiler/Driver.inl
+        src/lua/Decompiler/Instructions/Values.inl
+        src/lua/Decompiler/Instructions/Flow.inl
+        src/lua/Decompiler/Instructions/Calls.inl
+        src/lua/Decompiler/Instructions/LoopsAndClosures.inl
+        src/lua/API/Decompile.inl
+        src/lua/API/Bridge.inl
+        src/lua/Paths/Output.inl
+        src/lua/Dump/Read.inl
+        src/lua/Dump/Single.inl
+        src/lua/Dump/All.inl
         src/Lua.h
         src/lua/lua_decompile.h
         src/lua/lua_parse.cpp
@@ -368,8 +678,34 @@ set(APP_SOURCES
         src/lua/Decompiler/Processing/Sequences.inl
         src/lua/Decompiler/Statements/Operations.inl
         src/Quest/QuestGraph.cpp
+        src/Quest/QuestGraph/Core/TypesAndText.inl
+        src/Quest/QuestGraph/Graph/ConstructionHelpers.inl
+        src/Quest/QuestGraph/Narrative/Collection.inl
+        src/Quest/QuestGraph/Narrative/Conditions.inl
+        src/Quest/QuestGraph/Narrative/DescribeActions.inl
+        src/Quest/QuestGraph/Narrative/DescribeStart.inl
+        src/Quest/QuestGraph/Narrative/DescribeWorld.inl
+        src/Quest/QuestGraph/Narrative/Fallback.inl
+        src/Quest/QuestGraph/Parsing/FactsAndReferences.inl
+        src/Quest/QuestGraph/Parsing/ValuesAndWorld.inl
+        src/Quest/QuestGraph/Public/BuildGraph.inl
+        src/Quest/QuestGraph/Public/Names.inl
+        src/Quest/QuestGraph/Public/StringLiterals.inl
         src/Quest/QuestGraph.h
         src/Quest/QuestAuthoring.cpp
+        src/Quest/QuestAuthoring/Lua/Helpers.inl
+        src/Quest/QuestAuthoring/Flow/Validation.inl
+        src/Quest/QuestAuthoring/Childhood/Validation.inl
+        src/Quest/QuestAuthoring/Childhood/Generate.inl
+        src/Quest/QuestAuthoring/Model/Quest.inl
+        src/Quest/QuestAuthoring/Metadata/Names.inl
+        src/Quest/QuestAuthoring/Metadata/Milestones.inl
+        src/Quest/QuestAuthoring/Validation/Simple.inl
+        src/Quest/QuestAuthoring/Text/Entries.inl
+        src/Quest/QuestAuthoring/Generation/QuestLua.inl
+        src/Quest/QuestAuthoring/Generation/Eligibility.inl
+        src/Quest/QuestAuthoring/Generation/Preview.inl
+        src/Quest/QuestAuthoring/Patching/Gameflow.inl
         src/Quest/QuestAuthoring.h
         src/Quest/QuestInjection.cpp
         src/Quest/QuestInjection.h
@@ -378,6 +714,17 @@ set(APP_SOURCES
         src/Quest/QuestRewards.cpp
         src/Quest/QuestRewards.h
         src/Quest/QuestStoryGraph.cpp
+        src/Quest/QuestStoryGraph/Core/TypesAndText.inl
+        src/Quest/QuestStoryGraph/Layout/Branching.inl
+        src/Quest/QuestStoryGraph/Parsing/Classification.inl
+        src/Quest/QuestStoryGraph/Public/BuildStoryGraph.inl
+        src/Quest/QuestStoryGraph/References/Metadata.inl
+        src/Quest/QuestStoryGraph/Story/BeatConstruction.inl
+        src/Quest/QuestStoryGraph/Story/ChildhoodHelpers.inl
+        src/Quest/QuestStoryGraph/Story/NodeEmission.inl
+        src/Quest/QuestStoryGraph/Story/RewardsAndKinds.inl
+        src/Quest/QuestStoryGraph/Timelines/Childhood.inl
+        src/Quest/QuestStoryGraph/Timelines/Frankenbride.inl
         src/Quest/QuestStoryGraph.h
         src/Quest/QuestWorldIndex.cpp
         src/Quest/QuestWorldIndex.h
@@ -386,6 +733,27 @@ set(APP_SOURCES
         src/Entity/StaticPropAuthoring.cpp
         src/Entity/StaticPropAuthoring.h
         src/UI/Quest/QuestNodeView.cpp
+        src/UI/Quest/QuestNodeView/State/StateAndCatalog.inl
+        src/UI/Quest/QuestNodeView/Rendering/IdsColorsAndEditor.inl
+        src/UI/Quest/QuestNodeView/Rendering/Pins.inl
+        src/UI/Quest/QuestNodeView/Rendering/GraphNode.inl
+        src/UI/Quest/QuestNodeView/Authoring/StoryMilestones.inl
+        src/UI/Quest/QuestNodeView/Authoring/NodePresentation.inl
+        src/UI/Quest/QuestNodeView/Pickers/Items.inl
+        src/UI/Quest/QuestNodeView/References/Summary.inl
+        src/UI/Quest/QuestNodeView/Authoring/QuestLifecycle.inl
+        src/UI/Quest/QuestNodeView/Authoring/Prerequisites/Requests.inl
+        src/UI/Quest/QuestNodeView/References/Binding.inl
+        src/UI/Quest/QuestNodeView/Authoring/Prerequisites/Conditions.inl
+        src/UI/Quest/QuestNodeView/Authoring/Npc/Creation.inl
+        src/UI/Quest/QuestNodeView/Authoring/Npc/Instances.inl
+        src/UI/Quest/QuestNodeView/ReadOnly/Helpers.inl
+        src/UI/Quest/QuestNodeView/ReadOnly/Inspector.inl
+        src/UI/Quest/QuestNodeView/References/Catalog.inl
+        src/UI/Quest/QuestNodeView/Graph/Source.inl
+        src/UI/Quest/QuestNodeView/Graph/ViewState.inl
+        src/UI/Quest/QuestNodeView/Graph/Draw.inl
+        src/UI/Quest/QuestNodeView/Graph/Shutdown.inl
         src/UI/Quest/QuestNodeView.h
         src/UI/ContentTabs.cpp
         src/UI/ContentTabs.h

@@ -1,13 +1,11 @@
-bool replace_texture(const std::string& img_path,
-                     const std::string& target_bnk_path,
-                     int target_file_index, const Options& opt,
-                     Result& res, std::string& err) {
-    DebugLog::Scope debug_scope("Replace texture", img_path + " | " +
-        target_bnk_path + " | index=" +
-        std::to_string(target_file_index));
-    res = Result{};
-    std::vector<TextureTargets> groups;
-    std::vector<TexturePart> shared_mip0;
+static bool prepare_replacement(const ImageLoad::Image& decoded,
+                                const std::string& target_bnk_path,
+                                int target_file_index, const Options& opt,
+                                PreparedReplacement& prepared,
+                                std::string& err) {
+    prepared = PreparedReplacement{};
+    std::vector<TextureTargets>& groups = prepared.groups;
+    std::vector<TexturePart>& shared_mip0 = prepared.shared_mip0;
     if (!resolve_all_texture_targets(target_bnk_path, target_file_index,
                                      groups, shared_mip0, err)) {
         return false;
@@ -23,13 +21,6 @@ bool replace_texture(const std::string& img_path,
             target.virtual_path + " | copies: " + std::to_string(headers) +
             " header(s), " + std::to_string(bodies) + " body(ies), " +
             std::to_string(shared_mip0.size()) + " shared mip0 entr(ies)");
-    }
-
-    progress_update(10, 100, "Loading " +
-        std::filesystem::path(img_path).filename().string());
-    ImageLoad::Image decoded;
-    if (!ImageLoad::load_file(img_path, decoded, err)) {
-        return false;
     }
 
     TexWriter::Options texture_options;
@@ -127,8 +118,8 @@ bool replace_texture(const std::string& img_path,
             const uint32_t ds = be32(8);
             if ((cf == 1 || cf == 2 || cf == 3 || cf == 4 || cf == 11) &&
                 mip0_orig.size() >= 52) {
-                true_w = (uint32_t(mip0_orig[48]) << 8) | mip0_orig[49];
-                true_h = (uint32_t(mip0_orig[50]) << 8) | mip0_orig[51];
+                true_w = (uint32_t(mip0_orig[50]) << 8) | mip0_orig[51];
+                true_h = (uint32_t(mip0_orig[48]) << 8) | mip0_orig[49];
             } else if (cf == 7 && ds > 0) {
                 uint64_t pixels = 0;
                 if (orig_format == 35) pixels = (uint64_t)ds * 2;
@@ -228,6 +219,16 @@ bool replace_texture(const std::string& img_path,
                 h = std::max(1u, h >> 1);
             }
         }
+        if (!mirrored &&
+            (mip0_cf == 2 || mip0_cf == 3 || mip0_cf == 4)) {
+            uint32_t w = orig_w;
+            uint32_t h = orig_h;
+            for (uint32_t i = 0; i < orig_mips; ++i) {
+                flags.push_back((w >= 32 && h >= 32) ? mip0_cf : 7u);
+                w = std::max(1u, w >> 1);
+                h = std::max(1u, h >> 1);
+            }
+        }
         if (!flags.empty()) {
             std::string summary;
             bool variant_codec = false;
@@ -243,39 +244,125 @@ bool replace_texture(const std::string& img_path,
                     ? "mirroring original chunk flags ["
                     : "rebuilding chunk flags from the pristine mip0 [") +
                 summary + "]");
-            if (variant_codec) {
+            if (variant_codec &&
+                texture_options.format != TexWriter::Format::BC5Normal) {
                 DebugLog::Write("texture-replace",
-                    "warning: original uses the cf=2/3/4 variant codec "
-                    "(normal maps); those chunks fall back to raw cf=7");
+                    "warning: original uses the cf=2/3/4 variant codec but "
+                    "the texture is not BC5; those chunks fall back to raw "
+                    "cf=7");
             }
             texture_options.match_comp_flags = std::move(flags);
         }
     }
 
-    progress_update(40, 100, "Encoding replacement texture");
-    TexWriter::BuiltTex built;
+    progress_update(40, 100, "Encoding " + target.virtual_path);
     if (!TexWriter::build_from_rgba(
             decoded.rgba.data(), decoded.width, decoded.height,
-            texture_options, built, err)) {
+            texture_options, prepared.built, err)) {
         return false;
     }
-    if (!verify_tex(built, err)) {
+    if (!verify_tex(prepared.built, err)) {
+        return false;
+    }
+    return true;
+}
+
+bool replace_texture(const std::string& img_path,
+                     const std::string& target_bnk_path,
+                     int target_file_index, const Options& opt,
+                     Result& res, std::string& err) {
+    static std::mutex replace_mutex;
+    std::unique_lock<std::mutex> replace_lock(replace_mutex,
+                                              std::try_to_lock);
+    if (!replace_lock.owns_lock()) {
+        err = "another texture replacement is still applying; wait for it "
+              "to finish, then retry";
+        return false;
+    }
+    DebugLog::Scope debug_scope("Replace texture", img_path + " | " +
+        target_bnk_path + " | index=" +
+        std::to_string(target_file_index));
+    res = Result{};
+
+    progress_update(5, 100, "Loading " +
+        std::filesystem::path(img_path).filename().string());
+    ImageLoad::Image decoded;
+    if (!ImageLoad::load_file(img_path, decoded, err)) {
         return false;
     }
 
-    if (!apply_texture_replacement(groups, shared_mip0, built, err)) {
+    std::vector<PreparedReplacement> sets(1);
+    if (!prepare_replacement(decoded, target_bnk_path, target_file_index,
+                             opt, sets.front(), err)) {
+        return false;
+    }
+
+    auto basename_of = [](const std::string& norm) {
+        const size_t slash = norm.find_last_of('/');
+        return slash == std::string::npos ? norm : norm.substr(slash + 1);
+    };
+    const std::string clicked_key =
+        normalized_path(sets.front().groups.front().virtual_path);
+    const std::string clicked_base = basename_of(clicked_key);
+    std::set<std::string> seen_keys{clicked_key};
+    std::vector<std::pair<std::string, int>> twin_seeds;
+    {
+        std::vector<std::string> paths = S.bnk_paths;
+        paths.insert(paths.end(), S.nested_bnk_paths.begin(),
+                     S.nested_bnk_paths.end());
+        for (const std::string& path : paths) {
+            if (texture_bank_role(path) != 1) continue;
+            BnkCache::Entry entry;
+            try {
+                entry = BnkCache::get(path);
+            } catch (...) {
+                continue;
+            }
+            const auto& files = entry.reader->list_files();
+            for (size_t i = 0; i < files.size(); ++i) {
+                const std::string norm = normalized_path(files[i].name);
+                if (basename_of(norm) != clicked_base ||
+                    seen_keys.count(norm)) {
+                    continue;
+                }
+                seen_keys.insert(norm);
+                twin_seeds.emplace_back(path, (int)i);
+                DebugLog::Write("texture-replace",
+                    "same-name twin: " + files[i].name);
+            }
+        }
+    }
+    for (const auto& [seed_path, seed_index] : twin_seeds) {
+        PreparedReplacement twin;
+        if (!prepare_replacement(decoded, seed_path, seed_index, opt, twin,
+                                 err)) {
+            err = "same-name twin failed to prepare: " + err;
+            return false;
+        }
+        sets.push_back(std::move(twin));
+    }
+
+    if (!apply_texture_replacement(sets, err)) {
         return false;
     }
 
     progress_update(95, 100, "Refreshing texture caches");
-    res.tex_virtual_paths.push_back(target.virtual_path);
-    res.notes.push_back(
-        "replaced " + target.virtual_path + " (" +
-        std::to_string(built.width) + "x" + std::to_string(built.height) +
-        ", " + std::to_string(built.mip_count) + " mips) in " +
-        std::to_string(groups.size()) + " bank scope(s) + " +
-        std::to_string(shared_mip0.size()) + " shared mip0 entr(ies)");
-    debug_scope.Result("success | " + target.virtual_path + " | scopes=" +
-                       std::to_string(groups.size()));
+    std::string result_summary;
+    for (const PreparedReplacement& set : sets) {
+        const std::string& vpath = set.groups.front().virtual_path;
+        res.tex_virtual_paths.push_back(vpath);
+        res.notes.push_back(
+            "replaced " + vpath + " (" +
+            std::to_string(set.built.width) + "x" +
+            std::to_string(set.built.height) + ", " +
+            std::to_string(set.built.mip_count) + " mips) in " +
+            std::to_string(set.groups.size()) + " bank scope(s) + " +
+            std::to_string(set.shared_mip0.size()) +
+            " shared mip0 entr(ies)");
+        if (!result_summary.empty()) result_summary += ", ";
+        result_summary += vpath;
+    }
+    debug_scope.Result("success | " + result_summary + " | identities=" +
+                       std::to_string(sets.size()));
     return true;
 }

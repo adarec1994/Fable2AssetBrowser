@@ -1,4 +1,3 @@
-# bnk_ui.py
 """
 Pure Python BNK Explorer - Debug Version
 Made by Matthew W, free to use and update.
@@ -37,7 +36,7 @@ class State:
         self.lock = threading.Lock()
         self.monitor_thread: Optional[threading.Thread] = None
         self.progress_lock = threading.Lock()
-        self.nested_bnks: dict = {}  # Store nested BNK structure
+        self.nested_bnks: dict = {}
 
     def start_process_monitor(self):
         def monitor():
@@ -281,12 +280,10 @@ def _extract_nested_bnks(bnk_path: str, temp_dir: str) -> List[str]:
             if is_bnk_file(item.name):
                 nested_path = os.path.join(temp_dir, item.name)
                 _safe_mkdir(os.path.dirname(nested_path))
-                # Use core module directly (pure Python)
                 try:
                     core.extract_one(bnk_path, item.index, nested_path)
                     if os.path.exists(nested_path):
                         nested_bnks.append(nested_path)
-                        # Recursively check for more nested BNKs
                         deeper_bnks = _extract_nested_bnks(nested_path, temp_dir)
                         nested_bnks.extend(deeper_bnks)
                 except:
@@ -326,7 +323,7 @@ def _convert_wav_file(wav_path: Path) -> bool:
         if not towav:
             if repaired_path and repaired_path.exists():
                 repaired_path.unlink()
-            return True  # No converter available, but file extracted
+            return True
 
         work_dir = src_path.parent
         xma_path = work_dir / (src_path.stem + ".xma")
@@ -368,17 +365,14 @@ def _extract_file(bnk_path: str, item: core.BNKItem, base_out_dir: str, convert_
         dst_path = os.path.join(base_out_dir, item.name)
         _safe_mkdir(os.path.dirname(dst_path))
 
-        # Use the pure Python core module directly
         core.extract_one(bnk_path, item.index, dst_path)
 
         if not os.path.exists(dst_path):
             return False
 
-        # Convert audio if needed (still uses towav.exe if available)
         if convert_audio and is_audio_file(item.name):
             ok = _convert_wav_file(Path(dst_path))
             if not ok and os.path.exists(dst_path):
-                # Keep the file even if conversion failed
                 pass
 
         return True
@@ -412,7 +406,6 @@ def refresh_bnk_sidebar():
 
     for path in _filtered_bnk_paths():
         label = os.path.basename(path)
-        # Show indentation for nested BNKs
         indent = ""
         if path in S.nested_bnks.values():
             for parent, nested in S.nested_bnks.items():
@@ -478,10 +471,8 @@ def open_folder_cb(sender, app_data):
             _error_box("No folder selected")
             return
 
-        # Debug: Show what folder was selected
         print(f"DEBUG: Selected folder: {sel}")
 
-        # Check if folder exists
         if not os.path.exists(sel):
             _error_box(f"Folder does not exist: {sel}")
             return
@@ -492,13 +483,11 @@ def open_folder_cb(sender, app_data):
 
         S.root_dir = sel
 
-        # Try to find BNK files with error handling
         try:
             print(f"DEBUG: Searching for BNK files in: {sel}")
             S.bnk_paths = core.find_bnks(sel)
             print(f"DEBUG: Found {len(S.bnk_paths)} BNK files")
 
-            # Debug: Print first few BNK paths
             for i, path in enumerate(S.bnk_paths[:3]):
                 print(f"DEBUG: BNK {i}: {path}")
 
@@ -512,7 +501,6 @@ def open_folder_cb(sender, app_data):
             _error_box(f"No .bnk files found in:\n{sel}\n\nPlease select a folder containing Fable 2 BNK files.")
             return
 
-        # Skip nested BNK search for now to isolate the issue
         print("DEBUG: Skipping nested BNK search for testing")
 
         S.bnk_paths.sort(key=lambda p: os.path.basename(p).lower())
@@ -636,12 +624,10 @@ def on_extract_all(*_):
 
             return success
 
-        # Process non-audio files first
         if non_audio_files and not S.cancel_requested:
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 2)) as executor:
                 list(executor.map(lambda i: extract_parallel(i, False), non_audio_files))
 
-        # Then process audio files
         if audio_files and not S.cancel_requested:
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, os.cpu_count() // 2 or 1)) as executor:
                 list(executor.map(lambda i: extract_parallel(i, True), audio_files))
@@ -682,7 +668,6 @@ def on_export_selected_mdl(*_):
         _safe_mkdir(tmp_dir)
         mdl_path = os.path.join(tmp_dir, item.name)
 
-        # Use pure Python extraction
         core.extract_one(S.selected_bnk, item.index, mdl_path)
 
         if not os.path.exists(mdl_path):

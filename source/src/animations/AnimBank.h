@@ -72,10 +72,7 @@ size_t resolve_clip_names_from_gdb_animation_fields_for_root(
 
 
 
-// Compiled-in retail clip names + bindings (Cache/BakedNames.inl,
-// regenerate with tools/gen_baked_anim.py). Returns false on foreign data.
 bool load_clip_names_from_baked(std::vector<AnimClip>& clips);
-// Writes anim_names_resolved.txt next to the executable.
 void dump_resolved_clip_names_txt(const std::vector<AnimClip>& clips);
 
 bool load_clip_name_cache_for_root(const std::string& root,

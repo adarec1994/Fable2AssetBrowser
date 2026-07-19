@@ -112,7 +112,6 @@ void CollectAnimSlotsFromChain(
                 AnimTreeSlot& slot = tree.slots[existing->second];
                 if (slot.chain_depth == depth &&
                     slot.owner_record == cur_hash) {
-                    // Same record repeats the field: an inline variation.
                     if (type == 6) {
                         std::unordered_set<uint32_t> visited;
                         CollectRefClipKeys(views, raw, slot.variation_keys,
@@ -175,8 +174,6 @@ std::unordered_map<uint32_t, EntityAnimTree> ExtractEntityAnimTrees(
         dict.insert(entries.begin(), entries.end());
     }
 
-    // Trees are shared: many entity templates inherit the same manager /
-    // Animations root. Build each root once and copy it per entity.
     std::unordered_map<uint32_t, EntityAnimTree> by_root;
     auto build_for_root = [&](uint32_t manager_hash,
                               uint32_t root_hash) -> const EntityAnimTree* {
@@ -188,8 +185,6 @@ std::unordered_map<uint32_t, EntityAnimTree> ExtractEntityAnimTrees(
         tree.animations_root = root_hash;
         std::unordered_map<uint32_t, size_t> slot_index;
         CollectAnimSlotsFromChain(views, root_hash, dict, tree, slot_index);
-        // The manager chain itself can carry loose clip slots
-        // (e.g. DamoclesSwordHit* on Hollowman managers).
         if (manager_hash != 0 && manager_hash != root_hash) {
             CollectAnimSlotsFromChain(views, manager_hash, dict, tree,
                                       slot_index);
@@ -241,8 +236,6 @@ std::unordered_map<uint32_t, EntityAnimTree> ExtractEntityAnimTrees(
         resolve_entity(entity_hash);
     }
 
-    // Also cover every record that carries a local manager field, so sets
-    // exist even for templates that never made it into the entity catalog.
     for (const GdbView* view : views) {
         const size_t count = std::min<size_t>(
             view->count, view->record_data_offsets.size());

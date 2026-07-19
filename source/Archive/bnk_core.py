@@ -1,11 +1,9 @@
-# bnk_core.py (Adapter to use bnk_reader.py)
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from typing import List, Iterable
 
-# Try to import the correct reader
 try:
     from bnk_reader_correct import BNKReader
 except ImportError:
@@ -15,7 +13,6 @@ except ImportError:
         import bnk_reader
         BNKReader = bnk_reader.BNKReader
 
-# This script now relies on your bnk_reader.py file for all BNK parsing.
 import bnk_reader
 
 
@@ -27,7 +24,6 @@ class BNKItem:
     size: int
 
 
-# --- Public API that wraps bnk_reader.py ---
 
 def list_bnk(bnk_path: str) -> List[BNKItem]:
     """
@@ -35,14 +31,11 @@ def list_bnk(bnk_path: str) -> List[BNKItem]:
     """
     items = []
     try:
-        # Use the BNKReader class from bnk_reader.py
         with bnk_reader.BNKReader(bnk_path) as reader:
             for i, entry in enumerate(reader.file_entries):
-                # Convert the FileEntry objects into BNKItem objects for the UI
                 items.append(BNKItem(index=i, name=entry.name, size=entry.uncompressed_size))
     except Exception as e:
         print(f"Error using bnk_reader on '{os.path.basename(bnk_path)}': {e}")
-        # Return an empty list if the reader fails, so the UI doesn't crash.
         return []
     return items
 
@@ -56,7 +49,6 @@ def extract_one(bnk_path: str, index: int, out_path: str) -> str:
             raise IndexError("File index out of range.")
 
         entry = reader.file_entries[index]
-        # The extract_file method in bnk_reader saves the file directly
         reader.extract_file(entry.name, out_path)
         return os.path.abspath(out_path)
 

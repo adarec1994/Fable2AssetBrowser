@@ -22,8 +22,8 @@ class BNKReader:
         self.path = path
         self._fh: Optional[BinaryIO] = None
         self._size: int = 0
-        self.base_offset: int = 0              # v3: file-data base; v2: unused (0)
-        self.compress_file_data: int = 0       # header flag (v2/v3)
+        self.base_offset: int = 0
+        self.compress_file_data: int = 0
         self._file_table_blob: Optional[bytes] = None
         self.file_entries: List[FileEntry] = []
         self._is_v2: bool = False
@@ -35,10 +35,9 @@ class BNKReader:
         self._size = self._fh.tell()
         self._fh.seek(0)
 
-        # Peek base + version (BE)
         head = self._read(8)
         self._fh.seek(0)
-        header_offset = struct.unpack(">I", head[:4])[0]   # meaning differs by version
+        header_offset = struct.unpack(">I", head[:4])[0]
         ver           = struct.unpack(">I", head[4:8])[0]
 
         if ver == 2:
@@ -66,8 +65,8 @@ class BNKReader:
         return self._read(1)[0]
 
     def _read_header_continuous_stream(self):
-        self.base_offset = self._read_u32_be()  # v3: file-data base
-        _ = self._read(4)                       # v3 "version-ish/unknown" field
+        self.base_offset = self._read_u32_be()
+        _ = self._read(4)
         self.compress_file_data = self._read_u8()
 
         chunks: List[tuple[int, int, bytes]] = []
@@ -118,12 +117,12 @@ class BNKReader:
             
         self._fh.seek(8, os.SEEK_SET)
         self.compress_file_data = 1 if self._read_u8() != 0 else 0
-        _ = self._read(7)  # padding
+        _ = self._read(7)
 
         base_offset = 0
         self.base_offset = 0
 
-        chunks_meta: List[Tuple[int, int, int]] = []  # (offset_of_data, comp_size, uncomp_size)
+        chunks_meta: List[Tuple[int, int, int]] = []
         cur = file_table_offset
         while cur + 8 <= self._size:
             self._fh.seek(cur, os.SEEK_SET)
@@ -179,7 +178,6 @@ class BNKReader:
             s = bio.read(n)
             if len(s) != n:
                 raise EOFError
-            # v2 names may include a trailing '\0'; harmless to keep or strip
             if n and s[-1] == 0:
                 s = s[:-1]
             return s.decode("utf-8", errors="replace")
@@ -263,15 +261,12 @@ class BNKReader:
         written = 0
         pos = 0
         for idx, out_len in enumerate(e.decompressed_chunk_sizes):
-            # Slice the next 32KB (or remaining) of compressed blob
             comp_slice = comp_blob[pos:pos+chunk_size]
             pos += len(comp_slice)
 
             chunk = None
             for wbits in (15, -15, 31):
                 try:
-                    # In BNK v2 files, each chunk typically includes a 2-byte zlib header.
-                    # zlib will handle that when wbits=15. Fallbacks keep robustness.
                     chunk = zlib.decompress(comp_slice, wbits=wbits)
                     break
                 except zlib.error:
@@ -279,7 +274,6 @@ class BNKReader:
             if chunk is None:
                 raise RuntimeError(f"Failed to inflate payload slice #{idx}")
 
-            # Tighten/loosen to the expected length
             if len(chunk) != out_len:
                 if len(chunk) > out_len:
                     chunk = chunk[:out_len]

@@ -64,7 +64,6 @@ bool inject_entries(const std::vector<PendingEntry>& entries,
     }
 
     if (any_iso) {
-        // ISO members cannot be staged as sibling files; snapshot-rollback.
         struct Snap { std::string path; std::vector<uint8_t> bytes; };
         std::vector<Snap> snaps;
         for (auto& [path, t] : targets) {
@@ -95,8 +94,6 @@ bool inject_entries(const std::vector<PendingEntry>& entries,
         return true;
     }
 
-    // Stage all rebuilt banks first (live files untouched, no snapshot
-    // reads), then commit with renames keeping .f2ab_prev for rollback.
     struct StagedBank { std::string live, staged, prev; };
     std::vector<StagedBank> staged_banks;
     bool staged_ok = true;

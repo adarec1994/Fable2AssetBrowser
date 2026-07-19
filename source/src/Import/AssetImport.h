@@ -12,10 +12,8 @@
 
 namespace AssetImport {
 
-// True for model files the importer accepts (.glb, .obj).
 bool model_extension_supported(const std::string& path);
 
-// Loads a .glb or .obj (dispatched by extension) into the shared Scene.
 bool load_model_scene(const std::string& path, GlbImport::Scene& scene,
                       std::string& err);
 

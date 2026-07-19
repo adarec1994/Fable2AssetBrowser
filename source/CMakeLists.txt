@@ -1,8 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(Fable_2_Asset_Browser CXX)
 
-# Dependencies are pinned to explicit revisions below. Once populated, avoid
-# contacting every upstream repository during unrelated source changes.
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
 option(FABLE_ENABLE_RECONSTRUCTED_CLOUD_PREVIEW
@@ -1043,8 +1041,6 @@ FetchContent_MakeAvailable(imgui)
 FetchContent_Declare(
         imgui_node_editor
         GIT_REPOSITORY https://github.com/thedmd/imgui-node-editor.git
-        # develop commit with Dear ImGui 1.90+ compatibility (v0.9.3 still
-        # uses removed key APIs and duplicates ImVec2 equality operators).
         GIT_TAG b302971455b3719ec9b5fb94b2f92d27c62b9ff0
 )
 FetchContent_MakeAvailable(imgui_node_editor)

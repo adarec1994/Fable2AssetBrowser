@@ -463,8 +463,6 @@ void collect_codes(const HuffNode* node, uint32_t bits, int length,
         return;
     }
     if (length >= 32) {
-        // Zero-frequency symbols can sit arbitrarily deep; they are never
-        // emitted, so an unrepresentable code just stays marked invalid.
         return;
     }
     collect_codes(node->left, bits, length + 1, codes);
@@ -496,8 +494,6 @@ bool lh_encode_compressed_mip(const uint8_t* bc1_blocks, int width,
     const size_t total_blocks = (size_t)bw * (size_t)bh;
     constexpr int kOpLiteral = 61;
 
-    // The op=4 literal never consults neighbours or the delta table, so an
-    // all-literal stream is always reproducible by the retail decoder.
     uint32_t counts_idx[256] = {};
     uint32_t counts_op[62] = {};
     uint32_t counts_del[122] = {};
@@ -609,6 +605,250 @@ bool lh_encode_compressed_mip(const uint8_t* bc1_blocks, int width,
         if ((c0 != c1 || comp11_layout) &&
             std::memcmp(src + 4, got + 4, 4) != 0) {
             return fail("lh_encode: index mismatch in round-trip");
+        }
+    }
+    return true;
+}
+
+namespace {
+
+struct VariantBlock {
+    int op = 3;
+    uint8_t fill = 0;
+    uint8_t sym_a = 0;
+    uint8_t sym_b = 0;
+    uint8_t sym_c[8] = {};
+    uint8_t predicted[8] = {};
+};
+
+void classify_variant_block(const uint8_t* plane, int width, int bx, int by,
+                            VariantBlock& out) {
+    uint8_t v[16];
+    uint8_t lo = 255, hi = 0;
+    for (int py = 0; py < 4; ++py) {
+        const uint8_t* row = plane + (size_t)(by * 4 + py) * width + bx * 4;
+        for (int px = 0; px < 4; ++px) {
+            const uint8_t s = row[px];
+            v[py * 4 + px] = s;
+            lo = std::min(lo, s);
+            hi = std::max(hi, s);
+        }
+    }
+    if (lo == hi) {
+        if (lo == 0) {
+            out.op = 0;
+            std::memset(out.predicted, 0x00, 8);
+        } else if (lo == 255) {
+            out.op = 1;
+            std::memset(out.predicted, 0xFF, 8);
+        } else {
+            out.op = 2;
+            out.fill = lo;
+            std::memset(out.predicted, 0, 8);
+            out.predicted[0] = lo;
+            out.predicted[1] = lo;
+        }
+        return;
+    }
+
+    auto q6 = [](uint8_t s) { return (s * 63 + 127) / 255; };
+    int e0 = q6(hi);
+    int e1 = q6(lo);
+    if (e0 == e1) {
+        if (e0 < 63) ++e0; else --e1;
+    }
+    if (((e0 + e1) & 1) != 0) {
+        if (e1 > 0) --e1;
+        else if (e0 < 63) ++e0;
+        else ++e1;
+    }
+    out.op = 3;
+    out.sym_a = (uint8_t)((e0 + e1) >> 1);
+    out.sym_b = (uint8_t)((e0 - e1) >> 1);
+    const uint8_t a0 = g_dq6to8[e0];
+    const uint8_t a1 = g_dq6to8[e1];
+
+    uint8_t pal[8];
+    pal[0] = a0;
+    pal[1] = a1;
+    for (int k = 2; k < 8; ++k) {
+        pal[k] = (uint8_t)(((8 - k) * a0 + (k - 1) * a1 + 3) / 7);
+    }
+    uint8_t idx[16];
+    for (int i = 0; i < 16; ++i) {
+        int best = 0, best_err = 256;
+        for (int k = 0; k < 8; ++k) {
+            const int e = std::abs((int)v[i] - (int)pal[k]);
+            if (e < best_err) { best_err = e; best = k; }
+        }
+        idx[i] = (uint8_t)best;
+    }
+    for (int r = 0; r < 4; ++r) {
+        out.sym_c[r * 2 + 0] = (uint8_t)(idx[r * 4 + 0] | (idx[r * 4 + 1] << 3));
+        out.sym_c[r * 2 + 1] = (uint8_t)(idx[r * 4 + 2] | (idx[r * 4 + 3] << 3));
+    }
+    out.predicted[0] = a0;
+    out.predicted[1] = a1;
+    uint64_t packed = 0;
+    for (int i = 0; i < 16; ++i) {
+        packed |= ((uint64_t)(idx[i] & 7)) << (i * 3);
+    }
+    for (int i = 0; i < 6; ++i) {
+        out.predicted[2 + i] = (uint8_t)((packed >> (8 * i)) & 0xFF);
+    }
+}
+
+}
+
+bool lh_encode_variant_plane(const uint8_t* plane, int width, int height,
+                             std::vector<uint8_t>& out_body,
+                             std::string* err)
+{
+    auto fail = [&](const std::string& msg) -> bool {
+        if (err) *err = msg;
+        return false;
+    };
+    if (!plane || width <= 0 || height <= 0 ||
+        (width % 4) != 0 || (height % 4) != 0 ||
+        width > 8192 || height > 8192) {
+        return fail("lh_encode_variant: invalid dimensions");
+    }
+    init_variant_tables();
+
+    const int bw = width / 4;
+    const int bh = height / 4;
+    const size_t total_blocks = (size_t)bw * (size_t)bh;
+
+    std::vector<VariantBlock> blocks(total_blocks);
+    for (int by = 0; by < bh; ++by) {
+        for (int bx = 0; bx < bw; ++bx) {
+            classify_variant_block(plane, width, bx, by,
+                                   blocks[(size_t)by * bw + bx]);
+        }
+    }
+
+    struct Run { int op; uint8_t fill; uint32_t len; };
+    std::vector<Run> runs;
+    for (size_t b = 0; b < total_blocks;) {
+        const VariantBlock& first = blocks[b];
+        size_t n = 1;
+        while (b + n < total_blocks && n < 255) {
+            const VariantBlock& next = blocks[b + n];
+            if (next.op != first.op) break;
+            if (first.op == 2 && next.fill != first.fill) break;
+            ++n;
+        }
+        runs.push_back({first.op, first.fill, (uint32_t)n});
+        b += n;
+    }
+
+    uint32_t counts_a[64] = {};
+    uint32_t counts_b[32] = {};
+    uint32_t counts_c[64] = {};
+    uint32_t counts_op[32] = {};
+    for (const Run& run : runs) {
+        int count_bits = 0;
+        while ((2u << count_bits) <= run.len) ++count_bits;
+        ++counts_op[(run.op << 3) | count_bits];
+    }
+    for (const VariantBlock& blk : blocks) {
+        if (blk.op != 3) continue;
+        ++counts_a[blk.sym_a];
+        ++counts_b[blk.sym_b];
+        for (int i = 0; i < 8; ++i) ++counts_c[blk.sym_c[i]];
+    }
+
+    uint8_t freq_bytes[64 + 32 + 64 + 32];
+    uint32_t eff_a[64], eff_b[32], eff_c[64], eff_op[32];
+    size_t fb = 0;
+    for (int i = 0; i < 64; ++i, ++fb) {
+        freq_bytes[fb] = encode_freq_byte(counts_a[i]);
+        eff_a[i] = decode_freq_byte(freq_bytes[fb]);
+    }
+    for (int i = 0; i < 32; ++i, ++fb) {
+        freq_bytes[fb] = encode_freq_byte(counts_b[i]);
+        eff_b[i] = decode_freq_byte(freq_bytes[fb]);
+    }
+    for (int i = 0; i < 64; ++i, ++fb) {
+        freq_bytes[fb] = encode_freq_byte(counts_c[i]);
+        eff_c[i] = decode_freq_byte(freq_bytes[fb]);
+    }
+    for (int i = 0; i < 32; ++i, ++fb) {
+        freq_bytes[fb] = encode_freq_byte(counts_op[i]);
+        eff_op[i] = decode_freq_byte(freq_bytes[fb]);
+    }
+
+    HuffArena arena_a, arena_b, arena_c, arena_op;
+    const HuffNode* tree_a = build_tree(arena_a, eff_a, 64);
+    const HuffNode* tree_b = build_tree(arena_b, eff_b, 32);
+    const HuffNode* tree_c = build_tree(arena_c, eff_c, 64);
+    const HuffNode* tree_op = build_tree(arena_op, eff_op, 32);
+    if (!tree_a || !tree_b || !tree_c || !tree_op) {
+        return fail("lh_encode_variant: tree build failed");
+    }
+
+    std::vector<HuffCode> codes_a(64), codes_b(32), codes_c(64), codes_op(32);
+    collect_codes(tree_a, 0, 0, codes_a);
+    collect_codes(tree_b, 0, 0, codes_b);
+    collect_codes(tree_c, 0, 0, codes_c);
+    collect_codes(tree_op, 0, 0, codes_op);
+    auto code_ok = [](const HuffCode& c) {
+        return c.length > 0 && c.length <= 32;
+    };
+    for (int i = 0; i < 64; ++i) {
+        if (counts_a[i] && !code_ok(codes_a[i]))
+            return fail("lh_encode_variant: A code table incomplete");
+        if (counts_c[i] && !code_ok(codes_c[i]))
+            return fail("lh_encode_variant: C code table incomplete");
+    }
+    for (int i = 0; i < 32; ++i) {
+        if (counts_b[i] && !code_ok(codes_b[i]))
+            return fail("lh_encode_variant: B code table incomplete");
+        if (counts_op[i] && !code_ok(codes_op[i]))
+            return fail("lh_encode_variant: op code table incomplete");
+    }
+
+    BitWriter writer;
+    writer.push((uint32_t)width, 16);
+    writer.push((uint32_t)height, 16);
+    writer.push(2u, 4);
+    writer.push(0x80u, 8);
+    for (uint8_t b : freq_bytes) writer.push(b, 8);
+
+    size_t block_cursor = 0;
+    for (const Run& run : runs) {
+        int count_bits = 0;
+        while ((2u << count_bits) <= run.len) ++count_bits;
+        const uint32_t extra = run.len - (1u << count_bits);
+        write_code(writer, codes_op[(run.op << 3) | count_bits]);
+        if (count_bits > 0) writer.push(extra, count_bits);
+        if (run.op == 2) writer.push(run.fill, 8);
+        for (uint32_t k = 0; k < run.len; ++k, ++block_cursor) {
+            const VariantBlock& blk = blocks[block_cursor];
+            if (blk.op != 3) continue;
+            write_code(writer, codes_a[blk.sym_a]);
+            write_code(writer, codes_b[blk.sym_b]);
+            for (int i = 0; i < 8; ++i) {
+                write_code(writer, codes_c[blk.sym_c[i]]);
+            }
+        }
+    }
+    writer.finish();
+    out_body = std::move(writer.bytes);
+
+    std::vector<uint8_t> round_trip;
+    std::string rt_err;
+    if (!lh_decode_variant_2_3_4(out_body.data(), out_body.size(), 2,
+                                 width, height, round_trip, &rt_err)) {
+        return fail("lh_encode_variant: round-trip decode failed: " + rt_err);
+    }
+    if (round_trip.size() != total_blocks * 8) {
+        return fail("lh_encode_variant: round-trip geometry mismatch");
+    }
+    for (size_t b = 0; b < total_blocks; ++b) {
+        if (std::memcmp(blocks[b].predicted, round_trip.data() + b * 8,
+                        8) != 0) {
+            return fail("lh_encode_variant: block mismatch in round-trip");
         }
     }
     return true;

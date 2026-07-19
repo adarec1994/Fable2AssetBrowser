@@ -22,8 +22,6 @@ bool import_folder(const std::string& folder_path, const Options& opt,
         return false;
     }
 
-    // Textures an .obj's material set consumes are baked into that model's
-    // import; drop them from the standalone image list.
     {
         std::set<std::string> consumed;
         for (const auto& model_path : glbs) {

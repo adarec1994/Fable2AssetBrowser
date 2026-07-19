@@ -30,7 +30,6 @@ std::string trim(const std::string& s) {
     return s.substr(b, e - b + 1);
 }
 
-// Joins continuation lines (trailing '\') and strips comments.
 bool read_logical_lines(const std::string& path,
                         std::vector<std::string>& out, std::string& err) {
     std::ifstream f(path, std::ios::binary);
@@ -55,8 +54,6 @@ bool read_logical_lines(const std::string& path,
     return true;
 }
 
-// A texture map statement: option flags (each with a fixed argument count)
-// followed by the file name, which may contain spaces.
 std::string mtl_map_filename(const std::string& args) {
     static const std::map<std::string, int> kOptionArgs = {
         {"-blendu", 1}, {"-blendv", 1}, {"-boost", 1}, {"-bm", 1},
@@ -136,8 +133,6 @@ void parse_mtl(const std::string& path,
     }
 }
 
-// Resolves a texture reference against the obj/mtl directory, tolerating
-// backslashes and case differences.
 std::string resolve_texture_path(const std::string& reference,
                                  const fs::path& mtl_dir,
                                  const fs::path& obj_dir) {
@@ -160,7 +155,6 @@ std::string resolve_texture_path(const std::string& reference,
         if (fs::is_regular_file(c, ec)) return c.string();
     }
 
-    // case-insensitive filename search in both directories
     const std::string want = to_lower(ref.filename().string());
     for (const fs::path& dir : {mtl_dir, obj_dir}) {
         if (dir.empty() || !fs::is_directory(dir, ec)) continue;
@@ -174,11 +168,10 @@ std::string resolve_texture_path(const std::string& reference,
 }
 
 struct FaceCorner {
-    int v = 0, vt = 0, vn = 0;   // 1-based obj indices, 0 = absent
+    int v = 0, vt = 0, vn = 0;
 };
 
 bool parse_corner(const std::string& token, FaceCorner& out) {
-    // v, v/vt, v//vn, v/vt/vn (negative = relative)
     int parts[3] = {0, 0, 0};
     int part = 0;
     size_t i = 0;
@@ -207,15 +200,13 @@ bool parse_corner(const std::string& token, FaceCorner& out) {
 struct PrimBuilder {
     std::string name;
     int material = -1;
-    // glTF-convention data (pre basis change): positions Y-up, UV top-left,
-    // CCW winding. The final Scene conversion mirrors GlbImport exactly.
     std::vector<float> positions, normals, uvs;
     std::vector<uint32_t> indices;
     std::map<std::array<int, 3>, uint32_t> weld;
     bool any_missing_normal = false;
 };
 
-}  // namespace
+}
 
 bool load_obj(const std::string& path, GlbImport::Scene& out,
               std::string& err)
@@ -228,11 +219,10 @@ bool load_obj(const std::string& path, GlbImport::Scene& out,
     const fs::path obj_dir = fs::path(path).parent_path();
     const std::string stem = fs::path(path).stem().string();
 
-    std::vector<float> vx, vt, vn;           // raw obj streams
+    std::vector<float> vx, vt, vn;
     std::vector<MtlMaterial> mtl_materials;
-    std::map<std::string, fs::path> mtl_dirs; // material name -> owning dir
+    std::map<std::string, fs::path> mtl_dirs;
 
-    // First pass: mtllib files (they can appear anywhere).
     for (const std::string& raw : lines) {
         std::istringstream in(raw);
         std::string key;
@@ -253,8 +243,6 @@ bool load_obj(const std::string& path, GlbImport::Scene& out,
             }
             return true;
         };
-        // The whole remainder first (file names may contain spaces);
-        // otherwise treat it as a space-separated library list.
         if (!parse_lib(rest)) {
             std::istringstream split(rest);
             std::string one;
@@ -262,9 +250,8 @@ bool load_obj(const std::string& path, GlbImport::Scene& out,
         }
     }
 
-    // Scene materials + images from the mtl set.
-    std::map<std::string, int> material_index;   // obj name -> scene index
-    std::map<std::string, int> image_by_file;    // resolved path -> image idx
+    std::map<std::string, int> material_index;
+    std::map<std::string, int> image_by_file;
 
     auto add_image = [&](const std::string& reference,
                          const fs::path& mtl_dir) -> int {
@@ -318,7 +305,6 @@ bool load_obj(const std::string& path, GlbImport::Scene& out,
         return default_material;
     };
 
-    // Face pass.
     std::map<std::pair<std::string, int>, PrimBuilder> builders;
     std::string group = stem;
     int current_material = -1;
@@ -400,8 +386,6 @@ bool load_obj(const std::string& path, GlbImport::Scene& out,
                 b.positions.push_back(vx[pi * 3 + 1]);
                 b.positions.push_back(vx[pi * 3 + 2]);
                 if (ti >= 0 && (size_t)ti < vt.size() / 2) {
-                    // OBJ V origin is bottom-left; the pipeline uses the
-                    // glTF/D3D top-left convention.
                     b.uvs.push_back(vt[ti * 2 + 0]);
                     b.uvs.push_back(1.0f - vt[ti * 2 + 1]);
                 } else {
@@ -436,13 +420,9 @@ bool load_obj(const std::string& path, GlbImport::Scene& out,
     }
 
     if (missing_material_used) {
-        // faces referenced materials the mtl set does not define
         ensure_default_material();
     }
 
-    // Convert builders to Scene prims: same basis change and winding flip
-    // as GlbImport::emit_primitive (glTF Y-up -> Fable Z-up, x,y,z ->
-    // x,-z,y; triangles rewound a,c,b).
     for (auto& [key, b] : builders) {
         if (b.positions.empty() || b.indices.size() < 3) continue;
         const size_t vcount = b.positions.size() / 3;
@@ -471,7 +451,7 @@ bool load_obj(const std::string& path, GlbImport::Scene& out,
                 float* dst = &b.normals[v * 3];
                 const float lsq = dst[0]*dst[0] + dst[1]*dst[1] +
                                   dst[2]*dst[2];
-                if (lsq > 1e-12f) continue;   // authored normal kept
+                if (lsq > 1e-12f) continue;
                 dst[0] = accum[v*3+0];
                 dst[1] = accum[v*3+1];
                 dst[2] = accum[v*3+2];

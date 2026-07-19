@@ -171,8 +171,6 @@ bool build_from_rgba(const uint8_t* rgba_in, int w, int h,
     if (fmt == Format::Auto)
         fmt = rgba_has_alpha(rgba_in, w, h) ? Format::BC3 : Format::BC1;
 
-    // Geometry match (replace mode) pins the output to the original
-    // texture's exact dimensions; otherwise clamp to a power of two.
     const bool match_geom = opt.match_width > 0 && opt.match_height > 0;
     int tw, th;
     if (match_geom) {
@@ -208,13 +206,6 @@ bool build_from_rgba(const uint8_t* rgba_in, int w, int h,
     std::vector<MipChunk> chunks;
     int lw = tw, lh = th;
     while (true) {
-        std::vector<uint8_t> payload;
-        build_mip_payload(level.data(), lw, lh, fmt, payload);
-
-        // Chunks mirror the original texture's per-mip compression flags
-        // when the caller provides them; the terrain/theme streamer only
-        // decodes the Lionhead codec for large BC1 mips, so raw cf=7
-        // there renders as the engine's fallback texture.
         uint32_t want_flag = 0;
         if (chunks.size() < opt.match_comp_flags.size()) {
             want_flag = opt.match_comp_flags[chunks.size()];
@@ -222,34 +213,71 @@ bool build_from_rgba(const uint8_t* rgba_in, int w, int h,
                    lw >= 64 && lh >= 64) {
             want_flag = 1u;
         }
-        uint32_t comp_flag = kCompFlagRaw;
-        if ((want_flag == 1u || want_flag == 11u) && fmt == Format::BC1) {
-            std::vector<uint8_t> stream;
+
+        MipChunk ck; ck.w = lw; ck.h = lh;
+        const bool variant_chunk =
+            (want_flag == 2u || want_flag == 3u || want_flag == 4u) &&
+            fmt == Format::BC5Normal && (lw % 4) == 0 && (lh % 4) == 0;
+        if (variant_chunk) {
+            std::vector<uint8_t> xplane((size_t)lw * lh);
+            std::vector<uint8_t> yplane((size_t)lw * lh);
+            for (size_t i = 0, n = (size_t)lw * lh; i < n; ++i) {
+                xplane[i] = level[i * 4 + 0];
+                yplane[i] = level[i * 4 + 1];
+            }
+            std::vector<uint8_t> xs, ys;
             std::string lh_err;
-            if (!lh_encode_compressed_mip(payload.data(), lw, lh, stream,
-                                          &lh_err, want_flag == 11u)) {
+            if (!lh_encode_variant_plane(xplane.data(), lw, lh, xs,
+                                         &lh_err) ||
+                !lh_encode_variant_plane(yplane.data(), lw, lh, ys,
+                                         &lh_err)) {
                 err = "cf=" + std::to_string(want_flag) +
                       " encode failed for " + std::to_string(lw) + "x" +
                       std::to_string(lh) + " mip: " + lh_err;
                 return false;
             }
-            payload = std::move(stream);
-            comp_flag = want_flag;
-        } else if (fmt != Format::RawARGB) {
-            X360Tile::swap_u16_endian(payload.data(), payload.size());
-        }
+            put32be(ck.bytes, want_flag);
+            put32be(ck.bytes, 48u);
+            put32be(ck.bytes, (uint32_t)xs.size());
+            put32be(ck.bytes, want_flag);
+            put32be(ck.bytes, 48u + (uint32_t)xs.size());
+            put32be(ck.bytes, (uint32_t)ys.size());
+            for (int i = 0; i < 6; ++i) put32be(ck.bytes, 0u);
+            ck.bytes.insert(ck.bytes.end(), xs.begin(), xs.end());
+            ck.bytes.insert(ck.bytes.end(), ys.begin(), ys.end());
+        } else {
+            std::vector<uint8_t> payload;
+            build_mip_payload(level.data(), lw, lh, fmt, payload);
 
-        MipChunk ck; ck.w = lw; ck.h = lh;
-        put32be(ck.bytes, comp_flag);
-        put32be(ck.bytes, 48u);
-        put32be(ck.bytes, (uint32_t)payload.size());
-        for (int i = 0; i < 9; ++i) put32be(ck.bytes, 0u);
-        ck.bytes.insert(ck.bytes.end(), payload.begin(), payload.end());
+            uint32_t comp_flag = kCompFlagRaw;
+            if ((want_flag == 1u || want_flag == 11u) &&
+                fmt == Format::BC1) {
+                std::vector<uint8_t> stream;
+                std::string lh_err;
+                if (!lh_encode_compressed_mip(payload.data(), lw, lh,
+                                              stream, &lh_err,
+                                              want_flag == 11u)) {
+                    err = "cf=" + std::to_string(want_flag) +
+                          " encode failed for " + std::to_string(lw) + "x" +
+                          std::to_string(lh) + " mip: " + lh_err;
+                    return false;
+                }
+                payload = std::move(stream);
+                comp_flag = want_flag;
+            } else if (fmt != Format::RawARGB) {
+                X360Tile::swap_u16_endian(payload.data(), payload.size());
+            }
+
+            put32be(ck.bytes, comp_flag);
+            put32be(ck.bytes, 48u);
+            put32be(ck.bytes, (uint32_t)payload.size());
+            for (int i = 0; i < 9; ++i) put32be(ck.bytes, 0u);
+            ck.bytes.insert(ck.bytes.end(), payload.begin(), payload.end());
+        }
         chunks.push_back(std::move(ck));
 
         if (lw == 1 && lh == 1) break;
         if (opt.match_mip_count > 0) {
-            // Reproduce the original's full chain down to 1x1.
             if ((int)chunks.size() >= opt.match_mip_count) break;
         } else {
             if (!opt.generate_mips) break;

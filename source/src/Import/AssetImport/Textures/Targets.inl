@@ -5,6 +5,19 @@ std::string normalized_path(std::string value) {
     return value;
 }
 
+bool is_shared_texture_bank(const std::string& path) {
+    const std::string leaf = to_lower(
+        std::filesystem::path(path).filename().string());
+    if (leaf.size() < 4 || leaf.compare(leaf.size() - 4, 4, ".bnk") != 0) {
+        return false;
+    }
+    const size_t pos = leaf.find("shared_");
+    if (pos == std::string::npos) return false;
+    const size_t digit = pos + 7;
+    return digit < leaf.size() &&
+           leaf[digit] >= '0' && leaf[digit] <= '9';
+}
+
 int texture_bank_role(const std::string& path) {
     const std::string leaf = to_lower(
         std::filesystem::path(path).filename().string());
@@ -16,7 +29,7 @@ int texture_bank_role(const std::string& path) {
                       !header && !mip0;
     if (header) return 1;
     if (mip0) return 2;
-    if (body) return 3;
+    if (body || is_shared_texture_bank(path)) return 3;
     return 4;
 }
 
@@ -50,4 +63,10 @@ struct TextureTargets {
     TexturePart header;
     TexturePart mip0;
     TexturePart body;
+};
+
+struct PreparedReplacement {
+    std::vector<TextureTargets> groups;
+    std::vector<TexturePart> shared_mip0;
+    TexWriter::BuiltTex built;
 };

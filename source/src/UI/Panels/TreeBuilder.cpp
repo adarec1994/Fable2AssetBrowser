@@ -90,8 +90,6 @@ void start_tree_build_for_root(const std::string& root_dir,
         if (!root_snapshot.empty() && !S.anim_clips.empty()) {
             set_tree_label("Resolving animation names");
             try {
-                // Baked table first: instant, and immune to the cache
-                // fingerprint churn caused by editing the game banks.
                 if (!Anim::load_clip_names_from_baked(S.anim_clips) &&
                     !Anim::load_clip_name_cache_for_root(root_snapshot,
                                                          S.anim_clips)) {

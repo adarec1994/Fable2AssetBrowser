@@ -32,11 +32,6 @@ bool resolve_texture_targets(const std::string& preferred_bnk,
         if (rank < part.rank) part = {path, index, rank};
     };
 
-    // Nested banks from EVERY region share the same parent (levels.bnk),
-    // so scope must compare the virtual folder inside the parent - i.e.
-    // the region - not just the parent bank. Otherwise the header/body
-    // resolve to whichever region happens to appear first and the
-    // replacement patches banks the user never selected.
     auto nested_virtual_dir = [&](const std::string& path) -> std::string {
         const auto it = S.nested_bnk_virtual_paths.find(path);
         if (it == S.nested_bnk_virtual_paths.end()) return std::string();
@@ -92,6 +87,22 @@ bool resolve_texture_targets(const std::string& preferred_bnk,
                      path == preferred_bnk ? 0 : rank + 10);
         }
     }
+    if (out.header.path.empty()) {
+        for (const std::string& path : paths) {
+            if (texture_bank_role(path) != 1) continue;
+            const int index = BnkCache::find_index(path, key);
+            if (index < 0) continue;
+            consider(out.header, path, index, 5);
+        }
+    }
+    if (out.body.path.empty()) {
+        for (const std::string& path : paths) {
+            if (!is_shared_texture_bank(path)) continue;
+            const int index = BnkCache::find_index(path, key);
+            if (index < 0) continue;
+            consider(out.body, path, index, 5);
+        }
+    }
     if (out.header.path.empty() || out.body.path.empty()) {
         err = "Could not resolve both the header and body banks for '" +
               out.virtual_path + "'.";
@@ -110,12 +121,6 @@ bool resolve_texture_targets(const std::string& preferred_bnk,
     return true;
 }
 
-// A texture name is duplicated across the game: header copies in dozens of
-// region banks, body copies in a few, and (for 1024 textures) a shared top
-// mip in 1024mip0_textures.bnk. Replacing one copy leaves every other
-// lookup - previews, other levels, the engine's by-name mip0 streaming -
-// on the original. This resolves EVERY entry with the clicked texture's
-// exact name: per-scope header/body groups plus the shared mip0 entries.
 bool resolve_all_texture_targets(const std::string& preferred_bnk,
                                  int preferred_index,
                                  std::vector<TextureTargets>& groups,
@@ -162,8 +167,6 @@ bool resolve_all_texture_targets(const std::string& preferred_bnk,
     paths.insert(paths.end(), S.nested_bnk_paths.begin(),
                  S.nested_bnk_paths.end());
     for (const std::string& path : paths) {
-        // role first: probing a bank materializes it, and only texture
-        // banks (header/mip0/body) can carry copies worth replacing.
         const int role = texture_bank_role(path);
         if (role != 1 && role != 2 && role != 3) continue;
         const int index = BnkCache::find_index(path, key);
@@ -179,7 +182,12 @@ bool resolve_all_texture_targets(const std::string& preferred_bnk,
             if (!known) shared_mip0.push_back({path, index, 0});
             continue;
         }
-        const std::string sk = scope_key(path);
+        std::string sk = scope_key(path);
+        if (is_shared_texture_bank(path)) {
+            if (path == clicked.body.path) continue;
+            sk += "|" + normalized_path(
+                std::filesystem::path(path).filename().string());
+        }
         if (sk == clicked_scope) continue;
         Extra& g = extra[sk];
         if (role == 1) {

@@ -262,8 +262,6 @@ struct StateBuild {
     int node_id = 0;
 };
 
-// imgui_node_editor requires ids to be unique across nodes, pins and
-// links, not merely within each kind.
 int pin_in(int node_id) { return 1000000 + node_id * 2; }
 int pin_out(int node_id) { return 1000000 + node_id * 2 + 1; }
 constexpr int kFirstLinkId = 4000000;
@@ -302,7 +300,6 @@ void build_graph()
 
     const bool multi_chain = g.tree.chain.size() > 1;
 
-    // Pass 1: parse slot names into states / transitions.
     struct TransitionBuild {
         std::string label;
         std::string from;
@@ -326,8 +323,6 @@ void build_graph()
         const std::string& name = slot.slot_name;
         if (name.empty()) continue;
 
-        // Directional transition clips, e.g.
-        // CombatStrafeTransitionLeftIntoBackwards / ...RightOpenLFToForwards.
         const size_t tr = name.find("Transition");
         if (tr != std::string::npos && tr > 0 &&
             tr + 10 < name.size()) {
@@ -376,7 +371,6 @@ void build_graph()
             continue;
         }
 
-        // Entry transitions: IntoWalk etc.
         if (starts_with(name, "Into") && name.size() > 4) {
             TransitionBuild t;
             t.label = name;
@@ -425,7 +419,6 @@ void build_graph()
         }
     }
 
-    // Default / entry state.
     std::string default_state;
     for (const char* candidate : {"Idle", "CombatIdle", "Pose", "Walk"}) {
         if (states.count(candidate)) {
@@ -434,11 +427,9 @@ void build_graph()
         }
     }
 
-    // Ensure transition endpoints exist as states before node creation.
     for (TransitionBuild& t : transitions) {
         if (!t.to.empty() && !states.count(t.to)) {
             if (t.from.empty()) {
-                // IntoX with no X slot: keep the clip on a bare state.
                 state_for(t.to);
             } else {
                 t.from.clear();
@@ -500,7 +491,6 @@ void build_graph()
         }
     }
 
-    // Turn-in-place clips flow out of and back into the default state.
     if (default_id != 0) {
         for (VNode& node : g.nodes) {
             if (node.is_transition || node.id == default_id) continue;
@@ -519,7 +509,6 @@ void build_graph()
         }
     }
 
-    // Condition edges derived from the engine's known slot semantics.
     {
         std::set<std::tuple<int, int, std::string>> edge_seen;
         auto mark = [&](int node_id) {
@@ -568,7 +557,6 @@ void build_graph()
         const int action_src = combat_idle_id ? combat_idle_id
                                               : default_id;
 
-        // Locomotion flow.
         if (!authored_targets.count("Walk")) {
             add_edge(idle_id, walk_id, "move", kEdgeFlow);
         }
@@ -763,7 +751,6 @@ void build_graph()
         }
     }
 
-    // Layout: one column band per category, wrapping long columns.
     const float kColumnWidth = 430.0f;
     const float kColumnGap = 60.0f;
     const float kMaxColumnHeight = 2500.0f;
@@ -813,7 +800,6 @@ void build_graph()
         }
         band_x = max_x + kColumnWidth + kColumnGap;
     }
-    // Connected transition nodes sit between their endpoints.
     for (VNode& node : g.nodes) {
         if (!node.is_transition || !node.has_edges) continue;
         const VLink* in_link = nullptr;
@@ -833,7 +819,6 @@ void build_graph()
         node.x = (from->x + to->x) * 0.5f + 60.0f;
         node.y = (from->y + to->y) * 0.5f + 40.0f;
     }
-    // Resolve transition-node overlaps with a simple vertical shake-out.
     {
         std::vector<VNode*> connected;
         for (VNode& node : g.nodes) {
@@ -936,7 +921,6 @@ void draw_node(const VNode& node)
     const float content_w = std::min(480.0f, std::max(base_w, title_w));
     const float content_x = ImGui::GetCursorPosX();
 
-    // Header row: in-pin, title, out-pin.
     {
         const ImVec2 icon_size(20.0f, 20.0f);
         ed::BeginPin(ed::PinId((uintptr_t)pin_in(node.id)),

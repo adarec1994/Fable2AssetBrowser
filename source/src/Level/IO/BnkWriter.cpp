@@ -657,7 +657,6 @@ static bool rebuild_with_changes_impl(
         if (!f) { err = "short write to " + tmp; return false; }
     }
     if (staged_out) {
-        // caller commits via rename later; bnk_path is untouched
         return true;
     }
     std::filesystem::remove(bnk_path, ec);

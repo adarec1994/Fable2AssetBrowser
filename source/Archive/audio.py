@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """
 Made by Matthew W, free to use and update.
@@ -100,7 +98,6 @@ def repair_wave(buf: bytes):
         report["note"] = "Invalid/small RIFF WAVE after prefix strip"
         return bytes(out), report
 
-    # correct RIFF size
     expected_riff_size = max(0, len(out) - 8)
     if read_u32le(out, 4) != expected_riff_size:
         write_u32le(out, 4, expected_riff_size)

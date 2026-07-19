@@ -647,10 +647,6 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
         const bool preferred_is_nested = !preferred_parent.empty();
         const std::string preferred_family = family_key(preferred_bnk);
 
-        // Region scoping: every region's nested banks share one parent
-        // (levels.bnk), so a sibling must also live in the same virtual
-        // folder - otherwise the header/body assemble from whichever
-        // regions happen to be indexed first (mixed-region previews).
         auto nested_virtual_dir = [&](const std::string& p) -> std::string {
             auto it = S.nested_bnk_virtual_paths.find(p);
             if (it == S.nested_bnk_virtual_paths.end()) return std::string();

@@ -27,10 +27,6 @@ bool RebuildWithChanges(const std::string& bnk_path,
                         const std::vector<EntryAddition>& adds,
                         std::string& err);
 
-// Builds the rebuilt bank into staged_path and leaves bnk_path untouched,
-// so multi-bank operations can stage everything first and then commit via
-// cheap renames instead of snapshotting whole banks for rollback.
-// Not available for ISO-mounted paths.
 bool RebuildWithChangesStaged(const std::string& bnk_path,
                               const std::vector<EntryReplacement>& repls,
                               const std::vector<EntryAddition>& adds,

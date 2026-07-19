@@ -1,4 +1,3 @@
-# convert.py
 """
 Conversion logic for Fable 2 .mdl files to .glb format.
 
@@ -211,8 +210,8 @@ def skip_to_mesh_headers(r: Reader, vertex_stride: int) -> Tuple[int, List[Dict]
     materials_per_mesh: List[List[Dict]] = [[] for _ in range(max(mesh_count, 0))]
 
     for mi in range(mesh_count):
-        r.ru32()               # Unk1
-        _ = r.rstr()           # MeshName
+        r.ru32()
+        _ = r.rstr()
         r.rf32_arr(2)
         r.rbytes(21)
         r.rf32()
@@ -342,7 +341,6 @@ def write_merged_glb(out_path: Path, all_geometries: List[dict], src_name: str, 
     bin_data = bytearray()
     processed_primitives = []
 
-    # Build materials (fallback + first material per mesh)
     gltf_materials: List[Dict] = []
     fallback_mat_index = len(gltf_materials)
     gltf_materials.append({
@@ -358,7 +356,6 @@ def write_merged_glb(out_path: Path, all_geometries: List[dict], src_name: str, 
                 continue
             m = mats[0]
             name = m.get("display_name") or f"Mesh{mi}_Mat0"
-            # simple stable color based on name
             h = 2166136261
             for ch in name.encode("utf-8", "ignore"):
                 h ^= ch; h *= 16777619; h &= 0xFFFFFFFF
@@ -414,7 +411,6 @@ def write_merged_glb(out_path: Path, all_geometries: List[dict], src_name: str, 
             gltf['accessors'].append({"bufferView": bv_idx, "componentType": comp_type, "count": len(flat_idx), "type": "SCALAR"})
             prim.update({"indices": acc_idx, "mode": 4})
 
-        # bind material: first mat of mesh 'which' if available, else fallback
         which = geom['which']
         mindex = fallback_mat_index
         if materials_per_mesh and (which, 0) in mat_index_map:

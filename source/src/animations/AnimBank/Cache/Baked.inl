@@ -1,8 +1,5 @@
 #include "BakedNames.inl"
 
-// Applies the baked (compiled-in) clip-name + model-binding table. This is
-// the fully resolved retail data, so load never has to re-scan the GDBs -
-// the disk cache and the scan remain only as fallbacks for foreign data.
 bool load_clip_names_from_baked(std::vector<AnimClip>& clips) {
     if (clips.empty()) return false;
 
@@ -77,9 +74,6 @@ bool load_clip_names_from_baked(std::vector<AnimClip>& clips) {
                 ++applied;
             }
         }
-        // A mostly-missed table means foreign game data: let the caller
-        // fall back to the cache/scan path. Binding clip indices are
-        // positional, so they are only trustworthy on the exact list.
         if (applied * 2 < clips.size()) return false;
         bindings.clear();
     }
@@ -97,8 +91,6 @@ bool load_clip_names_from_baked(std::vector<AnimClip>& clips) {
     return true;
 }
 
-// Writes the resolved names + bindings next to the executable so they can
-// be inspected (and re-baked with tools/gen_baked_anim.py when desired).
 void dump_resolved_clip_names_txt(const std::vector<AnimClip>& clips) {
     std::ofstream f(std::filesystem::current_path() /
                         "anim_names_resolved.txt",

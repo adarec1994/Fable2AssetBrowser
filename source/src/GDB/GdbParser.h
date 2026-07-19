@@ -372,6 +372,29 @@ std::vector<TransitionPoint> ExtractTransitionPoints(
     const std::vector<const std::vector<uint8_t>*>& gdbs,
     const std::vector<std::pair<uint32_t, std::string>>& hash_to_name);
 
+struct AnimTreeSlot {
+    uint32_t slot_hash = 0;
+    std::string slot_name;
+    uint32_t clip_key = 0;
+    uint32_t ref_record = 0;
+    uint32_t owner_record = 0;
+    int      chain_depth = 0;
+    bool     overridden_deeper = false;
+    std::vector<uint32_t> variation_keys;
+};
+
+struct EntityAnimTree {
+    uint32_t entity_hash = 0;
+    uint32_t manager_record = 0;
+    uint32_t animations_root = 0;
+    std::vector<uint32_t> chain;
+    std::vector<AnimTreeSlot> slots;
+};
+
+std::unordered_map<uint32_t, EntityAnimTree> ExtractEntityAnimTrees(
+    const std::vector<const std::vector<uint8_t>*>& gdbs,
+    const std::vector<std::pair<uint32_t, std::string>>& hash_to_name);
+
 enum class EntityCatalogKind : uint8_t {
     Creature = 0,
     StaticProp = 1,

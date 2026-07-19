@@ -168,6 +168,44 @@
             if (sel_gameplay) {
                 draw_entity_gameplay_details(*sel_gameplay);
             }
+            {
+                uint32_t anim_tree_hash = 0;
+                std::string anim_tree_title = sel_gameplay
+                    ? sel_gameplay->entity_name : std::string();
+                uint32_t candidates[3] = {0, 0, 0};
+                if (::g_selected_level_hash != 0 &&
+                    ::g_selected_level_hash <= 0xFFFFFFFFull) {
+                    candidates[0] = uint32_t(::g_selected_level_hash);
+                }
+                candidates[1] = sel_gdb_entity_hash;
+                {
+                    const int selected_marker =
+                        selected_level_spawn_marker_index();
+                    if (selected_marker >= 0) {
+                        const auto& marker = g_level_spawn_markers[
+                            size_t(selected_marker)];
+                        candidates[2] = marker.creature_entity_hash;
+                        if (anim_tree_title.empty()) {
+                            anim_tree_title = marker.creature_name;
+                        }
+                    }
+                }
+                for (uint32_t candidate : candidates) {
+                    if (candidate != 0 &&
+                        AnimTreeUI::Available(candidate)) {
+                        anim_tree_hash = candidate;
+                        break;
+                    }
+                }
+                if (anim_tree_hash != 0) {
+                    ImGui::Spacing();
+                    if (ImGui::Button("Show Animation Tree")) {
+                        AnimTreeUI::Open(anim_tree_hash,
+                                         anim_tree_title.empty()
+                                             ? "Entity" : anim_tree_title);
+                    }
+                }
+            }
             if (sel_property) {
                 draw_property_details(*sel_property);
             }

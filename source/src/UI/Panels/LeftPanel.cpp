@@ -11,6 +11,7 @@
 #include "../../Level/Creation/LandscapeAuthoring.h"
 #include "../../Level/Creation/NewLevel.h"
 #include "../Quest/QuestNodeView.h"
+#include "../AnimTree/AnimTreeView.h"
 
 #include "../../ISO/IsoDump.h"
 #include "../../Quest/QuestInjection.h"

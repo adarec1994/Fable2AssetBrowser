@@ -7,6 +7,7 @@
 #include "../Utilities/Progress.h"
 #include "UI_Panels.h"
 #include "Panels/ImportDialog.h"
+#include "AnimTree/AnimTreeView.h"
 #include "AudioPlayerWindow.h"
 #include "Layout/LoadingScreen.h"
 #include "Layout/MainLayout.h"
@@ -836,6 +837,8 @@ void draw_main(GLFWwindow* window) {
 #endif
 
     UI::draw_audio_player_window();
+
+    AnimTreeUI::Draw();
 
     if (show_output_log) {
         OutputLog::draw();

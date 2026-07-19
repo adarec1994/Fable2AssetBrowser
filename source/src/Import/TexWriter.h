@@ -38,6 +38,10 @@ struct Options {
     int    match_width     = 0;
     int    match_height    = 0;
     int    match_mip_count = 0;
+    // Per-mip compression flags of the original texture (top mip first).
+    // Chunk i is written as cf=1/11 (Lionhead-coded BC1) or cf=7 raw to
+    // match; unsupported flags fall back to cf=7.
+    std::vector<uint32_t> match_comp_flags;
 };
 
 struct BuiltTex {

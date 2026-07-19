@@ -256,3 +256,5 @@ const FlatAssetEntry* FindGlobalModelAssetByPathHash(uint32_t path_hash);
 extern std::unordered_map<uint32_t, Gdb::EntityGameplayDetails>
     g_global_entity_gameplay;
 extern Gdb::EntityGameplayOptions g_global_entity_gameplay_options;
+extern std::unordered_map<uint32_t, Gdb::EntityAnimTree>
+    g_global_entity_anim_trees;

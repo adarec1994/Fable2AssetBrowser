@@ -1,5 +1,6 @@
 #include "RenderPanel.h"
 #include "../../Utilities/State.h"
+#include "../AnimTree/AnimTreeView.h"
 #include "../ModelPreview.h"
 #include "../EntityModelResolver.h"
 #include "../ContentTabs.h"

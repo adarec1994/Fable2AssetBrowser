@@ -66,6 +66,7 @@ namespace {
 #include "GdbParser/Entities/TextTags.inl"
 #include "GdbParser/Entities/Spawns.inl"
 #include "GdbParser/Entities/Transitions.inl"
+#include "GdbParser/Entities/AnimTree.inl"
 
 namespace {
 

@@ -101,6 +101,19 @@
                             ContentTabs::OpenEntity(index, label);
                             load_entity_preview(index);
                         }
+                        if (ImGui::BeginPopupContextItem()) {
+                            const bool has_tree =
+                                AnimTreeUI::Available(entity.entity_hash);
+                            if (ImGui::MenuItem("Show Animation Tree",
+                                                nullptr, false, has_tree)) {
+                                AnimTreeUI::Open(entity.entity_hash, label);
+                            }
+                            if (!has_tree) {
+                                ImGui::TextDisabled(
+                                    "No animation set on this entity.");
+                            }
+                            ImGui::EndPopup();
+                        }
                         if (!S.hide_tooltips && ImGui::IsItemHovered()) {
                             ImGui::BeginTooltip();
                             ImGui::TextUnformatted(label.c_str());

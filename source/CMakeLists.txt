@@ -472,6 +472,8 @@ set(APP_SOURCES
         src/UI/Quest/Blueprint/vendor/drawing.h
         src/UI/Quest/Blueprint/vendor/widgets.cpp
         src/UI/Quest/Blueprint/vendor/widgets.h
+        src/UI/AnimTree/AnimTreeView.cpp
+        src/UI/AnimTree/AnimTreeView.h
         src/Level/IO/BnkWriter.cpp
         src/Level/IO/BnkWriter.h
         src/UI/LevelGizmo.cpp

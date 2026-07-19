@@ -39,64 +39,82 @@ bool replace_texture(const std::string& img_path,
     texture_options.force_mip0_split = !shared_mip0.empty();
     if (!shared_mip0.empty()) texture_options.generate_mips = true;
 
-    uint32_t orig_format = 0, orig_w = 0, orig_h = 0, orig_mips = 0;
-    try {
-        const std::vector<uint8_t> header = BnkCache::extract_bytes(
-            target.header.path, target.header.index);
-        auto be = [&](size_t o) {
-            return (uint32_t(header[o]) << 24) | (uint32_t(header[o+1]) << 16) |
-                   (uint32_t(header[o+2]) << 8) | uint32_t(header[o+3]);
-        };
-        if (header.size() >= 32) {
-            orig_w = be(16);
-            orig_h = be(20);
-            orig_format = be(24);
-            orig_mips = be(28);
+    const std::string key = normalized_path(target.virtual_path);
+    auto backup_counterpart = [](const std::string& live) -> std::string {
+        if (S.root_dir.empty() || GameBackup::IsBackupPath(live)) {
+            return {};
         }
-    } catch (...) {
+        std::error_code ec;
+        const std::filesystem::path rel =
+            std::filesystem::relative(live, S.root_dir, ec);
+        if (ec || rel.empty() || rel.generic_string().rfind("..", 0) == 0) {
+            return {};
+        }
+        const std::filesystem::path p =
+            std::filesystem::path(S.root_dir) / "f2ab_backup" / rel;
+        return std::filesystem::is_regular_file(p, ec) ? p.string()
+                                                       : std::string();
+    };
+    auto extract_part_original = [&](const TexturePart& part,
+                                     bool& from_backup)
+        -> std::vector<uint8_t> {
+        from_backup = false;
+        if (part.index < 0 || part.path.empty()) return {};
+        const std::string backup = backup_counterpart(part.path);
+        if (!backup.empty()) {
+            try {
+                const int bidx = BnkCache::find_index(backup, key);
+                if (bidx >= 0) {
+                    from_backup = true;
+                    return BnkCache::extract_bytes(backup, bidx);
+                }
+            } catch (...) {
+            }
+        }
+        try {
+            return BnkCache::extract_bytes(part.path, part.index);
+        } catch (...) {
+        }
+        return {};
+    };
+
+    bool header_from_backup = false;
+    bool mip0_from_backup = false;
+    bool body_from_backup = false;
+    const std::vector<uint8_t> header_orig =
+        extract_part_original(target.header, header_from_backup);
+    const std::vector<uint8_t> body_orig =
+        extract_part_original(target.body, body_from_backup);
+    std::vector<uint8_t> mip0_orig;
+    for (const TexturePart& part : shared_mip0) {
+        mip0_orig = extract_part_original(part, mip0_from_backup);
+        if (!mip0_orig.empty()) break;
+    }
+    const std::string mip0_src =
+        mip0_from_backup ? "pristine backup" : "live bank";
+
+    uint32_t orig_format = 0, orig_w = 0, orig_h = 0, orig_mips = 0;
+    if (header_orig.size() >= 32) {
+        auto be = [&](size_t o) {
+            return (uint32_t(header_orig[o]) << 24) |
+                   (uint32_t(header_orig[o + 1]) << 16) |
+                   (uint32_t(header_orig[o + 2]) << 8) |
+                   uint32_t(header_orig[o + 3]);
+        };
+        orig_w = be(16);
+        orig_h = be(20);
+        orig_format = be(24);
+        orig_mips = be(28);
+    }
+
+    uint32_t mip0_cf = 0;
+    if (mip0_orig.size() >= 4) {
+        mip0_cf = (uint32_t(mip0_orig[0]) << 24) |
+                  (uint32_t(mip0_orig[1]) << 16) |
+                  (uint32_t(mip0_orig[2]) << 8) | uint32_t(mip0_orig[3]);
     }
 
     if (!shared_mip0.empty()) {
-        auto backup_counterpart = [](const std::string& live) -> std::string {
-            if (S.root_dir.empty() || GameBackup::IsBackupPath(live)) {
-                return {};
-            }
-            std::error_code ec;
-            const std::filesystem::path rel =
-                std::filesystem::relative(live, S.root_dir, ec);
-            if (ec || rel.empty() || rel.generic_string().rfind("..", 0) == 0) {
-                return {};
-            }
-            const std::filesystem::path p =
-                std::filesystem::path(S.root_dir) / "f2ab_backup" / rel;
-            return std::filesystem::is_regular_file(p, ec) ? p.string()
-                                                           : std::string();
-        };
-        const std::string key = normalized_path(target.virtual_path);
-        std::vector<uint8_t> mip0_orig;
-        std::string mip0_src;
-        for (const TexturePart& part : shared_mip0) {
-            if (part.index < 0) continue;
-            const std::string backup = backup_counterpart(part.path);
-            if (!backup.empty()) {
-                try {
-                    const int bidx = BnkCache::find_index(backup, key);
-                    if (bidx >= 0) {
-                        mip0_orig = BnkCache::extract_bytes(backup, bidx);
-                        mip0_src = "pristine backup";
-                    }
-                } catch (...) {
-                }
-            }
-            if (mip0_orig.empty()) {
-                try {
-                    mip0_orig = BnkCache::extract_bytes(part.path, part.index);
-                    mip0_src = "live bank";
-                } catch (...) {
-                }
-            }
-            if (!mip0_orig.empty()) break;
-        }
         uint32_t true_w = 0, true_h = 0;
         if (mip0_orig.size() >= 48) {
             auto be32 = [&](size_t o) {
@@ -175,6 +193,63 @@ bool replace_texture(const std::string& img_path,
         err = "could not read the original texture's dimensions to rebuild "
               "its streamed 1024 mip; aborting to avoid crashing the game";
         return false;
+    }
+
+    if (texture_options.match_mip_count > 0) {
+        std::vector<uint32_t> flags;
+        bool mirrored = false;
+        std::vector<uint8_t> whole;
+        whole.reserve(header_orig.size() + mip0_orig.size() +
+                      body_orig.size());
+        whole.insert(whole.end(), header_orig.begin(), header_orig.end());
+        whole.insert(whole.end(), mip0_orig.begin(), mip0_orig.end());
+        whole.insert(whole.end(), body_orig.begin(), body_orig.end());
+        TexInfo ti;
+        if (!header_orig.empty() && parse_tex_info(whole, ti) &&
+            ti.Mips.size() == (size_t)orig_mips &&
+            ti.TextureWidth == orig_w && ti.TextureHeight == orig_h) {
+            const uint32_t mirror_top = ti.Mips.front().CompFlag;
+            const bool mip0_disagrees = mip0_from_backup &&
+                                        mip0_cf != 0 &&
+                                        mip0_cf != mirror_top;
+            if (!mip0_disagrees) {
+                for (const auto& mip : ti.Mips) {
+                    flags.push_back(mip.CompFlag);
+                }
+                mirrored = true;
+            }
+        }
+        if (!mirrored && (mip0_cf == 1 || mip0_cf == 11)) {
+            uint32_t w = orig_w;
+            uint32_t h = orig_h;
+            for (uint32_t i = 0; i < orig_mips; ++i) {
+                flags.push_back((w >= 64 && h >= 64) ? mip0_cf : 7u);
+                w = std::max(1u, w >> 1);
+                h = std::max(1u, h >> 1);
+            }
+        }
+        if (!flags.empty()) {
+            std::string summary;
+            bool variant_codec = false;
+            for (uint32_t flag : flags) {
+                if (!summary.empty()) summary += ",";
+                summary += std::to_string(flag);
+                if (flag == 2 || flag == 3 || flag == 4) {
+                    variant_codec = true;
+                }
+            }
+            DebugLog::Write("texture-replace",
+                std::string(mirrored
+                    ? "mirroring original chunk flags ["
+                    : "rebuilding chunk flags from the pristine mip0 [") +
+                summary + "]");
+            if (variant_codec) {
+                DebugLog::Write("texture-replace",
+                    "warning: original uses the cf=2/3/4 variant codec "
+                    "(normal maps); those chunks fall back to raw cf=7");
+            }
+            texture_options.match_comp_flags = std::move(flags);
+        }
     }
 
     progress_update(40, 100, "Encoding replacement texture");

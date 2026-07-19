@@ -123,6 +123,14 @@ void draw_entity_tab_content() {
     if (gameplay != g_global_entity_gameplay.end()) {
         draw_entity_gameplay_details(gameplay->second);
     }
+    if (AnimTreeUI::Available(entity.entity_hash)) {
+        ImGui::Spacing();
+        if (ImGui::Button("Show Animation Tree")) {
+            AnimTreeUI::Open(entity.entity_hash,
+                             entity.display_name.empty()
+                                 ? entity.name : entity.display_name);
+        }
+    }
     ImGui::EndChild();
 }
 

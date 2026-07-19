@@ -522,6 +522,7 @@ void BuildGlobalEntityCatalog() {
     }
     auto gameplay = Gdb::ExtractEntityGameplayDetails(gdbs, names);
     auto gameplay_options = Gdb::CollectEntityGameplayOptions(gdbs);
+    auto anim_trees = Gdb::ExtractEntityAnimTrees(gdbs, names);
 
     g_global_entity_catalog = std::move(entities);
     g_global_entity_model_hashes = std::move(exact_model_hashes);
@@ -529,6 +530,7 @@ void BuildGlobalEntityCatalog() {
         std::move(authored_entity_bindings);
     g_global_entity_gameplay = std::move(gameplay);
     g_global_entity_gameplay_options = std::move(gameplay_options);
+    g_global_entity_anim_trees = std::move(anim_trees);
     ++g_global_entity_catalog_revision;
     OutputLog::info(
         "entities: indexed " +
@@ -536,6 +538,8 @@ void BuildGlobalEntityCatalog() {
         " entity definition(s) from all game and level GDBs (" +
         std::to_string(g_global_entity_gameplay.size()) +
         " NPC/creature definitions with gameplay details, " +
+        std::to_string(g_global_entity_anim_trees.size()) +
+        " animation tree(s), " +
         std::to_string(static_props.size()) + " custom static prop(s))");
 }
 

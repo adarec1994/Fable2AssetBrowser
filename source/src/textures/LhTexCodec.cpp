@@ -1,4 +1,5 @@
 #include "LhTexCodec.h"
+#include <algorithm>
 #include <sstream>
 #include <deque>
 #include <cstring>
@@ -393,6 +394,224 @@ static inline int clamp6(int v) {
     return v < 0 ? 0 : (v > 0x3F ? 0x3F : v);
 }
 
+}
+
+namespace {
+
+struct BitWriter {
+    std::vector<uint8_t> bytes;
+    uint32_t word = 0;
+    int bits_in_word = 0;
+
+    void push(uint32_t value, int n) {
+        while (n > 0) {
+            const int take = std::min(n, 32 - bits_in_word);
+            const uint32_t mask =
+                take == 32 ? 0xFFFFFFFFu : ((1u << take) - 1u);
+            word |= (value & mask) << bits_in_word;
+            bits_in_word += take;
+            value >>= take;
+            n -= take;
+            if (bits_in_word == 32) flush_word();
+        }
+    }
+
+    void flush_word() {
+        bytes.push_back((uint8_t)(word >> 24));
+        bytes.push_back((uint8_t)(word >> 16));
+        bytes.push_back((uint8_t)(word >> 8));
+        bytes.push_back((uint8_t)word);
+        word = 0;
+        bits_in_word = 0;
+    }
+
+    void finish() {
+        if (bits_in_word > 0) flush_word();
+    }
+};
+
+uint8_t encode_freq_byte(uint32_t value) {
+    if (value == 0) return 0;
+    uint32_t best_b = 0x1F;
+    uint32_t best_err = 0xFFFFFFFFu;
+    for (uint32_t exp = 0; exp < 16; ++exp) {
+        for (uint32_t mant = 1; mant < 16; ++mant) {
+            const uint64_t decoded = (uint64_t)mant << exp;
+            const uint64_t err = decoded > value ? decoded - value
+                                                 : value - decoded;
+            if (err < best_err) {
+                best_err = (uint32_t)std::min<uint64_t>(err, 0xFFFFFFFFu);
+                best_b = (exp << 4) | mant;
+            }
+        }
+    }
+    return (uint8_t)best_b;
+}
+
+struct HuffCode {
+    uint32_t bits = 0;
+    int length = 0;
+};
+
+void collect_codes(const HuffNode* node, uint32_t bits, int length,
+                   std::vector<HuffCode>& codes) {
+    if (!node) return;
+    if (node->sym >= 0) {
+        if (node->sym < (int)codes.size()) {
+            codes[(size_t)node->sym] = {bits, length == 0 ? 1 : length};
+        }
+        return;
+    }
+    if (length >= 32) {
+        // Zero-frequency symbols can sit arbitrarily deep; they are never
+        // emitted, so an unrepresentable code just stays marked invalid.
+        return;
+    }
+    collect_codes(node->left, bits, length + 1, codes);
+    collect_codes(node->right, bits | (1u << length), length + 1, codes);
+}
+
+void write_code(BitWriter& bw, const HuffCode& code) {
+    bw.push(code.bits, code.length);
+}
+
+}
+
+bool lh_encode_compressed_mip(const uint8_t* bc1_blocks, int width,
+                              int height, std::vector<uint8_t>& out_body,
+                              std::string* err, bool comp11_layout)
+{
+    auto fail = [&](const std::string& msg) -> bool {
+        if (err) *err = msg;
+        return false;
+    };
+    if (!bc1_blocks || width <= 0 || height <= 0 ||
+        (width % 4) != 0 || (height % 4) != 0 ||
+        width > 8192 || height > 8192) {
+        return fail("lh_encode: invalid dimensions");
+    }
+
+    const int bw = width / 4;
+    const int bh = height / 4;
+    const size_t total_blocks = (size_t)bw * (size_t)bh;
+    constexpr int kOpLiteral = 61;
+
+    // The op=4 literal never consults neighbours or the delta table, so an
+    // all-literal stream is always reproducible by the retail decoder.
+    uint32_t counts_idx[256] = {};
+    uint32_t counts_op[62] = {};
+    uint32_t counts_del[122] = {};
+    counts_op[kOpLiteral] = (uint32_t)std::min<size_t>(
+        total_blocks, 0xFFFFFFFFu);
+
+    auto index_symbols = [](const uint8_t* blk, uint8_t out_syms[4]) {
+        out_syms[0] = (uint8_t)((blk[4] & 0x0F) | ((blk[5] & 0x0F) << 4));
+        out_syms[1] = (uint8_t)(((blk[4] >> 4) & 0x0F) | (blk[5] & 0xF0));
+        out_syms[2] = (uint8_t)((blk[6] & 0x0F) | ((blk[7] & 0x0F) << 4));
+        out_syms[3] = (uint8_t)(((blk[6] >> 4) & 0x0F) | (blk[7] & 0xF0));
+    };
+
+    for (size_t b = 0; b < total_blocks; ++b) {
+        const uint8_t* blk = bc1_blocks + b * 8;
+        const uint16_t c0 = (uint16_t)(blk[0] | (blk[1] << 8));
+        const uint16_t c1 = (uint16_t)(blk[2] | (blk[3] << 8));
+        if (c0 == c1 && !comp11_layout) continue;
+        uint8_t syms[4];
+        index_symbols(blk, syms);
+        for (int i = 0; i < 4; ++i) ++counts_idx[syms[i]];
+    }
+
+    uint8_t freq_bytes[256 + 62 + 122];
+    uint32_t eff_idx[256];
+    uint32_t eff_op[62];
+    uint32_t eff_del[122];
+    for (int i = 0; i < 256; ++i) {
+        freq_bytes[i] = encode_freq_byte(counts_idx[i]);
+        eff_idx[i] = decode_freq_byte(freq_bytes[i]);
+    }
+    for (int i = 0; i < 62; ++i) {
+        freq_bytes[256 + i] = encode_freq_byte(counts_op[i]);
+        eff_op[i] = decode_freq_byte(freq_bytes[256 + i]);
+    }
+    for (int i = 0; i < 122; ++i) {
+        freq_bytes[256 + 62 + i] = encode_freq_byte(counts_del[i]);
+        eff_del[i] = decode_freq_byte(freq_bytes[256 + 62 + i]);
+    }
+
+    HuffArena arena_idx;
+    HuffArena arena_op;
+    HuffArena arena_del;
+    const HuffNode* tree_idx = build_tree(arena_idx, eff_idx, 256);
+    const HuffNode* tree_op = build_tree(arena_op, eff_op, 62);
+    const HuffNode* tree_del = build_tree(arena_del, eff_del, 122);
+    if (!tree_idx || !tree_op || !tree_del) {
+        return fail("lh_encode: tree build failed");
+    }
+
+    std::vector<HuffCode> codes_idx(256);
+    std::vector<HuffCode> codes_op(62);
+    collect_codes(tree_idx, 0, 0, codes_idx);
+    collect_codes(tree_op, 0, 0, codes_op);
+    for (int i = 0; i < 256; ++i) {
+        if (counts_idx[i] != 0 &&
+            (codes_idx[i].length <= 0 || codes_idx[i].length > 32)) {
+            return fail("lh_encode: index code table incomplete");
+        }
+    }
+    if (codes_op[kOpLiteral].length <= 0 ||
+        codes_op[kOpLiteral].length > 32) {
+        return fail("lh_encode: op code table incomplete");
+    }
+
+    BitWriter writer;
+    writer.push((uint32_t)width, 16);
+    writer.push((uint32_t)height, 16);
+    for (uint8_t b : freq_bytes) writer.push(b, 8);
+
+    for (size_t b = 0; b < total_blocks; ++b) {
+        const uint8_t* blk = bc1_blocks + b * 8;
+        const uint16_t c0 = (uint16_t)(blk[0] | (blk[1] << 8));
+        const uint16_t c1 = (uint16_t)(blk[2] | (blk[3] << 8));
+        write_code(writer, codes_op[kOpLiteral]);
+        writer.push(c0, 16);
+        writer.push(c1, 16);
+        if (c0 == c1 && !comp11_layout) continue;
+        uint8_t syms[4];
+        index_symbols(blk, syms);
+        for (int i = 0; i < 4; ++i) {
+            write_code(writer, codes_idx[syms[i]]);
+        }
+    }
+    writer.finish();
+    out_body = std::move(writer.bytes);
+
+    int rt_w = 0;
+    int rt_h = 0;
+    std::vector<uint8_t> round_trip;
+    std::string rt_err;
+    if (!lh_decode_compressed_mip(out_body.data(), out_body.size(), rt_w,
+                                  rt_h, round_trip, &rt_err,
+                                  comp11_layout)) {
+        return fail("lh_encode: round-trip decode failed: " + rt_err);
+    }
+    if (rt_w != width || rt_h != height ||
+        round_trip.size() != total_blocks * 8) {
+        return fail("lh_encode: round-trip geometry mismatch");
+    }
+    for (size_t b = 0; b < total_blocks; ++b) {
+        const uint8_t* src = bc1_blocks + b * 8;
+        const uint8_t* got = round_trip.data() + b * 8;
+        const uint16_t c0 = (uint16_t)(src[0] | (src[1] << 8));
+        const uint16_t c1 = (uint16_t)(src[2] | (src[3] << 8));
+        if (std::memcmp(src, got, 4) != 0) {
+            return fail("lh_encode: endpoint mismatch in round-trip");
+        }
+        if ((c0 != c1 || comp11_layout) &&
+            std::memcmp(src + 4, got + 4, 4) != 0) {
+            return fail("lh_encode: index mismatch in round-trip");
+        }
+    }
+    return true;
 }
 
 bool lh_decode_variant_2_3_4(const uint8_t* body, size_t body_size,

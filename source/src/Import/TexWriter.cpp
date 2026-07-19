@@ -1,5 +1,6 @@
 #include "TexWriter.h"
 #include "Xbox360Tiling.h"
+#include "textures/LhTexCodec.h"
 
 #define STB_DXT_IMPLEMENTATION
 #include "stb_dxt.h"
@@ -148,7 +149,6 @@ void build_mip_payload(const uint8_t* rgba, int w, int h, Format fmt,
             }
         }
     }
-    X360Tile::swap_u16_endian(payload.data(), payload.size());
 }
 
 }
@@ -211,8 +211,36 @@ bool build_from_rgba(const uint8_t* rgba_in, int w, int h,
         std::vector<uint8_t> payload;
         build_mip_payload(level.data(), lw, lh, fmt, payload);
 
+        // Chunks mirror the original texture's per-mip compression flags
+        // when the caller provides them; the terrain/theme streamer only
+        // decodes the Lionhead codec for large BC1 mips, so raw cf=7
+        // there renders as the engine's fallback texture.
+        uint32_t want_flag = 0;
+        if (chunks.size() < opt.match_comp_flags.size()) {
+            want_flag = opt.match_comp_flags[chunks.size()];
+        } else if (match_geom && fmt == Format::BC1 &&
+                   lw >= 64 && lh >= 64) {
+            want_flag = 1u;
+        }
+        uint32_t comp_flag = kCompFlagRaw;
+        if ((want_flag == 1u || want_flag == 11u) && fmt == Format::BC1) {
+            std::vector<uint8_t> stream;
+            std::string lh_err;
+            if (!lh_encode_compressed_mip(payload.data(), lw, lh, stream,
+                                          &lh_err, want_flag == 11u)) {
+                err = "cf=" + std::to_string(want_flag) +
+                      " encode failed for " + std::to_string(lw) + "x" +
+                      std::to_string(lh) + " mip: " + lh_err;
+                return false;
+            }
+            payload = std::move(stream);
+            comp_flag = want_flag;
+        } else if (fmt != Format::RawARGB) {
+            X360Tile::swap_u16_endian(payload.data(), payload.size());
+        }
+
         MipChunk ck; ck.w = lw; ck.h = lh;
-        put32be(ck.bytes, kCompFlagRaw);
+        put32be(ck.bytes, comp_flag);
         put32be(ck.bytes, 48u);
         put32be(ck.bytes, (uint32_t)payload.size());
         for (int i = 0; i < 9; ++i) put32be(ck.bytes, 0u);

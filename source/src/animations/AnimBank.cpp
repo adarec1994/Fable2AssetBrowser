@@ -6,6 +6,8 @@
 #include "../Utilities/State.h"
 #include "../BNKCore.cpp"
 
+#include <zlib.h>
+
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -59,6 +61,7 @@ namespace {
 
 #include "AnimBank/Cache/Load.inl"
 #include "AnimBank/Cache/Save.inl"
+#include "AnimBank/Cache/Baked.inl"
 #include "AnimBank/Bindings/Public.inl"
 
 }

@@ -171,10 +171,21 @@ bool build_from_rgba(const uint8_t* rgba_in, int w, int h,
     if (fmt == Format::Auto)
         fmt = rgba_has_alpha(rgba_in, w, h) ? Format::BC3 : Format::BC1;
 
-    int tw = std::min(next_pow2_le(std::max(1, w)), std::max(4, opt.max_dimension));
-    int th = std::min(next_pow2_le(std::max(1, h)), std::max(4, opt.max_dimension));
-    if (tw * 2 <= w && tw * 2 <= opt.max_dimension) tw *= 2;
-    if (th * 2 <= h && th * 2 <= opt.max_dimension) th *= 2;
+    // Geometry match (replace mode) pins the output to the original
+    // texture's exact dimensions; otherwise clamp to a power of two.
+    const bool match_geom = opt.match_width > 0 && opt.match_height > 0;
+    int tw, th;
+    if (match_geom) {
+        tw = opt.match_width;
+        th = opt.match_height;
+    } else {
+        tw = std::min(next_pow2_le(std::max(1, w)),
+                      std::max(4, opt.max_dimension));
+        th = std::min(next_pow2_le(std::max(1, h)),
+                      std::max(4, opt.max_dimension));
+        if (tw * 2 <= w && tw * 2 <= opt.max_dimension) tw *= 2;
+        if (th * 2 <= h && th * 2 <= opt.max_dimension) th *= 2;
+    }
 
     std::vector<uint8_t> level;
     if (tw != w || th != h) {
@@ -208,11 +219,24 @@ bool build_from_rgba(const uint8_t* rgba_in, int w, int h,
         ck.bytes.insert(ck.bytes.end(), payload.begin(), payload.end());
         chunks.push_back(std::move(ck));
 
-        if (!opt.generate_mips) break;
-        if (lw / 2 < kMinMipDim || lh / 2 < kMinMipDim) break;
+        if (lw == 1 && lh == 1) break;
+        if (opt.match_mip_count > 0) {
+            // Reproduce the original's full chain down to 1x1.
+            if ((int)chunks.size() >= opt.match_mip_count) break;
+        } else {
+            if (!opt.generate_mips) break;
+            if (lw / 2 < kMinMipDim || lh / 2 < kMinMipDim) break;
+        }
         std::vector<uint8_t> nxt; int nw = 0, nh = 0;
         downsample_half(level, lw, lh, nxt, nw, nh);
         level.swap(nxt); lw = nw; lh = nh;
+    }
+
+    if (opt.match_mip_count > 0 &&
+        (int)chunks.size() != opt.match_mip_count) {
+        err = "internal: produced " + std::to_string(chunks.size()) +
+              " mips, original has " + std::to_string(opt.match_mip_count);
+        return false;
     }
 
     out.mip_count = (uint32_t)chunks.size();
@@ -220,8 +244,16 @@ bool build_from_rgba(const uint8_t* rgba_in, int w, int h,
     const size_t header_size =
         std::max(kHeaderEntrySize, (size_t)32 + 4 * chunks.size());
 
-    const bool split_mip0 = (out.width >= 1024 || out.height >= 1024) &&
-                            chunks.size() > 1;
+    if (opt.force_mip0_split && chunks.size() < 2) {
+        err = "the original texture streams its top mip separately; the "
+              "replacement needs at least 2 mips (use a source of 32px or "
+              "larger and keep mip generation on)";
+        return false;
+    }
+    const bool split_mip0 =
+        (opt.force_mip0_split ||
+         out.width >= 1024 || out.height >= 1024) &&
+        chunks.size() > 1;
 
     size_t total_data = 0;
     for (const auto& c : chunks) total_data += c.bytes.size();

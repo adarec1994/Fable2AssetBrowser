@@ -136,6 +136,7 @@ struct State {
     bool terrain_mode = false;
     bool show_gdb_placements = false;
     bool show_spawn_markers = false;
+    bool show_transition_points = false;
     bool show_ent_npcs = false;
     bool show_entity_models = true;
     bool show_dig_spots = false;

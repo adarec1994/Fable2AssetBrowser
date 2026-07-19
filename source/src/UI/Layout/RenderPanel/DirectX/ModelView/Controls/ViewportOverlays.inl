@@ -149,6 +149,7 @@
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Wireframe");
             ImGui::Checkbox("Show", &g_mp.wireframe);
             if (g_mp.no_tilt && (!g_level_spawn_markers.empty() ||
+                                 !g_level_transition_points.empty() ||
                                  !g_level_entity_text.empty())) {
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
@@ -161,6 +162,14 @@
                         "points (orange). In edit mode: click to "
                         "select, Right-click ground to add a "
                         "new generator.");
+                ImGui::Checkbox("Transition Points",
+                                &S.show_transition_points);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Show level exits and their destination areas. "
+                        "Orange pins are exits and blue pins are "
+                        "teleporters.");
+                }
                 ImGui::Checkbox("NPC / creature markers",
                                 &S.show_ent_npcs);
                 if (ImGui::IsItemHovered()) {

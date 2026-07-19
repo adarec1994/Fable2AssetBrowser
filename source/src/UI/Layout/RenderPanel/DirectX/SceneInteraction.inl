@@ -400,26 +400,138 @@ static bool level_placement_surface_at(const ImVec2& mouse,
     return true;
 }
 
+static bool level_terrain_surface_at(const ImVec2& mouse,
+                                     const ImVec2& origin,
+                                     const ImVec2& region,
+                                     float out_engine_pos[3],
+                                     float* out_surface_distance = nullptr) {
+    float ray_origin[3] = {};
+    float ray_direction[3] = {};
+    if (!level_view_ray(mouse, origin, region,
+                        ray_origin, ray_direction)) {
+        return false;
+    }
+
+    float terrain_hit[3] = {};
+    if (!TerrainEdit::Raycast(
+            ray_origin[0], ray_origin[1], ray_origin[2],
+            ray_direction[0], ray_direction[1], ray_direction[2],
+            terrain_hit[0], terrain_hit[1], terrain_hit[2])) {
+        return false;
+    }
+
+    const float dx = terrain_hit[0] - ray_origin[0];
+    const float dy = terrain_hit[1] - ray_origin[1];
+    const float dz = terrain_hit[2] - ray_origin[2];
+    const float distance = dx * ray_direction[0] +
+                           dy * ray_direction[1] +
+                           dz * ray_direction[2];
+    if (distance <= 0.0f) return false;
+
+    out_engine_pos[0] = terrain_hit[0];
+    out_engine_pos[1] = terrain_hit[2];
+    out_engine_pos[2] = terrain_hit[1];
+    if (out_surface_distance) *out_surface_distance = distance;
+    return true;
+}
+
 
 
 static bool level_water_surface_at(const ImVec2& mouse,
                                    const ImVec2& origin,
                                    const ImVec2& region,
-                                   float out_engine_pos[3]) {
+                                   float out_engine_pos[3],
+                                   float* out_surface_distance = nullptr) {
     float ray_origin[3] = {};
     float ray_direction[3] = {};
     if (!level_view_ray(mouse, origin, region, ray_origin,
                         ray_direction)) {
         return false;
     }
+
+    auto hit_triangle = [](const float* a, const float* b, const float* c,
+                           const float ro[3], const float rd[3],
+                           float& out_t) {
+        const float e1x = b[0] - a[0];
+        const float e1y = b[1] - a[1];
+        const float e1z = b[2] - a[2];
+        const float e2x = c[0] - a[0];
+        const float e2y = c[1] - a[1];
+        const float e2z = c[2] - a[2];
+        const float px = rd[1] * e2z - rd[2] * e2y;
+        const float py = rd[2] * e2x - rd[0] * e2z;
+        const float pz = rd[0] * e2y - rd[1] * e2x;
+        const float det = e1x * px + e1y * py + e1z * pz;
+        if (std::fabs(det) < 1e-8f) return false;
+        const float inv_det = 1.0f / det;
+        const float tx = ro[0] - a[0];
+        const float ty = ro[1] - a[1];
+        const float tz = ro[2] - a[2];
+        const float u = (tx * px + ty * py + tz * pz) * inv_det;
+        if (u < 0.0f || u > 1.0f) return false;
+        const float qx = ty * e1z - tz * e1y;
+        const float qy = tz * e1x - tx * e1z;
+        const float qz = tx * e1y - ty * e1x;
+        const float v = (rd[0] * qx + rd[1] * qy +
+                         rd[2] * qz) * inv_det;
+        if (v < 0.0f || u + v > 1.0f) return false;
+        const float t = (e2x * qx + e2y * qy + e2z * qz) * inv_det;
+        if (t <= 0.0f) return false;
+        out_t = t;
+        return true;
+    };
+
     float best_t = std::numeric_limits<float>::infinity();
     for (const auto& mesh : g_mp.meshes) {
-        if (!mesh.is_water) continue;
-        const float y = mesh.water_params[0];
-        if (std::fabs(ray_direction[1]) < 1e-5f) continue;
-        const float t = (y - ray_origin[1]) / ray_direction[1];
-        if (t <= 0.0f || t >= best_t) continue;
-        best_t = t;
+        if (!mesh.is_water || mesh.edit_xform.deleted ||
+            mesh.pick_positions.empty() || mesh.pick_indices.empty()) {
+            continue;
+        }
+
+        float local_origin[3] = {
+            ray_origin[0], ray_origin[1], ray_origin[2]
+        };
+        float local_direction[3] = {
+            ray_direction[0], ray_direction[1], ray_direction[2]
+        };
+        float distance_scale = 1.0f;
+        if (mesh.edit_xform.active()) {
+            const LevelEdit::EditXform& x = mesh.edit_xform;
+            const float relative[3] = {
+                ray_origin[0] - x.pivot[0] - x.off[0],
+                ray_origin[1] - x.pivot[1] - x.off[1],
+                ray_origin[2] - x.pivot[2] - x.off[2],
+            };
+            float rotated_relative[3] = {};
+            rp_quat_rot_inv(x.quat, relative, rotated_relative);
+            const float inverse_scale =
+                x.scale > 1e-6f ? 1.0f / x.scale : 1.0f;
+            local_origin[0] = rotated_relative[0] * inverse_scale + x.pivot[0];
+            local_origin[1] = rotated_relative[1] * inverse_scale + x.pivot[1];
+            local_origin[2] = rotated_relative[2] * inverse_scale + x.pivot[2];
+            rp_quat_rot_inv(x.quat, ray_direction, local_direction);
+            distance_scale = x.scale;
+        }
+
+        for (size_t k = 0; k + 2 < mesh.pick_indices.size(); k += 3) {
+            const size_t pa = static_cast<size_t>(mesh.pick_indices[k]) * 3;
+            const size_t pb = static_cast<size_t>(mesh.pick_indices[k + 1]) * 3;
+            const size_t pc = static_cast<size_t>(mesh.pick_indices[k + 2]) * 3;
+            if (pa + 2 >= mesh.pick_positions.size() ||
+                pb + 2 >= mesh.pick_positions.size() ||
+                pc + 2 >= mesh.pick_positions.size()) {
+                continue;
+            }
+            float local_t = 0.0f;
+            if (!hit_triangle(&mesh.pick_positions[pa],
+                              &mesh.pick_positions[pb],
+                              &mesh.pick_positions[pc],
+                              local_origin, local_direction, local_t)) {
+                continue;
+            }
+            const float world_t = local_t * distance_scale;
+            if (world_t > 0.0f && world_t < best_t) best_t = world_t;
+        }
     }
     if (!std::isfinite(best_t)) return false;
     const float px = ray_origin[0] + ray_direction[0] * best_t;
@@ -428,5 +540,6 @@ static bool level_water_surface_at(const ImVec2& mouse,
     out_engine_pos[0] = px;
     out_engine_pos[1] = pz;
     out_engine_pos[2] = py;
+    if (out_surface_distance) *out_surface_distance = best_t;
     return true;
 }

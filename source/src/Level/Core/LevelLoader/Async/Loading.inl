@@ -50,6 +50,7 @@ void OpenAsync(const FlatAssetEntry& entry)
             g_level_property_details.clear();
             g_level_entity_text.clear();
             g_level_spawn_markers.clear();
+            g_level_transition_points.clear();
             g_level_creature_catalog.clear();
             g_level_vfs_texture_body_bnks.clear();
             g_level_vfs_model_bnks.clear();

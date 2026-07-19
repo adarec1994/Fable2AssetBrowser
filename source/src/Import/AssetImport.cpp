@@ -3,6 +3,7 @@
 #include "GlbImport.h"
 #include "ImageLoad.h"
 #include "MdlWriter.h"
+#include "ObjImport.h"
 
 #include "Entity/StaticPropAuthoring.h"
 #include "MDL/ModelParser.h"
@@ -88,6 +89,22 @@ bool restore_mutable_file(const std::string& path,
 #include "AssetImport/Textures/Replace.inl"
 #include "AssetImport/Models/SpawnTemplate.inl"
 
+}
+
+bool model_extension_supported(const std::string& path)
+{
+    const std::string ext = to_lower(
+        std::filesystem::path(path).extension().string());
+    return ext == ".glb" || ext == ".obj";
+}
+
+bool load_model_scene(const std::string& path, GlbImport::Scene& scene,
+                      std::string& err)
+{
+    const std::string ext = to_lower(
+        std::filesystem::path(path).extension().string());
+    if (ext == ".obj") return ObjImport::load_obj(path, scene, err);
+    return GlbImport::load_glb(path, scene, err);
 }
 
 #include "AssetImport/Naming/Sanitize.inl"

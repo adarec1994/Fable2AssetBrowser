@@ -286,9 +286,27 @@ bool RequireBackup(std::string& error) {
     return true;
 }
 
+bool IsBackupPath(const std::string& path) {
+    std::string lowered = path;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    std::replace(lowered.begin(), lowered.end(), '\\', '/');
+    return lowered.find("/f2ab_backup/") != std::string::npos ||
+           lowered.rfind("f2ab_backup/", 0) == 0;
+}
+
 bool EnsureFilesCovered(const std::vector<std::string>& paths,
                          std::string& error) {
     if (!RequireBackup(error)) return false;
+    for (const std::string& path : paths) {
+        if (IsBackupPath(path)) {
+            error = "Refusing to modify the pristine backup copy (" + path +
+                    "). Re-open the game folder to refresh the file index.";
+            return false;
+        }
+    }
     if (iso_session()) {
         return ISO::Writeback::EnsureBackedUp(paths, error);
     }

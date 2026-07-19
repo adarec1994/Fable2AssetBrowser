@@ -226,7 +226,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
             mr.lev_rec_kind = pr.lev_rec_kind;
             m.pick_ranges.push_back(mr);
         }
-        if (!m.pick_ranges.empty()) {
+        if (!m.pick_ranges.empty() || m.is_water) {
             m.pick_positions = g.positions;
             m.pick_indices = g.indices;
         }

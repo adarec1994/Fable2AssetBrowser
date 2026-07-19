@@ -14,13 +14,42 @@ bool import_folder(const std::string& folder_path, const Options& opt,
     for (const auto& de : fs::directory_iterator(folder_path, ec)) {
         if (!de.is_regular_file()) continue;
         const std::string p = de.path().string();
-        std::string ext = to_lower(de.path().extension().string());
-        if (ext == ".glb") glbs.push_back(p);
+        if (model_extension_supported(p)) glbs.push_back(p);
         else if (ImageLoad::extension_supported(p)) images.push_back(p);
     }
     if (glbs.empty() && images.empty()) {
-        err = "no .glb or image files found in " + folder_path;
+        err = "no .glb/.obj or image files found in " + folder_path;
         return false;
+    }
+
+    // Textures an .obj's material set consumes are baked into that model's
+    // import; drop them from the standalone image list.
+    {
+        std::set<std::string> consumed;
+        for (const auto& model_path : glbs) {
+            if (to_lower(fs::path(model_path).extension().string()) != ".obj")
+                continue;
+            for (const std::string& file :
+                 ObjImport::referenced_texture_files(model_path)) {
+                std::error_code cec;
+                const fs::path canon = fs::weakly_canonical(file, cec);
+                consumed.insert(to_lower(
+                    (cec ? fs::path(file) : canon).string()));
+            }
+        }
+        if (!consumed.empty()) {
+            images.erase(
+                std::remove_if(
+                    images.begin(), images.end(),
+                    [&](const std::string& image) {
+                        std::error_code cec;
+                        const fs::path canon =
+                            fs::weakly_canonical(image, cec);
+                        return consumed.count(to_lower(
+                            (cec ? fs::path(image) : canon).string()));
+                    }),
+                images.end());
+        }
     }
 
     int item = 0;

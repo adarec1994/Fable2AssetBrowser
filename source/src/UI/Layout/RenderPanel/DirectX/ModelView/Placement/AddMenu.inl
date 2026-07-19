@@ -18,25 +18,27 @@
         s_gen_click_pending = false;
         const ImVec2 mouse2 = ImGui::GetIO().MousePos;
         s_gen_click_mouse = mouse2;
-        float engine_pos[3] = {};
-        const bool land_hit = level_placement_surface_at(
-            mouse2, origin, region, true, engine_pos);
+        float land_pos[3] = {};
+        float land_distance = std::numeric_limits<float>::infinity();
+        const bool land_hit = level_terrain_surface_at(
+            mouse2, origin, region, land_pos, &land_distance);
         float water_pos[3] = {};
+        float water_distance = std::numeric_limits<float>::infinity();
         const bool water_hit =
-            level_water_surface_at(mouse2, origin, region, water_pos);
+            level_water_surface_at(mouse2, origin, region, water_pos,
+                                   &water_distance);
         
         
-        if (water_hit &&
-            (!land_hit || water_pos[2] > engine_pos[2] + 0.01f)) {
+        if (water_hit && (!land_hit || water_distance < land_distance)) {
             s_gen_pos[0] = water_pos[0];
             s_gen_pos[1] = water_pos[1];
             s_gen_pos[2] = water_pos[2];
             s_gen_on_water = true;
             s_gen_click_pending = true;
         } else if (land_hit) {
-            s_gen_pos[0] = engine_pos[0];
-            s_gen_pos[1] = engine_pos[1];
-            s_gen_pos[2] = engine_pos[2];
+            s_gen_pos[0] = land_pos[0];
+            s_gen_pos[1] = land_pos[1];
+            s_gen_pos[2] = land_pos[2];
             s_gen_on_water = false;
             s_gen_click_pending = true;
         }
@@ -256,6 +258,7 @@
         
         if (s_gen_on_water) {
             actor_names.clear();
+            static_entity_indices.clear();
             object_indices.clear();
             container_indices.clear();
             dig_indices.clear();
@@ -361,7 +364,7 @@
         }
         const int quest_reference_marker =
             selected_level_spawn_marker_index();
-        if (QuestUI::IsAuthoredQuestActive() &&
+        if (!s_gen_on_water && QuestUI::IsAuthoredQuestActive() &&
             quest_reference_marker >= 0) {
             const LevelSpawnMarker& marker =
                 g_level_spawn_markers[static_cast<std::size_t>(

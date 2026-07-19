@@ -8,7 +8,7 @@ static void draw_spawn_markers_overlay(const ImVec2& origin,
                     g_level_spawn_markers.end(), ::is_player_start_marker);
     if (!S.show_spawn_markers && !S.show_ent_npcs &&
         !S.show_dig_spots && !S.show_containers && !S.show_ent_text &&
-        !any_player_start) {
+        !S.show_transition_points && !any_player_start) {
         return;
     }
     if (!g_mp.no_tilt) return;
@@ -61,6 +61,77 @@ static void draw_spawn_markers_overlay(const ImVec2& origin,
         IM_COL32(220, 125, 255, 235),
         IM_COL32(90, 225, 225, 235),
     };
+
+    size_t transitions_drawn = 0;
+    if (S.show_transition_points) {
+        const ImVec2 mouse = ImGui::GetIO().MousePos;
+        for (const auto& transition : g_level_transition_points) {
+            XMVECTOR clip = XMVector4Transform(
+                XMVectorSet(transition.x, transition.z, transition.y, 1.0f),
+                VP);
+            const float w = XMVectorGetW(clip);
+            if (w <= 0.05f) continue;
+            const float ndcx = XMVectorGetX(clip) / w;
+            const float ndcy = XMVectorGetY(clip) / w;
+            if (ndcx < -1.1f || ndcx > 1.1f ||
+                ndcy < -1.1f || ndcy > 1.1f) {
+                continue;
+            }
+            ImVec2 tip;
+            tip.x = origin.x + (ndcx * 0.5f + 0.5f) * region.x;
+            tip.y = origin.y +
+                    (1.0f - (ndcy * 0.5f + 0.5f)) * region.y;
+            const ImVec2 head(tip.x, tip.y - 11.0f);
+            const ImU32 colour = transition.teleporter
+                ? IM_COL32(100, 205, 255, 245)
+                : IM_COL32(255, 165, 70, 245);
+            dl->AddTriangleFilled(
+                tip, ImVec2(head.x - 5.0f, head.y + 3.0f),
+                ImVec2(head.x + 5.0f, head.y + 3.0f), colour);
+            dl->AddCircleFilled(head, 6.5f, colour);
+            dl->AddCircle(head, 7.5f, IM_COL32(0, 0, 0, 210), 0, 1.5f);
+            dl->AddCircleFilled(head, 2.2f, IM_COL32(30, 35, 45, 245));
+
+            std::string label = transition.name;
+            if (!transition.level.empty()) {
+                if (!label.empty()) label += " -> ";
+                label += transition.level;
+            }
+            if (w < 55.0f && !label.empty()) {
+                dl->AddText(ImVec2(head.x + 10.0f, head.y - 7.0f),
+                            colour, label.c_str());
+            }
+            if (viewport_hovered) {
+                const float dx = mouse.x - head.x;
+                const float dy = mouse.y - head.y;
+                if (dx * dx + dy * dy <= 100.0f) {
+                    std::string destination = transition.world;
+                    if (!transition.level.empty()) {
+                        if (!destination.empty()) destination += " / ";
+                        destination += transition.level;
+                    }
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(
+                        transition.name.empty() ? "Transition Point"
+                                                : transition.name.c_str());
+                    if (!destination.empty()) {
+                        ImGui::Text("Destination: %s", destination.c_str());
+                    }
+                    if (!transition.destination_entity.empty()) {
+                        ImGui::Text("Arrival: %s",
+                                    transition.destination_entity.c_str());
+                    }
+                    ImGui::Text("Radius: %.2f", transition.radius);
+                    ImGui::TextUnformatted(
+                        transition.activated_on_interaction
+                            ? "Activation: interaction"
+                            : "Activation: proximity");
+                    ImGui::EndTooltip();
+                }
+            }
+            ++transitions_drawn;
+        }
+    }
 
     size_t text_drawn = 0;
     for (const auto& kv : g_level_entity_text) {
@@ -355,5 +426,13 @@ static void draw_spawn_markers_overlay(const ImVec2& origin,
                       g_level_spawn_markers.size());
         dl->AddText(ImVec2(origin.x + 14, origin.y + region.y - 38),
                     IM_COL32(220, 220, 220, 200), buf);
+    }
+    if (transitions_drawn) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf),
+                      "transition points: %zu shown / %zu total",
+                      transitions_drawn, g_level_transition_points.size());
+        dl->AddText(ImVec2(origin.x + 14, origin.y + region.y - 56),
+                    IM_COL32(255, 190, 110, 210), buf);
     }
 }

@@ -322,15 +322,21 @@ bool AddEntriesToBnkBytes(std::vector<uint8_t>& bnk,
     return true;
 }
 
-bool RebuildWithChanges(const std::string& bnk_path,
-                        const std::vector<EntryReplacement>& repls,
-                        const std::vector<EntryAddition>& adds,
-                        std::string& err) {
+static bool rebuild_with_changes_impl(
+        const std::string& bnk_path,
+        const std::vector<EntryReplacement>& repls,
+        const std::vector<EntryAddition>& adds,
+        const std::string* staged_out,
+        std::string& err) {
     if (repls.empty() && adds.empty()) {
         err = "no BNK changes given";
         return false;
     }
     const bool iso_path = ISO::IsoMount::is_iso_path(bnk_path);
+    if (iso_path && staged_out) {
+        err = "staged rebuild is not available for ISO banks";
+        return false;
+    }
     std::error_code ec;
     if (!iso_path && !std::filesystem::is_regular_file(bnk_path, ec)) {
         err = "BNK was not found";
@@ -641,13 +647,18 @@ bool RebuildWithChanges(const std::string& bnk_path,
                            std::to_string(out.size()) + " bytes)");
         return true;
     }
-    const std::string tmp = bnk_path + ".tmp_write";
+    const std::string tmp =
+        staged_out ? *staged_out : bnk_path + ".tmp_write";
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         if (!f) { err = "could not write " + tmp; return false; }
         f.write(reinterpret_cast<const char*>(out.data()),
                 (std::streamsize)out.size());
         if (!f) { err = "short write to " + tmp; return false; }
+    }
+    if (staged_out) {
+        // caller commits via rename later; bnk_path is untouched
+        return true;
     }
     std::filesystem::remove(bnk_path, ec);
     if (ec) {
@@ -666,6 +677,22 @@ bool RebuildWithChanges(const std::string& bnk_path,
                        std::filesystem::path(bnk_path).filename().string() +
                        " (" + std::to_string(out.size()) + " bytes)");
     return true;
+}
+
+bool RebuildWithChanges(const std::string& bnk_path,
+                        const std::vector<EntryReplacement>& repls,
+                        const std::vector<EntryAddition>& adds,
+                        std::string& err) {
+    return rebuild_with_changes_impl(bnk_path, repls, adds, nullptr, err);
+}
+
+bool RebuildWithChangesStaged(const std::string& bnk_path,
+                              const std::vector<EntryReplacement>& repls,
+                              const std::vector<EntryAddition>& adds,
+                              const std::string& staged_path,
+                              std::string& err) {
+    return rebuild_with_changes_impl(bnk_path, repls, adds, &staged_path,
+                                     err);
 }
 
 bool RebuildWithReplacedEntries(const std::string& bnk_path,

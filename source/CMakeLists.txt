@@ -95,6 +95,8 @@ set(APP_SOURCES
         src/Import/TexWriter.h
         src/Import/GlbImport.cpp
         src/Import/GlbImport.h
+        src/Import/ObjImport.cpp
+        src/Import/ObjImport.h
         src/Import/MdlWriter.cpp
         src/Import/MdlWriter.h
         src/Import/AssetImport.cpp
@@ -495,6 +497,7 @@ set(APP_SOURCES
         src/GDB/GdbParser/Entities/PropTemplates.inl
         src/GDB/GdbParser/Entities/Spawns.inl
         src/GDB/GdbParser/Entities/TextTags.inl
+        src/GDB/GdbParser/Entities/Transitions.inl
         src/GDB/GdbParser/Items/Catalog.inl
         src/GDB/GdbParser/Items/Details.inl
         src/GDB/GdbParser/Items/LabelFormatting.inl

@@ -32,11 +32,29 @@ bool resolve_texture_targets(const std::string& preferred_bnk,
         if (rank < part.rank) part = {path, index, rank};
     };
 
+    // Nested banks from EVERY region share the same parent (levels.bnk),
+    // so scope must compare the virtual folder inside the parent - i.e.
+    // the region - not just the parent bank. Otherwise the header/body
+    // resolve to whichever region happens to appear first and the
+    // replacement patches banks the user never selected.
+    auto nested_virtual_dir = [&](const std::string& path) -> std::string {
+        const auto it = S.nested_bnk_virtual_paths.find(path);
+        if (it == S.nested_bnk_virtual_paths.end()) return std::string();
+        std::string v = normalized_path(it->second);
+        const size_t slash = v.find_last_of('/');
+        return slash == std::string::npos ? std::string()
+                                          : v.substr(0, slash);
+    };
+    const std::string preferred_virtual_dir =
+        preferred_is_nested ? nested_virtual_dir(preferred_bnk)
+                            : std::string();
+
     auto same_scope = [&](const std::string& path) {
         const auto nested_it = S.nested_bnk_parents.find(path);
         if (preferred_is_nested) {
             return nested_it != S.nested_bnk_parents.end() &&
-                   nested_it->second == preferred_nested_parent;
+                   nested_it->second == preferred_nested_parent &&
+                   nested_virtual_dir(path) == preferred_virtual_dir;
         }
         return nested_it == S.nested_bnk_parents.end() &&
                std::filesystem::path(path).parent_path() ==
@@ -88,6 +106,96 @@ bool resolve_texture_targets(const std::string& preferred_bnk,
                 break;
             }
         }
+    }
+    return true;
+}
+
+// A texture name is duplicated across the game: header copies in dozens of
+// region banks, body copies in a few, and (for 1024 textures) a shared top
+// mip in 1024mip0_textures.bnk. Replacing one copy leaves every other
+// lookup - previews, other levels, the engine's by-name mip0 streaming -
+// on the original. This resolves EVERY entry with the clicked texture's
+// exact name: per-scope header/body groups plus the shared mip0 entries.
+bool resolve_all_texture_targets(const std::string& preferred_bnk,
+                                 int preferred_index,
+                                 std::vector<TextureTargets>& groups,
+                                 std::vector<TexturePart>& shared_mip0,
+                                 std::string& err) {
+    groups.clear();
+    shared_mip0.clear();
+
+    TextureTargets clicked;
+    if (!resolve_texture_targets(preferred_bnk, preferred_index, clicked,
+                                 err)) {
+        return false;
+    }
+    const std::string key = normalized_path(clicked.virtual_path);
+
+    auto scope_key = [&](const std::string& path) -> std::string {
+        const auto it = S.nested_bnk_parents.find(path);
+        if (it != S.nested_bnk_parents.end()) {
+            std::string vdir;
+            const auto vit = S.nested_bnk_virtual_paths.find(path);
+            if (vit != S.nested_bnk_virtual_paths.end()) {
+                vdir = normalized_path(vit->second);
+                const size_t slash = vdir.find_last_of('/');
+                vdir = slash == std::string::npos ? std::string()
+                                                  : vdir.substr(0, slash);
+            }
+            return "nested|" + it->second + "|" + vdir;
+        }
+        return "disk|" +
+               std::filesystem::path(path).parent_path().string();
+    };
+    const std::string clicked_scope = scope_key(clicked.header.path);
+
+    if (clicked.mip0.index >= 0) {
+        shared_mip0.push_back(clicked.mip0);
+    }
+    clicked.mip0 = TexturePart{};
+    groups.push_back(clicked);
+
+    struct Extra { TexturePart header, body; };
+    std::map<std::string, Extra> extra;
+
+    std::vector<std::string> paths = S.bnk_paths;
+    paths.insert(paths.end(), S.nested_bnk_paths.begin(),
+                 S.nested_bnk_paths.end());
+    for (const std::string& path : paths) {
+        // role first: probing a bank materializes it, and only texture
+        // banks (header/mip0/body) can carry copies worth replacing.
+        const int role = texture_bank_role(path);
+        if (role != 1 && role != 2 && role != 3) continue;
+        const int index = BnkCache::find_index(path, key);
+        if (index < 0) continue;
+        if (role == 2) {
+            bool known = false;
+            for (const auto& part : shared_mip0) {
+                if (part.path == path && part.index == index) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known) shared_mip0.push_back({path, index, 0});
+            continue;
+        }
+        const std::string sk = scope_key(path);
+        if (sk == clicked_scope) continue;
+        Extra& g = extra[sk];
+        if (role == 1) {
+            if (g.header.index < 0) g.header = {path, index, 0};
+        } else if (g.body.index < 0) {
+            g.body = {path, index, 0};
+        }
+    }
+
+    for (auto& [sk, g] : extra) {
+        if (g.header.index < 0 && g.body.index < 0) continue;
+        TextureTargets t;
+        t.virtual_path = groups.front().virtual_path;
+        t.header = g.header;
+        t.body = g.body;
+        groups.push_back(std::move(t));
     }
     return true;
 }

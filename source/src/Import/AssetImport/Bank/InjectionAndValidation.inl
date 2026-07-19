@@ -58,36 +58,112 @@ bool inject_entries(const std::vector<PendingEntry>& entries,
         injected.emplace_back(t.path, e.virtual_path);
     }
 
-    
-    struct Snap { std::string path; std::vector<uint8_t> bytes; };
-    std::vector<Snap> snaps;
-    for (auto& [path, t] : targets) {
-        Snap s;
-        s.path = path;
-        if (!read_mutable_file(path, s.bytes, err)) return false;
-        snaps.push_back(std::move(s));
+    bool any_iso = false;
+    for (const auto& [path, t] : targets) {
+        if (ISO::IsoMount::is_iso_path(path)) { any_iso = true; break; }
     }
 
-    size_t done = 0;
+    if (any_iso) {
+        // ISO members cannot be staged as sibling files; snapshot-rollback.
+        struct Snap { std::string path; std::vector<uint8_t> bytes; };
+        std::vector<Snap> snaps;
+        for (auto& [path, t] : targets) {
+            Snap s;
+            s.path = path;
+            if (!read_mutable_file(path, s.bytes, err)) return false;
+            snaps.push_back(std::move(s));
+        }
+        size_t done = 0;
+        for (auto& [path, t] : targets) {
+            BnkCache::invalidate(path);
+            if (!BnkWriter::RebuildWithChanges(path, t.repls, t.adds, err)) {
+                err = std::filesystem::path(path).filename().string() +
+                      ": " + err;
+                break;
+            }
+            ++done;
+        }
+        if (done != targets.size()) {
+            for (const Snap& s : snaps) {
+                std::string restore_error;
+                restore_mutable_file(s.path, s.bytes, restore_error);
+                BnkCache::invalidate(s.path);
+            }
+            return false;
+        }
+        for (auto& [path, t] : targets) BnkCache::invalidate(path);
+        return true;
+    }
+
+    // Stage all rebuilt banks first (live files untouched, no snapshot
+    // reads), then commit with renames keeping .f2ab_prev for rollback.
+    struct StagedBank { std::string live, staged, prev; };
+    std::vector<StagedBank> staged_banks;
+    bool staged_ok = true;
     for (auto& [path, t] : targets) {
-        BnkCache::invalidate(path);
-        if (!BnkWriter::RebuildWithChanges(path, t.repls, t.adds, err)) {
-            err = std::filesystem::path(path).filename().string() + ": " + err;
+        progress_update(80, 100, "Rebuilding " +
+            std::filesystem::path(path).filename().string() +
+            " (large banks take a while)");
+        StagedBank bank{path, path + ".f2ab_staged", path + ".f2ab_prev"};
+        std::error_code ec;
+        std::filesystem::remove(bank.staged, ec);
+        if (!BnkWriter::RebuildWithChangesStaged(
+                path, t.repls, t.adds, bank.staged, err)) {
+            err = std::filesystem::path(path).filename().string() + ": " +
+                  err;
+            staged_ok = false;
             break;
         }
-        ++done;
+        staged_banks.push_back(std::move(bank));
     }
-
-    if (done != targets.size()) {
-        for (const Snap& s : snaps) {
-            std::string restore_error;
-            restore_mutable_file(s.path, s.bytes, restore_error);
-            BnkCache::invalidate(s.path);
+    if (!staged_ok) {
+        std::error_code ec;
+        for (const StagedBank& bank : staged_banks) {
+            std::filesystem::remove(bank.staged, ec);
         }
         return false;
     }
 
-    for (auto& [path, t] : targets) BnkCache::invalidate(path);
+    progress_update(90, 100, "Committing rebuilt banks");
+    size_t swapped = 0;
+    for (; swapped < staged_banks.size(); ++swapped) {
+        const StagedBank& bank = staged_banks[swapped];
+        std::error_code ec;
+        BnkCache::invalidate(bank.live);
+        std::filesystem::remove(bank.prev, ec);
+        ec.clear();
+        std::filesystem::rename(bank.live, bank.prev, ec);
+        if (ec) {
+            err = "could not move " + bank.live + " aside: " + ec.message();
+            break;
+        }
+        std::filesystem::rename(bank.staged, bank.live, ec);
+        if (ec) {
+            err = "could not activate the rebuilt bank for " + bank.live +
+                  ": " + ec.message();
+            std::error_code undo;
+            std::filesystem::rename(bank.prev, bank.live, undo);
+            break;
+        }
+    }
+    if (swapped != staged_banks.size()) {
+        std::error_code ec;
+        for (size_t k = 0; k < swapped; ++k) {
+            const StagedBank& bank = staged_banks[k];
+            std::filesystem::remove(bank.live, ec);
+            std::filesystem::rename(bank.prev, bank.live, ec);
+            BnkCache::invalidate(bank.live);
+        }
+        for (size_t k = swapped; k < staged_banks.size(); ++k) {
+            std::filesystem::remove(staged_banks[k].staged, ec);
+        }
+        return false;
+    }
+    for (const StagedBank& bank : staged_banks) {
+        std::error_code ec;
+        std::filesystem::remove(bank.prev, ec);
+        BnkCache::invalidate(bank.live);
+    }
     return true;
 }
 

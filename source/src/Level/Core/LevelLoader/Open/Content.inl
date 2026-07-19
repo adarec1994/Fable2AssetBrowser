@@ -5,6 +5,7 @@
     g_level_property_details.clear();
     g_level_entity_text.clear();
     g_level_spawn_markers.clear();
+    g_level_transition_points.clear();
     g_level_creature_catalog.clear();
     {
 #include "Level/Loading/Stages/LoadEntities.inl"

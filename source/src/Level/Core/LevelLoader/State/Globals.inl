@@ -40,6 +40,7 @@ std::unordered_map<uint32_t, Gdb::PropTemplateInfo>
     g_level_prop_entity_templates;
 std::unordered_map<uint32_t, Gdb::EntityTextTags> g_level_entity_text;
 std::vector<LevelSpawnMarker> g_level_spawn_markers;
+std::vector<Gdb::TransitionPoint> g_level_transition_points;
 Gdb::SpawnDonorInfo g_level_spawn_donor;
 Gdb::NpcDonorInfo g_level_npc_donor;
 std::vector<Gdb::CreatureCatalogEntry> g_level_creature_catalog;

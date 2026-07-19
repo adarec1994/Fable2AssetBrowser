@@ -1,4 +1,5 @@
 #include "TexParser.h"
+#include "Utilities/DebugLog.h"
 #include "Utilities/Files.h"
 #include "Utilities/Utils.h"
 #include "BNKCore.cpp"
@@ -646,11 +647,29 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
         const bool preferred_is_nested = !preferred_parent.empty();
         const std::string preferred_family = family_key(preferred_bnk);
 
+        // Region scoping: every region's nested banks share one parent
+        // (levels.bnk), so a sibling must also live in the same virtual
+        // folder - otherwise the header/body assemble from whichever
+        // regions happen to be indexed first (mixed-region previews).
+        auto nested_virtual_dir = [&](const std::string& p) -> std::string {
+            auto it = S.nested_bnk_virtual_paths.find(p);
+            if (it == S.nested_bnk_virtual_paths.end()) return std::string();
+            std::string v = normalize_lookup_key(it->second);
+            const size_t slash = v.find_last_of('/');
+            return slash == std::string::npos ? std::string()
+                                              : v.substr(0, slash);
+        };
+        const std::string preferred_virtual_dir =
+            preferred_is_nested ? nested_virtual_dir(preferred_bnk)
+                                : std::string();
+
         auto is_sibling = [&](const std::string& p) {
             if (p == preferred_bnk) return true;
             if (preferred_parent.empty()) return false;
             auto it = S.nested_bnk_parents.find(p);
-            return it != S.nested_bnk_parents.end() && it->second == preferred_parent;
+            return it != S.nested_bnk_parents.end() &&
+                   it->second == preferred_parent &&
+                   nested_virtual_dir(p) == preferred_virtual_dir;
         };
 
         auto is_nested_path = [&](const std::string& p) {
@@ -778,6 +797,12 @@ bool build_any_tex_buffer_for_name(const std::string &tex_name, std::vector<unsi
             break;
         }
     }
+
+    DebugLog::Write("tex-lookup",
+        tex_name + " | header='" + header_bnk_path + "'[" +
+        std::to_string(header_idx) + "] mip0='" + mip0_bnk_path + "'[" +
+        std::to_string(mip0_idx) + "] body='" + body_bnk_path + "'[" +
+        std::to_string(body_idx) + "] preferred='" + preferred_bnk + "'");
 
     try {
         auto vh = BnkCache::extract_bytes(header_bnk_path, header_idx);

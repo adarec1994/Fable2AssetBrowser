@@ -199,6 +199,14 @@
                 g_level_property_details =
                     Gdb::ExtractPropertyDetails(contents_gdbs,
                                                 save_hash_to_name);
+                g_level_transition_points = Gdb::ExtractTransitionPoints(
+                    contents_gdbs, save_hash_to_name);
+                if (!g_level_transition_points.empty()) {
+                    OutputLog::info(
+                        "gdb transitions: " +
+                        std::to_string(g_level_transition_points.size()) +
+                        " level exit point(s)");
+                }
                 if (!g_level_entity_gameplay.empty()) {
                     OutputLog::info(
                         "gdb entities: " +

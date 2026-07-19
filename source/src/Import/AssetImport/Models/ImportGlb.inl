@@ -14,7 +14,7 @@ bool import_glb(const std::string& glb_path, const Options& opt,
                                               .filename().string());
 
     GlbImport::Scene scene;
-    if (!GlbImport::load_glb(glb_path, scene, err)) return false;
+    if (!load_model_scene(glb_path, scene, err)) return false;
 
     if (!opt.material_textures.empty()) {
         if (opt.material_textures.size() != scene.materials.size()) {

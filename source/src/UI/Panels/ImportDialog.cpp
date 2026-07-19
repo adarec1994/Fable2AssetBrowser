@@ -144,7 +144,10 @@ std::vector<uint8_t> make_thumbnail(const ImageLoad::Image& image,
 
 void load_glb_editor() {
     clear_glb_editor();
-    if (!GlbImport::load_glb(s_source_path, s_glb_scene, s_glb_error)) return;
+    if (!AssetImport::load_model_scene(s_source_path, s_glb_scene,
+                                       s_glb_error)) {
+        return;
+    }
 
     s_material_textures.reserve(s_glb_scene.materials.size());
     for (const auto& material : s_glb_scene.materials) {
@@ -239,8 +242,8 @@ void open_picker(Mode mode) {
     switch (mode) {
         case Mode::Glb:
             ImGuiFileDialog::Instance()->OpenDialog(
-                "ImportPickGlb", "Select .glb model",
-                "glTF binary (*.glb){.glb},.*", cfg);
+                "ImportPickGlb", "Select model",
+                "Models (*.glb *.obj){.glb,.obj},.*", cfg);
             break;
         case Mode::Image:
             ImGuiFileDialog::Instance()->OpenDialog(
@@ -490,7 +493,7 @@ void draw_material_mapping_panel() {
         return;
     }
     if (s_glb_scene.materials.empty()) {
-        ImGui::TextDisabled("This GLB has no material records.");
+        ImGui::TextDisabled("This model has no material records.");
         return;
     }
 
@@ -541,7 +544,7 @@ void draw_material_mapping_panel() {
         ImGui::EndTable();
     }
 
-    if (ImGui::Button("Reset this material to GLB defaults")) {
+    if (ImGui::Button("Reset this material to source defaults")) {
         reset_material_assignment(size_t(s_selected_material));
     }
 }
@@ -605,7 +608,8 @@ void draw_settings_modal() {
         ImGui::InputText("Destination folder (empty = per-asset)",
                          &s_dest_folder);
         ImGui::TextDisabled(
-            "Every .glb and image directly inside the folder is imported.");
+            "Every .glb/.obj and image directly inside the folder is "
+            "imported (textures an .obj uses are baked into its model).");
     }
 
     ImGui::Combo("Texture format", &s_format_idx, kFormatNames,
@@ -647,7 +651,7 @@ void draw_settings_modal() {
                 }
             } else {
                 ImGui::TextDisabled(
-                    "Each imported .glb gets a PROP_<name> entity.");
+                    "Each imported model gets a PROP_<name> entity.");
             }
         }
     }

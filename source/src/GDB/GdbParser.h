@@ -355,6 +355,23 @@ std::unordered_map<uint32_t, SpawnEntityInfo> CollectSpawnEntities(
     SpawnDonorInfo* out_donor = nullptr,
     NpcDonorInfo* out_npc_donor = nullptr);
 
+struct TransitionPoint {
+    uint32_t entity_hash = 0;
+    uint32_t component_record = 0;
+    std::string name;
+    std::string world;
+    std::string level;
+    std::string destination_entity;
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    float radius = 1.0f;
+    bool activated_on_interaction = false;
+    bool teleporter = false;
+};
+
+std::vector<TransitionPoint> ExtractTransitionPoints(
+    const std::vector<const std::vector<uint8_t>*>& gdbs,
+    const std::vector<std::pair<uint32_t, std::string>>& hash_to_name);
+
 enum class EntityCatalogKind : uint8_t {
     Creature = 0,
     StaticProp = 1,

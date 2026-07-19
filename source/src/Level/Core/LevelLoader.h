@@ -244,6 +244,7 @@ struct LevelSpawnMarker {
     std::string name;
 };
 extern std::vector<LevelSpawnMarker> g_level_spawn_markers;
+extern std::vector<Gdb::TransitionPoint> g_level_transition_points;
 extern Gdb::SpawnDonorInfo g_level_spawn_donor;
 extern Gdb::NpcDonorInfo g_level_npc_donor;
 extern std::vector<Gdb::CreatureCatalogEntry> g_level_creature_catalog;

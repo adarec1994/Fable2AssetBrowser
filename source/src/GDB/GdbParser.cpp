@@ -65,6 +65,7 @@ namespace {
 #include "GdbParser/Entities/CreatureCatalog.inl"
 #include "GdbParser/Entities/TextTags.inl"
 #include "GdbParser/Entities/Spawns.inl"
+#include "GdbParser/Entities/Transitions.inl"
 
 namespace {
 

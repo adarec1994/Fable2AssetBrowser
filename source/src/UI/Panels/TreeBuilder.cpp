@@ -90,15 +90,17 @@ void start_tree_build_for_root(const std::string& root_dir,
         if (!root_snapshot.empty() && !S.anim_clips.empty()) {
             set_tree_label("Resolving animation names");
             try {
-                
-                
-                if (!Anim::load_clip_name_cache_for_root(root_snapshot,
+                // Baked table first: instant, and immune to the cache
+                // fingerprint churn caused by editing the game banks.
+                if (!Anim::load_clip_names_from_baked(S.anim_clips) &&
+                    !Anim::load_clip_name_cache_for_root(root_snapshot,
                                                          S.anim_clips)) {
                     Anim::resolve_clip_names_from_gdb_animation_fields_for_root(
                         root_snapshot, S.anim_clips);
                     Anim::save_clip_name_cache_for_root(root_snapshot,
                                                         S.anim_clips);
                 }
+                Anim::dump_resolved_clip_names_txt(S.anim_clips);
                 S.anim_authored_signature = 0;
                 S.anim_authored_cache.clear();
             } catch (...) {  }

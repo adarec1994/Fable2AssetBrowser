@@ -439,7 +439,7 @@ void draw_main(GLFWwindow* window) {
                 {
                     const bool import_busy = ImportDialog::Busy();
                     if (ImGui::BeginMenu("Import", !import_busy)) {
-                        if (ImGui::MenuItem("Import .glb...")) {
+                        if (ImGui::MenuItem("Import Model (.glb, .obj)...")) {
                             ImportDialog::OpenGlb();
                         }
                         if (ImGui::MenuItem("Import Image...")) {

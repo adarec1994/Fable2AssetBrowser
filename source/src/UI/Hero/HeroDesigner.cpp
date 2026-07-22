@@ -61,6 +61,9 @@ struct Option {
     std::uint32_t body_areas_covered = 0;
     int cluster_sort_layer = -100;
     std::vector<std::string> clusters_covered;
+    int weapon_type = 0;
+    bool name_localized = false;
+    bool is_pistol = false;
 };
 
 struct SlotState {
@@ -234,48 +237,60 @@ Slot classify_named_option(const std::string& source) {
 
 Slot classify_authored_item(const Gdb::ItemDetail& item,
                             const std::string& source) {
-
-
-
-
     const bool has_worn_model = item.worn_model_path_hash != 0 ||
                                 item.female_worn_model_path_hash != 0;
-    if (has_worn_model) {
-        const Slot named = classify_named_option(source);
-        if (named == Slot::Hair || named == Slot::Beard ||
-            named == Slot::Moustache) {
-            return named;
-        }
-    }
-
     switch (item.category) {
         case 1:
-            if (item.weapon_type == 2) return Slot::Ranged;
-            if (item.weapon_type == 1) return Slot::Melee;
-
-
-
-            return has_any(source, {"rifle", "pistol", "blunderbuss",
-                                    "crossbow", "firearm", "ranged"})
-                ? Slot::Ranged : Slot::Melee;
+            if (item.weapon_type >= 2 && item.weapon_type <= 4) {
+                return Slot::Melee;
+            }
+            if (item.weapon_type >= 5 && item.weapon_type <= 8) {
+                return Slot::Ranged;
+            }
+            return Slot::Count;
+        case 9: return Slot::Hair;
+        case 10: return Slot::Beard;
+        case 11: return Slot::Moustache;
         case 17: return Slot::Hat;
         case 18: return Slot::Coat;
         case 19: return Slot::Shirt;
         case 20: return Slot::Gloves;
         case 21: return Slot::Trousers;
         case 22: return Slot::Boots;
-        case 23: return Slot::Mask;
-        case 24: return Slot::Accessories;
+        case 23:
+            return source.find("mask") != std::string::npos
+                ? Slot::Mask : Slot::Accessories;
         case 25: return Slot::Suit;
         default: break;
+    }
+    if (item.category == 0 && has_worn_model) {
+        const Slot named = classify_named_option(source);
+        if (named == Slot::Accessories) return named;
     }
     return Slot::Count;
 }
 
 void add_option(SlotState& slot, Option option) {
     if (!option.hash) return;
-    for (const Option& current : slot.options) {
-        if (current.hash == option.hash) return;
+    for (Option& current : slot.options) {
+        if (current.hash != option.hash) continue;
+        if (lower_slash(current.label) == lower_slash(option.label)) {
+            if (option.name_localized && !current.name_localized) {
+                current = std::move(option);
+            }
+            return;
+        }
+        if (current.name_localized && !option.name_localized) return;
+        if (!current.name_localized && option.name_localized) {
+            current = std::move(option);
+            return;
+        }
+        if (!current.name_localized && !option.name_localized) {
+            if (option.label.size() < current.label.size()) {
+                current = std::move(option);
+            }
+            return;
+        }
     }
     slot.options.push_back(std::move(option));
 }
@@ -308,9 +323,9 @@ void rebuild_catalog(bool preserve_selection) {
             (!item.model_path_hash && !item.worn_model_path_hash &&
              !item.female_worn_model_path_hash)) continue;
         std::string source = item.internal_name + " " + item.label + " " +
-                             item.display_name + " " + item.model_path + " " +
-                             item.worn_model_path + " " +
-                             item.female_worn_model_path;
+                             item.display_name + " " + item.model_path + " ";
+        source += designer.sex == Sex::Female
+            ? item.female_worn_model_path : item.worn_model_path;
         source = lower_slash(std::move(source));
         if (opposite_sex_asset(source, designer.sex)) continue;
         const Slot slot_id = classify_authored_item(item, source);
@@ -325,10 +340,6 @@ void rebuild_catalog(bool preserve_selection) {
         for (std::string& cluster : clusters_covered) {
             cluster = lower_slash(std::move(cluster));
         }
-
-
-
-
         if (slot_id != Slot::Melee && slot_id != Slot::Ranged) {
             if (designer.sex == Sex::Female &&
                 item.female_worn_model_path_hash) {
@@ -342,8 +353,6 @@ void rebuild_catalog(bool preserve_selection) {
                     FindGlobalModelAssetByPathHash(option_hash)) {
                 option_path = authored->full_path;
             } else {
-
-
                 const std::string item_path = lower_slash(item.model_path);
                 const std::string item_leaf = item_path.substr(
                     item_path.find_last_of('/') + 1);
@@ -380,28 +389,9 @@ void rebuild_catalog(bool preserve_selection) {
                    {std::move(label), std::move(option_path), option_hash,
                     item.body_areas_covered,
                     item.cluster_sort_layer,
-                    std::move(clusters_covered)});
-    }
-
-
-
-
-    for (const FlatAssetEntry& asset : S.all_mdl_files) {
-        const std::string source = lower_slash(asset.full_path);
-        if (opposite_sex_asset(source, designer.sex)) continue;
-        const bool likely_wearable =
-            source.find("art/characters/heros/") != std::string::npos &&
-            has_any(
-            source, {"clothing", "clothes", "hero", "hair", "beard",
-                     "moustache", "weapon", "sword", "rifle", "pistol"});
-        if (!likely_wearable || source.find("morph_") != std::string::npos) {
-            continue;
-        }
-        const Slot slot_id = classify_named_option(source);
-        if (slot_id == Slot::Count) continue;
-        const std::uint32_t hash = Anim::gdb_model_path_hash(asset.full_path);
-        add_option(designer.slots[static_cast<std::size_t>(slot_id)],
-                   {leaf_label(asset.full_path), asset.full_path, hash});
+                    std::move(clusters_covered), item.weapon_type,
+                    item.name_localized,
+                    source.find("pistol") != std::string::npos});
     }
 
     for (std::size_t i = 0; i < designer.slots.size(); ++i) {
@@ -1085,8 +1075,7 @@ void publish_cached_preview(bool rebuild_gpu) {
         designer.status = "Hero preview contained no geometry.";
         return;
     }
-    designer.status = "Hero preview ready (" +
-        std::to_string(model.meshes.size()) + " meshes).";
+    designer.status.clear();
     if (rebuild_gpu) {
         ContentTabs::StoreHeroModel(
             model.info, model.meshes, model.primary_model_path,
@@ -1174,15 +1163,27 @@ void request_preview() {
     EntityModels::ResolveOptions options;
     options.preferred_primary_hash = body_hash;
     if (const Option* melee = selected_option(Slot::Melee)) {
+        std::vector<std::string> bones;
+        if (melee->weapon_type == 2) {
+            bones = {"Carry_SheathWeaponFront_DummyObject",
+                     "Carry_SheathWeaponBack_DummyObject"};
+        } else {
+            bones = {"Carry_SheathWeaponBack_DummyObject",
+                     "Carry_SheathWeaponFront_DummyObject"};
+        }
         options.attachments.push_back({
-            melee->hash,
-            {"Carry_SheathWeaponBack_DummyObject",
-             "Carry_SheathWeaponFront_DummyObject",
-             "Carry_SheathWeaponHip_DummyObject"}});
+            melee->hash, std::move(bones)});
     }
     if (const Option* ranged = selected_option(Slot::Ranged)) {
+        std::vector<std::string> bones;
+        if (ranged->is_pistol) {
+            bones = {"Carry_SheathWeaponFront_DummyObject",
+                     "Carry_SheathRangedWeaponBack_DummyObject"};
+        } else {
+            bones = {"Carry_SheathRangedWeaponBack_DummyObject"};
+        }
         options.attachments.push_back({
-            ranged->hash, {"Carry_SheathRangedWeaponBack_DummyObject"}});
+            ranged->hash, std::move(bones)});
     }
 
     struct NamedTarget { const char* name; MorphKind kind; };
@@ -1325,7 +1326,9 @@ bool draw_slot_combo(Slot slot_id) {
     if (ImGui::BeginCombo(id.c_str(), preview)) {
         for (std::size_t i = 0; i < slot.options.size(); ++i) {
             const bool selected = slot.selected == static_cast<int>(i);
-            if (ImGui::Selectable(slot.options[i].label.c_str(), selected)) {
+            const std::string option_id = slot.options[i].label +
+                "##hero_option_" + std::to_string(i);
+            if (ImGui::Selectable(option_id.c_str(), selected)) {
                 slot.selected = static_cast<int>(i);
                 changed = true;
             }
@@ -1370,8 +1373,6 @@ void DrawControls() {
     }
 
     ImGui::TextUnformatted("Hero Designer");
-    ImGui::TextDisabled("Assemble the player model and preview morphs.");
-    ImGui::Spacing();
 
     const float gap = ImGui::GetStyle().ItemSpacing.x;
     const float half = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
@@ -1426,10 +1427,12 @@ void DrawControls() {
         publish_cached_preview(false);
     }
     ImGui::Spacing();
-    if (designer.loading) {
-        ImGui::TextDisabled("%s", designer.status.c_str());
-    } else {
-        ImGui::TextWrapped("%s", designer.status.c_str());
+    if (!designer.status.empty()) {
+        if (designer.loading) {
+            ImGui::TextDisabled("%s", designer.status.c_str());
+        } else {
+            ImGui::TextWrapped("%s", designer.status.c_str());
+        }
     }
     if (ImGui::Button("Rebuild preview", ImVec2(-1, 0))) {
         request_preview();

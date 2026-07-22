@@ -219,6 +219,40 @@ void remap_part_bones(std::vector<MDLMeshGeom>& meshes,
     }
 }
 
+void merge_part_skeleton(MDLInfo& rig, const MDLInfo& part)
+{
+    if (part.Bones.empty() ||
+        part.BoneTransforms.size() != part.Bones.size() ||
+        rig.BoneTransforms.size() != rig.Bones.size()) {
+        return;
+    }
+    const auto lookup = Anim::build_model_bone_lookup(
+        rig, static_cast<uint32_t>(rig.Bones.size()));
+    std::vector<int> remap(part.Bones.size(), -1);
+    std::vector<bool> appended(part.Bones.size(), false);
+    for (size_t i = 0; i < part.Bones.size(); ++i) {
+        remap[i] = Anim::model_bone_for_track_name(lookup,
+                                                    part.Bones[i].Name);
+        if (remap[i] >= 0) continue;
+        remap[i] = static_cast<int>(rig.Bones.size());
+        rig.Bones.push_back({part.Bones[i].Name, -1});
+        rig.BoneTransforms.push_back(part.BoneTransforms[i]);
+        appended[i] = true;
+    }
+    for (size_t i = 0; i < part.Bones.size(); ++i) {
+        if (!appended[i]) continue;
+        const int parent = part.Bones[i].ParentID;
+        if (parent >= 0 && static_cast<size_t>(parent) < remap.size()) {
+            rig.Bones[static_cast<size_t>(remap[i])].ParentID =
+                remap[static_cast<size_t>(parent)];
+        }
+    }
+    rig.BoneCount = static_cast<uint32_t>(rig.Bones.size());
+    rig.BoneTransformCount =
+        static_cast<uint32_t>(rig.BoneTransforms.size());
+    rig.HasBoneTransforms = !rig.Bones.empty();
+}
+
 }
 
 bool Resolve(const std::vector<std::uint32_t>& model_hashes,
@@ -304,9 +338,25 @@ bool Resolve(const std::vector<std::uint32_t>& model_hashes,
             }
         }
     }
-    const MDLInfo& rig = parts[primary].info;
+    MDLInfo rig = parts[primary].info;
     out.primary_model_path = parts[primary].path;
     out.primary_model_hash = parts[primary].hash;
+
+    auto is_attachment = [&](const LoadedPart& part) {
+        return options && std::any_of(
+            options->attachments.begin(), options->attachments.end(),
+            [&](const Attachment& item) {
+                return item.model_hash == part.hash;
+            });
+    };
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i == primary ||
+            eye_side_from_path(parts[i].path) != EyeSide::None ||
+            is_attachment(parts[i])) {
+            continue;
+        }
+        merge_part_skeleton(rig, parts[i].info);
+    }
 
     for (size_t i = 0; i < parts.size(); ++i) {
         LoadedPart& part = parts[i];
@@ -338,7 +388,7 @@ bool Resolve(const std::vector<std::uint32_t>& model_hashes,
                           std::make_move_iterator(part.meshes.begin()),
                           std::make_move_iterator(part.meshes.end()));
     }
-    out.info = std::move(parts[primary].info);
+    out.info = std::move(rig);
     return !out.meshes.empty();
 }
 

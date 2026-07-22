@@ -7,7 +7,8 @@ Browse the Fable 2 BNK files. Included features:
 - Export textures.
 - Export audio files.
 - Export animations.
-- Export level.
+- Export levels.
+- 
 
 ## How to use
 - Acquire a legitimate copy of Fable 2.
@@ -61,10 +62,9 @@ Follow these steps to submit your changes:
 5. Submit a pull request to the 'main' branch.
 
 ### TO-DO List:
-1. Pixel perfect terrains
-2. Skyboxes and Water
-3. Lighting
-4. FX
-5. Importing/ mods
+1. Fix the water
+2. Lighting
+3. FX
+4. Complete the level creator
 
     

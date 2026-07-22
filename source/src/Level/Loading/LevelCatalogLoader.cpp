@@ -120,6 +120,7 @@ void BuildGlobalItemCatalog() {
 
             while (!nm.empty() && nm.back() == '\0') nm.pop_back();
             d.display_name = nm;
+            d.name_localized = true;
         } else {
             d.display_name = d.label;
         }
@@ -162,12 +163,27 @@ void BuildGlobalItemCatalog() {
         }
         return true;
     };
+    auto compatible_hash = [](uint32_t a, uint32_t b) {
+        return !a || !b || a == b;
+    };
+    auto compatible_visual = [&](const Gdb::ItemDetail& a,
+                                 const Gdb::ItemDetail& b) {
+        return a.category == b.category &&
+            (!a.weapon_type || !b.weapon_type ||
+             a.weapon_type == b.weapon_type) &&
+            compatible_hash(a.model_path_hash, b.model_path_hash) &&
+            compatible_hash(a.worn_model_path_hash,
+                            b.worn_model_path_hash) &&
+            compatible_hash(a.female_worn_model_path_hash,
+                            b.female_worn_model_path_hash);
+    };
     std::vector<Gdb::ItemDetail> merged;
     merged.reserve(details.size());
     for (auto& d : details) {
         if (!merged.empty() &&
             !d.display_name.empty() &&
-            ci_eq(merged.back().display_name, d.display_name)) {
+            ci_eq(merged.back().display_name, d.display_name) &&
+            compatible_visual(merged.back(), d)) {
             Gdb::ItemDetail& m = merged.back();
             if (m.model_path.empty() && !d.model_path.empty()) {
                 m.model_path = d.model_path;
@@ -202,6 +218,7 @@ void BuildGlobalItemCatalog() {
             }
             if (!m.desc_tag) m.desc_tag = d.desc_tag;
             if (m.icon_tex.empty()) m.icon_tex = d.icon_tex;
+            m.name_localized = m.name_localized || d.name_localized;
             if (m.money < 0) m.money = d.money;
             std::unordered_set<std::string> have;
             for (auto& s : m.stats) have.insert(s.first);

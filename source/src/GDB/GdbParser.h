@@ -276,6 +276,7 @@ struct ItemDetail {
 
     int category = -1;
     int weapon_type = 0;
+    bool name_localized = false;
     int money = -1;
     bool unnamed = false;
     bool is_money = false;

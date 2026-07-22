@@ -110,9 +110,12 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
 
     uint32_t StringBlockCount=0;
     if(!r.u32be(StringBlockCount)) return false;
+    out.HideRegions.clear();
     if(StringBlockCount>0 && StringBlockCount<1000000u){
+        out.HideRegions.reserve(StringBlockCount);
         for(uint32_t i=0;i<StringBlockCount;i++){
             std::string s; if(!r.strz(s)) return false;
+            out.HideRegions.push_back(std::move(s));
         }
     }
 
@@ -176,4 +179,3 @@ bool parse_mdl_info(const std::vector<unsigned char>& data, MDLInfo& out, const 
         }
         out.Meshes.push_back(std::move(mesh));
     }
-

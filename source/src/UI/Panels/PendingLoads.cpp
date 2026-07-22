@@ -18,7 +18,9 @@
 #include "../../Level/Terrain/TerrainEdit.h"
 #include "../../Level/Terrain/TerrainPaint.h"
 #include "../../Level/Editing/LevelEdit.h"
+#include "../../Level/Creation/FoliageAuthoring.h"
 #include "../../Level/Creation/LandscapeAuthoring.h"
+#include "LandscapePanel.h"
 #include "../../Level/Skybox/SkyboxPreviewBinding.h"
 #include "../../Utilities/Files.h"
 #include "../../Utilities/Utils.h"
@@ -85,6 +87,8 @@ namespace {
 
 #ifdef _WIN32
 #include "PendingLoads/Editing/ModelSpawning.inl"
+#include "PendingLoads/Editing/FoliagePainting.inl"
+#include "PendingLoads/Editing/DeleteSelected.inl"
 #include "PendingLoads/Editing/EntitySpawning.inl"
 #include "PendingLoads/Editing/ContainerSpawning.inl"
 #endif

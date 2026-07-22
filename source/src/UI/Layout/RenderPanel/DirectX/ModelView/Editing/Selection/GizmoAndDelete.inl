@@ -52,8 +52,12 @@
                 }
             }
             if (!removed_spawn_point) {
-                LevelEdit::PushUndoSnapshot(collect_group_ids());
-                apply_group_edit(kEditDelete, nullptr);
+                if (::g_selected_level_hash >= 0xADD0000000000000ull) {
+                    delete_selected_level_object();
+                } else {
+                    LevelEdit::PushUndoSnapshot(collect_group_ids());
+                    apply_group_edit(kEditDelete, nullptr);
+                }
             }
             ::g_selected_level_mesh_idx = -1;
             ::g_selected_level_pick_id = 0;

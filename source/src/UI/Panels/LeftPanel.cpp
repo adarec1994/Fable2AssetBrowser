@@ -12,6 +12,7 @@
 #include "../../Level/Creation/NewLevel.h"
 #include "../Quest/QuestNodeView.h"
 #include "../AnimTree/AnimTreeView.h"
+#include "../Hero/HeroDesigner.h"
 
 #include "../../ISO/IsoDump.h"
 #include "../../Quest/QuestInjection.h"
@@ -89,6 +90,7 @@ void draw_left_panel() {
 #include "LeftPanel/Draw/Tabs/Items.inl"
 #include "LeftPanel/Draw/Tabs/Entities.inl"
 #include "LeftPanel/Draw/Tabs/Quests.inl"
+#include "LeftPanel/Draw/Tabs/Hero.inl"
 #include "LeftPanel/Draw/Tabs/Levels.inl"
 #include "LeftPanel/Draw/Tabs/ScriptsAndDetails.inl"
     ImGui::EndChild();

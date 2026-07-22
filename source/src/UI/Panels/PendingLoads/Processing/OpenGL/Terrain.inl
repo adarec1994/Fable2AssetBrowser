@@ -50,7 +50,7 @@
                     splat_dbg_rgba, splat_dbg_w, splat_dbg_h)) {
                 picked_label = (composite_name == "embedded_tile_albedo")
                     ? std::string("ehf_embedded_tile_albedo")
-                    : "ehf_composite[" + composite_name + " * lightmap]";
+                    : "ehf_composite[" + composite_name + "]";
                 uv_scale = 1.0f;
             } else if (Level::DecodeEhfTerrainAlbedoFromBytes(
                     g_pending_terrain_ehf_bytes,
@@ -208,6 +208,7 @@
         g_pending_terrain_label.clear();
         g_pending_terrain_ehf_bytes.clear();
         g_pending_terrain_ehf_bytes.shrink_to_fit();
+        g_pending_terrain_lightmap = {};
         g_pending_adjacent_terrain_meshes.clear();
         g_pending_adjacent_terrain_meshes.shrink_to_fit();
         g_pending_terrain_ghf_payload.clear();

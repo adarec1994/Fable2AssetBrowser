@@ -78,7 +78,6 @@
         ((LandscapePanel::InSculptMode() && TerrainEdit::IsLoaded()) ||
          (LandscapePanel::InPaintMode() && TerrainPaint::Active()));
     if (g_mp.no_tilt && hovered && !rotate_active &&
-        !player_start_place_active &&
         !sculpt_click_owns_mouse &&
         !LevelGizmo::WantsMouse() &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&

@@ -67,6 +67,7 @@ namespace {
 #include "GdbParser/Entities/Spawns.inl"
 #include "GdbParser/Entities/Transitions.inl"
 #include "GdbParser/Entities/AnimTree.inl"
+#include "GdbParser/Entities/MorphTargets.inl"
 
 namespace {
 

@@ -49,7 +49,14 @@ void apply_orbit_to_flycam_gl() {
     float cp = std::cos(S.cam_pitch);
     float sp = std::sin(S.cam_pitch);
     g_flycam.pos[0] = g_mp.center[0] + sy * cp * S.cam_dist * g_mp.radius;
-    const float target_y = g_mp.center[1] + S.cam_target_offset_y;
+    float hero_head_offset = 0.0f;
+    if (ContentTabs::ActiveKind() == ContentTabs::Kind::Hero) {
+        float focus = std::clamp((1.8f - S.cam_dist) / 1.3f, 0.0f, 1.0f);
+        focus = focus * focus * (3.0f - 2.0f * focus);
+        hero_head_offset = g_mp.radius * 0.82f * focus;
+    }
+    const float target_y = g_mp.center[1] + S.cam_target_offset_y +
+                           hero_head_offset;
     g_flycam.pos[1] = target_y + sp * S.cam_dist * g_mp.radius;
     g_flycam.pos[2] = g_mp.center[2] + cy * cp * S.cam_dist * g_mp.radius;
     float dx = g_mp.center[0] - g_flycam.pos[0];

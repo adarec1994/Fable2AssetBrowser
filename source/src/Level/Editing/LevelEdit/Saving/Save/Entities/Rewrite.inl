@@ -11,6 +11,21 @@
         !s.generators.empty() || !s.spawn_point_adds.empty() ||
         !s.spawn_point_deletes.empty() ||
         legacy_spawn_points_pending || legacy_generators_pending) {
+        {
+            char dbg[200];
+            std::snprintf(
+                dbg, sizeof(dbg),
+                "gdb REWRITE triggered: contents=%zu loot=%zu "
+                "chest_adds=%d ent_dels=%zu gens=%zu sp_adds=%zu "
+                "sp_dels=%zu legacy_sp=%d legacy_gen=%d",
+                s.contents_edits.size(), s.contents_loot_edits.size(),
+                have_chest_adds ? 1 : 0, gdb_entity_deletes.size(),
+                s.generators.size(), s.spawn_point_adds.size(),
+                s.spawn_point_deletes.size(),
+                legacy_spawn_points_pending ? 1 : 0,
+                legacy_generators_pending ? 1 : 0);
+            DebugLog::Write("save.rewrite", dbg);
+        }
         progress_update(6, 100, "Rewriting entity data...");
         std::vector<uint8_t> gbytes;
         if (!s.gdb.file_path.empty()) {

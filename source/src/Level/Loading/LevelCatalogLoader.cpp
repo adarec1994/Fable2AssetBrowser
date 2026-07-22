@@ -104,6 +104,7 @@ void BuildGlobalItemCatalog() {
     if (gdbs.empty()) return;
 
     auto details = Gdb::BuildItemDetails(gdbs);
+    g_hero_morph_targets = Gdb::BuildMorphTargets(gdbs);
     if (details.empty()) return;
     TextBank::LoadForRoot(S.root_dir);
     for (auto& d : details) {
@@ -172,6 +173,33 @@ void BuildGlobalItemCatalog() {
                 m.model_path = d.model_path;
             }
             if (!m.model_path_hash) m.model_path_hash = d.model_path_hash;
+            if (m.worn_model_path.empty() && !d.worn_model_path.empty()) {
+                m.worn_model_path = d.worn_model_path;
+            }
+            if (!m.worn_model_path_hash) {
+                m.worn_model_path_hash = d.worn_model_path_hash;
+            }
+            if (m.female_worn_model_path.empty() &&
+                !d.female_worn_model_path.empty()) {
+                m.female_worn_model_path = d.female_worn_model_path;
+            }
+            if (!m.female_worn_model_path_hash) {
+                m.female_worn_model_path_hash =
+                    d.female_worn_model_path_hash;
+            }
+            if (!m.body_areas_covered) {
+                m.body_areas_covered = d.body_areas_covered;
+            }
+            if (m.cluster_sort_layer == -100 &&
+                d.cluster_sort_layer != -100) {
+                m.cluster_sort_layer = d.cluster_sort_layer;
+            }
+            if (m.clusters_covered.empty()) {
+                m.clusters_covered = d.clusters_covered;
+            }
+            if (m.female_clusters_covered.empty()) {
+                m.female_clusters_covered = d.female_clusters_covered;
+            }
             if (!m.desc_tag) m.desc_tag = d.desc_tag;
             if (m.icon_tex.empty()) m.icon_tex = d.icon_tex;
             if (m.money < 0) m.money = d.money;

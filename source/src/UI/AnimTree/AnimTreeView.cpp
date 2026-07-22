@@ -95,6 +95,7 @@ struct VLink {
     int to_node = 0;
     int kind = kEdgeAuthored;
     std::string label;
+    std::vector<Row> rows;
 };
 
 struct ViewState {
@@ -112,7 +113,7 @@ struct ViewState {
     std::string filter;
     bool cat_visible[(int)Category::Count] = {true, true, true, true, true,
                                               true};
-    bool show_transitions = true;
+    bool show_transitions = false;
     bool show_conditions = true;
     bool show_returns = false;
     bool all_labels = false;
@@ -470,7 +471,33 @@ void build_graph()
     };
 
     const int default_id = state_node_id(default_state);
+    std::map<std::pair<int, int>, size_t> authored_edges;
     for (TransitionBuild& t : transitions) {
+        const int from_id =
+            t.from.empty() ? default_id : state_node_id(t.from);
+        const int to_id = t.to.empty() ? 0 : state_node_id(t.to);
+        if (from_id != 0 && to_id != 0 && from_id != to_id) {
+            const std::pair<int, int> key{from_id, to_id};
+            const auto it = authored_edges.find(key);
+            if (it == authored_edges.end()) {
+                VLink link;
+                link.id = next_link++;
+                link.from_node = from_id;
+                link.to_node = to_id;
+                link.kind = kEdgeAuthored;
+                link.label = humanize(t.label);
+                link.rows = t.rows;
+                authored_edges.emplace(key, g.links.size());
+                g.links.push_back(std::move(link));
+            } else {
+                VLink& link = g.links[it->second];
+                link.rows.insert(link.rows.end(), t.rows.begin(),
+                                 t.rows.end());
+            }
+            node_by_id(from_id)->has_edges = true;
+            node_by_id(to_id)->has_edges = true;
+            continue;
+        }
         t.node_id = next_id++;
         VNode node;
         node.id = t.node_id;
@@ -479,16 +506,6 @@ void build_graph()
         node.title = humanize(t.label);
         node.rows = t.rows;
         g.nodes.push_back(std::move(node));
-
-        int from_id = t.from.empty() ? default_id : state_node_id(t.from);
-        const int to_id = t.to.empty() ? 0 : state_node_id(t.to);
-        if (from_id != 0 && to_id != 0 && from_id != to_id) {
-            g.links.push_back({next_link++, from_id, t.node_id});
-            g.links.push_back({next_link++, t.node_id, to_id});
-            node_by_id(from_id)->has_edges = true;
-            node_by_id(to_id)->has_edges = true;
-            node_by_id(t.node_id)->has_edges = true;
-        }
     }
 
     if (default_id != 0) {
@@ -754,41 +771,21 @@ void build_graph()
     const float kColumnWidth = 430.0f;
     const float kColumnGap = 60.0f;
     const float kMaxColumnHeight = 2500.0f;
-    float band_x = 0.0f;
-    for (int cat = 0; cat < (int)Category::Count; ++cat) {
-        std::vector<VNode*> members;
-        for (VNode& node : g.nodes) {
-            if ((int)node.cat == cat && !node.is_transition) {
-                members.push_back(&node);
-            }
-        }
-        std::vector<VNode*> band_transitions;
-        for (VNode& node : g.nodes) {
-            if ((int)node.cat == cat && node.is_transition &&
-                !node.has_edges) {
-                band_transitions.push_back(&node);
-            }
-        }
-        members.insert(members.end(), band_transitions.begin(),
-                       band_transitions.end());
-        if (members.empty()) continue;
-        std::stable_sort(members.begin(), members.end(),
-                         [](const VNode* a, const VNode* b) {
-            if (a->is_default != b->is_default) return a->is_default;
-            if (a->has_edges != b->has_edges) return a->has_edges;
-            if (a->is_transition != b->is_transition) {
-                return !a->is_transition;
-            }
-            return a->title < b->title;
-        });
-        float x = band_x;
+
+    std::unordered_map<int, VNode*> by_id;
+    for (VNode& node : g.nodes) by_id[node.id] = &node;
+    auto est_height = [](const VNode& node) {
+        const size_t shown_rows = std::min<size_t>(node.rows.size(), 8);
+        return 74.0f + (float)shown_rows * 23.0f +
+               (node.rows.size() > shown_rows ? 20.0f : 0.0f);
+    };
+    auto stack_members = [&](std::vector<VNode*>& members,
+                             float band_start) {
+        float x = band_start;
         float y = 0.0f;
-        float max_x = band_x;
+        float max_x = band_start;
         for (VNode* node : members) {
-            const size_t shown_rows = std::min<size_t>(node->rows.size(), 8);
-            const float est_h =
-                74.0f + (float)shown_rows * 23.0f +
-                (node->rows.size() > shown_rows ? 20.0f : 0.0f);
+            const float est_h = est_height(*node);
             if (y > 0.0f && y + est_h > kMaxColumnHeight) {
                 x += kColumnWidth;
                 y = 0.0f;
@@ -798,47 +795,109 @@ void build_graph()
             y += est_h + 26.0f;
             max_x = std::max(max_x, x);
         }
-        band_x = max_x + kColumnWidth + kColumnGap;
-    }
-    for (VNode& node : g.nodes) {
-        if (!node.is_transition || !node.has_edges) continue;
-        const VLink* in_link = nullptr;
-        const VLink* out_link = nullptr;
-        for (const VLink& link : g.links) {
-            if (link.to_node == node.id) in_link = &link;
-            if (link.from_node == node.id) out_link = &link;
-        }
-        if (!in_link || !out_link) continue;
-        const VNode* from = nullptr;
-        const VNode* to = nullptr;
-        for (const VNode& other : g.nodes) {
-            if (other.id == in_link->from_node) from = &other;
-            if (other.id == out_link->to_node) to = &other;
-        }
-        if (!from || !to) continue;
-        node.x = (from->x + to->x) * 0.5f + 60.0f;
-        node.y = (from->y + to->y) * 0.5f + 40.0f;
-    }
+        return max_x + kColumnWidth + kColumnGap;
+    };
+
+    std::unordered_map<int, int> node_layer;
     {
-        std::vector<VNode*> connected;
+        std::unordered_map<int, std::vector<int>> succ;
+        for (const VLink& link : g.links) {
+            if (link.kind == kEdgeReturn) continue;
+            succ[link.from_node].push_back(link.to_node);
+        }
+        std::vector<int> frontier;
+        auto seed = [&](int id) {
+            if (id != 0 && by_id.count(id) && !node_layer.count(id)) {
+                node_layer[id] = 0;
+                frontier.push_back(id);
+            }
+        };
+        seed(default_id);
+        for (const VNode& node : g.nodes) {
+            if (node.is_any_state) seed(node.id);
+        }
+        if (frontier.empty()) {
+            int best = 0;
+            size_t best_out = 0;
+            for (const auto& [id, outs] : succ) {
+                if (outs.size() > best_out) {
+                    best = id;
+                    best_out = outs.size();
+                }
+            }
+            seed(best);
+        }
+        for (size_t i = 0; i < frontier.size(); ++i) {
+            const int cur = frontier[i];
+            const auto it = succ.find(cur);
+            if (it == succ.end()) continue;
+            for (int next : it->second) {
+                if (!by_id.count(next) || node_layer.count(next)) {
+                    continue;
+                }
+                node_layer[next] = node_layer[cur] + 1;
+                frontier.push_back(next);
+            }
+        }
+        int deepest = 0;
+        for (const auto& [id, l] : node_layer) {
+            deepest = std::max(deepest, l);
+        }
         for (VNode& node : g.nodes) {
-            if (node.is_transition && node.has_edges) {
-                connected.push_back(&node);
+            if (node.has_edges && !node_layer.count(node.id)) {
+                node_layer[node.id] = deepest + 1;
             }
         }
-        std::stable_sort(connected.begin(), connected.end(),
+    }
+
+    float band_x = 0.0f;
+    {
+        int max_layer = -1;
+        for (const auto& [id, l] : node_layer) {
+            max_layer = std::max(max_layer, l);
+        }
+        for (int l = 0; l <= max_layer; ++l) {
+            std::vector<VNode*> members;
+            for (VNode& node : g.nodes) {
+                const auto it = node_layer.find(node.id);
+                if (node.has_edges && it != node_layer.end() &&
+                    it->second == l) {
+                    members.push_back(&node);
+                }
+            }
+            if (members.empty()) continue;
+            std::stable_sort(members.begin(), members.end(),
+                             [](const VNode* a, const VNode* b) {
+                if (a->is_default != b->is_default) return a->is_default;
+                if (a->is_any_state != b->is_any_state) {
+                    return b->is_any_state;
+                }
+                if ((int)a->cat != (int)b->cat) {
+                    return (int)a->cat < (int)b->cat;
+                }
+                return a->title < b->title;
+            });
+            band_x = stack_members(members, band_x);
+        }
+        if (band_x > 0.0f) band_x += kColumnGap * 3.0f;
+    }
+
+    for (int cat = 0; cat < (int)Category::Count; ++cat) {
+        std::vector<VNode*> members;
+        for (VNode& node : g.nodes) {
+            if ((int)node.cat == cat && !node.has_edges) {
+                members.push_back(&node);
+            }
+        }
+        if (members.empty()) continue;
+        std::stable_sort(members.begin(), members.end(),
                          [](const VNode* a, const VNode* b) {
-            if (a->x != b->x) return a->x < b->x;
-            return a->y < b->y;
-        });
-        for (size_t i = 1; i < connected.size(); ++i) {
-            VNode* prev = connected[i - 1];
-            VNode* cur = connected[i];
-            if (std::abs(cur->x - prev->x) < 200.0f &&
-                cur->y < prev->y + 96.0f) {
-                cur->y = prev->y + 96.0f;
+            if (a->is_transition != b->is_transition) {
+                return !a->is_transition;
             }
-        }
+            return a->title < b->title;
+        });
+        band_x = stack_members(members, band_x);
     }
 
     g.layout_pending = true;
@@ -1019,8 +1078,13 @@ void draw_inspector()
         ImGui::Spacing();
         ImGui::TextWrapped(
             "States come from the entity's AnimationManagerComponent in "
-            "the game databases. Into / Loop / Out rows are the engine's "
-            "state grammar; wires show authored transition clips.");
+            "the game databases and are laid out left to right by flow: "
+            "the default state and Any State sit in the first column, and "
+            "each arrow moves one column right. Bright arrows carry "
+            "authored transition clips (hover one to see the clips); "
+            "colored arrows are engine rules and events - the legend "
+            "above names each color. States with no wires are parked to "
+            "the far right; they are clip sets the engine plays directly.");
         if (!g.tree.chain.empty()) {
             ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.55f, 0.9f, 1.0f, 1.0f),
@@ -1093,6 +1157,9 @@ void draw_inspector()
             ImGui::SameLine();
             ImGui::TextDisabled("- %s", link.label.c_str());
         }
+        for (const Row& row : link.rows) {
+            ImGui::TextDisabled("      %s", row.clip.c_str());
+        }
     }
     wrote_header = false;
     for (const VLink& link : g.links) {
@@ -1109,6 +1176,9 @@ void draw_inspector()
         if (!link.label.empty()) {
             ImGui::SameLine();
             ImGui::TextDisabled("- %s", link.label.c_str());
+        }
+        for (const Row& row : link.rows) {
+            ImGui::TextDisabled("      %s", row.clip.c_str());
         }
     }
 }
@@ -1134,7 +1204,7 @@ void Open(uint32_t entity_hash, const std::string& title)
     g.tree = it->second;
     g.filter.clear();
     for (bool& visible : g.cat_visible) visible = true;
-    g.show_transitions = true;
+    g.show_transitions = false;
     build_graph();
     g.open = true;
     g.bring_front = true;
@@ -1169,16 +1239,22 @@ void Draw()
         g.fit_pending = true;
     }
     ImGui::SameLine();
-    ImGui::Checkbox("Transitions", &g.show_transitions);
+    ImGui::Checkbox("Unlinked clips", &g.show_transitions);
+    if (!S.hide_tooltips && ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Also show transition clips that could not be wired between\n"
+            "two states (unmatched names). They are parked on the far\n"
+            "right with the other unwired clip sets.");
+    }
     ImGui::SameLine();
     ImGui::Checkbox("Conditions", &g.show_conditions);
     if (!S.hide_tooltips && ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
             "Wires the states together with the engine's known trigger\n"
-            "rules (movement, attacks, hits, action enter/exit). Solid\n"
-            "bright wires are authored transition clips from the game\n"
-            "data; colored wires are engine behaviour. Select or hover a\n"
-            "state to see its condition labels; hover a wire for detail.");
+            "rules (movement, attacks, hits, action enter/exit). Bright\n"
+            "arrows carry authored transition clips from the game data;\n"
+            "colored arrows are engine behaviour. Select or hover a state\n"
+            "to see its condition labels; hover an arrow for its clips.");
     }
     ImGui::SameLine();
     ImGui::Checkbox("Returns", &g.show_returns);
@@ -1216,6 +1292,28 @@ void Draw()
     ImGui::SameLine();
     ImGui::TextDisabled("%d / %d nodes", visible_count,
                         (int)g.nodes.size());
+
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        static const int kLegendKinds[] = {
+            kEdgeAuthored, kEdgeFlow, kEdgeEvent, kEdgeOutcome,
+            kEdgeReturn,
+        };
+        bool first = true;
+        for (int kind : kLegendKinds) {
+            if (!first) ImGui::SameLine(0.0f, 18.0f);
+            first = false;
+            const EdgeStyle style = edge_style(kind);
+            const ImVec2 pos = ImGui::GetCursorScreenPos();
+            const float mid = pos.y + ImGui::GetTextLineHeight() * 0.55f;
+            dl->AddLine(ImVec2(pos.x, mid), ImVec2(pos.x + 24.0f, mid),
+                        ImGui::ColorConvertFloat4ToU32(style.color),
+                        style.thickness);
+            ImGui::Dummy(ImVec2(28.0f, ImGui::GetTextLineHeight()));
+            ImGui::SameLine(0.0f, 4.0f);
+            ImGui::TextDisabled("%s", edge_kind_name(kind));
+        }
+    }
 
     const float inspector_w = 330.0f;
     ImGui::BeginChild("anim_tree_canvas",
@@ -1264,15 +1362,17 @@ void Draw()
         }
         if (!g.show_conditions && link.kind != kEdgeAuthored) continue;
         if (link.kind == kEdgeReturn && !g.show_returns) continue;
-        const EdgeStyle style = edge_style(link.kind);
-        ed::Link(ed::LinkId((uintptr_t)link.id),
-                 ed::PinId((uintptr_t)pin_out(link.from_node)),
-                 ed::PinId((uintptr_t)pin_in(link.to_node)),
-                 style.color, style.thickness);
         const bool touches_focus =
             link.from_node == g.selected || link.to_node == g.selected ||
             (hovered_node != 0 && (link.from_node == hovered_node ||
                                    link.to_node == hovered_node));
+        const int focus = g.selected != 0 ? g.selected : hovered_node;
+        EdgeStyle style = edge_style(link.kind);
+        if (focus != 0 && !touches_focus) style.color.w *= 0.12f;
+        ed::Link(ed::LinkId((uintptr_t)link.id),
+                 ed::PinId((uintptr_t)pin_out(link.from_node)),
+                 ed::PinId((uintptr_t)pin_in(link.to_node)),
+                 style.color, style.thickness);
         if (!link.label.empty() && g.show_conditions &&
             (g.all_labels || touches_focus)) {
             const ed::NodeId from_id((uintptr_t)link.from_node);
@@ -1314,6 +1414,17 @@ void Draw()
                                        link.label.c_str());
                 }
                 ImGui::TextDisabled("%s", edge_kind_name(link.kind));
+                if (!link.rows.empty()) {
+                    ImGui::Separator();
+                    for (const Row& row : link.rows) {
+                        if (row.duration > 0.0f) {
+                            ImGui::Text("%s  (%.2fs)", row.clip.c_str(),
+                                        row.duration);
+                        } else {
+                            ImGui::TextUnformatted(row.clip.c_str());
+                        }
+                    }
+                }
                 ImGui::EndTooltip();
                 ed::Resume();
                 break;

@@ -1,6 +1,7 @@
 #include "LevelEdit.h"
 
 #include "../../Utilities/GameBackup.h"
+#include "../Creation/FoliageAuthoring.h"
 #include "../Creation/LandscapeAuthoring.h"
 
 #include <algorithm>

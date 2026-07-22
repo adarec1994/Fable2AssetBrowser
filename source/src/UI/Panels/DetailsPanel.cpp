@@ -23,6 +23,7 @@ extern ModelPreview g_mp;
 extern int g_selected_level_mesh_idx;
 extern uint32_t g_selected_level_pick_id;
 extern uint64_t g_selected_level_hash;
+bool delete_selected_level_object();
 
 namespace DetailsPanel {
 
@@ -393,6 +394,18 @@ void draw_addition_details(const std::vector<LevelEdit::Addition>& adds) {
             }
         }
         ImGui::EndTable();
+    }
+
+    {
+        ImGui::Spacing();
+        if (!ImGui::GetIO().WantTextInput &&
+            ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+            if (::delete_selected_level_object()) {
+                s_kind = SelKind::None;
+                s_index = -1;
+                return;
+            }
+        }
     }
 
     if (a.entity_has_text) {

@@ -304,6 +304,9 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
 
             g.MeshIndex = (uint32_t)mi;
             g.SubMeshIndex = 0;
+            if(!mb.SubMeshes.empty() &&
+               mb.SubMeshes[0].RegionIndex < info.HideRegions.size())
+                g.hide_region = info.HideRegions[mb.SubMeshes[0].RegionIndex];
             if(mi<info.Meshes.size() && !info.Meshes[mi].MeshName.empty())
                 g.name = info.Meshes[mi].MeshName;
             else
@@ -412,6 +415,8 @@ bool parse_mdl_geometry(const std::vector<unsigned char>& data, const MDLInfo& i
 
                 g.MeshIndex = (uint32_t)mi;
                 g.SubMeshIndex = (uint32_t)si;
+                if(sub.RegionIndex < info.HideRegions.size())
+                    g.hide_region = info.HideRegions[sub.RegionIndex];
                 std::string baseName;
                 if(mi<info.Meshes.size() && !info.Meshes[mi].MeshName.empty())
                     baseName = info.Meshes[mi].MeshName;

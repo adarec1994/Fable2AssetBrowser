@@ -123,6 +123,7 @@ bool reparse_mdl_multi_instance_buffers(const std::vector<unsigned char>& data,
             }
             if (!sub_ok) break;
             MDLSubMeshInfo smi;
+            smi.RegionIndex = marker;
             smi.MaterialIndex = uint8_t(matIdxRaw & 0xFFu);
             smi.FaceCount  = faceCount;
             smi.StartIndex = startIdx;

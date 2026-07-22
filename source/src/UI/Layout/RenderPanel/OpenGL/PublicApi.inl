@@ -8,6 +8,8 @@ void draw_render_panel() {
             kind == ContentTabs::Kind::Quest ||
             kind == ContentTabs::Kind::CustomQuest) {
             draw_lua_in_panel();
+        } else if (kind == ContentTabs::Kind::VfsConfig) {
+            VfsConfigViewer::Draw(ContentTabs::ActiveVfsConfigContent());
         } else if (kind == ContentTabs::Kind::Level) {
             const FlatAssetEntry* level_entry =
                 ContentTabs::ActiveLevelEntry();
@@ -26,7 +28,8 @@ void draw_render_panel() {
                 draw_placeholder();
             }
             if (landscape_panel) ImGui::EndChild();
-        } else if (kind == ContentTabs::Kind::Model) {
+        } else if (kind == ContentTabs::Kind::Model ||
+                   kind == ContentTabs::Kind::Hero) {
             if (ContentTabs::ActiveHasModel() && g_mp.has_model &&
                 !S.terrain_mode && !g_mp.no_tilt) {
                 draw_model_in_panel_gl();

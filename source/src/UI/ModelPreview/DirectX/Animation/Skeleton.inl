@@ -77,3 +77,59 @@ static void compute_rest_world(const MDLInfo& info,
         }
     }
 }
+
+static void mp_set_skeleton_bind(const MDLInfo& info,
+                                 ModelPreview& mp,
+                                 bool reset_pose) {
+    uint32_t n = 0;
+    if (info.HasBoneTransforms && info.BoneCount > 0 &&
+        info.Bones.size() == info.BoneTransforms.size()) {
+        n = std::min<uint32_t>(info.BoneCount, MP_MAX_BONES);
+    }
+
+    std::vector<int> parents(n);
+    std::vector<float> local_rest((size_t)n * 11, 0.0f);
+    std::vector<float> inv_bind((size_t)n * 16, 0.0f);
+    for (uint32_t i = 0; i < n; ++i) {
+        int parent = info.Bones[i].ParentID;
+        if (parent >= (int)n) parent = -1;
+        parents[i] = parent;
+        const auto& transform = info.BoneTransforms[i];
+        for (int component = 0; component < 11; ++component) {
+            local_rest[(size_t)i * 11 + component] =
+                component < (int)transform.size()
+                    ? transform[(size_t)component] : 0.0f;
+        }
+    }
+
+    std::vector<XMFLOAT4X4> rest_world;
+    compute_rest_world(info, n, rest_world);
+    for (uint32_t i = 0; i < n && i < rest_world.size(); ++i) {
+        const XMMATRIX world = XMLoadFloat4x4(&rest_world[i]);
+        const XMMATRIX inverse = XMMatrixInverse(nullptr, world);
+        XMFLOAT4X4 matrix;
+        XMStoreFloat4x4(&matrix, inverse);
+        std::memcpy(&inv_bind[(size_t)i * 16], &matrix,
+                    sizeof(float) * 16);
+    }
+
+    const bool topology_changed = mp.bone_count != n ||
+                                  mp.bone_parents != parents;
+    mp.bone_count = n;
+    mp.bone_parents = std::move(parents);
+    mp.local_rest = std::move(local_rest);
+    mp.inv_bind = std::move(inv_bind);
+
+    if (!reset_pose && !topology_changed) return;
+    S.bone_rot_deltas.assign((size_t)n * 4, 0.0f);
+    for (uint32_t i = 0; i < n; ++i) {
+        S.bone_rot_deltas[(size_t)i * 4 + 3] = 1.0f;
+    }
+    S.bone_anim_rot_absolute.clear();
+    S.bone_anim_rot_present.clear();
+    S.bone_anim_trans_delta.clear();
+    S.bone_anim_trans_present.clear();
+    S.bone_anim_pose_active = false;
+    S.selected_bone = -1;
+    S.bone_rotate_mode = false;
+}

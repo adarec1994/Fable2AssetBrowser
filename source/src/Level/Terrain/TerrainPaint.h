@@ -19,10 +19,23 @@ namespace TerrainPaint {
 
 constexpr int kMaxLayers = 16;
 
+struct AutoRule {
+    bool  enabled = false;
+    float h_min = -100.0f;
+    float h_max = 100.0f;
+    float h_fade = 2.0f;
+    float slope_min = 0.0f;
+    float slope_max = 90.0f;
+    float slope_fade = 5.0f;
+    float noise_amount = 0.0f;
+    float noise_scale = 16.0f;
+};
+
 struct Layer {
     std::string tex_path;
     std::string normal_path;
-    float       tiling = 8.0f;   
+    float       tiling = 8.0f;
+    AutoRule    rule;
 };
 
 #ifdef _WIN32
@@ -54,6 +67,7 @@ int  AddLayer(const std::string& tex_path,
               const std::string& normal_path = {});
 void RemoveLayer(int index);
 void SetLayerTiling(int index, float metres);
+void SetLayerNormal(int index, const std::string& normal_path);
 int  ActiveLayer();
 void SetActiveLayer(int index);
 
@@ -63,8 +77,12 @@ void MarkSaved();
 
 
 void ApplyBrush(float wx, float wz, float radius_m, float strength01,
-                float falloff01, bool erase);
+                float falloff01, bool erase,
+                float noise_amount = 0.0f, float noise_scale = 16.0f);
 void EndStroke();
+
+void SetLayerRule(int index, const AutoRule& rule);
+bool ApplyAutoMaterial(std::string& err);
 
 
 

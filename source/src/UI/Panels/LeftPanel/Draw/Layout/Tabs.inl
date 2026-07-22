@@ -49,6 +49,12 @@
     ImGui::SameLine(0, 2);
     const ImU32 kQuestsLabel = IM_COL32(100, 200, 255, 255);
     if (tab_button("Quests", s_active_tab == 10, kQuestsLabel)) s_active_tab = 10;
+    ImGui::SameLine(0, 2);
+    const ImU32 kHeroLabel = IM_COL32(255, 120, 175, 255);
+    if (tab_button("Hero", s_active_tab == 12, kHeroLabel)) {
+        s_active_tab = 12;
+        HeroDesigner::Open();
+    }
 
     if (DetailsPanel::Active()) {
         ImGui::SameLine(0, 2);
@@ -61,4 +67,3 @@
     }
 
     ImGui::Separator();
-

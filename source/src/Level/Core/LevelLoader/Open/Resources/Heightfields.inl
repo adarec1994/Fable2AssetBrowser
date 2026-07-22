@@ -298,6 +298,32 @@
         if (res.ehf_path.empty()) res.ehf_path = all_ehf_refs.front();
     }
 
+    res.lmp_path = sibling_with_ext(".lmp");
+    auto normalized_ref = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        std::replace(value.begin(), value.end(), '\\', '/');
+        return value;
+    };
+    const std::string selected_ehf = normalized_ref(res.ehf_path);
+    for (const auto& e : info.entries) {
+        if (e.type != 4 || !e.has_resource_key) continue;
+        const std::string candidate = normalized_ref(e.str_a);
+        if (!selected_ehf.empty() && candidate != selected_ehf) continue;
+        res.terrain_lightmap_key = e.resource_key;
+        res.has_terrain_lightmap_key = true;
+        break;
+    }
+    if (!res.has_terrain_lightmap_key) {
+        for (const auto& e : info.entries) {
+            if (e.type == 4 && e.has_resource_key) {
+                res.terrain_lightmap_key = e.resource_key;
+                res.has_terrain_lightmap_key = true;
+                break;
+            }
+        }
+    }
+
     auto report_slot = [](const char* label, const std::string& v) {
         if (v.empty()) {
             OutputLog::warn(std::string("  ") + label + ": (missing)");
@@ -313,5 +339,13 @@
     report_slot(".ama  (ambient)",       res.ama_path);
     report_slot(".amm  (ambient meta)",  res.amm_path);
     report_slot(".amr  (ambient refs)",  res.amr_path);
+    report_slot(".lmp  (static lighting)", res.lmp_path);
+    if (res.has_terrain_lightmap_key) {
+        std::ostringstream key_log;
+        key_log << "  lightmap key: 0x" << std::hex << std::setw(16)
+                << std::setfill('0') << res.terrain_lightmap_key;
+        OutputLog::info(key_log.str());
+    } else {
+        OutputLog::warn("  lightmap key: (no type-4 terrain reference)");
+    }
     report_slot("models",                res.model_body_bnk);
-

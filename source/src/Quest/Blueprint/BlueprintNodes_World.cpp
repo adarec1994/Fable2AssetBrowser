@@ -154,6 +154,25 @@ void RegisterWorldNodes() {
     }
     {
         NodeDef def;
+        def.type = "world.freeze_time";
+        def.title = "Freeze Time";
+        def.category = "World & Camera";
+        def.icon = ICON_FA_CLOCK;
+        def.header_color = kWorldColor;
+        def.pins = {
+            {"", PinType::Exec, PinDir::Input},
+            {"Frozen", PinType::Bool, PinDir::Input, "true"},
+            {"", PinType::Exec, PinDir::Output},
+        };
+        def.emit = [](EmitContext& ctx, const Node& node, const Pin&) {
+            ctx.Line("Debug.StopDaySpeed(" + ctx.Expr(node, "Frozen") +
+                     ")");
+            ctx.Chain(node, "");
+        };
+        Registry::Register(std::move(def));
+    }
+    {
+        NodeDef def;
         def.type = "world.camera_look_at";
         def.title = "Camera Look At";
         def.category = "World & Camera";

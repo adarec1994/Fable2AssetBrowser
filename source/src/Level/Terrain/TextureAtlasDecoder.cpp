@@ -590,6 +590,38 @@ bool DecodeRawBc1ToRgba(const uint8_t* bc1, size_t bc1_size,
                               decode_bc1_block);
 }
 
+bool DecodeTiledBc1ToRgba(const uint8_t* tiled_bc1, size_t tiled_size,
+                          int W, int H, std::vector<uint8_t>& rgba)
+{
+    rgba.clear();
+    size_t blocks_w = 0, blocks_h = 0, logical_size = 0, rgba_size = 0;
+    if (!tiled_bc1 ||
+        !bc_layout_sizes(W, H, 8u, blocks_w, blocks_h,
+                         logical_size, rgba_size)) {
+        return false;
+    }
+
+    const size_t block_off_x = W <= 16 ? 4u : 0u;
+    const size_t block_off_y = H <= 16 ? 4u : 0u;
+    const size_t padded_w = (block_off_x + blocks_w + 31u) & ~size_t(31u);
+    const size_t padded_h = (block_off_y + blocks_h + 31u) & ~size_t(31u);
+    size_t padded_blocks = 0;
+    size_t required_size = 0;
+    if (!checked_mul_size(padded_w, padded_h, padded_blocks) ||
+        !checked_mul_size(padded_blocks, 8u, required_size) ||
+        tiled_size < required_size) {
+        return false;
+    }
+
+    std::vector<uint8_t> linear;
+    untile_xbox360_imageheat(tiled_bc1, tiled_size, linear,
+                             W, H, 4, 8);
+    if (linear.size() < logical_size) return false;
+    swap16_words(linear.data(), linear.size());
+    return blit_bc_to_rgba<8>(linear.data(), linear.size(), W, H, rgba,
+                              decode_bc1_block);
+}
+
 bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,
                         std::vector<uint8_t>& out_indices,
                         int& out_w, int& out_h,

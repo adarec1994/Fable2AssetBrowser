@@ -6,6 +6,9 @@
         extern ModelPreview g_mp;
         extern FlyCam g_flycam;
         extern bool g_mp_initialized;
+        const bool preserve_hero_camera =
+            ContentTabs::ActiveKind() == ContentTabs::Kind::Hero &&
+            g_mp.has_model;
         MP_Release(g_mp);
         g_mp_initialized = MP_Init(g_mp, 800, 600);
         if (g_mp_initialized) {
@@ -18,9 +21,11 @@
             S.model_materials_open = false;
             S.terrain_mode = false;
             g_mp.no_tilt = false;
-            S.cam_yaw = 3.14159265f;
-            S.cam_pitch = 0.2f;
-            S.cam_dist = 3.0f;
+            if (!preserve_hero_camera) {
+                S.cam_yaw = 3.14159265f;
+                S.cam_pitch = 0.2f;
+                S.cam_dist = 3.0f;
+            }
         }
     }
 #endif

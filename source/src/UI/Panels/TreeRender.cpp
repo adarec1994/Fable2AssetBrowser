@@ -1,6 +1,7 @@
 #include "../UI_Panels.h"
 #include "PanelInternal.h"
 #include "../ContentTabs.h"
+#include "../VfsConfigViewer.h"
 #include "../../Utilities/Utils.h"
 #include "../../Utilities/Files.h"
 #include "../../Utilities/Progress.h"
@@ -255,6 +256,17 @@ void draw_tree_node(TreeNode& node) {
                     if (is_gdb_file(node.name)) {
                         open_gdb_viewer_for_bnk_entry(
                             node.bnk_source, node.bnk_index, node.name);
+                    }
+                    if (VfsConfigViewer::IsFileName(node.name)) {
+                        g_pending_mdl_load = false;
+                        g_pending_tex_load = false;
+                        g_pending_mdl_index = -1;
+                        g_pending_tex_index = -1;
+                        g_pending_mdl_full_path.clear();
+                        VfsConfigViewer::OpenBnkEntry(
+                            node.bnk_source, node.bnk_index,
+                            node.full_path.empty() ? node.name
+                                                   : node.full_path);
                     }
                     if (is_lua(node.name)) {
                         std::string bnk_path  = node.bnk_source;

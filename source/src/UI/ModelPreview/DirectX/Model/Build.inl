@@ -136,7 +136,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
 
         D3D11_BUFFER_DESC vb{}; vb.BindFlags=D3D11_BIND_VERTEX_BUFFER; vb.ByteWidth=(UINT)vb_bytes;
         if(g.cloth_sim){ vb.Usage=D3D11_USAGE_DYNAMIC; vb.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE; }
-        else           { vb.Usage=D3D11_USAGE_IMMUTABLE; }
+        else           { vb.Usage=D3D11_USAGE_DEFAULT; }
         D3D11_SUBRESOURCE_DATA vsd{}; vsd.pSysMem=vtx.data();
         if(FAILED(dev->CreateBuffer(&vb,&vsd,&m.vb))) {
             OutputLog::warn("MP_Build: vertex buffer create failed for '" +
@@ -332,54 +332,7 @@ bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MD
     mp.selected_pick_hash = 0;
     mp.range_edit_xforms.clear();
 
-    mp.bone_count = 0;
-    mp.bone_parents.clear();
-    mp.local_rest.clear();
-    mp.inv_bind.clear();
-
-    if (info.HasBoneTransforms && info.BoneCount > 0 &&
-        info.Bones.size() == info.BoneTransforms.size()) {
-        const uint32_t n = std::min<uint32_t>(info.BoneCount, MP_MAX_BONES);
-        mp.bone_count = n;
-        mp.bone_parents.resize(n);
-        mp.local_rest.resize((size_t)n * 11);
-        mp.inv_bind.resize((size_t)n * 16);
-
-        for (uint32_t i = 0; i < n; ++i) {
-            int pid = info.Bones[i].ParentID;
-            if (pid >= (int)n) pid = -1;
-            mp.bone_parents[i] = pid;
-
-            const auto& tf = info.BoneTransforms[i];
-            for (int k = 0; k < 11; ++k) {
-                mp.local_rest[(size_t)i * 11 + k] =
-                    (k < (int)tf.size()) ? tf[k] : 0.0f;
-            }
-        }
-
-        std::vector<XMFLOAT4X4> rest_world;
-        compute_rest_world(info, n, rest_world);
-        for (uint32_t i = 0; i < n && i < rest_world.size(); ++i) {
-            XMMATRIX W = XMLoadFloat4x4(&rest_world[i]);
-            XMMATRIX inv = XMMatrixInverse(nullptr, W);
-            XMFLOAT4X4 m;
-            XMStoreFloat4x4(&m, inv);
-            std::memcpy(&mp.inv_bind[(size_t)i * 16], &m,
-                        sizeof(float) * 16);
-        }
-    }
-
-    S.bone_rot_deltas.assign((size_t)mp.bone_count * 4, 0.0f);
-    for (uint32_t i = 0; i < mp.bone_count; ++i) {
-        S.bone_rot_deltas[(size_t)i * 4 + 3] = 1.0f;
-    }
-    S.bone_anim_rot_absolute.clear();
-    S.bone_anim_rot_present.clear();
-    S.bone_anim_trans_delta.clear();
-    S.bone_anim_trans_present.clear();
-    S.bone_anim_pose_active = false;
-    S.selected_bone = -1;
-    S.bone_rotate_mode = false;
+    mp_set_skeleton_bind(info, mp, true);
 
     mp.has_model = !mp.meshes.empty();
     return true;

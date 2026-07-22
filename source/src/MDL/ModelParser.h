@@ -45,6 +45,7 @@ struct MDLClothInfo {
 };
 
 struct MDLSubMeshInfo {
+    uint32_t RegionIndex = 0;
     uint32_t FaceCount = 0;
     uint32_t StartIndex = 0;
     uint8_t  MaterialIndex = 0;
@@ -79,6 +80,7 @@ struct MDLInfo {
     std::vector<MDLMeshInfo> Meshes;
     std::vector<MDLMeshBufferInfo> MeshBuffers;
     std::vector<MDLClothInfo> ClothBlocks;
+    std::vector<std::string> HideRegions;
 };
 
 struct MDLMeshGeom {
@@ -94,6 +96,8 @@ struct MDLMeshGeom {
     std::string metallic_tex_name;
     std::string extra_tex_name;
     std::string name;
+    std::string hide_region;
+    uint32_t source_model_hash = 0;
     bool is_terrain = false;
     bool is_water = false;
     bool is_cloth = false;

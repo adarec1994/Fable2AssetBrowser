@@ -28,9 +28,38 @@ int SilverKeyChestRequirement(const std::string& model_path)
 void OnLevelLoaded(const FlatAssetEntry& entry) {
     std::lock_guard<std::mutex> lk(mtx());
     auto& s = st();
+    const bool same_level = s.available &&
+                            s.entry.full_path == entry.full_path &&
+                            s.entry.bnk_path == entry.bnk_path;
+    ModuleState kept{};
+    bool carry = false;
+    {
+        char dbg[160];
+        std::snprintf(dbg, sizeof(dbg),
+                      "OnLevelLoaded '%s' same_level=%d dirty=%d "
+                      "edits=%zu",
+                      entry.name.c_str(), same_level ? 1 : 0,
+                      s.dirty ? 1 : 0, s.edits.size());
+        DebugLog::Write("pin", dbg);
+    }
     if (s.dirty) {
-        OutputLog::warn("level edit: unsaved object edits discarded "
-                        "(level reloaded)");
+        if (same_level) {
+            carry = true;
+            kept.enabled = s.enabled;
+            kept.edits = std::move(s.edits);
+            kept.undo_stack = std::move(s.undo_stack);
+            kept.contents_edits = std::move(s.contents_edits);
+            kept.contents_loot_edits = std::move(s.contents_loot_edits);
+            kept.text_edits = std::move(s.text_edits);
+            kept.generators = std::move(s.generators);
+            kept.spawn_point_adds = std::move(s.spawn_point_adds);
+            kept.spawn_point_deletes = std::move(s.spawn_point_deletes);
+            OutputLog::info(
+                "level edit: unsaved edits carried across reload");
+        } else {
+            OutputLog::warn("level edit: unsaved object edits discarded "
+                            "(level reloaded)");
+        }
     }
     const uint64_t rev = s.revision;
     s = ModuleState{};
@@ -56,6 +85,18 @@ void OnLevelLoaded(const FlatAssetEntry& entry) {
     }
     load_additions(s);
     load_spawns(s);
+    if (carry) {
+        s.enabled = kept.enabled;
+        s.edits = std::move(kept.edits);
+        s.undo_stack = std::move(kept.undo_stack);
+        s.contents_edits = std::move(kept.contents_edits);
+        s.contents_loot_edits = std::move(kept.contents_loot_edits);
+        s.text_edits = std::move(kept.text_edits);
+        s.generators = std::move(kept.generators);
+        s.spawn_point_adds = std::move(kept.spawn_point_adds);
+        s.spawn_point_deletes = std::move(kept.spawn_point_deletes);
+        s.dirty = true;
+    }
     OutputLog::info(
         "level edit: tracking '" + entry.name + "' (" +
         (s.lev.compressed ? "chunked" : "raw") + " entry, slot " +

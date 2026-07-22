@@ -1,6 +1,10 @@
 #pragma once
 
+#include "../MDL/ModelParser.h"
+
+#include <cstdint>
 #include <string>
+#include <vector>
 
 struct FlatAssetEntry;
 
@@ -11,8 +15,10 @@ enum class Kind {
     Model,
     Item,
     Entity,
+    Hero,
     Level,
     Lua,
+    VfsConfig,
     Quest,
     CustomQuest,
 };
@@ -24,9 +30,24 @@ void CaptureCurrentModel();
 
 void OpenItem(int item_index, const std::string& title);
 void OpenEntity(int entity_index, const std::string& title);
+void OpenHero();
+void StoreHeroModel(const MDLInfo& info,
+                    const std::vector<MDLMeshGeom>& meshes,
+                    const std::string& primary_path,
+                    std::uint32_t primary_hash,
+                    std::uint32_t animation_source_hash,
+                    const std::vector<std::uint32_t>& animation_model_hashes);
+void UpdateHeroModel(const MDLInfo& info,
+                     const std::vector<MDLMeshGeom>& meshes,
+                     const std::string& primary_path,
+                     std::uint32_t primary_hash,
+                     std::uint32_t animation_source_hash,
+                     const std::vector<std::uint32_t>& animation_model_hashes);
 void OpenLevel(const FlatAssetEntry& entry, const std::string& title);
 void OpenLua(const std::string& key, const std::string& title,
              bool is_quest);
+void OpenVfsConfig(const std::string& key, const std::string& title,
+                   const std::string& content);
 void OpenCustomQuest(const std::string& quest_id,
                      const std::string& title);
 void CloseCustomQuest(const std::string& quest_id);
@@ -44,6 +65,7 @@ bool HasTabs();
 Kind ActiveKind();
 bool ActiveHasModel();
 const FlatAssetEntry* ActiveLevelEntry();
+const std::string* ActiveVfsConfigContent();
 void DrawTabBar();
 void CloseActive();
 void Clear();

@@ -67,7 +67,8 @@ bool LookupPlacement(
     const std::vector<uint8_t>& bytes,
     uint32_t record_hash,
     const std::string& entity_name,
-    Placement& out_placement);
+    Placement& out_placement,
+    bool lenient = false);
 
 std::vector<RecordRow> Build010RecordRows(
     const std::vector<uint8_t>& bytes,
@@ -261,7 +262,20 @@ struct ItemDetail {
     uint32_t desc_tag = 0;
     uint32_t model_path_hash = 0;
     std::string model_path;
+    uint32_t worn_model_path_hash = 0;
+    std::string worn_model_path;
+    uint32_t female_worn_model_path_hash = 0;
+    std::string female_worn_model_path;
+    uint32_t body_areas_covered = 0;
+    int cluster_sort_layer = -100;
+    std::vector<std::string> clusters_covered;
+    std::vector<std::string> female_clusters_covered;
     std::string icon_tex;
+
+
+
+    int category = -1;
+    int weapon_type = 0;
     int money = -1;
     bool unnamed = false;
     bool is_money = false;
@@ -269,6 +283,15 @@ struct ItemDetail {
 };
 
 std::vector<ItemDetail> BuildItemDetails(
+    const std::vector<const std::vector<uint8_t>*>& gdbs);
+
+struct MorphTargetPair {
+    uint32_t original_model_hash = 0;
+    uint32_t target_model_hash = 0;
+    uint32_t morph_type = 0;
+};
+
+std::vector<MorphTargetPair> BuildMorphTargets(
     const std::vector<const std::vector<uint8_t>*>& gdbs);
 
 std::unordered_map<uint32_t, std::string> LoadEmbeddedDict(

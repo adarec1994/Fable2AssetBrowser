@@ -4,6 +4,7 @@
 #include "../../Utilities/operations.h"
 #include "../UI_Main.h"
 #include "../AudioPlayerWindow.h"
+#include "../VfsConfigViewer.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "imgui_stdlib.h"
@@ -78,6 +79,17 @@ void draw_file_table() {
                             is_nested ? S.selected_nested_temp_path
                                       : S.selected_bnk;
                         open_gdb_viewer_for_bnk_entry(
+                            bp, S.files[i].index, S.files[i].name);
+                    }
+                    if (VfsConfigViewer::IsFileName(S.files[i].name) &&
+                        !S.viewing_adb && !S.viewing_lua) {
+                        const bool is_nested =
+                            S.selected_nested_index != -1 &&
+                            !S.selected_nested_temp_path.empty();
+                        const std::string& bp =
+                            is_nested ? S.selected_nested_temp_path
+                                      : S.selected_bnk;
+                        VfsConfigViewer::OpenBnkEntry(
                             bp, S.files[i].index, S.files[i].name);
                     }
                     if (ImGui::IsMouseDoubleClicked(0) && is_tex(S.files[i].name)) {
@@ -183,6 +195,10 @@ void draw_global_results_table() {
                             if (is_mdl(hit.file_name)) {
                                 g_pending_mdl_load = true;
                                 g_pending_mdl_index = (int)j;
+                            }
+                            if (VfsConfigViewer::IsFileName(hit.file_name)) {
+                                VfsConfigViewer::OpenBnkEntry(
+                                    hit.bnk_path, hit.index, hit.file_name);
                             }
                             break;
                         }

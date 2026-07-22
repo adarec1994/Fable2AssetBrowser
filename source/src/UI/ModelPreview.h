@@ -324,6 +324,9 @@ extern FlyCam g_flycam;
 bool MP_Init(ID3D11Device* dev, ModelPreview& mp, int w, int h);
 void MP_Release(ModelPreview& mp);
 bool MP_Build(ID3D11Device* dev, const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp, bool append = false);
+bool MP_UpdateGeometry(const std::vector<MDLMeshGeom>& geoms,
+                       const MDLInfo& info,
+                       ModelPreview& mp);
 void MP_BuildLevelFx(ID3D11Device* dev, ModelPreview& mp);
 void MP_Render(ID3D11Device* dev, ModelPreview& mp, const FlyCam& cam);
 void MP_Resize(ID3D11Device* dev, ModelPreview& mp, int w, int h);
@@ -331,6 +334,9 @@ void MP_Resize(ID3D11Device* dev, ModelPreview& mp, int w, int h);
 bool MP_Init(ModelPreview& mp, int w, int h);
 void MP_Release(ModelPreview& mp);
 bool MP_Build(const std::vector<MDLMeshGeom>& geoms, const MDLInfo& info, ModelPreview& mp, bool append = false);
+bool MP_UpdateGeometry(const std::vector<MDLMeshGeom>& geoms,
+                       const MDLInfo& info,
+                       ModelPreview& mp);
 void MP_Render(ModelPreview& mp, const FlyCam& cam);
 void MP_Resize(ModelPreview& mp, int w, int h);
 unsigned int MP_GetTexture(ModelPreview& mp);
@@ -339,6 +345,9 @@ void FlyCam_Reset(FlyCam& cam, float cx, float cy, float cz, float radius);
 void FlyCam_Update(FlyCam& cam, float dt, bool w, bool s, bool a, bool d, bool q, bool e, float mouse_dx, float mouse_dy);
 
 void MP_TextureCache_Clear();
+size_t MP_RemoveMeshesByNamePrefix(ModelPreview& mp,
+                                   const std::string& prefix);
+size_t MP_RemoveMeshesByInstHash(ModelPreview& mp, uint64_t inst_hash);
 
 bool decode_tex_to_rgba(const std::vector<unsigned char>& blob,
                         std::vector<uint8_t>& rgba,

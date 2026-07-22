@@ -41,6 +41,11 @@ bool DecodeZlibBc5Page(const uint8_t* zlib_stream,
 bool DecodeRawBc1ToRgba(const uint8_t* bc1, size_t bc1_size,
                         int W, int H, std::vector<uint8_t>& rgba);
 
+
+
+bool DecodeTiledBc1ToRgba(const uint8_t* tiled_bc1, size_t tiled_size,
+                          int W, int H, std::vector<uint8_t>& rgba);
+
 bool DecodePF99SplatMap(const uint8_t* pf99_blob, size_t blob_size,
                         std::vector<uint8_t>& out_indices,
                         int& out_w, int& out_h,

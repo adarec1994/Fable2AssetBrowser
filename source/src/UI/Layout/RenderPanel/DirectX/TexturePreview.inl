@@ -152,7 +152,14 @@ void draw_texture_in_panel(ID3D11Device* device) {
 
 void apply_orbit_to_flycam() {
     float r = std::max(g_mp.radius, 0.5f) * std::max(S.cam_dist, 0.1f);
-    const float target_y = g_mp.center[1] + S.cam_target_offset_y;
+    float hero_head_offset = 0.0f;
+    if (ContentTabs::ActiveKind() == ContentTabs::Kind::Hero) {
+        float focus = std::clamp((1.8f - S.cam_dist) / 1.3f, 0.0f, 1.0f);
+        focus = focus * focus * (3.0f - 2.0f * focus);
+        hero_head_offset = g_mp.radius * 0.82f * focus;
+    }
+    const float target_y = g_mp.center[1] + S.cam_target_offset_y +
+                           hero_head_offset;
     float yaw   = S.cam_yaw;
     float pitch = S.cam_pitch;
     float cy = cosf(pitch);

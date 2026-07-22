@@ -1,6 +1,8 @@
 #include "NewLevel.h"
 #include "GameRegistry.h"
 #include "LandscapeAuthoring.h"
+#include "Level/Core/LevelLoader.h"
+#include "Level/Lighting/LightmapFile.h"
 
 #include "BNKCore.cpp"
 #include "GDB/GdbEdit.h"
@@ -39,6 +41,11 @@ void be_u32(std::string& out, uint32_t v) {
     out.push_back(char((v >> 16) & 0xFF));
     out.push_back(char((v >> 8) & 0xFF));
     out.push_back(char(v & 0xFF));
+}
+
+void be_u64(std::string& out, uint64_t v) {
+    be_u32(out, static_cast<uint32_t>(v >> 32));
+    be_u32(out, static_cast<uint32_t>(v));
 }
 
 void be_f32(std::string& out, float value) {
@@ -88,25 +95,74 @@ bool gzip_compress(const std::string& raw, const std::string& embedded_name,
     return true;
 }
 
+bool gzip_decompress(const std::vector<uint8_t>& compressed,
+                     std::string& raw, std::string& error) {
+    z_stream stream;
+    std::memset(&stream, 0, sizeof(stream));
+    if (inflateInit2(&stream, 15 + 32) != Z_OK) {
+        error = "could not create donor terrain decompressor";
+        return false;
+    }
+    stream.next_in = const_cast<Bytef*>(compressed.data());
+    stream.avail_in = static_cast<uInt>(compressed.size());
+    raw.clear();
+    std::vector<char> buffer(1 << 16);
+    for (;;) {
+        stream.next_out = reinterpret_cast<Bytef*>(buffer.data());
+        stream.avail_out = static_cast<uInt>(buffer.size());
+        const int result = inflate(&stream, Z_NO_FLUSH);
+        raw.append(buffer.data(), buffer.size() - stream.avail_out);
+        if (result == Z_STREAM_END) break;
+        if (result != Z_OK) {
+            inflateEnd(&stream);
+            error = "could not decompress donor terrain";
+            return false;
+        }
+    }
+    inflateEnd(&stream);
+    return true;
+}
+
 bool build_blank_heightfield(const std::string& region,
                              const std::string& hfid,
+                             const std::vector<uint8_t>& donor,
                              std::vector<uint8_t>& out,
                              std::string& error) {
-    constexpr int width = 2;
-    constexpr int height = 2;
-    static const uint8_t cell_tail[10] = {
-        0x00, 0x00, 0x00, 0x00, 0xCA, 0xD8, 0x17, 0x57, 0x00, 0x00};
     std::string raw;
-    raw.reserve(20 + size_t(width) * size_t(height) * 14);
-    be_f32(raw, 0.5f);
-    be_u32(raw, 0);
-    be_u32(raw, 0);
-    be_u32(raw, width);
-    be_u32(raw, height);
-    for (int i = 0; i < width * height; ++i) {
-        be_f32(raw, 0.0f);
-        raw.append(reinterpret_cast<const char*>(cell_tail),
-                   sizeof(cell_tail));
+    if (donor.size() >= 2 && donor[0] == 0x1F && donor[1] == 0x8B) {
+        if (!gzip_decompress(donor, raw, error)) return false;
+    } else {
+        raw.assign(reinterpret_cast<const char*>(donor.data()),
+                   donor.size());
+    }
+    if (raw.size() < 20) {
+        error = "donor .ghf is too small";
+        return false;
+    }
+    auto read_be_u32 = [&](size_t offset) {
+        const auto* p = reinterpret_cast<const uint8_t*>(raw.data()) + offset;
+        return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+               (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+    };
+    const uint32_t width = read_be_u32(12);
+    const uint32_t height = read_be_u32(16);
+    const uint64_t cells = uint64_t(width) * uint64_t(height);
+    const uint64_t required = 20 + cells * 14;
+    if (width < 2 || height < 2 || cells > (1ull << 28) ||
+        required > raw.size()) {
+        error = "donor .ghf dimensions or payload are invalid";
+        return false;
+    }
+
+
+
+
+    for (uint64_t i = 0; i < cells; ++i) {
+        const size_t offset = 20 + size_t(i) * 14;
+        raw[offset + 0] = 0;
+        raw[offset + 1] = 0;
+        raw[offset + 2] = 0;
+        raw[offset + 3] = 0;
     }
     return gzip_compress(raw,
                          "export_xbox360\\worlds\\albion\\" + region +
@@ -299,7 +355,7 @@ bool build_custom_spawn_gdb(
     for (const SpawnPointMapping& mapping : mappings) {
         Gdb::Placement placement;
         if (!Gdb::LookupPlacement(out, mapping.record_hash, mapping.name,
-                                  placement)) {
+                                  placement, true)) {
             error = "Player start position could not be reset in the clean GDB.";
             return false;
         }
@@ -382,14 +438,76 @@ std::string donor_heightfield_id(const std::vector<DonorFile>& donor_files) {
     return {};
 }
 
+bool donor_terrain_reference(const std::vector<DonorFile>& donor_files,
+                             const std::string& hfid,
+                             uint64_t& out_key,
+                             std::string& error) {
+    out_key = 0;
+    bool found_reference = false;
+    const std::string wanted_leaf = lower(hfid) + ".ehf";
+    for (const DonorFile& df : donor_files) {
+        const size_t slash = df.rel_path.find_last_of('\\');
+        const std::string leaf = slash == std::string::npos
+            ? df.rel_path : df.rel_path.substr(slash + 1);
+        if (leaf != "defaultscenario.engine_level") continue;
+
+        Level::EngineLevelInfo info;
+        if (!Level::ParseEngineLevel(df.bytes, info) || !info.ok) {
+            error = "Donor engine_level could not be parsed: " + info.error;
+            return false;
+        }
+        for (const Level::EngineLevelEntry& entry : info.entries) {
+            if (entry.type != 4 || !entry.has_resource_key) continue;
+            std::string path = lower(backslash(entry.str_a));
+            const size_t path_slash = path.find_last_of('\\');
+            const std::string path_leaf = path_slash == std::string::npos
+                ? path : path.substr(path_slash + 1);
+            if (path_leaf != wanted_leaf) continue;
+            if (found_reference) {
+                error = "Donor has duplicate type-4 references for " +
+                        wanted_leaf;
+                return false;
+            }
+            out_key = entry.resource_key;
+            found_reference = true;
+        }
+    }
+    if (!found_reference) {
+        error = "Donor engine_level has no type-4 reference for " +
+                wanted_leaf;
+        return false;
+    }
+
+    for (const DonorFile& df : donor_files) {
+        const size_t slash = df.rel_path.find_last_of('\\');
+        const std::string leaf = slash == std::string::npos
+            ? df.rel_path : df.rel_path.substr(slash + 1);
+        if (leaf != "defaultscenario.lmp") continue;
+        Level::TerrainLightmap lightmap;
+        if (!Level::DecodeTerrainLightmap(df.bytes, out_key, lightmap)) {
+            error = "Donor LMP does not contain the terrain lightmap: " +
+                    lightmap.error;
+            return false;
+        }
+        return true;
+    }
+    error = "Donor region has no defaultscenario.lmp";
+    return false;
+}
+
 std::string build_engine_level(const std::string& region,
-                               const std::string& hfid) {
+                               const std::string& hfid,
+                               uint64_t terrain_lightmap_key) {
     const std::string base = "worlds\\albion\\" + region +
                              "\\defaultscenario\\" + hfid;
     std::string out;
     out += "LevelGraphicsFile";           
     be_u32(out, 12);                      
-    be_u32(out, 2);                       
+    be_u32(out, 3);
+    be_u32(out, 4);
+    out += base + ".ehf";
+    out.push_back('\0');
+    be_u64(out, terrain_lightmap_key);
     be_u32(out, 5);                       
     out += base + ".water";
     out.push_back('\0');
@@ -402,7 +520,11 @@ std::string build_engine_level(const std::string& region,
 std::string build_list_file(const std::string& region,
                             const std::string& hfid) {
     std::ostringstream os;
-    os << "Worlds\\Albion\\" << region << "\\" << hfid << ".ghf\r\n";
+    for (const char* ext :
+         {".ghf", ".ama", ".amm", ".amr", ".hdb", ".genv"}) {
+        os << "Worlds\\Albion\\" << region << "\\" << hfid << ext
+           << "\r\n";
+    }
     os << "Worlds\\Albion\\" << region
        << "\\DefaultScenario\\DefaultScenario.gdb\r\n";
     os << "Worlds\\Albion\\" << region
@@ -410,8 +532,10 @@ std::string build_list_file(const std::string& region,
     os << "Worlds\\Albion\\" << region
        << "\\DefaultScenario\\pathdata\\Config.ai_config\r\n";
     for (const char* leaf :
-         {"defaultscenario.engine_level", "defaultscenario_models.bnk",
-           "defaultscenario_textures.bnk",
+         {"defaultscenario.engine_level",
+          "defaultscenario.havok_scenario",
+          "defaultscenario_models.bnk",
+          "defaultscenario_textures.bnk",
           "defaultscenario_texture_headers.bnk",
           "defaultscenario_streaming.bnk"}) {
         os << "worlds\\albion\\" << region << "\\defaultscenario\\" << leaf
@@ -569,6 +693,11 @@ NewLevelResult CreateNewLevel(const NewLevelParams& params) {
         res.error = "Donor region has no .ghf heightfield to clone.";
         return res;
     }
+    uint64_t terrain_lightmap_key = 0;
+    if (!donor_terrain_reference(donor_files, hfid,
+                                 terrain_lightmap_key, res.error)) {
+        return res;
+    }
 
     std::vector<uint8_t> custom_spawn_save;
     std::vector<SpawnPointMapping> spawn_mappings;
@@ -603,7 +732,8 @@ NewLevelResult CreateNewLevel(const NewLevelParams& params) {
                                      : df.rel_path.substr(slash + 1);
         std::vector<uint8_t> bytes;
         if (leaf == "defaultscenario.engine_level") {
-            bytes = to_bytes(build_engine_level(region, hfid));
+            bytes = to_bytes(build_engine_level(
+                region, hfid, terrain_lightmap_key));
         } else if (leaf == "defaultscenario.list") {
             bytes = to_bytes(build_list_file(region, hfid));
         } else if (leaf == "defaultscenario.save") {
@@ -617,7 +747,8 @@ NewLevelResult CreateNewLevel(const NewLevelParams& params) {
             const std::string text(df.bytes.begin(), df.bytes.end());
             bytes = to_bytes(replace_ci(text, params.donor_region, region));
         } else if (leaf == hfid + ".ghf") {
-            if (!build_blank_heightfield(region, hfid, bytes, res.error)) {
+            if (!build_blank_heightfield(region, hfid, df.bytes, bytes,
+                                         res.error)) {
                 return res;
             }
         } else if (leaf == hfid + ".water") {
@@ -642,6 +773,12 @@ NewLevelResult CreateNewLevel(const NewLevelParams& params) {
     std::string menu_error;
     if (!SyncDebugMenuCustomLevels(data_dir, menu_error)) {
         OutputLog::warn("new level: debug menu sync failed: " + menu_error);
+    }
+
+    std::string ehf_error;
+    if (!EnsureEhfInStreamingBank(data_dir, region, ehf_error)) {
+        OutputLog::warn("new level: terrain streaming inject failed: " +
+                        ehf_error);
     }
 
     res.engine_level_virtual_path =

@@ -4,6 +4,7 @@ Level::TerrainMesh  g_pending_terrain_mesh;
 std::string         g_pending_terrain_label;
 FlatAssetEntry      g_pending_terrain_level_entry;
 std::vector<uint8_t> g_pending_terrain_ehf_bytes;
+Level::TerrainLightmap g_pending_terrain_lightmap;
 std::vector<Level::PendingAdjacentTerrain> g_pending_adjacent_terrain_meshes;
 
 std::vector<uint8_t>  g_pending_terrain_ghf_payload;
@@ -36,6 +37,7 @@ std::unordered_map<uint32_t, Gdb::PropertyDetails>
     g_level_property_details;
 std::vector<Gdb::ItemCatalogEntry> g_level_item_catalog;
 std::vector<Gdb::ItemDetail> g_item_details;
+std::vector<Gdb::MorphTargetPair> g_hero_morph_targets;
 std::unordered_map<uint32_t, Gdb::PropTemplateInfo>
     g_level_prop_entity_templates;
 std::unordered_map<uint32_t, Gdb::EntityTextTags> g_level_entity_text;

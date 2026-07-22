@@ -2,6 +2,9 @@
         S.pending_preview_build = false;
         const bool capture_model_tab =
             S.pending_model_tab_capture.exchange(false);
+        const bool preserve_hero_camera =
+            ContentTabs::ActiveKind() == ContentTabs::Kind::Hero &&
+            g_mp.has_model;
 #ifdef _WIN32
         try {
             if (!g_mp_initialized) {
@@ -18,9 +21,11 @@
                 S.model_materials_open = false;
                 S.terrain_mode = false;
                 g_mp.no_tilt = false;
-                S.cam_yaw = 3.14159265f;
-                S.cam_pitch = 0.2f;
-                S.cam_dist = 3.0f;
+                if (!preserve_hero_camera) {
+                    S.cam_yaw = 3.14159265f;
+                    S.cam_pitch = 0.2f;
+                    S.cam_dist = 3.0f;
+                }
             }
         } catch (const std::exception& e) {
             OutputLog::error(std::string("MDL preview build failed: ") +
@@ -41,9 +46,11 @@
             S.model_materials_open = false;
             S.terrain_mode = false;
             g_mp.no_tilt = false;
-            S.cam_yaw = 3.14159265f;
-            S.cam_pitch = 0.2f;
-            S.cam_dist = 3.0f;
+            if (!preserve_hero_camera) {
+                S.cam_yaw = 3.14159265f;
+                S.cam_pitch = 0.2f;
+                S.cam_dist = 3.0f;
+            }
         }
 #endif
     }

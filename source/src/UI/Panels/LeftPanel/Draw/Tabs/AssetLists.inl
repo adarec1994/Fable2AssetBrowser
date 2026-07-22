@@ -38,7 +38,8 @@
 
             const float footer_h = ImGui::GetFrameHeightWithSpacing();
             draw_flat_asset_tab("Textures", S.all_tex_files, S.tex_filter,
-                                "textures_list", 1, footer_h);
+                                "textures_list", 1, footer_h,
+                                true, "F2_TEXTURE");
 
             const bool has_any = !S.all_tex_files.empty();
             if (!has_any) ImGui::BeginDisabled();

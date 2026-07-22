@@ -1,5 +1,5 @@
     if (!s.additions.empty() || !gen_asset_models.empty() ||
-        !level_placement_deletes.empty()) {
+        !level_placement_deletes.empty() || FoliageEdit::ShouldBake()) {
         const bool rewritable = s.lev.valid && !s.lev.compressed &&
                                 s.lev.file_path.empty();
         if (rewritable) {
@@ -37,6 +37,11 @@
                 }
                 bake_note = "; bake skipped: " + berr;
                 bake_bytes.clear();
+            } else if (FoliageEdit::ShouldBake() &&
+                       !FoliageEdit::RewriteEngineLevelBytes(bake_bytes,
+                                                             berr)) {
+                msg = "save failed while baking foliage: " + berr;
+                return false;
             } else {
                 need_bake = true;
                 bake_iso = s.lev.in_iso;
@@ -67,6 +72,14 @@
                     for (const auto& mp : gen_asset_models) {
                         mdl_hashes.push_back(
                             fnv1_32(lower_model_path(mp)));
+                    }
+                    {
+                        std::vector<std::string> foliage_models;
+                        FoliageEdit::Models(foliage_models);
+                        for (const auto& fm : foliage_models) {
+                            mdl_hashes.push_back(
+                                fnv1_32(lower_model_path(fm)));
+                        }
                     }
                     try {
                         const auto bc = BnkCache::get(s.lev.bnk_path);

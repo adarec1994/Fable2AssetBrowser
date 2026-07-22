@@ -1,8 +1,10 @@
 bool build_mdl_engine_geometry(const std::vector<unsigned char>& data, std::vector<MDLMeshGeom>& out){
     std::vector<MDLEngRec>     recs;
     std::vector<MDLEngMeshHdr> hdrs;
+    std::vector<std::string> hide_regions;
     uint32_t bone_count = 0;
-    if(!parse_mdl_engine_records(data, recs, hdrs, bone_count)) return false;
+    if(!parse_mdl_engine_records(data, recs, hdrs, bone_count,
+                                 hide_regions)) return false;
     const size_t n = data.size();
     bool any=false;
     uint32_t ri=0;
@@ -101,10 +103,16 @@ bool build_mdl_engine_geometry(const std::vector<unsigned char>& data, std::vect
             }
             tg.name=baseName; tg.alpha_test=true; tg.cloth_sim=false; tg.MeshIndex=ri;
         };
+        auto assignRegion=[&](MDLMeshGeom& tg, uint32_t regionIndex){
+            if(regionIndex < hide_regions.size()) {
+                tg.hide_region = hide_regions[regionIndex];
+            }
+        };
 
         if(subs.size()==1){
             g.indices = std::move(fullIdx);
             assignMat(g, subs[0].MatIdx);
+            assignRegion(g, subs[0].RegionIndex);
             out.push_back(std::move(g));
             any=true;
         }else{
@@ -120,6 +128,7 @@ bool build_mdl_engine_geometry(const std::vector<unsigned char>& data, std::vect
                 if(rec.Skinned){ sg.bone_ids = g.bone_ids; sg.bone_weights = g.bone_weights; }
                 sg.indices = std::move(idx);
                 assignMat(sg, subs[si].MatIdx);
+                assignRegion(sg, subs[si].RegionIndex);
                 sg.SubMeshIndex = (uint32_t)si;
                 out.push_back(std::move(sg));
                 any=true;

@@ -12,6 +12,73 @@
             }
         }
         if (const ImGuiPayload* pay =
+                ImGui::AcceptDragDropPayload("F2_START_PIN")) {
+            size_t marker_index = std::numeric_limits<size_t>::max();
+            if (pay->DataSize == (int)sizeof(size_t)) {
+                std::memcpy(&marker_index, pay->Data, sizeof(size_t));
+            }
+            float target[3] = {};
+            if (marker_index < g_level_spawn_markers.size() &&
+                is_player_start_marker(
+                    g_level_spawn_markers[marker_index]) &&
+                level_placement_surface_at(ImGui::GetIO().MousePos,
+                                           origin, region, false,
+                                           target)) {
+                LevelSpawnMarker& marker =
+                    g_level_spawn_markers[marker_index];
+                if (!marker.pos_off[0] && !marker.pos_off[1] &&
+                    !marker.pos_off[2]) {
+                    OutputLog::error(
+                        "player start: this point has no editable "
+                        "transform");
+                } else {
+                    const uint32_t edit_id =
+                        0x70000000u | uint32_t(marker_index);
+                    LevelEdit::ClearDeleted(edit_id);
+                    float current[3] = {marker.x, marker.y, marker.z};
+                    float delta_pos[3] = {};
+                    float delta_rot[3] = {};
+                    if (LevelEdit::EditFor(edit_id, delta_pos,
+                                           delta_rot)) {
+                        for (int axis = 0; axis < 3; ++axis) {
+                            current[axis] += delta_pos[axis];
+                        }
+                    }
+                    const float step[3] = {target[0] - current[0],
+                                           target[1] - current[1],
+                                           target[2] - current[2]};
+                    LevelEdit::InstInfo info;
+                    const float original[3] = {marker.x, marker.y,
+                                               marker.z};
+                    info.orig_pos = original;
+                    info.gdb_off = marker.pos_off;
+                    info.gdb_rot_off = marker.rot_off;
+                    info.gdb_entity_hash = marker.entity_hash;
+                    LevelEdit::PushUndoSnapshot({edit_id});
+                    LevelEdit::AddMove(edit_id, step, info);
+                    {
+                        char dbg[240];
+                        std::snprintf(
+                            dbg, sizeof(dbg),
+                            "pin drop '%s' id=0x%08X target=(%.2f,%.2f,"
+                            "%.2f) orig=(%.2f,%.2f,%.2f) step=(%.2f,"
+                            "%.2f,%.2f) pos_off=(%u,%u,%u) hash=0x%08X",
+                            marker.name.c_str(), edit_id, target[0],
+                            target[1], target[2], original[0],
+                            original[1], original[2], step[0], step[1],
+                            step[2], marker.pos_off[0],
+                            marker.pos_off[1], marker.pos_off[2],
+                            marker.entity_hash);
+                        DebugLog::Write("pin", dbg);
+                    }
+                    OutputLog::success(
+                        marker.name +
+                        " placed; Save writes it to the level");
+                    UI::select_level_marker(marker_index);
+                }
+            }
+        }
+        if (const ImGuiPayload* pay =
                 ImGui::AcceptDragDropPayload("F2_ENTITY_NPC")) {
             int catalog_index = -1;
             if (pay->DataSize == (int)sizeof(int)) {
@@ -89,62 +156,3 @@
         ImGui::EndDragDropTarget();
     }
 
-    if (player_start_place_active) {
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-            g_player_start_placement = std::numeric_limits<size_t>::max();
-        } else if (g_player_start_placement >=
-                       g_level_spawn_markers.size() ||
-                   !is_player_start_marker(
-                       g_level_spawn_markers[g_player_start_placement])) {
-            g_player_start_placement = std::numeric_limits<size_t>::max();
-        } else if (hovered) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            ImGui::SetTooltip("Click the terrain to place this point\nEsc cancels");
-            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left, false)) {
-                const size_t marker_index = g_player_start_placement;
-                LevelSpawnMarker& marker =
-                    g_level_spawn_markers[marker_index];
-                float target[3] = {};
-                if (!LevelEdit::Enabled() || LevelEdit::Saving()) {
-                    OutputLog::error(
-                        "player start: enable level editing before placing");
-                } else if (!marker.pos_off[0] && !marker.pos_off[1] &&
-                           !marker.pos_off[2]) {
-                    OutputLog::error(
-                        "player start: this point has no editable transform");
-                } else if (!level_placement_surface_at(
-                               ImGui::GetIO().MousePos, origin, region,
-                               false, target)) {
-                    OutputLog::error(
-                        "player start: click a visible terrain surface");
-                } else {
-                    const uint32_t edit_id =
-                        0x70000000u | uint32_t(marker_index);
-                    float current[3] = {marker.x, marker.y, marker.z};
-                    float delta_pos[3] = {};
-                    float delta_rot[3] = {};
-                    if (LevelEdit::EditFor(edit_id, delta_pos, delta_rot)) {
-                        for (int axis = 0; axis < 3; ++axis) {
-                            current[axis] += delta_pos[axis];
-                        }
-                    }
-                    const float step[3] = {target[0] - current[0],
-                                           target[1] - current[1],
-                                           target[2] - current[2]};
-                    LevelEdit::InstInfo info;
-                    const float original[3] = {marker.x, marker.y, marker.z};
-                    info.orig_pos = original;
-                    info.gdb_off = marker.pos_off;
-                    info.gdb_rot_off = marker.rot_off;
-                    info.gdb_entity_hash = marker.entity_hash;
-                    LevelEdit::PushUndoSnapshot({edit_id});
-                    LevelEdit::AddMove(edit_id, step, info);
-                    OutputLog::success(marker.name +
-                                       " placed; Save writes it to the level");
-                    g_player_start_placement =
-                        std::numeric_limits<size_t>::max();
-                    UI::select_level_marker(marker_index);
-                }
-            }
-        }
-    }

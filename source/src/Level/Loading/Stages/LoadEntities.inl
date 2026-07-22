@@ -619,7 +619,8 @@
                     bool found = false;
                     for (const auto& db : supplemental_gdbs) {
                         if (Gdb::LookupPlacement(db.bytes, kv.first,
-                                                 kv.second, supplemental) &&
+                                                 kv.second, supplemental,
+                                                 true) &&
                             !supplemental.model_path_hashes.empty())
                         {
                             found = true;

@@ -1,5 +1,6 @@
 #include "TerrainPaint.h"
 
+#include "TerrainEdit.h"
 #include "../../BNKCore.cpp"
 #include "../../UI/ModelPreview.h"
 #include "../../UI/OutputLog.h"
@@ -413,7 +414,7 @@ int AddLayer(const std::string& tex_path,
     for (const Layer& layer : s.layers) {
         if (layer.tex_path == tex_path) return -1;
     }
-    const uint8_t initial_weight = s.layers.empty() ? 255 : 0;
+    const uint8_t initial_weight = 0;
     Layer layer;
     layer.tex_path = tex_path;
     layer.normal_path = normal_path;
@@ -425,6 +426,114 @@ int AddLayer(const std::string& tex_path,
     s.render_layers_dirty = true;
     s.render_weight_dirty_mask = 0xFFFFFFFFu;
     return s.active_layer;
+}
+
+static float paint_value_noise(float x, float z);
+static float paint_fractal_noise(float x, float z);
+
+void SetLayerRule(int index, const AutoRule& rule) {
+    auto& s = st();
+    if (index < 0 || index >= (int)s.layers.size()) return;
+    s.layers[(size_t)index].rule = rule;
+}
+
+bool ApplyAutoMaterial(std::string& err) {
+    auto& s = st();
+    if (s.layers.empty()) {
+        err = "no paint layers";
+        return false;
+    }
+    if (!TerrainEdit::IsLoaded()) {
+        err = "terrain is not loaded";
+        return false;
+    }
+    const float span_x = float(s.grid_w - 1) * s.tile_size;
+    const float span_z = float(s.grid_h - 1) * s.tile_size;
+    if (span_x <= 0.0f || span_z <= 0.0f) {
+        err = "terrain grid is empty";
+        return false;
+    }
+    std::vector<int> ruled;
+    for (int i = 0; i < (int)s.layers.size(); ++i) {
+        if (s.layers[(size_t)i].rule.enabled) ruled.push_back(i);
+    }
+    if (ruled.empty()) {
+        err = "no layers have an enabled rule";
+        return false;
+    }
+
+    const float step_x = span_x / float(s.paint_w - 1);
+    const float step_z = span_z / float(s.paint_h - 1);
+    auto band = [](float v, float lo, float hi, float fade) {
+        if (fade <= 0.001f) return (v >= lo && v <= hi) ? 1.0f : 0.0f;
+        const float in = (v - (lo - fade)) / fade;
+        const float out = ((hi + fade) - v) / fade;
+        const float t = std::min(in, out);
+        const float c = std::clamp(t, 0.0f, 1.0f);
+        return c * c * (3.0f - 2.0f * c);
+    };
+
+    std::vector<float> scores(ruled.size());
+    for (int z = 0; z < s.paint_h; ++z) {
+        const float wz = float(z) * step_z;
+        for (int x = 0; x < s.paint_w; ++x) {
+            const float wx = float(x) * step_x;
+            const float h = TerrainEdit::SampleHeightAtWorldXZ(wx, wz);
+            const float hx1 = TerrainEdit::SampleHeightAtWorldXZ(
+                std::min(wx + step_x, span_x), wz);
+            const float hz1 = TerrainEdit::SampleHeightAtWorldXZ(
+                wx, std::min(wz + step_z, span_z));
+            const float gx = (hx1 - h) / std::max(step_x, 0.001f);
+            const float gz = (hz1 - h) / std::max(step_z, 0.001f);
+            const float slope_deg =
+                std::atan(std::sqrt(gx * gx + gz * gz)) *
+                57.29578f;
+
+            float total = 0.0f;
+            for (size_t r = 0; r < ruled.size(); ++r) {
+                const AutoRule& rule =
+                    s.layers[(size_t)ruled[r]].rule;
+                float score =
+                    band(h, rule.h_min, rule.h_max, rule.h_fade) *
+                    band(slope_deg, rule.slope_min, rule.slope_max,
+                         rule.slope_fade);
+                if (score > 0.0f && rule.noise_amount > 0.0f) {
+                    const float scale = rule.noise_scale > 0.25f
+                                            ? rule.noise_scale
+                                            : 0.25f;
+                    const float n = paint_fractal_noise(wx / scale,
+                                                        wz / scale);
+                    score *= 1.0f - rule.noise_amount +
+                             rule.noise_amount * n;
+                }
+                scores[r] = score;
+                total += score;
+            }
+            const size_t idx = (size_t)z * s.paint_w + x;
+            for (size_t r = 0; r < ruled.size(); ++r) {
+                const float norm =
+                    total > 0.0001f ? scores[r] / total : 0.0f;
+                s.weights[(size_t)ruled[r]][idx] =
+                    (uint8_t)std::clamp(int(norm * 255.0f + 0.5f), 0,
+                                        255);
+            }
+        }
+    }
+
+    s.dirty = true;
+    s.render_layers_dirty = true;
+    s.render_weight_dirty_mask = 0xFFFFFFFFu;
+    return true;
+}
+
+void SetLayerNormal(int index, const std::string& normal_path) {
+    auto& s = st();
+    if (index < 0 || index >= (int)s.layers.size()) return;
+    if (s.layers[(size_t)index].normal_path == normal_path) return;
+    s.layers[(size_t)index].normal_path = normal_path;
+    s.dirty = true;
+    s.render_layers_dirty = true;
+    s.render_weight_dirty_mask = 0xFFFFFFFFu;
 }
 
 void RemoveLayer(int index) {
@@ -461,8 +570,34 @@ void SetActiveLayer(int index) {
 bool Dirty() { return st().dirty; }
 void MarkSaved() { st().dirty = false; }
 
+static float paint_value_noise(float x, float z) {
+    auto hash01 = [](int xi, int zi) {
+        uint32_t h = (uint32_t)xi * 374761393u + (uint32_t)zi * 668265263u;
+        h = (h ^ (h >> 13)) * 1274126177u;
+        return (float)((h ^ (h >> 16)) & 0xFFFFu) / 65535.0f;
+    };
+    const int xi = (int)std::floor(x);
+    const int zi = (int)std::floor(z);
+    float fx = x - (float)xi;
+    float fz = z - (float)zi;
+    fx = fx * fx * (3.0f - 2.0f * fx);
+    fz = fz * fz * (3.0f - 2.0f * fz);
+    const float a = hash01(xi, zi);
+    const float b = hash01(xi + 1, zi);
+    const float c = hash01(xi, zi + 1);
+    const float d = hash01(xi + 1, zi + 1);
+    return (a + (b - a) * fx) + ((c + (d - c) * fx) - (a + (b - a) * fx)) * fz;
+}
+
+static float paint_fractal_noise(float x, float z) {
+    return 0.60f * paint_value_noise(x, z) +
+           0.28f * paint_value_noise(x * 2.13f + 71.7f, z * 2.13f + 33.1f) +
+           0.12f * paint_value_noise(x * 4.71f + 13.9f, z * 4.71f + 57.3f);
+}
+
 void ApplyBrush(float wx, float wz, float radius_m, float strength01,
-                float falloff01, bool erase) {
+                float falloff01, bool erase,
+                float noise_amount, float noise_scale) {
     auto& s = st();
     if (s.active_layer < 0 || s.active_layer >= (int)s.weights.size()) {
         return;
@@ -503,6 +638,37 @@ void ApplyBrush(float wx, float wz, float radius_m, float strength01,
                     w = t * t * (3.0f - 2.0f * t);
                 }
                 const size_t idx = (size_t)z * s.paint_w + x;
+                if (noise_amount > 0.0f) {
+                    const float scale =
+                        noise_scale > 0.25f ? noise_scale : 0.25f;
+                    const float world_x =
+                        float(x) / float(s.paint_w - 1) * span_x;
+                    const float world_z =
+                        float(z) / float(s.paint_h - 1) * span_z;
+                    const float n = paint_fractal_noise(
+                        world_x / scale, world_z / scale);
+                    const float spread =
+                        std::clamp((n - 0.25f) / 0.5f, 0.0f, 1.0f);
+                    const float coverage =
+                        std::clamp(noise_amount, 0.02f, 1.0f);
+                    const float threshold = 1.0f - coverage;
+                    const float band = 0.08f;
+                    float m = (spread - (threshold - band)) /
+                              (2.0f * band);
+                    m = std::clamp(m, 0.0f, 1.0f);
+                    m = m * m * (3.0f - 2.0f * m);
+                    if (m <= 0.0f) continue;
+                    const int stamp = int(
+                        255.0f * std::clamp(strength01, 0.0f, 1.0f) *
+                            w * m +
+                        0.5f);
+                    const int cur = int(target[idx]);
+                    const int next = erase
+                                         ? std::min(cur, 255 - stamp)
+                                         : std::max(cur, stamp);
+                    target[idx] = (uint8_t)next;
+                    continue;
+                }
                 const int delta =
                     int(add * w + 0.5f) * (erase ? -1 : 1);
                 const int next =

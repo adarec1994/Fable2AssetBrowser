@@ -2,6 +2,16 @@
     if (rebuilt && !gdb_rewrite_bytes.empty()) {
         progress_update(85, 100, "Writing container data...");
         std::string gerr;
+        {
+            char dbg[200];
+            std::snprintf(dbg, sizeof(dbg),
+                          "writing rewritten gdb (%zu bytes) -> %s",
+                          gdb_rewrite_bytes.size(),
+                          !gdb_rewrite_loose.empty()
+                              ? gdb_rewrite_loose.c_str()
+                              : gdb_rewrite_bnk.c_str());
+            DebugLog::Write("save.rebuild", dbg);
+        }
         if (!gdb_rewrite_loose.empty()) {
             std::ofstream f(gdb_rewrite_loose,
                             std::ios::binary | std::ios::trunc);

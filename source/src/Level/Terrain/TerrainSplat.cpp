@@ -838,10 +838,19 @@ bool Build(ID3D11Device*                                       device,
             + " fallback pixels)");
     }
 
-    if (!lightmap_rgba.empty() && lightmap_w > 0 && lightmap_h > 0) {
+    const uint8_t neutral_lightmap[4] = {255, 255, 255, 255};
+    const bool have_lightmap = !lightmap_rgba.empty() &&
+                               lightmap_w > 0 && lightmap_h > 0 &&
+                               lightmap_rgba.size() >=
+                                   size_t(lightmap_w) * size_t(lightmap_h) * 4u;
+    const int upload_lightmap_w = have_lightmap ? lightmap_w : 1;
+    const int upload_lightmap_h = have_lightmap ? lightmap_h : 1;
+    const uint8_t* upload_lightmap = have_lightmap
+        ? lightmap_rgba.data() : neutral_lightmap;
+    {
         D3D11_TEXTURE2D_DESC td{};
-        td.Width            = lightmap_w;
-        td.Height           = lightmap_h;
+        td.Width            = upload_lightmap_w;
+        td.Height           = upload_lightmap_h;
         td.MipLevels        = 1;
         td.ArraySize        = 1;
         td.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -850,14 +859,23 @@ bool Build(ID3D11Device*                                       device,
         td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
 
         D3D11_SUBRESOURCE_DATA sd{};
-        sd.pSysMem      = lightmap_rgba.data();
-        sd.SysMemPitch  = UINT(lightmap_w * 4);
+        sd.pSysMem      = upload_lightmap;
+        sd.SysMemPitch  = UINT(upload_lightmap_w * 4);
 
         ID3D11Texture2D* tex = nullptr;
         if (SUCCEEDED(device->CreateTexture2D(&td, &sd, &tex))) {
             device->CreateShaderResourceView(tex, nullptr, &R.lightmap);
             tex->Release();
         }
+    }
+
+    if (!R.lightmap) {
+        OutputLog::warn("TerrainSplat: failed to create static lightmap texture");
+        Clear();
+        return false;
+    }
+    if (!have_lightmap) {
+        OutputLog::info("TerrainSplat: no keyed LMP lightmap; using neutral white");
     }
 
     R.ok = true;

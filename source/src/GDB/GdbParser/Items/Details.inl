@@ -29,6 +29,98 @@ std::vector<ItemDetail> BuildItemDetails(
         return it != dict.end() ? it->second : std::string();
     };
 
+    auto collect_name_list = [&](uint32_t list_hash) {
+        std::vector<std::string> names;
+        MultiGdbCursor walk;
+        if (!MultiLookup(views, list_hash, walk)) return names;
+        std::unordered_set<uint32_t> inherited_slots;
+        std::unordered_set<uint32_t> visited_records;
+        for (int depth = 0; depth < 64; ++depth) {
+            size_t schema = 0;
+            uint32_t field_count = 0;
+            if (!walk.view->schema(walk.record, schema, field_count)) break;
+            const size_t hashes = schema + 4;
+            const size_t descriptors = hashes + size_t(field_count) * 4;
+            std::unordered_set<uint32_t> local_slots;
+            for (uint32_t field = 0; field < field_count; ++field) {
+                const uint32_t field_hash = ReadBeU32(
+                    walk.view->bytes.data() + hashes + size_t(field) * 4);
+                if (field_hash == kHashParent ||
+                    inherited_slots.find(field_hash) != inherited_slots.end()) {
+                    continue;
+                }
+                local_slots.insert(field_hash);
+                const uint32_t descriptor = ReadBeU32(
+                    walk.view->bytes.data() + descriptors + size_t(field) * 4);
+                if (uint8_t(descriptor >> 24) != 5) continue;
+                const size_t value_slot = walk.record + 4 + size_t(field) * 4;
+                if (value_slot + 4 > walk.view->body_end) continue;
+                const uint32_t value = ReadBeU32(
+                    walk.view->bytes.data() + value_slot);
+                if (value == 0 || value == kHashNull) continue;
+                std::string name = dict_name(value);
+                if (!name.empty()) names.push_back(std::move(name));
+            }
+            inherited_slots.insert(local_slots.begin(), local_slots.end());
+
+            size_t parent_slot = 0;
+            if (!walk.view->findLocal(walk.record, kHashParent, 6,
+                                      parent_slot, nullptr)) break;
+            const uint32_t parent = ReadBeU32(
+                walk.view->bytes.data() + parent_slot);
+            if (parent == 0 || parent == kHashNull ||
+                !visited_records.insert(parent).second) break;
+            MultiGdbCursor next;
+            if (!MultiLookup(views, parent, next)) break;
+            walk = next;
+        }
+        return names;
+    };
+
+    auto collect_bitmask = [&](uint32_t list_hash) {
+        uint32_t mask = 0;
+        MultiGdbCursor walk;
+        if (!MultiLookup(views, list_hash, walk)) return mask;
+        std::unordered_set<uint32_t> inherited_slots;
+        std::unordered_set<uint32_t> visited_records;
+        for (int depth = 0; depth < 64; ++depth) {
+            size_t schema = 0;
+            uint32_t field_count = 0;
+            if (!walk.view->schema(walk.record, schema, field_count)) break;
+            const size_t hashes = schema + 4;
+            const size_t descriptors = hashes + size_t(field_count) * 4;
+            std::unordered_set<uint32_t> local_slots;
+            for (uint32_t field = 0; field < field_count; ++field) {
+                const uint32_t field_hash = ReadBeU32(
+                    walk.view->bytes.data() + hashes + size_t(field) * 4);
+                if (field_hash == kHashParent ||
+                    inherited_slots.find(field_hash) != inherited_slots.end()) {
+                    continue;
+                }
+                local_slots.insert(field_hash);
+                const uint32_t descriptor = ReadBeU32(
+                    walk.view->bytes.data() + descriptors + size_t(field) * 4);
+                if (uint8_t(descriptor >> 24) != 5) continue;
+                const size_t value_slot = walk.record + 4 + size_t(field) * 4;
+                if (value_slot + 4 <= walk.view->body_end) {
+                    mask |= ReadBeU32(walk.view->bytes.data() + value_slot);
+                }
+            }
+            inherited_slots.insert(local_slots.begin(), local_slots.end());
+            size_t parent_slot = 0;
+            if (!walk.view->findLocal(walk.record, kHashParent, 6,
+                                      parent_slot, nullptr)) break;
+            const uint32_t parent = ReadBeU32(
+                walk.view->bytes.data() + parent_slot);
+            if (parent == 0 || parent == kHashNull ||
+                !visited_records.insert(parent).second) break;
+            MultiGdbCursor next;
+            if (!MultiLookup(views, parent, next)) break;
+            walk = next;
+        }
+        return mask;
+    };
+
     auto is_stat_field = [&](const std::string& nm) {
         static const char* kSkip[] = {
             "GUIScreen", "Icon", "parent", "Component", "Tag",
@@ -106,6 +198,95 @@ std::vector<ItemDetail> BuildItemDetails(
             MultiGdbCursor cur{vw, rec};
 
 
+
+
+
+            {
+                constexpr uint32_t kAppearanceModifierComponent = 0xD949A6F5u;
+                constexpr uint32_t kGraphicAppearanceStaticMeshComponent =
+                    0x29CF50D1u;
+                constexpr uint32_t kModelFile = 0x0C17DB4Eu;
+                constexpr uint32_t kOverrideFemaleModel = 0xD71D2B14u;
+                constexpr uint32_t kClustersCovered = 0x194C174Au;
+                constexpr uint32_t kBodyAreasCovered = 0xB3ADD081u;
+                constexpr uint32_t kOverrideFemaleClustersCovered =
+                    0xF736AC4Au;
+                constexpr uint32_t kClusterSortLayer = 0x88FD2918u;
+
+                auto read_model = [&](const MultiGdbCursor& component,
+                                      uint32_t field,
+                                      uint32_t& hash,
+                                      std::string& path) {
+                    MultiGdbCursor owner;
+                    uint32_t value = 0;
+                    uint8_t type = 0;
+                    if (MultiFindInherited(views, component, field, 0xFF,
+                                           owner, value, &type) &&
+                        (type == 4 || type == 7) && value != 0 &&
+                        value != kHashNull) {
+                        hash = value;
+                        path = dict_name(value);
+                    }
+                };
+
+                MultiGdbCursor owner;
+                uint32_t component_hash = 0;
+                if (MultiFindInherited(
+                        views, cur, kGraphicAppearanceStaticMeshComponent, 6,
+                        owner, component_hash) &&
+                    component_hash != 0 && component_hash != kHashNull) {
+                    MultiGdbCursor component;
+                    if (MultiLookup(views, component_hash, component)) {
+                        read_model(component, kModelFile,
+                                   d.worn_model_path_hash,
+                                   d.worn_model_path);
+                    }
+                }
+
+                if (MultiFindInherited(views, cur,
+                                       kAppearanceModifierComponent, 6,
+                                       owner, component_hash) &&
+                    component_hash != 0 && component_hash != kHashNull) {
+                    MultiGdbCursor component;
+                    if (MultiLookup(views, component_hash, component)) {
+                        read_model(component, kOverrideFemaleModel,
+                                   d.female_worn_model_path_hash,
+                                   d.female_worn_model_path);
+
+                        MultiGdbCursor field_owner;
+                        uint32_t value = 0;
+                        uint8_t type = 0;
+                        if (MultiFindInherited(views, component,
+                                               kClusterSortLayer, 0xFF,
+                                               field_owner, value, &type) &&
+                            (type == 1 || type == 5)) {
+                            d.cluster_sort_layer = static_cast<int32_t>(value);
+                        }
+                        if (MultiFindInherited(views, component,
+                                               kBodyAreasCovered, 6,
+                                               field_owner, value) &&
+                            value != 0 && value != kHashNull) {
+                            d.body_areas_covered = collect_bitmask(value);
+                        }
+                        if (MultiFindInherited(views, component,
+                                               kClustersCovered, 6,
+                                               field_owner, value) &&
+                            value != 0 && value != kHashNull) {
+                            d.clusters_covered = collect_name_list(value);
+                        }
+                        if (MultiFindInherited(
+                                views, component,
+                                kOverrideFemaleClustersCovered, 6,
+                                field_owner, value) &&
+                            value != 0 && value != kHashNull) {
+                            d.female_clusters_covered =
+                                collect_name_list(value);
+                        }
+                    }
+                }
+            }
+
+
             MultiGdbCursor inv_comp;
             bool have_inv_comp = false;
             {
@@ -116,6 +297,39 @@ std::vector<ItemDetail> BuildItemDetails(
                                        io, ih) &&
                     ih != 0 && ih != kHashNull) {
                     have_inv_comp = MultiLookup(views, ih, inv_comp);
+                }
+            }
+
+
+
+
+
+            {
+                constexpr uint32_t kCategory = 0xFE6FDF41u;
+                constexpr uint32_t kWeaponComponent = 0x2C34431Eu;
+                constexpr uint32_t kWeaponType = 0xC7596B9Du;
+                MultiGdbCursor owner;
+                uint32_t value = 0;
+                uint8_t type = 0;
+                if (have_inv_comp &&
+                    MultiFindInherited(views, inv_comp, kCategory, 0xFF,
+                                       owner, value, &type) &&
+                    (type == 1 || type == 5)) {
+                    d.category = static_cast<int32_t>(value);
+                }
+
+                uint32_t weapon_component = 0;
+                if (MultiFindInherited(views, cur, kWeaponComponent, 6,
+                                       owner, weapon_component) &&
+                    weapon_component != 0 &&
+                    weapon_component != kHashNull) {
+                    MultiGdbCursor component;
+                    if (MultiLookup(views, weapon_component, component) &&
+                        MultiFindInherited(views, component, kWeaponType,
+                                           0xFF, owner, value, &type) &&
+                        (type == 1 || type == 5)) {
+                        d.weapon_type = static_cast<int32_t>(value);
+                    }
                 }
             }
 

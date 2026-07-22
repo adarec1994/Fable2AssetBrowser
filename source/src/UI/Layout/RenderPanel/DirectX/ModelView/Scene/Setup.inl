@@ -49,5 +49,3 @@
     ImGui::InvisibleButton("##model_render", region);
     bool hovered = ImGui::IsItemHovered();
     bool active  = ImGui::IsItemActive();
-    const bool player_start_place_active =
-        g_player_start_placement != std::numeric_limits<size_t>::max();

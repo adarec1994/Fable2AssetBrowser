@@ -37,11 +37,22 @@ EyeSide eye_side_from_path(std::string path)
     return EyeSide::None;
 }
 
+int named_bone(const MDLInfo& info,
+               const std::vector<std::string>& candidates)
+{
+    if (info.Bones.empty()) return -1;
+    const auto lookup = Anim::build_model_bone_lookup(
+        info, static_cast<uint32_t>(info.Bones.size()));
+    for (const std::string& candidate : candidates) {
+        const int bone = Anim::model_bone_for_track_name(lookup, candidate);
+        if (bone >= 0) return bone;
+    }
+    return -1;
+}
+
 int eye_bone(const MDLInfo& info, EyeSide side)
 {
     if (side == EyeSide::None || info.Bones.empty()) return -1;
-    const auto lookup = Anim::build_model_bone_lookup(
-        info, static_cast<uint32_t>(info.Bones.size()));
     static constexpr const char* kLeftCandidates[] = {
         "L_Eye", "Left_Eye", "LeftEye", "Character.Focal.Eye.Left",
         "Focal_Eye_DummyObject1",
@@ -50,16 +61,15 @@ int eye_bone(const MDLInfo& info, EyeSide side)
         "R_Eye", "Right_Eye", "RightEye", "Character.Focal.Eye.Right",
         "Focal_Eye_DummyObject",
     };
-    const char* const* candidates = side == EyeSide::Left
-        ? kLeftCandidates : kRightCandidates;
-    const size_t count = side == EyeSide::Left
-        ? std::size(kLeftCandidates) : std::size(kRightCandidates);
-    for (size_t i = 0; i < count; ++i) {
-        const int bone = Anim::model_bone_for_track_name(lookup,
-                                                          candidates[i]);
-        if (bone >= 0) return bone;
+    std::vector<std::string> candidates;
+    if (side == EyeSide::Left) {
+        candidates.assign(std::begin(kLeftCandidates),
+                          std::end(kLeftCandidates));
+    } else {
+        candidates.assign(std::begin(kRightCandidates),
+                          std::end(kRightCandidates));
     }
-    return -1;
+    return named_bone(info, candidates);
 }
 
 void rotate_vector(float& x, float& y, float& z,
@@ -88,7 +98,8 @@ void rotate_vector(float& x, float& y, float& z,
     z += 2.0f * (qw * cz + ccz);
 }
 
-bool attach_eye_mesh(MDLMeshGeom& mesh, const MDLInfo& rig, int bone)
+bool attach_rigid_mesh(MDLMeshGeom& mesh, const MDLInfo& rig, int bone,
+                       bool apply_bind_orientation)
 {
     if (bone < 0 || static_cast<size_t>(bone) >= rig.Bones.size() ||
         rig.BoneTransforms.size() != rig.Bones.size()) {
@@ -106,25 +117,62 @@ bool attach_eye_mesh(MDLMeshGeom& mesh, const MDLInfo& rig, int bone)
 
 
 
-    float origin_x = 0.0f;
-    float origin_y = 0.0f;
-    float origin_z = 0.0f;
-    for (int current : chain) {
-        const auto& tf = rig.BoneTransforms[static_cast<size_t>(current)];
-        if (tf.size() < 10) continue;
-        origin_x *= tf[7];
-        origin_y *= tf[8];
-        origin_z *= tf[9];
-        rotate_vector(origin_x, origin_y, origin_z, tf);
-        origin_x += tf[4];
-        origin_y += tf[5];
-        origin_z += tf[6];
-    }
-
-    for (size_t i = 0; i + 2 < mesh.positions.size(); i += 3) {
-        mesh.positions[i + 0] += origin_x;
-        mesh.positions[i + 1] += origin_y;
-        mesh.positions[i + 2] += origin_z;
+    if (apply_bind_orientation) {
+        for (size_t i = 0; i + 2 < mesh.positions.size(); i += 3) {
+            float& x = mesh.positions[i + 0];
+            float& y = mesh.positions[i + 1];
+            float& z = mesh.positions[i + 2];
+            for (int current : chain) {
+                const auto& tf = rig.BoneTransforms[static_cast<size_t>(current)];
+                if (tf.size() < 10) continue;
+                x *= tf[7];
+                y *= tf[8];
+                z *= tf[9];
+                rotate_vector(x, y, z, tf);
+                x += tf[4];
+                y += tf[5];
+                z += tf[6];
+            }
+        }
+        for (size_t i = 0; i + 2 < mesh.normals.size(); i += 3) {
+            float& x = mesh.normals[i + 0];
+            float& y = mesh.normals[i + 1];
+            float& z = mesh.normals[i + 2];
+            for (int current : chain) {
+                const auto& tf = rig.BoneTransforms[static_cast<size_t>(current)];
+                if (tf.size() < 10) continue;
+                if (std::fabs(tf[7]) > 1.0e-7f) x /= tf[7];
+                if (std::fabs(tf[8]) > 1.0e-7f) y /= tf[8];
+                if (std::fabs(tf[9]) > 1.0e-7f) z /= tf[9];
+                rotate_vector(x, y, z, tf);
+            }
+            const float length = std::sqrt(x * x + y * y + z * z);
+            if (length > 1.0e-7f) {
+                x /= length;
+                y /= length;
+                z /= length;
+            }
+        }
+    } else {
+        float origin_x = 0.0f;
+        float origin_y = 0.0f;
+        float origin_z = 0.0f;
+        for (int current : chain) {
+            const auto& tf = rig.BoneTransforms[static_cast<size_t>(current)];
+            if (tf.size() < 10) continue;
+            origin_x *= tf[7];
+            origin_y *= tf[8];
+            origin_z *= tf[9];
+            rotate_vector(origin_x, origin_y, origin_z, tf);
+            origin_x += tf[4];
+            origin_y += tf[5];
+            origin_z += tf[6];
+        }
+        for (size_t i = 0; i + 2 < mesh.positions.size(); i += 3) {
+            mesh.positions[i + 0] += origin_x;
+            mesh.positions[i + 1] += origin_y;
+            mesh.positions[i + 2] += origin_z;
+        }
     }
 
     const size_t vertex_count = mesh.positions.size() / 3;
@@ -144,10 +192,23 @@ void remap_part_bones(std::vector<MDLMeshGeom>& meshes,
     if (part.Bones.empty() || rig.Bones.empty()) return;
     const auto lookup = Anim::build_model_bone_lookup(
         rig, static_cast<uint32_t>(rig.Bones.size()));
-    std::vector<uint16_t> remap(part.Bones.size(), 0);
+    std::vector<int> direct(part.Bones.size(), -1);
     for (size_t i = 0; i < part.Bones.size(); ++i) {
         const int target = Anim::model_bone_for_track_name(
             lookup, part.Bones[i].Name);
+        if (target >= 0) direct[i] = target;
+    }
+    std::vector<uint16_t> remap(part.Bones.size(), 0);
+    for (size_t i = 0; i < part.Bones.size(); ++i) {
+        int target = direct[i];
+        int ancestor = part.Bones[i].ParentID;
+        std::unordered_set<int> visited;
+        while (target < 0 && ancestor >= 0 &&
+               ancestor < static_cast<int>(part.Bones.size()) &&
+               visited.insert(ancestor).second) {
+            target = direct[static_cast<size_t>(ancestor)];
+            ancestor = part.Bones[static_cast<size_t>(ancestor)].ParentID;
+        }
         if (target >= 0) remap[i] = static_cast<uint16_t>(target);
     }
     for (MDLMeshGeom& mesh : meshes) {
@@ -162,7 +223,8 @@ void remap_part_bones(std::vector<MDLMeshGeom>& meshes,
 
 bool Resolve(const std::vector<std::uint32_t>& model_hashes,
              ResolvedModel& out,
-             std::string* error)
+             std::string* error,
+             const ResolveOptions* options)
 {
     out = ResolvedModel{};
     struct LoadedPart {
@@ -208,6 +270,9 @@ bool Resolve(const std::vector<std::uint32_t>& model_hashes,
                 continue;
             }
         }
+        for (MDLMeshGeom& mesh : meshes) {
+            mesh.source_model_hash = hash;
+        }
         size_t geometry_score = 0;
         for (const MDLMeshGeom& mesh : meshes) {
             geometry_score += mesh.positions.size();
@@ -222,10 +287,21 @@ bool Resolve(const std::vector<std::uint32_t>& model_hashes,
         return false;
     }
 
-    size_t primary = 0;
-    for (size_t i = 1; i < parts.size(); ++i) {
-        if (parts[i].geometry_score > parts[primary].geometry_score) {
-            primary = i;
+    size_t primary = parts.size();
+    if (options && options->preferred_primary_hash) {
+        for (size_t i = 0; i < parts.size(); ++i) {
+            if (parts[i].hash == options->preferred_primary_hash) {
+                primary = i;
+                break;
+            }
+        }
+    }
+    if (primary >= parts.size()) {
+        primary = 0;
+        for (size_t i = 1; i < parts.size(); ++i) {
+            if (parts[i].geometry_score > parts[primary].geometry_score) {
+                primary = i;
+            }
         }
     }
     const MDLInfo& rig = parts[primary].info;
@@ -238,7 +314,22 @@ bool Resolve(const std::vector<std::uint32_t>& model_hashes,
         if (side != EyeSide::None) {
             const int bone = eye_bone(rig, side);
             for (MDLMeshGeom& mesh : part.meshes) {
-                attach_eye_mesh(mesh, rig, bone);
+                attach_rigid_mesh(mesh, rig, bone, false);
+            }
+        } else if (options) {
+            const auto attachment = std::find_if(
+                options->attachments.begin(), options->attachments.end(),
+                [&](const Attachment& item) {
+                    return item.model_hash == part.hash;
+                });
+            if (attachment != options->attachments.end()) {
+                const int bone = named_bone(rig,
+                                             attachment->bone_candidates);
+                for (MDLMeshGeom& mesh : part.meshes) {
+                    attach_rigid_mesh(mesh, rig, bone, true);
+                }
+            } else if (i != primary) {
+                remap_part_bones(part.meshes, part.info, rig);
             }
         } else if (i != primary) {
             remap_part_bones(part.meshes, part.info, rig);

@@ -311,6 +311,8 @@ set(APP_SOURCES
         src/Level/Core/LevelLoader.h
         src/Level/Loading/LevelBinaryReader.h
         src/Level/Loading/EngineLevelParser.cpp
+        src/Level/Lighting/LightmapFile.cpp
+        src/Level/Lighting/LightmapFile.h
         src/Level/Loading/LevelCatalogLoader.cpp
         src/Level/Loading/LevelCatalogLoaderInternal.h
         src/Level/Loading/LevelTerrainLoader.cpp
@@ -428,6 +430,7 @@ set(APP_SOURCES
         src/Level/Creation/TiffHeightmap.cpp
         src/Level/Creation/SkyAuthoring.cpp
         src/Level/Creation/WaterAuthoring.cpp
+        src/Level/Creation/FoliageAuthoring.cpp
         src/Level/Terrain/TerrainPaint.cpp
         src/Level/Creation/NewLevel.h
         src/Level/Creation/GameRegistry.cpp
@@ -638,6 +641,8 @@ set(APP_SOURCES
         src/UI/ModelPreview/Textures/XboxTiling.inl
         src/UI/EntityModelResolver.cpp
         src/UI/EntityModelResolver.h
+        src/UI/Hero/HeroDesigner.cpp
+        src/UI/Hero/HeroDesigner.h
         src/Lua.cpp
         src/lua/Bytecode/Definitions.inl
         src/lua/Bytecode/Reader.inl
@@ -752,6 +757,8 @@ set(APP_SOURCES
         src/UI/Quest/QuestNodeView.h
         src/UI/ContentTabs.cpp
         src/UI/ContentTabs.h
+        src/UI/VfsConfigViewer.cpp
+        src/UI/VfsConfigViewer.h
 )
 
 if(MSVC)
@@ -938,6 +945,17 @@ if(FABLE_BUILD_TESTS)
     target_link_libraries(texture_atlas_decoder_tests PRIVATE ZLIB::ZLIB)
     add_test(NAME texture_atlas_decoder_tests
              COMMAND texture_atlas_decoder_tests)
+
+    add_executable(lightmap_file_tests
+            tests/LightmapFileTests.cpp
+            src/Level/Lighting/LightmapFile.cpp
+            src/Level/Terrain/TextureAtlasDecoder.cpp
+    )
+    target_include_directories(lightmap_file_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(lightmap_file_tests PRIVATE ZLIB::ZLIB)
+    add_test(NAME lightmap_file_tests COMMAND lightmap_file_tests)
 
     add_executable(shader_bank_tests
             tests/ShaderBankTests.cpp

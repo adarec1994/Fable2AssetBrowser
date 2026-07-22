@@ -415,9 +415,11 @@ float4 PS(VSOUT i) : SV_Target {
         final = sample_lod(0, mat_uv);
     }
 
-    float2 lm_uv = chunk_co / float2(CW, CH);
-    float  ao    = lightmap.Sample(smp_wrap, lm_uv).r;
-    final *= (ao * 0.55 + 0.45);
+    float2 lm_uv = clamp(chunk_co / float2(CW, CH),
+                         float2(0.000001, 0.000001),
+                         float2(0.999999, 0.999999));
+    float3 baked_light = lightmap.Sample(smp_wrap, lm_uv).rgb;
+    final *= (baked_light * 0.55 + 0.45);
 
     float3 N = normalize(i.n);
     float3 light_vec = normalize(float3(0.3, 0.7, 0.5));
@@ -519,6 +521,12 @@ float4 PS(VSOUT i) : SV_Target {
         final = sample_material(0, world_xy, slope_w);
     }
 
+    float2 lm_uv = clamp(chunk_co / float2(CW, CH),
+                         float2(0.000001, 0.000001),
+                         float2(0.999999, 0.999999));
+    float3 baked_light = lightmap.Sample(smp_wrap, lm_uv).rgb;
+    final *= (baked_light * 0.55 + 0.45);
+
     if (params.z > 0.5) {
         float3 hi = float3(0.10, 0.95, 0.25);
         final = lerp(final, hi, 0.65);
@@ -535,6 +543,9 @@ cbuffer CB : register(b0){
     float4   lightDir;
     float4x4 mv;
     float4   params;
+    float4   edit_off;
+    float4   edit_rot;
+    float4   edit_piv;
 }
 struct VSIN{
     float3 p   : POSITION;
@@ -557,10 +568,17 @@ struct VSOUT{
 
 VSOUT VS(VSIN i){
     VSOUT o;
-    o.p  = mul(float4(i.p, 1.0), mvp);
+    float3 pin = i.p;
+    if (edit_off.w > 0.5) {
+        float3 q = (pin - edit_piv.xyz) * edit_piv.w;
+        float3 tq = 2.0 * cross(edit_rot.xyz, q);
+        q = q + edit_rot.w * tq + cross(edit_rot.xyz, tq);
+        pin = q + edit_piv.xyz + edit_off.xyz;
+    }
+    o.p  = mul(float4(pin, 1.0), mvp);
     o.n  = float3(0.0, 1.0, 0.0);
     o.t  = i.t;
-    o.wp = i.p;
+    o.wp = pin;
     return o;
 }
 )";

@@ -289,8 +289,12 @@ struct State {
     int                         anim_selected_clip = -1;
     std::string                 current_mdl_path;
     uint32_t                    current_mdl_path_hash = 0;
+    uint32_t                    current_animation_source_hash = 0;
+    std::vector<uint32_t>       current_animation_model_hashes;
     uint64_t                    anim_authored_signature = 0;
     std::vector<uint8_t>         anim_authored_cache;
+    std::vector<size_t>          anim_authored_order;
+    std::vector<std::string>     anim_authored_names;
     uint64_t                    anim_compat_signature = 0;
     std::vector<uint8_t>         anim_compat_cache;
     std::vector<uint16_t>        anim_compat_matches;

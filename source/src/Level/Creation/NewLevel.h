@@ -10,7 +10,9 @@ namespace Creation {
 
 struct NewLevelParams {
     std::string name;
-    std::string donor_region = "chamberofseasons";
+
+
+    std::string donor_region = "crucible";
 };
 
 struct NewLevelResult {

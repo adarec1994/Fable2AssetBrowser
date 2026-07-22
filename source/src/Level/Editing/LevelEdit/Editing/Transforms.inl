@@ -85,6 +85,24 @@ void SetDeleted(uint32_t selection_id, const InstInfo& info) {
     ++s.revision;
 }
 
+void ClearDeleted(uint32_t selection_id) {
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (s.saving) return;
+    auto it = s.edits.find(selection_id);
+    if (it == s.edits.end() || !it->second.deleted) return;
+    it->second.deleted = false;
+    s.dirty = true;
+    ++s.revision;
+}
+
+bool IsDeleted(uint32_t selection_id) {
+    std::lock_guard<std::mutex> lk(mtx());
+    const auto& s = st();
+    auto it = s.edits.find(selection_id);
+    return it != s.edits.end() && it->second.deleted;
+}
+
 bool EntityRemovalPending(uint32_t entity_hash) {
     if (!entity_hash) return false;
     std::lock_guard<std::mutex> lk(mtx());
@@ -93,6 +111,14 @@ bool EntityRemovalPending(uint32_t entity_hash) {
         if (e.deleted && e.gdb_entity_hash == entity_hash) return true;
     }
     return false;
+}
+
+void NoteExternalEdit() {
+    std::lock_guard<std::mutex> lk(mtx());
+    auto& s = st();
+    if (!s.available || s.saving) return;
+    s.dirty = true;
+    ++s.revision;
 }
 
 int AddPlacement(const std::string& model_path, const float pos[3]) {

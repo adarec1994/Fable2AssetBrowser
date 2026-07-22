@@ -64,23 +64,6 @@ void request_level_add_menu_at(const float engine_pos[3]) {
     g_add_menu_requested = true;
 }
 
-void request_player_start_placement(std::size_t marker_index) {
-    if (marker_index >= g_level_spawn_markers.size() ||
-        !is_player_start_marker(g_level_spawn_markers[marker_index])) {
-        return;
-    }
-    if (g_player_start_placement == marker_index) {
-        g_player_start_placement = std::numeric_limits<size_t>::max();
-    } else {
-        g_player_start_placement = marker_index;
-        select_level_marker(marker_index);
-    }
-}
-
-bool player_start_placement_pending(std::size_t marker_index) {
-    return g_player_start_placement == marker_index;
-}
-
 void draw_render_panel(ID3D11Device* device) {
 
     if (S.show_gdb_render) {
@@ -92,6 +75,8 @@ void draw_render_panel(ID3D11Device* device) {
             kind == ContentTabs::Kind::Quest ||
             kind == ContentTabs::Kind::CustomQuest) {
             draw_lua_in_panel();
+        } else if (kind == ContentTabs::Kind::VfsConfig) {
+            VfsConfigViewer::Draw(ContentTabs::ActiveVfsConfigContent());
         } else if (kind == ContentTabs::Kind::Level) {
             const FlatAssetEntry* level_entry =
                 ContentTabs::ActiveLevelEntry();
@@ -110,7 +95,8 @@ void draw_render_panel(ID3D11Device* device) {
                 draw_placeholder();
             }
             if (landscape_panel) ImGui::EndChild();
-        } else if (kind == ContentTabs::Kind::Model) {
+        } else if (kind == ContentTabs::Kind::Model ||
+                   kind == ContentTabs::Kind::Hero) {
             if (ContentTabs::ActiveHasModel() && g_mp.has_model &&
                 !S.terrain_mode && !g_mp.no_tilt) {
                 draw_model_in_panel(device);

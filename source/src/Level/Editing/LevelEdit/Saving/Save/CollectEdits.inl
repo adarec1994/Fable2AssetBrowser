@@ -21,6 +21,20 @@
     for (const auto& kv : s.edits) {
         const EditEntry& e = kv.second;
         if (!e.changed()) continue;
+        {
+            char dbg[240];
+            std::snprintf(
+                dbg, sizeof(dbg),
+                "edit id=0x%08X moved=%d rot=%d del=%d "
+                "delta=(%.2f,%.2f,%.2f) orig=(%.2f,%.2f,%.2f) "
+                "gdb_off=(%u,%u,%u) lev_off=%u kind=%u hash=0x%08X",
+                kv.first, e.moved() ? 1 : 0, e.rotated() ? 1 : 0,
+                e.deleted ? 1 : 0, e.delta[0], e.delta[1], e.delta[2],
+                e.orig[0], e.orig[1], e.orig[2], e.gdb_off[0],
+                e.gdb_off[1], e.gdb_off[2], e.lev_off, e.lev_kind,
+                e.gdb_entity_hash);
+            DebugLog::Write("save.collect", dbg);
+        }
         if (!e.deleted && e.gdb_entity_hash != 0 && e.lev_kind != 5) {
             SavePhysPatch sp;
             sp.hash = e.gdb_entity_hash;
@@ -111,6 +125,17 @@
                 ++rs_visual;
             }
         }
+    }
+    {
+        char dbg[200];
+        std::snprintf(
+            dbg, sizeof(dbg),
+            "collected: lev_patches=%zu gdb_patches=%zu phys=%zu "
+            "deletes(lev=%zu gdb=%zu) adds_updated=%zu skipped=%zu",
+            lev_patches.size(), gdb_patches.size(),
+            save_physics_patches.size(), level_placement_deletes.size(),
+            gdb_entity_deletes.size(), adds_updated, skipped);
+        DebugLog::Write("save.collect", dbg);
     }
     babel_edits = s.text_edits;
     bool legacy_spawn_points_pending = false;

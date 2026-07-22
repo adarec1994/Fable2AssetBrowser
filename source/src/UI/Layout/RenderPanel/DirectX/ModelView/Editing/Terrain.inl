@@ -178,7 +178,11 @@
                         
                         TerrainPaint::ApplyBrush(
                             hx, hz, eff_size, eff_strength, eff_falloff,
-                            ImGui::GetIO().KeyShift);
+                            ImGui::GetIO().KeyShift,
+                            LandscapePanel::PaintTool() == 1
+                                ? LandscapePanel::PaintNoiseCoverage()
+                                : 0.0f,
+                            LandscapePanel::PaintNoiseScale());
                         paint_dab_applied = true;
                     }
                     else if (!imgui_captured &&
@@ -219,4 +223,126 @@
 
     if (!paint_mode_active || !paint_dab_applied) {
         TerrainPaint::EndStroke();
+    }
+
+    const bool foliage_mode_active =
+        details_panel_docked() && g_mp.has_model && g_mp.no_tilt &&
+        LandscapePanel::InFoliageMode() && TerrainEdit::IsLoaded();
+    if (foliage_mode_active) {
+        static bool s_foliage_stroking = false;
+        static float s_foliage_last[3] = {0, 0, 0};
+        const ImVec2 mp_pos = ImGui::GetIO().MousePos;
+        const bool over_view =
+            mp_pos.x >= origin.x && mp_pos.x < origin.x + region.x &&
+            mp_pos.y >= origin.y && mp_pos.y < origin.y + region.y;
+        const bool imgui_captured =
+            !hovered ||
+            ImGui::IsPopupOpen(nullptr,
+                               ImGuiPopupFlags_AnyPopupId |
+                                   ImGuiPopupFlags_AnyPopupLevel);
+        if (over_view && g_mp.width > 0 && g_mp.height > 0) {
+            using namespace DirectX;
+            const float cy = cosf(g_flycam.yaw);
+            const float sy = sinf(g_flycam.yaw);
+            const float cp = cosf(g_flycam.pitch);
+            const float sp = sinf(g_flycam.pitch);
+            const float forward[3] = { sy * cp, sp, cy * cp };
+            XMVECTOR eye = XMVectorSet(g_flycam.pos[0], g_flycam.pos[1],
+                                       g_flycam.pos[2], 1);
+            XMVECTOR at = XMVectorSet(g_flycam.pos[0] + forward[0],
+                                      g_flycam.pos[1] + forward[1],
+                                      g_flycam.pos[2] + forward[2], 1);
+            XMVECTOR up = XMVectorSet(0, 1, 0, 0);
+            XMMATRIX V = XMMatrixLookAtLH(eye, at, up);
+            const float fov = XMConvertToRadians(60.0f);
+            const float aspect = (float)g_mp.width / (float)g_mp.height;
+            XMMATRIX P = XMMatrixPerspectiveFovLH(
+                fov, aspect, 0.05f, g_mp.radius * 100.0f);
+            XMMATRIX VP = V * P;
+            XMVECTOR det;
+            XMMATRIX inv_VP = XMMatrixInverse(&det, VP);
+            const float u = (mp_pos.x - origin.x) / region.x;
+            const float v = (mp_pos.y - origin.y) / region.y;
+            XMVECTOR near_pt = XMVector4Transform(
+                XMVectorSet(u * 2.f - 1.f, 1.f - v * 2.f, 0.f, 1.f),
+                inv_VP);
+            XMVECTOR far_pt = XMVector4Transform(
+                XMVectorSet(u * 2.f - 1.f, 1.f - v * 2.f, 1.f, 1.f),
+                inv_VP);
+            near_pt = XMVectorScale(near_pt, 1.f / XMVectorGetW(near_pt));
+            far_pt = XMVectorScale(far_pt, 1.f / XMVectorGetW(far_pt));
+            const float ox = XMVectorGetX(near_pt);
+            const float oy = XMVectorGetY(near_pt);
+            const float oz = XMVectorGetZ(near_pt);
+            const float dx = XMVectorGetX(far_pt) - ox;
+            const float dy = XMVectorGetY(far_pt) - oy;
+            const float dz = XMVectorGetZ(far_pt) - oz;
+            float hx, hy, hz;
+            if (TerrainEdit::Raycast(ox, oy, oz, dx, dy, dz, hx, hy, hz)) {
+                const int tool = ImGui::GetIO().KeyShift
+                                     ? 2
+                                     : LandscapePanel::FoliageTool();
+                const float radius =
+                    tool == 1 ? 0.75f
+                              : LandscapePanel::FoliageBrushRadius();
+                ImDrawList* dlay = ImGui::GetForegroundDrawList();
+                const ImU32 ring_col =
+                    tool == 2   ? IM_COL32(255, 90, 70, 220)
+                    : tool == 1 ? IM_COL32(110, 205, 255, 220)
+                                : IM_COL32(120, 235, 110, 220);
+                ImVec2 last_screen{};
+                bool last_valid = false;
+                for (int i = 0; i <= 48; ++i) {
+                    const float ang = (float)i / 48.0f * 6.2831853f;
+                    const float wx = hx + cosf(ang) * radius;
+                    const float wz = hz + sinf(ang) * radius;
+                    const float wy =
+                        TerrainEdit::SampleHeightAtWorldXZ(wx, wz);
+                    XMVECTOR cs = XMVector4Transform(
+                        XMVectorSet(wx, wy, wz, 1.f), VP);
+                    const float ws = XMVectorGetW(cs);
+                    if (ws <= 0.f) { last_valid = false; continue; }
+                    const ImVec2 sc(
+                        origin.x + (XMVectorGetX(cs) / ws * 0.5f + 0.5f) *
+                                       region.x,
+                        origin.y +
+                            (1.f - (XMVectorGetY(cs) / ws * 0.5f + 0.5f)) *
+                                region.y);
+                    if (last_valid) dlay->AddLine(last_screen, sc,
+                                                  ring_col, 1.5f);
+                    last_screen = sc;
+                    last_valid = true;
+                }
+
+                if (tool == 1) {
+                    if (!imgui_captured &&
+                        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        const float engine_hit[3] = {hx, hz, hy};
+                        foliage_paint_dab(device, engine_hit, tool);
+                    }
+                } else if (!imgui_captured &&
+                           ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    const float ddx = hx - s_foliage_last[0];
+                    const float ddy = hy - s_foliage_last[1];
+                    const float ddz = hz - s_foliage_last[2];
+                    const float moved2 =
+                        ddx * ddx + ddy * ddy + ddz * ddz;
+                    const float step = std::max(0.5f, radius * 0.45f);
+                    if (!s_foliage_stroking || moved2 >= step * step) {
+                        const float engine_hit[3] = {hx, hz, hy};
+                        foliage_paint_dab(device, engine_hit, tool);
+                        s_foliage_last[0] = hx;
+                        s_foliage_last[1] = hy;
+                        s_foliage_last[2] = hz;
+                        s_foliage_stroking = true;
+                    }
+                }
+            }
+        }
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            if (s_foliage_stroking) {
+                foliage_paint_stroke_end(device);
+            }
+            s_foliage_stroking = false;
+        }
     }

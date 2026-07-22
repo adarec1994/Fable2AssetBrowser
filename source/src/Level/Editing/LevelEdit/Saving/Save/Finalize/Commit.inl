@@ -8,6 +8,7 @@
                 s.additions.clear();
                 s.edits.clear();
                 s.undo_stack.clear();
+                FoliageEdit::SetClean();
                 {
                     std::error_code ec;
                     std::filesystem::remove(additions_path(), ec);

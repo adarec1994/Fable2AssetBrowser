@@ -42,13 +42,35 @@
         }
     }
     if (!gdb_patches.empty()) {
+        {
+            char dbg[240];
+            std::snprintf(
+                dbg, sizeof(dbg),
+                "gdb target: file='%s' bnk='%s' idx=%d valid=%d "
+                "in_place=%d on_disk=%u patches=%zu",
+                s.gdb.file_path.c_str(), s.gdb.bnk_path.c_str(),
+                s.gdb.file_index, s.gdb.valid ? 1 : 0,
+                target_patchable_in_place(s.gdb) ? 1 : 0,
+                s.gdb.on_disk_size, gdb_patches.size());
+            DebugLog::Write("save.gdb", dbg);
+        }
         if (target_patchable_in_place(s.gdb)) {
             for (const auto& p : gdb_patches) {
                 if (s.gdb.on_disk_size &&
                     (uint64_t)p.off + 4 > s.gdb.on_disk_size) continue;
                 if (!patch_target(s.gdb, p.off, &p.v, 1, err)) {
+                    DebugLog::Write("save.gdb",
+                                    "patch FAILED off=" +
+                                        std::to_string(p.off) + ": " +
+                                        err);
                     msg = "save failed (.gdb): " + err;
                     return false;
+                }
+                {
+                    char dbg[96];
+                    std::snprintf(dbg, sizeof(dbg),
+                                  "patched off=%u val=%.3f", p.off, p.v);
+                    DebugLog::Write("save.gdb", dbg);
                 }
                 ++gdb_written;
             }

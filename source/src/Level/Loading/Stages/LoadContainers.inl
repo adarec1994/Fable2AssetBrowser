@@ -108,6 +108,36 @@
                         emitted_spawns.insert(p.hash_a);
                         g_level_spawn_markers.push_back(std::move(m));
                     }
+                    for (const auto& kv : nm) {
+                        std::string low = kv.second;
+                        std::transform(low.begin(), low.end(), low.begin(),
+                                       [](unsigned char c) {
+                                           return (char)std::tolower(c);
+                                       });
+                        if (low.rfind("startfrom", 0) != 0 &&
+                            low.rfind("teleportto", 0) != 0) {
+                            continue;
+                        }
+                        if (emitted_spawns.count(kv.first)) continue;
+                        bool in_placements = false;
+                        for (const auto& p : info.placements) {
+                            if (p.hash_a == kv.first) {
+                                in_placements = true;
+                                break;
+                            }
+                        }
+                        const bool in_spawn_ents =
+                            spawn_ents.count(kv.first) != 0;
+                        char diag[192];
+                        std::snprintf(
+                            diag, sizeof(diag),
+                            "player start '%s' (0x%08X) missing: "
+                            "placement=%d spawn_ent=%d",
+                            kv.second.c_str(), kv.first,
+                            in_placements ? 1 : 0, in_spawn_ents ? 1 : 0);
+                        OutputLog::warn(diag);
+                    }
+
                     for (const auto& [entity_hash, contents] :
                          g_level_entity_contents) {
                         if ((!contents.has_inventory_component &&

@@ -10,6 +10,41 @@
             OutputLog::warn("level load cancelled during heightfield load");
             return false;
         } else {
+            g_pending_terrain_lightmap = {};
+            if (res.has_terrain_lightmap_key && !res.lmp_path.empty()) {
+                std::vector<uint8_t> lmp_bytes;
+                if (!load_text_sibling(res.lmp_path, lmp_bytes)) {
+                    OutputLog::warn("terrain lightmap: sibling LMP not found: " +
+                                    res.lmp_path);
+                } else {
+                    Level::TerrainLightmap decoded;
+                    if (!Level::DecodeTerrainLightmap(
+                            lmp_bytes, res.terrain_lightmap_key, decoded)) {
+                        OutputLog::warn("terrain lightmap: " + decoded.error);
+                    } else if (hf.ehf_header.ok &&
+                               (decoded.sample_width != hf.ehf_header.u0 ||
+                                decoded.sample_height != hf.ehf_header.u1)) {
+                        std::ostringstream mismatch;
+                        mismatch << "terrain lightmap: LMP sample grid "
+                                 << decoded.sample_width << "x"
+                                 << decoded.sample_height
+                                 << " does not match EHF "
+                                 << hf.ehf_header.u0 << "x"
+                                 << hf.ehf_header.u1;
+                        OutputLog::warn(mismatch.str());
+                    } else {
+                        std::ostringstream loaded;
+                        loaded << "terrain lightmap: decoded LMP key 0x"
+                               << std::hex << decoded.key << std::dec << "  "
+                               << decoded.texture_width << "x"
+                               << decoded.texture_height << " PF"
+                               << decoded.pixel_format;
+                        OutputLog::success(loaded.str());
+                        g_pending_terrain_lightmap = std::move(decoded);
+                    }
+                }
+            }
+
             std::ostringstream hos;
             hos << "heightfield loaded:"
                 << "  ehf=" << hf.ehf_bytes.size() << "B"

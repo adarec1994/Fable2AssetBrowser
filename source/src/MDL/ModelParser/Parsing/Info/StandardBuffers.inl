@@ -20,6 +20,7 @@
                 for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
 
                 MDLSubMeshInfo smi;
+                smi.RegionIndex = marker;
                 smi.MaterialIndex = (uint8_t)(matIdxRaw & 0xFF);
                 smi.FaceCount = faceCount;
                 smi.StartIndex = startIdx;
@@ -93,6 +94,7 @@
                     for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
 
                     MDLSubMeshInfo smi;
+                    smi.RegionIndex = marker;
                     smi.MaterialIndex = (uint8_t)(matIdxRaw & 0xFF);
                     smi.FaceCount = faceCount;
                     smi.StartIndex = startIdx;
@@ -234,6 +236,7 @@
                 for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
 
                 MDLSubMeshInfo smi;
+                smi.RegionIndex = marker;
                 smi.MaterialIndex = (uint8_t)(matIdxRaw & 0xFF);
                 smi.FaceCount = faceCount;
                 smi.StartIndex = startIdx;
@@ -377,6 +380,7 @@
                     for(int k=0;k<6;k++) if(!r.f32be(F4[k])) return false;
 
                     MDLSubMeshInfo smi;
+                    smi.RegionIndex = marker;
                     smi.MaterialIndex = (uint8_t)(matIdxRaw & 0xFF);
                     smi.FaceCount = faceCount;
                     smi.StartIndex = startIdx;

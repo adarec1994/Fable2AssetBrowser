@@ -7,6 +7,7 @@
 #include "../../Level/Creation/LandscapeAuthoring.h"
 #include "../../Level/Creation/GameRegistry.h"
 #include "../../Level/Creation/NewLevel.h"
+#include "../../Level/Creation/FoliageAuthoring.h"
 #include "../../Level/Creation/SkyAuthoring.h"
 #include "../../Level/Creation/WaterAuthoring.h"
 #include "../../Level/Editing/LevelEdit.h"
@@ -28,6 +29,7 @@
 #include <limits>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifdef _WIN32
@@ -41,9 +43,11 @@ namespace {
 Level::Creation::LandscapeParams s_params;
 
 int         s_mode = 0;
-int         s_manage_tool = 0;   
+int         s_manage_tool = 0;
 int         s_sculpt_tool = 0;
 int         s_paint_tool = 0;
+float       s_paint_noise_scale = 12.0f;
+float       s_paint_noise_coverage = 0.45f;
 float       s_tool_strength = 0.3f;
 float       s_brush_size = 8.0f;
 float       s_brush_falloff = 0.5f;
@@ -65,6 +69,31 @@ float       s_water_height = 1.0f;
 
 
 std::string s_entity_filter;
+
+struct FoliagePaletteSlot {
+    FoliagePaintEntry entry;
+    bool enabled = true;
+};
+std::vector<FoliagePaletteSlot> s_foliage_palette;
+int         s_foliage_active = -1;
+std::string s_foliage_filter;
+int         s_foliage_tool = 0;
+float       s_foliage_radius = 6.0f;
+
+}
+}
+void foliage_preload_model(const std::string& model_path);
+namespace LandscapePanel {
+namespace {
+
+int foliage_palette_find(const std::string& model_path) {
+    for (int i = 0; i < (int)s_foliage_palette.size(); ++i) {
+        if (s_foliage_palette[(size_t)i].entry.model_path == model_path) {
+            return i;
+        }
+    }
+    return -1;
+}
 
 
 
@@ -365,20 +394,37 @@ void prop_label(const char* label) {
 
 void draw_size_rows() {
     prop_label("Width");
-    ImGui::DragInt("##ls_w", &s_params.grid_w, 1.0f, 2, 1025,
-                   "%d samples");
+    ImGui::Text("%d samples", s_params.grid_w);
     prop_label("Length");
-    ImGui::DragInt("##ls_h", &s_params.grid_h, 1.0f, 2, 1025,
-                   "%d samples");
-    prop_label("Tile Size");
-    ImGui::DragFloat("##ls_tile", &s_params.tile_size, 0.05f, 0.0f,
-                     256.0f, "%.2f m");
+    ImGui::Text("%d samples", s_params.grid_h);
+    prop_label("Sample Spacing");
+    ImGui::Text("%.2f m", s_params.tile_size);
 }
 
 void draw_manage(const FlatAssetEntry& entry) {
     std::string region;
     Level::Creation::IsCustomLooseLevel(entry, &region);
     const std::string data_dir = Level::Creation::ResolveGameDataDir();
+    static std::string s_layout_region;
+    static bool s_layout_ok = false;
+    static int s_layout_w = 0;
+    static int s_layout_h = 0;
+    static float s_layout_spacing = 0.0f;
+    static std::string s_layout_error;
+    if (s_layout_region != region) {
+        s_layout_region = region;
+        s_layout_error.clear();
+        s_layout_ok = Level::Creation::GetNativeLandscapeLayout(
+            entry, s_layout_w, s_layout_h, s_layout_spacing,
+            s_layout_error);
+    }
+    if (s_layout_ok) {
+
+
+        s_params.grid_w = s_layout_w;
+        s_params.grid_h = s_layout_h;
+        s_params.tile_size = s_layout_spacing;
+    }
     if (s_level_name_region != region) {
         s_level_name_region = region;
         s_level_display_name =
@@ -472,11 +518,32 @@ void draw_manage(const FlatAssetEntry& entry) {
             prop_label("Max Height");
             ImGui::DragFloat("##ls_max", &s_params.max_height, 0.1f,
                              -1024.0f, 4096.0f, "%.1f m");
+            if (!s_heightmap_path.empty()) {
+                static std::string s_probe_path;
+                static int s_probe_w = 0;
+                static int s_probe_h = 0;
+                if (s_probe_path != s_heightmap_path) {
+                    s_probe_path = s_heightmap_path;
+                    if (!Level::Creation::ProbeHeightmapSize(
+                            s_heightmap_path, s_probe_w, s_probe_h)) {
+                        s_probe_w = 0;
+                        s_probe_h = 0;
+                    }
+                }
+                if (s_probe_w > 0) {
+                    prop_label("Source Size");
+                    ImGui::Text("%d x %d", s_probe_w, s_probe_h);
+                    prop_label("Imported As");
+                    ImGui::Text("%d x %d (donor grid)", s_params.grid_w,
+                                s_params.grid_h);
+                }
+            }
             ImGui::EndTable();
         }
     }
 
-    if (ImGui::CollapsingHeader("New Landscape",
+    if (ImGui::CollapsingHeader(s_manage_tool == 0 ? "New Landscape"
+                                                   : "Landscape Size",
                                 ImGuiTreeNodeFlags_DefaultOpen)) {
         if (begin_props("##ls_size_props")) {
             if (s_manage_tool == 0) {
@@ -487,11 +554,57 @@ void draw_manage(const FlatAssetEntry& entry) {
             draw_size_rows();
             ImGui::EndTable();
         }
+        ImGui::TextDisabled(
+            "Grid and spacing are fixed by the donor EHF used in game.");
     }
 
+    if (busy || !s_layout_ok) ImGui::BeginDisabled();
+    if (ImGui::Button("Repair Existing Terrain for Game",
+                      ImVec2(-FLT_MIN, 0.0f))) {
+        std::string error;
+        if (!Level::Creation::RepairLandscapeForGame(entry, error)) {
+            OutputLog::error("terrain repair: " + error);
+        }
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(
+            "Resample an older mismatched GHF to the donor EHF grid, "
+            "repair HDB/GENV, and synchronize the streaming banks.");
+    }
+    if (busy || !s_layout_ok) ImGui::EndDisabled();
+
+    const bool large_layout =
+        s_layout_ok && s_layout_w == 769 && s_layout_h == 769;
+    if (busy || !s_layout_ok || large_layout) ImGui::BeginDisabled();
+    if (ImGui::Button("Upgrade Terrain to 769 x 769",
+                      ImVec2(-FLT_MIN, 0.0f))) {
+        std::string error;
+        if (Level::Creation::UpgradeLandscapeToLarge(entry, error)) {
+
+            s_layout_region.clear();
+        } else {
+            OutputLog::error("terrain upgrade: " + error);
+        }
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(
+            large_layout
+                ? "This level already uses the 769 x 769 terrain layout."
+                : "Resample the current heights into the retail Crucible "
+                  "terrain family. Scenario entities and level edits are "
+                  "preserved.");
+    }
+    if (busy || !s_layout_ok || large_layout) ImGui::EndDisabled();
+
+    if (!s_layout_ok) {
+        ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f),
+                           "Terrain layout error: %s",
+                           s_layout_error.c_str());
+    }
     ImGui::Spacing();
     const bool blocked =
-        busy || (s_manage_tool == 1 && s_heightmap_path.empty());
+        busy || !s_layout_ok ||
+        (s_manage_tool == 1 && s_heightmap_path.empty());
     if (blocked) ImGui::BeginDisabled();
     ImGui::PushStyleColor(ImGuiCol_Button, kAccent);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccentHover);
@@ -553,7 +666,13 @@ void draw_sculpt() {
 }
 
 void draw_paint() {
-    tool_button(ICON_FA_PAINTBRUSH, "Paint", true);
+    if (tool_button(ICON_FA_PAINTBRUSH, "Paint", s_paint_tool == 0)) {
+        s_paint_tool = 0;
+    }
+    ImGui::SameLine();
+    if (tool_button(ICON_FA_BRAILLE, "Noise", s_paint_tool == 1)) {
+        s_paint_tool = 1;
+    }
     ImGui::Separator();
 
     if (ImGui::CollapsingHeader("Tool Settings",
@@ -562,6 +681,16 @@ void draw_paint() {
             prop_label("Tool Strength");
             ImGui::SliderFloat("##ls_pstrength", &s_tool_strength, 0.0f,
                                1.0f, "%.2f");
+            if (s_paint_tool == 1) {
+                prop_label("Noise Scale");
+                ImGui::SliderFloat("##ls_pnscale", &s_paint_noise_scale,
+                                   1.0f, 64.0f, "%.1f m",
+                                   ImGuiSliderFlags_Logarithmic);
+                prop_label("Coverage");
+                ImGui::SliderFloat("##ls_pncov",
+                                   &s_paint_noise_coverage, 0.02f,
+                                   1.0f, "%.2f");
+            }
             ImGui::EndTable();
         }
     }
@@ -584,6 +713,24 @@ void draw_paint() {
         const auto& layers = TerrainPaint::Layers();
         const int active = TerrainPaint::ActiveLayer();
         int remove_index = -1;
+        static int s_normal_pick_layer = -1;
+        auto accept_texture_drop = [&]() {
+            if (!ImGui::BeginDragDropTarget()) return;
+            if (const ImGuiPayload* pay =
+                    ImGui::AcceptDragDropPayload("F2_TEXTURE")) {
+                const std::string path((const char*)pay->Data,
+                                       (size_t)pay->DataSize);
+                const PaintTexOption* opt = find_paint_tex_option(path);
+                if (TerrainPaint::AddLayer(
+                        path,
+                        opt ? opt->normal_path : std::string()) < 0) {
+                    OutputLog::warn(
+                        "paint: layer not added (duplicate or at the "
+                        "16-layer limit)");
+                }
+            }
+            ImGui::EndDragDropTarget();
+        };
         for (size_t i = 0; i < layers.size(); ++i) {
             ImGui::PushID((int)i);
             const bool selected = (int)i == active;
@@ -645,11 +792,111 @@ void draw_paint() {
                 ImGui::IsMouseClicked(ImGuiMouseButton_Left);
             if (card_clicked) TerrainPaint::SetActiveLayer((int)i);
             ImGui::EndChild();
+            accept_texture_drop();
+            if (ImGui::BeginPopupContextItem("##layer_ctx")) {
+                if (ImGui::MenuItem("Set normal map...")) {
+                    s_normal_pick_layer = (int)i;
+                }
+                if (!layers[i].normal_path.empty() &&
+                    ImGui::MenuItem("Clear normal map")) {
+                    TerrainPaint::SetLayerNormal((int)i, std::string());
+                }
+                ImGui::EndPopup();
+            }
             ImGui::PopStyleColor();
             ImGui::Spacing();
             ImGui::PopID();
         }
         if (remove_index >= 0) TerrainPaint::RemoveLayer(remove_index);
+
+        if (s_normal_pick_layer >= 0 &&
+            s_normal_pick_layer >= (int)layers.size()) {
+            s_normal_pick_layer = -1;
+        }
+        if (s_normal_pick_layer >= 0) {
+            if (!ImGui::IsPopupOpen("##paint_pick_normal")) {
+                ImGui::OpenPopup("##paint_pick_normal");
+            }
+            if (ImGui::BeginPopup("##paint_pick_normal")) {
+                static std::string s_normal_filter;
+                ImGui::SetNextItemWidth(300.0f);
+                ImGui::InputTextWithHint("##paint_normal_filter", "Search",
+                                         &s_normal_filter);
+                const std::string nfilter = lower_slash(s_normal_filter);
+
+                static std::vector<int> s_normal_catalog;
+                static size_t s_normal_catalog_count = (size_t)-1;
+                if (s_normal_catalog_count != S.all_tex_files.size()) {
+                    s_normal_catalog.clear();
+                    std::unordered_set<std::string> seen;
+                    for (int ti = 0; ti < (int)S.all_tex_files.size();
+                         ++ti) {
+                        const std::string low =
+                            lower_slash(S.all_tex_files[(size_t)ti]
+                                            .full_path);
+                        std::string leaf = low;
+                        const size_t sl = leaf.find_last_of('/');
+                        if (sl != std::string::npos) {
+                            leaf = leaf.substr(sl + 1);
+                        }
+                        if (leaf.find("norm") == std::string::npos &&
+                            leaf.find("nrm") == std::string::npos &&
+                            leaf.find("bump") == std::string::npos) {
+                            continue;
+                        }
+                        if (!seen.insert(low).second) continue;
+                        s_normal_catalog.push_back(ti);
+                    }
+                    s_normal_catalog_count = S.all_tex_files.size();
+                }
+
+                std::vector<int> nvis;
+                nvis.reserve(s_normal_catalog.size());
+                for (int ti : s_normal_catalog) {
+                    if (!nfilter.empty()) {
+                        const std::string low = lower_slash(
+                            S.all_tex_files[(size_t)ti].full_path);
+                        if (low.find(nfilter) == std::string::npos) {
+                            continue;
+                        }
+                    }
+                    nvis.push_back(ti);
+                }
+
+                ImGui::BeginChild("##paint_normal_list",
+                                  ImVec2(300.0f, 340.0f), true);
+                ImGuiListClipper nclip;
+                nclip.Begin((int)nvis.size());
+                while (nclip.Step()) {
+                    for (int row = nclip.DisplayStart;
+                         row < nclip.DisplayEnd; ++row) {
+                        const FlatAssetEntry& te =
+                            S.all_tex_files[(size_t)nvis[(size_t)row]];
+                        std::string leaf = lower_slash(te.full_path);
+                        const size_t sl = leaf.find_last_of('/');
+                        if (sl != std::string::npos) {
+                            leaf = leaf.substr(sl + 1);
+                        }
+                        ImGui::PushID(nvis[(size_t)row]);
+                        if (ImGui::Selectable(leaf.c_str())) {
+                            TerrainPaint::SetLayerNormal(
+                                s_normal_pick_layer, te.full_path);
+                            s_normal_pick_layer = -1;
+                            ImGui::CloseCurrentPopup();
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("%s", te.full_path.c_str());
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                nclip.End();
+                ImGui::EndChild();
+                ImGui::EndPopup();
+            } else {
+                s_normal_pick_layer = -1;
+            }
+        }
 
         const bool full =
             (int)layers.size() >= TerrainPaint::kMaxLayers;
@@ -657,6 +904,7 @@ void draw_paint() {
         if (ImGui::Button("+ Add Layer", ImVec2(-FLT_MIN, 0.0f))) {
             ImGui::OpenPopup("##paint_add_layer");
         }
+        accept_texture_drop();
         if (full) ImGui::EndDisabled();
 
         if (ImGui::BeginPopup("##paint_add_layer")) {
@@ -723,6 +971,67 @@ void draw_paint() {
             clipper.End();
             ImGui::EndChild();
             ImGui::EndPopup();
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Auto Material")) {
+        const auto& layers = TerrainPaint::Layers();
+        for (size_t i = 0; i < layers.size(); ++i) {
+            ImGui::PushID((int)(4000 + i));
+            TerrainPaint::AutoRule rule = layers[i].rule;
+            bool changed = false;
+            const std::string leaf =
+                std::filesystem::path(layers[i].tex_path).stem().string();
+            changed |= ImGui::Checkbox("##rule_on", &rule.enabled);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(leaf.c_str());
+            if (rule.enabled) {
+                ImGui::Indent(24.0f);
+                ImGui::SetNextItemWidth(-90.0f);
+                changed |= ImGui::DragFloatRange2(
+                    "##rule_h", &rule.h_min, &rule.h_max, 0.25f,
+                    -1000.0f, 1000.0f, "h %.1f", "%.1f m");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                changed |= ImGui::DragFloat("##rule_hf", &rule.h_fade,
+                                            0.1f, 0.0f, 100.0f,
+                                            "+-%.1f");
+                ImGui::SetNextItemWidth(-90.0f);
+                changed |= ImGui::DragFloatRange2(
+                    "##rule_s", &rule.slope_min, &rule.slope_max, 0.25f,
+                    0.0f, 90.0f, "slope %.0f", "%.0f deg");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                changed |= ImGui::DragFloat("##rule_sf",
+                                            &rule.slope_fade, 0.1f,
+                                            0.0f, 45.0f, "+-%.1f");
+                ImGui::SetNextItemWidth(-90.0f);
+                changed |= ImGui::SliderFloat("##rule_na",
+                                              &rule.noise_amount, 0.0f,
+                                              1.0f, "noise %.2f");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                changed |= ImGui::DragFloat("##rule_ns",
+                                            &rule.noise_scale, 0.25f,
+                                            1.0f, 128.0f, "%.0f m");
+                ImGui::Unindent(24.0f);
+            }
+            if (changed) TerrainPaint::SetLayerRule((int)i, rule);
+            ImGui::PopID();
+        }
+        if (!layers.empty()) {
+            if (ImGui::Button("Generate From Rules",
+                              ImVec2(-FLT_MIN, 0.0f))) {
+                std::string error;
+                if (TerrainPaint::ApplyAutoMaterial(error)) {
+                    OutputLog::success(
+                        "paint: auto material generated");
+                } else {
+                    OutputLog::warn("paint: " + error);
+                }
+            }
+        } else {
+            ImGui::TextDisabled("Add layers first.");
         }
     }
 }
@@ -825,59 +1134,47 @@ void draw_entities(const FlatAssetEntry& entry) {
     if (ImGui::CollapsingHeader("Player Start",
                                 ImGuiTreeNodeFlags_DefaultOpen)) {
         bool found = false;
-        size_t start_from = std::numeric_limits<size_t>::max();
-        size_t teleport_to = std::numeric_limits<size_t>::max();
+        const bool can_edit = LevelEdit::Enabled() && !LevelEdit::Saving();
         for (size_t mi = 0; mi < g_level_spawn_markers.size(); ++mi) {
             const LevelSpawnMarker& m = g_level_spawn_markers[mi];
             if (!is_player_start_marker(m)) continue;
             found = true;
-            std::string low_name = m.name;
-            std::transform(low_name.begin(), low_name.end(), low_name.begin(),
-                           [](unsigned char c) {
-                               return (char)std::tolower(c);
-                           });
-            if (low_name.rfind("startfrom", 0) == 0 &&
-                start_from == std::numeric_limits<size_t>::max()) {
-                start_from = mi;
-            }
-            if (low_name.rfind("teleportto", 0) == 0 &&
-                teleport_to == std::numeric_limits<size_t>::max()) {
-                teleport_to = mi;
-            }
+            const bool removed =
+                LevelEdit::IsDeleted(0x70000000u | (uint32_t)mi);
             char label[192];
-            std::snprintf(label, sizeof(label),
-                          "%s  (%.1f, %.1f, %.1f)##ps_%zu",
-                          m.name.empty() ? "Player Start"
-                                         : m.name.c_str(),
-                          m.x, m.y, m.z, mi);
-            if (ImGui::Selectable(label)) {
+            if (removed) {
+                std::snprintf(label, sizeof(label),
+                              "%s  [deleted]##ps_%zu",
+                              m.name.empty() ? "Player Start"
+                                             : m.name.c_str(),
+                              mi);
+            } else {
+                std::snprintf(label, sizeof(label),
+                              "%s  (%.1f, %.1f, %.1f)##ps_%zu",
+                              m.name.empty() ? "Player Start"
+                                             : m.name.c_str(),
+                              m.x, m.y, m.z, mi);
+            }
+            if (ImGui::Selectable(label) && !removed) {
                 UI::select_level_marker(mi);
+            }
+            if (can_edit && ImGui::BeginDragDropSource()) {
+                ImGui::SetDragDropPayload("F2_START_PIN", &mi,
+                                          sizeof(mi));
+                ImGui::TextUnformatted(m.name.empty()
+                                           ? "Player Start"
+                                           : m.name.c_str());
+                ImGui::EndDragDropSource();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(removed
+                                      ? "Drag into the level to restore"
+                                      : "Drag into the level");
             }
         }
         if (!found) {
             ImGui::TextDisabled("(no player start in this level)");
         }
-        const bool can_edit = LevelEdit::Enabled() && !LevelEdit::Saving();
-        if (!can_edit) ImGui::BeginDisabled();
-        if (start_from != std::numeric_limits<size_t>::max()) {
-            const bool pending =
-                UI::player_start_placement_pending(start_from);
-            if (ImGui::Button(pending ? "Cancel Start From Placement"
-                                      : "Set Start From on Terrain",
-                              ImVec2(-FLT_MIN, 0.0f))) {
-                UI::request_player_start_placement(start_from);
-            }
-        }
-        if (teleport_to != std::numeric_limits<size_t>::max()) {
-            const bool pending =
-                UI::player_start_placement_pending(teleport_to);
-            if (ImGui::Button(pending ? "Cancel Teleport To Placement"
-                                      : "Set Teleport To on Terrain",
-                              ImVec2(-FLT_MIN, 0.0f))) {
-                UI::request_player_start_placement(teleport_to);
-            }
-        }
-        if (!can_edit) ImGui::EndDisabled();
     }
 
     if (ImGui::CollapsingHeader("Place Entities",
@@ -945,16 +1242,234 @@ void draw_entities(const FlatAssetEntry& entry) {
 
 }
 
+static void draw_foliage() {
+    const size_t total = FoliageEdit::TotalInstances();
+    ImGui::Text("Painted: %zu instance(s)", total);
+    if (!FoliageEdit::Dirty() && total > 0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(saved)");
+    } else if (FoliageEdit::Dirty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.25f, 1.0f),
+                           "(unsaved - use Save)");
+    }
+
+    ImGui::Spacing();
+    {
+        static const char* kTools[3] = {"Paint", "Place", "Erase"};
+        for (int i = 0; i < 3; ++i) {
+            if (i > 0) ImGui::SameLine();
+            if (mode_button(kTools[i], s_foliage_tool == i)) {
+                s_foliage_tool = i;
+            }
+        }
+    }
+    if (s_foliage_tool != 1) {
+        ImGui::SliderFloat("Brush radius", &s_foliage_radius, 1.0f, 30.0f,
+                           "%.1f m");
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    int remove_slot = -1;
+    for (int i = 0; i < (int)s_foliage_palette.size(); ++i) {
+        FoliagePaletteSlot& slot = s_foliage_palette[(size_t)i];
+        FoliagePaintEntry& fe = slot.entry;
+        std::string leaf = fe.model_path;
+        const size_t sl = leaf.find_last_of("/\\");
+        if (sl != std::string::npos) leaf = leaf.substr(sl + 1);
+        ImGui::PushID(i + 90000);
+        ImGui::Checkbox("##on", &slot.enabled);
+        ImGui::SameLine();
+        const bool active = s_foliage_active == i;
+        if (ImGui::Selectable(leaf.c_str(), active,
+                              ImGuiSelectableFlags_AllowItemOverlap)) {
+            s_foliage_active = i;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", fe.model_path.c_str());
+        }
+        ImGui::SameLine(
+            std::max(140.0f, ImGui::GetContentRegionAvail().x +
+                                 ImGui::GetCursorPosX() - 24.0f));
+        if (ImGui::SmallButton("x")) remove_slot = i;
+        ImGui::Indent(24.0f);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::SliderFloat("##density", &fe.density, 0.005f, 8.0f,
+                           "density %.3f / m2",
+                           ImGuiSliderFlags_Logarithmic);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::DragFloatRange2("##scale", &fe.scale_min, &fe.scale_max,
+                               0.01f, 0.2f, 3.0f, "scale %.2f", "%.2f");
+        ImGui::Unindent(24.0f);
+        ImGui::PopID();
+    }
+    if (remove_slot >= 0) {
+        s_foliage_palette.erase(s_foliage_palette.begin() + remove_slot);
+        if (s_foliage_active == remove_slot) s_foliage_active = -1;
+        else if (s_foliage_active > remove_slot) --s_foliage_active;
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputTextWithHint("##foliage_model_filter", "Filter",
+                             &s_foliage_filter);
+    std::string filter = lower_slash(s_foliage_filter);
+
+    static std::vector<int> s_catalog;
+    static size_t s_catalog_source_count = (size_t)-1;
+    if (s_catalog_source_count != S.all_mdl_files.size()) {
+        s_catalog.clear();
+        std::unordered_set<std::string> seen;
+        auto is_lod_variant = [](const std::string& leaf) {
+            const size_t pos = leaf.rfind("lod");
+            if (pos == std::string::npos || pos == 0) return false;
+            const char prev = leaf[pos - 1];
+            if (prev != '_' && prev != '-') return false;
+            size_t q = pos + 3;
+            while (q < leaf.size() && leaf[q] >= '0' && leaf[q] <= '9') {
+                ++q;
+            }
+            return q >= leaf.size() || leaf[q] == '.';
+        };
+        for (int i = 0; i < (int)S.all_mdl_files.size(); ++i) {
+            const std::string low =
+                lower_slash(S.all_mdl_files[i].full_path);
+            const bool foliage_dir =
+                low.find("foliage") != std::string::npos;
+            std::string leaf = low;
+            const size_t sl = leaf.find_last_of('/');
+            if (sl != std::string::npos) leaf = leaf.substr(sl + 1);
+            if (!foliage_dir && leaf.find("grass") == std::string::npos) {
+                continue;
+            }
+            if (is_lod_variant(leaf)) continue;
+            if (!seen.insert(low).second) continue;
+            s_catalog.push_back(i);
+        }
+        std::sort(s_catalog.begin(), s_catalog.end(), [](int a, int b) {
+            auto leaf_of = [](const FlatAssetEntry& e) {
+                std::string low = lower_slash(e.full_path);
+                const size_t sl = low.find_last_of('/');
+                return sl == std::string::npos ? low : low.substr(sl + 1);
+            };
+            return leaf_of(S.all_mdl_files[a]) <
+                   leaf_of(S.all_mdl_files[b]);
+        });
+        s_catalog_source_count = S.all_mdl_files.size();
+    }
+
+    std::vector<int> vis;
+    vis.reserve(s_catalog.size());
+    for (int idx : s_catalog) {
+        if (!filter.empty()) {
+            const std::string low =
+                lower_slash(S.all_mdl_files[idx].full_path);
+            if (low.find(filter) == std::string::npos) continue;
+        }
+        vis.push_back(idx);
+    }
+
+    ImGui::BeginChild("##foliage_model_list", ImVec2(0, 0), true);
+    ImGuiListClipper clipper;
+    clipper.Begin((int)vis.size());
+    while (clipper.Step()) {
+        for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r) {
+            const int idx = vis[r];
+            const FlatAssetEntry& mf = S.all_mdl_files[(size_t)idx];
+            std::string leaf = lower_slash(mf.full_path);
+            const size_t sl = leaf.find_last_of('/');
+            if (sl != std::string::npos) leaf = leaf.substr(sl + 1);
+            ImGui::PushID(idx);
+            const int slot = foliage_palette_find(mf.full_path);
+            const bool sel = slot >= 0;
+            std::string label = leaf;
+            const size_t used = FoliageEdit::InstanceCount(mf.full_path);
+            if (used > 0) label += "  (" + std::to_string(used) + ")";
+            if (ImGui::Selectable(label.c_str(), sel)) {
+                if (slot >= 0) {
+                    s_foliage_palette.erase(
+                        s_foliage_palette.begin() + slot);
+                    if (s_foliage_active == slot) {
+                        s_foliage_active = -1;
+                    } else if (s_foliage_active > slot) {
+                        --s_foliage_active;
+                    }
+                } else {
+                    FoliagePaletteSlot ns;
+                    ns.entry.model_path = mf.full_path;
+                    s_foliage_palette.push_back(ns);
+                    s_foliage_active =
+                        (int)s_foliage_palette.size() - 1;
+#ifdef _WIN32
+                    foliage_preload_model(mf.full_path);
+#endif
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", mf.full_path.c_str());
+            }
+            ImGui::PopID();
+        }
+    }
+    clipper.End();
+    ImGui::EndChild();
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* pay =
+                ImGui::AcceptDragDropPayload("F2_MODEL")) {
+            const std::string path((const char*)pay->Data,
+                                   (size_t)pay->DataSize);
+            if (!path.empty() && foliage_palette_find(path) < 0) {
+                FoliagePaletteSlot ns;
+                ns.entry.model_path = path;
+                s_foliage_palette.push_back(ns);
+                s_foliage_active = (int)s_foliage_palette.size() - 1;
+#ifdef _WIN32
+                foliage_preload_model(path);
+#endif
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+}
+
 bool AppliesTo(const FlatAssetEntry& entry) {
     return Level::Creation::IsCustomLooseLevel(entry);
 }
 
 bool  InSculptMode()  { return s_mode == 1; }
 bool  InPaintMode()   { return s_mode == 2; }
+bool  InFoliageMode() { return s_mode == 6; }
 int   SculptTool()    { return s_sculpt_tool; }
+int   PaintTool()     { return s_paint_tool; }
+float PaintNoiseScale() { return s_paint_noise_scale; }
+float PaintNoiseCoverage() { return s_paint_noise_coverage; }
 float BrushSize()     { return s_brush_size; }
 float ToolStrength()  { return s_tool_strength; }
 float BrushFalloff()  { return s_brush_falloff; }
+
+int   FoliageTool()        { return s_foliage_tool; }
+float FoliageBrushRadius() { return s_foliage_radius; }
+bool  FoliageEraseMode()   { return s_foliage_tool == 2; }
+
+void FoliageEnabledPaintSet(std::vector<FoliagePaintEntry>& out) {
+    out.clear();
+    for (const FoliagePaletteSlot& slot : s_foliage_palette) {
+        if (slot.enabled) out.push_back(slot.entry);
+    }
+}
+
+const FoliagePaintEntry* FoliageActiveEntry() {
+    if (s_foliage_active >= 0 &&
+        s_foliage_active < (int)s_foliage_palette.size()) {
+        return &s_foliage_palette[(size_t)s_foliage_active].entry;
+    }
+    for (const FoliagePaletteSlot& slot : s_foliage_palette) {
+        if (slot.enabled) return &slot.entry;
+    }
+    return nullptr;
+}
 
 void DrawSidePanel(const FlatAssetEntry& entry, void* d3d_device) {
     s_thumb_device = d3d_device;
@@ -962,23 +1477,28 @@ void DrawSidePanel(const FlatAssetEntry& entry, void* d3d_device) {
 
     
     {
-        static const char* kModes[6] = {"Manage", "Sculpt", "Paint",
-                                        "Sky",    "Water",  "Entities"};
+        static const char* kModes[7] = {"Manage", "Sculpt", "Paint",
+                                        "Sky",    "Water",  "Entities",
+                                        "Foliage"};
+        static const int kRowStart[3] = {0, 3, 6};
+        static const int kRowCount[3] = {3, 3, 1};
         const ImGuiStyle& style = ImGui::GetStyle();
         const float avail = ImGui::GetContentRegionAvail().x;
-        for (int row = 0; row < 2; ++row) {
+        for (int row = 0; row < 3; ++row) {
             float total = 0.0f;
-            for (int i = row * 3; i < row * 3 + 3; ++i) {
+            for (int i = kRowStart[row];
+                 i < kRowStart[row] + kRowCount[row]; ++i) {
                 total += ImGui::CalcTextSize(kModes[i]).x +
                          style.FramePadding.x * 2.0f;
-                if (i > row * 3) total += style.ItemSpacing.x;
+                if (i > kRowStart[row]) total += style.ItemSpacing.x;
             }
             if (total < avail) {
                 ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
                                      (avail - total) * 0.5f);
             }
-            for (int i = row * 3; i < row * 3 + 3; ++i) {
-                if (i > row * 3) ImGui::SameLine();
+            for (int i = kRowStart[row];
+                 i < kRowStart[row] + kRowCount[row]; ++i) {
+                if (i > kRowStart[row]) ImGui::SameLine();
                 if (mode_button(kModes[i], s_mode == i)) s_mode = i;
             }
         }
@@ -992,6 +1512,7 @@ void DrawSidePanel(const FlatAssetEntry& entry, void* d3d_device) {
         case 3: draw_sky(entry); break;
         case 4: draw_water(entry); break;
         case 5: draw_entities(entry); break;
+        case 6: draw_foliage(); break;
         default: break;
     }
 

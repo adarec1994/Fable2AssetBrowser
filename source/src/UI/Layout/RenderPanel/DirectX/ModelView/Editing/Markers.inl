@@ -60,7 +60,7 @@
             mk.kind == 2 && spawn_owner_list != 0;
         const bool entity_deletable =
             LevelEdit::Enabled() && !LevelEdit::Saving() &&
-            mk.kind != 2 && !is_player_start_marker(mk) &&
+            mk.kind != 2 &&
             (mk.entity_hash != 0 || pending_addition);
         auto queue_entity_delete = [&]() {
             LevelEdit::InstInfo info;
@@ -196,6 +196,7 @@
                 g_sel_spawn_marker = -1;
             }
             if (mk.kind != 2 && entity_deletable &&
+                !::is_player_start_marker(mk) &&
                 ImGui::Button(mk.kind == 1 ? "Delete generator"
                                            : pending_addition
                                                ? (mk.kind == 4
@@ -306,13 +307,22 @@
             if (gz.moved &&
                 (gz.step[0] != 0.0f || gz.step[1] != 0.0f ||
                  gz.step[2] != 0.0f)) {
+                float step[3] = {gz.step[0], gz.step[1], gz.step[2]};
+                if (::is_player_start_marker(mk) &&
+                    TerrainEdit::IsLoaded()) {
+                    const float ex = gpos[0] + step[0];
+                    const float ey = gpos[1] + step[1];
+                    const float ez =
+                        TerrainEdit::SampleHeightAtWorldXZ(ex, ey);
+                    step[2] = ez - gpos[2];
+                }
                 LevelEdit::InstInfo info;
                 const float orig[3] = {mk.x, mk.y, mk.z};
                 info.orig_pos = orig;
                 info.gdb_off = mk.pos_off;
                 info.gdb_rot_off = mk.rot_off;
                 info.gdb_entity_hash = mk.entity_hash;
-                LevelEdit::AddMove(edit_id, gz.step, info);
+                LevelEdit::AddMove(edit_id, step, info);
             }
         }
     }

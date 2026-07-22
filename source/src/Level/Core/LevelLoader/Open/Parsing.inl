@@ -15,6 +15,7 @@ bool Open(const FlatAssetEntry& entry)
 
     g_pending_level_prop_blocks.clear();
     g_pending_adjacent_terrain_meshes.clear();
+    g_pending_terrain_lightmap = {};
     g_pending_level_water_theme = Gdb::WaterTheme{};
     g_pending_level_sky_theme = Gdb::SkyTheme{};
     g_pending_level_cloud_theme = Gdb::CloudTheme{};
@@ -74,6 +75,16 @@ bool Open(const FlatAssetEntry& entry)
        << " t32=" << n_t32
        << " other=" << n_other << ")";
     OutputLog::success(os.str());
+
+    if (Creation::IsCustomLooseLevel(entry)) {
+        FoliageEdit::PopulateFromParsedBlocks(info.prop_blocks);
+        std::string ehf_error;
+        if (!Creation::EnsureEhfInStreamingBank(entry, ehf_error)) {
+            OutputLog::warn("terrain streaming inject: " + ehf_error);
+        }
+    } else {
+        FoliageEdit::Clear();
+    }
 
     size_t t2_prop_blocks = 0, t2_prop_instances = 0;
     size_t t21_prop_blocks = 0, t21_prop_instances = 0;

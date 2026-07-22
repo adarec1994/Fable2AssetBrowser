@@ -8,6 +8,7 @@ struct MDLEngMeshHdr {
 struct MDLEngSub {
     uint8_t  MatIdx   = 0;
     uint32_t StartIdx = 0;
+    uint32_t RegionIndex = 0;
 };
 struct MDLEngRec {
     std::string MeshName;
@@ -72,8 +73,9 @@ static bool mdl_read_submeshes(R& r, uint32_t subc, MDLEngRec& rec){
         if(!r.u32be(marker)||!r.u32be(matIdx)||!r.u8(flag)
            ||!r.u32be(faceCount)||!r.u32be(startIdx)) return false;
         if(!r.skip(24)) return false;
-        (void)marker;(void)flag;(void)faceCount;
+        (void)flag;(void)faceCount;
         MDLEngSub sm; sm.MatIdx=(uint8_t)(matIdx & 0xFF); sm.StartIdx=startIdx;
+        sm.RegionIndex=marker;
         rec.Submeshes.push_back(sm);
     }
     return true;
@@ -143,14 +145,17 @@ static bool mdl_read_skinned_record(R& r, uint32_t sh4, MDLEngRec& rec){
 static bool parse_mdl_engine_records(const std::vector<unsigned char>& data,
                                      std::vector<MDLEngRec>& out_recs,
                                      std::vector<MDLEngMeshHdr>& out_hdrs,
-                                     uint32_t& out_bone_count){
-    out_recs.clear(); out_hdrs.clear(); out_bone_count = 0;
+                                     uint32_t& out_bone_count,
+                                     std::vector<std::string>& out_hide_regions){
+    out_recs.clear(); out_hdrs.clear(); out_hide_regions.clear();
+    out_bone_count = 0;
     if(data.size() < 0x68) return false;
     if(std::memcmp(data.data(), "MeshFile", 8) != 0 &&
        std::memcmp(data.data(), "DefMeshF", 8) != 0) return false;
 
     R r{data.data(), data.size(), 0};
-    auto fail = [&]()->bool{ out_recs.clear(); out_hdrs.clear(); return false; };
+    auto fail = [&]()->bool{ out_recs.clear(); out_hdrs.clear();
+        out_hide_regions.clear(); return false; };
     auto rd_u32_at = [&](size_t off, uint32_t& v)->bool{
         if(off+4>r.n) return false;
         const uint8_t* q=r.p+off;
@@ -201,7 +206,10 @@ static bool parse_mdl_engine_records(const std::vector<unsigned char>& data,
 
         uint32_t hrc=0; if(!r.u32be(hrc)) return fail();
         if(hrc>1000000u) return fail();
-        for(uint32_t i=0;i<hrc;i++){ std::string s; if(!r.strz(s)) return fail(); }
+        for(uint32_t i=0;i<hrc;i++){
+            std::string s; if(!r.strz(s)) return fail();
+            if(lod==0) out_hide_regions.push_back(std::move(s));
+        }
 
         const bool capture = (lod==0);
         for(uint32_t m=0;m<mc;m++){

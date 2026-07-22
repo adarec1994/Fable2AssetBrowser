@@ -133,9 +133,12 @@ void AddMove(uint32_t selection_id, const float step[3],
 void AddRotate(uint32_t selection_id, const float step_deg[3],
                const InstInfo& info);
 void SetDeleted(uint32_t selection_id, const InstInfo& info);
+void ClearDeleted(uint32_t selection_id);
+bool IsDeleted(uint32_t selection_id);
 bool EntityRemovalPending(uint32_t entity_hash);
 
 int AddPlacement(const std::string& model_path, const float pos[3]);
+void NoteExternalEdit();
 void GetAdditions(std::vector<Addition>& out);
 void MoveAddition(int index, const float pos[3]);
 void SetAdditionYaw(int index, float yaw_deg);

@@ -1,5 +1,7 @@
 #include "LevelLoader.h"
 #include "Level/Terrain/HeightfieldLoader.h"
+#include "Level/Lighting/LightmapFile.h"
+#include "Level/Creation/FoliageAuthoring.h"
 #include "Level/Creation/LandscapeAuthoring.h"
 #include "Level/Editing/LevelEdit.h"
 #include "Level/Terrain/TextureAtlasDecoder.h"

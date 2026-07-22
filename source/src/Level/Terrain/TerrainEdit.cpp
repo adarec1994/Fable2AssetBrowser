@@ -362,6 +362,44 @@ void ApplyToGpu(ID3D11Device* device, void* mesh_v) {
         p[2] = s.positions[i * 3 + 2];
     }
 
+    for (int gz = 0; gz < s.height; ++gz) {
+        for (int gx = 0; gx < s.width; ++gx) {
+            const size_t i = size_t(gz) * s.width + gx;
+            auto pos_at = [&](int x, int z) -> const float* {
+                x = std::clamp(x, 0, s.width - 1);
+                z = std::clamp(z, 0, s.height - 1);
+                return &s.positions[(size_t(z) * s.width + x) * 3];
+            };
+            const float* xl = pos_at(gx - 1, gz);
+            const float* xr = pos_at(gx + 1, gz);
+            const float* zl = pos_at(gx, gz - 1);
+            const float* zr = pos_at(gx, gz + 1);
+            const float dxx = xr[0] - xl[0];
+            const float dxy = xr[1] - xl[1];
+            const float dzy = zr[1] - zl[1];
+            const float dzz = zr[2] - zl[2];
+            float nx = -dxy * dzz;
+            float ny = dxx * dzz;
+            float nz = -dxx * dzy;
+            const float len =
+                std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (len > 1e-6f) {
+                nx /= len;
+                ny /= len;
+                nz /= len;
+            } else {
+                nx = 0.0f;
+                ny = 1.0f;
+                nz = 0.0f;
+            }
+            float* vtx = reinterpret_cast<float*>(
+                cpu_verts.data() + i * vstride);
+            vtx[3] = nx;
+            vtx[4] = ny;
+            vtx[5] = nz;
+        }
+    }
+
     D3D11_BUFFER_DESC nd = vd;
     nd.Usage          = D3D11_USAGE_IMMUTABLE;
     nd.CPUAccessFlags = 0;

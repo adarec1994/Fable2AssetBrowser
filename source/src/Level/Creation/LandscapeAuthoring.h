@@ -25,12 +25,22 @@ struct LandscapeParams {
 bool IsCustomLooseLevel(const FlatAssetEntry& entry,
                         std::string* region = nullptr);
 
+
+
+
+bool GetNativeLandscapeLayout(const FlatAssetEntry& entry, int& grid_w,
+                              int& grid_h, float& sample_spacing,
+                              std::string& error);
+
 bool CreateFlatLandscape(const FlatAssetEntry& entry,
                          const LandscapeParams& params,
                          std::string& error);
 
 
 
+
+bool ProbeHeightmapSize(const std::string& image_path, int& out_w,
+                        int& out_h);
 
 bool ImportHeightmapLandscape(const FlatAssetEntry& entry,
                               const LandscapeParams& params,
@@ -39,7 +49,23 @@ bool ImportHeightmapLandscape(const FlatAssetEntry& entry,
 
 
 
+bool RepairLandscapeForGame(const FlatAssetEntry& entry,
+                            std::string& error);
+
+
+
+bool UpgradeLandscapeToLarge(const FlatAssetEntry& entry,
+                             std::string& error);
+
+
+
 bool SaveSculptedHeights(const FlatAssetEntry& entry, std::string& error);
+
+bool EnsureEhfInStreamingBank(const std::string& data_dir,
+                              const std::string& region,
+                              std::string& error);
+bool EnsureEhfInStreamingBank(const FlatAssetEntry& entry,
+                              std::string& error);
 
 }
 }

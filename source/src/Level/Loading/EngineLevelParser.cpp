@@ -134,10 +134,11 @@ bool ParseEngineLevel(const std::vector<uint8_t>& bytes,
                     return false;
                 }
                 if (e.type == 4) {
-                    if (!r.skip(8)) {
+                    if (!r.u64(e.resource_key)) {
                         out.error = "truncated reading type-4 tail";
                         return false;
                     }
+                    e.has_resource_key = true;
                 }
                 break;
             }

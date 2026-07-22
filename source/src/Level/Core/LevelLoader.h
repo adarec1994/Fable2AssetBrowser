@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "Level/Terrain/HeightfieldLoader.h"
+#include "Level/Lighting/LightmapFile.h"
 #include "GDB/GdbParser.h"
 #include "Level/Skybox/EnvironmentThemeParser.h"
 #include "Level/Environment/WaterParser.h"
@@ -20,6 +21,8 @@ struct EngineLevelEntry {
     size_t   size   = 0;
     std::string str_a;
     std::string str_b;
+    uint64_t resource_key = 0;
+    bool     has_resource_key = false;
 };
 
 struct PropInstance {
@@ -65,7 +68,10 @@ struct LevelResources {
     std::string ama_path;
     std::string amm_path;
     std::string amr_path;
+    std::string lmp_path;
     std::string model_body_bnk;
+    uint64_t    terrain_lightmap_key = 0;
+    bool        has_terrain_lightmap_key = false;
 };
 
 bool Open(const FlatAssetEntry& entry);
@@ -145,6 +151,7 @@ extern Level::TerrainMesh g_pending_terrain_mesh;
 extern std::string        g_pending_terrain_label;
 extern FlatAssetEntry     g_pending_terrain_level_entry;
 extern std::vector<uint8_t> g_pending_terrain_ehf_bytes;
+extern Level::TerrainLightmap g_pending_terrain_lightmap;
 
 namespace Level {
 
@@ -217,6 +224,7 @@ extern std::unordered_map<uint32_t, Gdb::PropertyDetails>
 
 extern std::vector<Gdb::ItemCatalogEntry> g_level_item_catalog;
 extern std::vector<Gdb::ItemDetail> g_item_details;
+extern std::vector<Gdb::MorphTargetPair> g_hero_morph_targets;
 
 extern std::unordered_map<uint32_t, Gdb::PropTemplateInfo>
     g_level_prop_entity_templates;

@@ -5,7 +5,7 @@ void request_open_create_npc() {
 static const char* const kLeftPanelTabLabels[] = {
     "BNK List", "File Tree", "Levels", "Lua Scripts",
     "Models", "Textures", "Audio", "Animations", "Items", "Entities",
-    "Quests"
+    "Quests", "Hero"
 };
 
 static float compute_tab_button_width() {
@@ -27,4 +27,3 @@ float left_panel_min_width() {
     row_w += st.WindowPadding.x * 2.0f;
     return row_w;
 }
-

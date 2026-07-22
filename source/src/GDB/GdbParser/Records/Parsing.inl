@@ -6,7 +6,8 @@ bool LookupPlacement(
     const std::vector<uint8_t>& bytes,
     uint32_t record_hash,
     const std::string& entity_name,
-    Placement& out_placement)
+    Placement& out_placement,
+    bool lenient)
 {
     if (record_hash == 0) return false;
 
@@ -25,12 +26,13 @@ bool LookupPlacement(
                                                 pos_x, pos_y, pos_z,
                                                 rot_x, rot_y, rot_z,
                                                 has_rotation, pos_slots,
-                                                rot_slots);
+                                                rot_slots, lenient);
     if (!have_pos) {
         have_pos = TryTransformRecord(view, record,
                                       pos_x, pos_y, pos_z,
                                       rot_x, rot_y, rot_z,
-                                      has_rotation, pos_slots, rot_slots);
+                                      has_rotation, pos_slots, rot_slots,
+                                      lenient);
     }
     if (!have_pos) {
         have_pos = TryIndexedInlineTransform(view, record,
@@ -125,7 +127,10 @@ GdbInfo ParseWithSaveMap(
         }
 
         Placement pl;
-        if (!LookupPlacement(bytes, inst_hash, entity_name, pl)) return;
+        if (!LookupPlacement(bytes, inst_hash, entity_name, pl,
+                             !entity_name.empty())) {
+            return;
+        }
 
         if (pl.model_path_hashes.size() > 1) {
             const std::vector<uint32_t> hashes = pl.model_path_hashes;

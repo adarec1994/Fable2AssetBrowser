@@ -89,6 +89,18 @@ size_t build_model_animation_cache_for_hash(
     size_t clip_count,
     std::vector<uint8_t>& out_authored);
 
+size_t build_animation_cache_for_scope(
+    uint32_t source_record_hash,
+    const std::vector<uint32_t>& model_path_hashes,
+    size_t clip_count,
+    std::vector<uint8_t>& out_authored,
+    std::vector<size_t>& out_order,
+    std::vector<std::string>& out_names);
+
+uint64_t animation_scope_signature(
+    uint32_t source_record_hash,
+    const std::vector<uint32_t>& model_path_hashes);
+
 size_t model_animation_binding_count_for_hash(uint32_t model_path_hash);
 
 const std::vector<ModelAnimationBinding>& model_animation_bindings();

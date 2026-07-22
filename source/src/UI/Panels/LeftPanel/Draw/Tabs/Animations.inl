@@ -6,20 +6,32 @@
 
             const uint32_t want_bones = g_mp.bone_count;
             size_t authored_count = 0;
+            std::vector<uint32_t> authored_models =
+                S.current_animation_model_hashes;
+            if (authored_models.empty() && S.current_mdl_path_hash != 0) {
+                authored_models.push_back(S.current_mdl_path_hash);
+            }
             const bool can_filter_by_authored =
-                g_mp.has_model && S.current_mdl_path_hash != 0 &&
+                g_mp.has_model &&
+                (S.current_animation_source_hash != 0 ||
+                 !authored_models.empty()) &&
                 !S.anim_clips.empty();
             if (can_filter_by_authored) {
                 const uint64_t authored_sig =
                     Anim::model_animation_binding_revision() ^
-                    (uint64_t(S.current_mdl_path_hash) << 32) ^
+                    Anim::animation_scope_signature(
+                        S.current_animation_source_hash,
+                        authored_models) ^
                     uint64_t(S.anim_clips.size());
                 if (S.anim_authored_signature != authored_sig ||
                     S.anim_authored_cache.size() != S.anim_clips.size()) {
                     authored_count =
-                        Anim::build_model_animation_cache_for_hash(
-                            S.current_mdl_path_hash, S.anim_clips.size(),
-                            S.anim_authored_cache);
+                        Anim::build_animation_cache_for_scope(
+                            S.current_animation_source_hash,
+                            authored_models, S.anim_clips.size(),
+                            S.anim_authored_cache,
+                            S.anim_authored_order,
+                            S.anim_authored_names);
                     S.anim_authored_signature = authored_sig;
                 } else {
                     authored_count = 0;
@@ -35,10 +47,12 @@
                                 &S.anim_authored_only);
                 if (!S.hide_tooltips && ImGui::IsItemHovered()) {
                     ImGui::SetTooltip(
-                        "Show clips referenced by GDB animation records for "
-                        "this exact model path hash.");
+                        "Show the animation set referenced by the current "
+                        "GDB creature/model records.");
                 }
-            } else if (g_mp.has_model && S.current_mdl_path_hash != 0) {
+            } else if (g_mp.has_model &&
+                       (S.current_mdl_path_hash != 0 ||
+                        S.current_animation_source_hash != 0)) {
                 ImGui::TextDisabled("No authored animation set for model");
             }
             const bool can_filter_by_skeleton =
@@ -78,26 +92,34 @@
             vis.reserve(S.anim_clips.size());
             std::string flow = S.anim_filter;
             std::transform(flow.begin(), flow.end(), flow.begin(), ::tolower);
-            for (size_t i = 0; i < S.anim_clips.size(); ++i) {
-                if (filter_by_authored) {
-                    if (i >= S.anim_authored_cache.size() ||
-                        !S.anim_authored_cache[i]) {
-                        continue;
-                    }
-                } else if (filter_by_bones) {
+            auto append_if_visible = [&](size_t i) {
+                if (i >= S.anim_clips.size()) return;
+                if (filter_by_bones) {
                     if (i >= S.anim_compat_cache.size() ||
                         !S.anim_compat_cache[i]) {
-                        continue;
+                        return;
                     }
                 }
+                const bool have_authored_name = filter_by_authored &&
+                    i < S.anim_authored_names.size() &&
+                    !S.anim_authored_names[i].empty();
+                const std::string& visible_name = have_authored_name
+                    ? S.anim_authored_names[i] : S.anim_clips[i].name;
                 if (flow.empty()) {
                     vis.push_back((int)i);
                 } else {
-                    std::string nlow = S.anim_clips[i].name;
+                    std::string nlow = visible_name;
                     std::transform(nlow.begin(), nlow.end(), nlow.begin(), ::tolower);
                     if (nlow.find(flow) != std::string::npos) {
                         vis.push_back((int)i);
                     }
+                }
+            };
+            if (filter_by_authored) {
+                for (size_t i : S.anim_authored_order) append_if_visible(i);
+            } else {
+                for (size_t i = 0; i < S.anim_clips.size(); ++i) {
+                    append_if_visible(i);
                 }
             }
             {
@@ -126,13 +148,18 @@
                          row < clipper.DisplayEnd; ++row) {
                         const int clip_idx = vis[(size_t)row];
                         const auto& c = S.anim_clips[(size_t)clip_idx];
+                        const bool have_authored_name = filter_by_authored &&
+                            (size_t)clip_idx < S.anim_authored_names.size() &&
+                            !S.anim_authored_names[(size_t)clip_idx].empty();
+                        const std::string& display_name = have_authored_name
+                            ? S.anim_authored_names[(size_t)clip_idx] : c.name;
                         ImGui::PushID(row);
                         bool selected =
                             (S.anim_selected_clip == clip_idx);
                         char label[64];
                         float dur_s = Anim::clip_duration_seconds(c);
                         std::snprintf(label, sizeof(label), "%s  (%.2fs)",
-                                      c.name.c_str(), dur_s);
+                                      display_name.c_str(), dur_s);
                         if (ImGui::Selectable(label, selected,
                                               ImGuiSelectableFlags_SpanAllColumns)) {
                             S.anim_selected_clip = clip_idx;
@@ -142,7 +169,10 @@
                         }
                         if (!S.hide_tooltips && ImGui::IsItemHovered()) {
                             ImGui::BeginTooltip();
-                            ImGui::TextUnformatted(c.name.c_str());
+                            ImGui::TextUnformatted(display_name.c_str());
+                            if (have_authored_name && display_name != c.name) {
+                                ImGui::TextDisabled("Clip: %s", c.name.c_str());
+                            }
                             ImGui::Text("Duration: %.3f s  (%.0f fps)",
                                         dur_s, c.fps);
                             if (Anim::global_data_file().is_open()) {

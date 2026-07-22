@@ -44,6 +44,8 @@ struct Tab {
     std::vector<MDLMeshGeom> model_meshes;
     std::string model_path;
     std::uint32_t model_path_hash = 0;
+    std::uint32_t animation_source_hash = 0;
+    std::vector<std::uint32_t> animation_model_hashes;
     float cam_yaw = 3.14159265f;
     float cam_pitch = 0.2f;
     float cam_dist = 3.0f;
@@ -55,6 +57,7 @@ struct Tab {
     FlyCam level_camera{};
 
     std::string lua_content;
+    std::string text_content;
     bool lua_loading = false;
     std::string authored_quest_id;
 };
@@ -261,6 +264,8 @@ void reset_model_specific_ui() {
     S.anim_selected_clip = -1;
     S.anim_authored_signature = 0;
     S.anim_authored_cache.clear();
+    S.anim_authored_order.clear();
+    S.anim_authored_names.clear();
     S.anim_compat_signature = 0;
     S.anim_compat_cache.clear();
     S.anim_compat_matches.clear();
@@ -284,7 +289,7 @@ void save_active_state() {
         return;
     }
     if (tab->kind == Kind::Model || tab->kind == Kind::Item ||
-        tab->kind == Kind::Entity) {
+        tab->kind == Kind::Entity || tab->kind == Kind::Hero) {
         tab->cam_yaw = S.cam_yaw;
         tab->cam_pitch = S.cam_pitch;
         tab->cam_dist = S.cam_dist;
@@ -358,7 +363,7 @@ bool activate(std::size_t index) {
     S.content_tabs_visible = true;
 
     if (target.kind == Kind::Model || target.kind == Kind::Item ||
-        target.kind == Kind::Entity) {
+        target.kind == Kind::Entity || target.kind == Kind::Hero) {
         if ((target.kind == Kind::Item || target.kind == Kind::Entity) &&
             target.model_meshes.empty()) {
             ++S.lua_preview_request;
@@ -379,6 +384,15 @@ bool activate(std::size_t index) {
         S.mdl_info_ok = !target.model_meshes.empty();
         S.current_mdl_path = target.model_path;
         S.current_mdl_path_hash = target.model_path_hash;
+        if (target.kind == Kind::Hero) {
+            S.current_animation_source_hash =
+                target.animation_source_hash;
+            S.current_animation_model_hashes =
+                target.animation_model_hashes;
+        } else {
+            S.current_animation_source_hash = 0;
+            S.current_animation_model_hashes.clear();
+        }
         S.item_model_active = target.kind == Kind::Item;
         S.selected_item = target.item_index;
         S.show_item_details = target.kind == Kind::Item &&
@@ -429,6 +443,20 @@ bool activate(std::size_t index) {
         }
         S.terrain_mode = false;
         Level::OpenAsync(target.level_entry);
+        return true;
+    }
+
+    if (target.kind == Kind::VfsConfig) {
+        ++S.lua_preview_request;
+        S.show_gdb_render = false;
+        S.show_lua_render = false;
+        S.terrain_mode = false;
+        S.item_model_active = false;
+        S.selected_item = -1;
+        S.show_item_details = false;
+        S.entity_model_active = false;
+        S.selected_entity = -1;
+        S.show_entity_details = false;
         return true;
     }
 
@@ -492,6 +520,8 @@ void close_id(std::uint64_t id) {
         S.mdl_meshes.clear();
         S.current_mdl_path.clear();
         S.current_mdl_path_hash = 0;
+        S.current_animation_source_hash = 0;
+        S.current_animation_model_hashes.clear();
         S.item_model_active = false;
         S.selected_item = -1;
         S.show_item_details = false;
@@ -521,8 +551,10 @@ const char* kind_tooltip(Kind kind) {
         case Kind::Model: return "Model";
         case Kind::Item: return "Item";
         case Kind::Entity: return "Entity";
+        case Kind::Hero: return "Hero designer";
         case Kind::Level: return "Level";
         case Kind::Lua: return "Lua script";
+        case Kind::VfsConfig: return "VFS configuration";
         case Kind::Quest: return "Quest script";
         case Kind::CustomQuest: return "Custom quest";
         default: return "Content";
@@ -567,6 +599,8 @@ void CaptureCurrentModel() {
     if (kind == Kind::Model) tab.key = S.current_mdl_path;
     tab.model_path = S.current_mdl_path;
     tab.model_path_hash = S.current_mdl_path_hash;
+    tab.animation_source_hash = 0;
+    tab.animation_model_hashes.clear();
     tab.model_info = S.mdl_info;
     tab.model_meshes = S.mdl_meshes;
     tab.item_index = kind == Kind::Item ? S.selected_item : -1;
@@ -584,6 +618,8 @@ void CaptureCurrentModel() {
     g_active_id = g_tabs[index].id;
     g_select_id = g_active_id;
     S.content_tabs_visible = true;
+    S.current_animation_source_hash = 0;
+    S.current_animation_model_hashes.clear();
     S.show_gdb_render = false;
     S.show_lua_render = false;
 }
@@ -646,6 +682,122 @@ void OpenEntity(int entity_index, const std::string& title) {
     ++S.lua_preview_request;
 }
 
+void OpenHero() {
+    if (level_load_blocks_tab_switch()) return;
+    const std::string key = "hero-designer";
+    std::size_t index = find_key(Kind::Hero, key);
+    if (index >= g_tabs.size()) {
+        save_active_state();
+        Tab tab;
+        tab.id = g_next_id++;
+        tab.kind = Kind::Hero;
+        tab.title = "Hero";
+        tab.key = key;
+        g_tabs.push_back(std::move(tab));
+        index = g_tabs.size() - 1;
+    }
+    if (g_active_id == g_tabs[index].id) {
+        g_select_id = g_active_id;
+        S.content_tabs_visible = true;
+        return;
+    }
+    g_active_id = 0;
+    g_select_id = g_tabs[index].id;
+    activate(index);
+}
+
+void StoreHeroModel(const MDLInfo& info,
+                    const std::vector<MDLMeshGeom>& meshes,
+                    const std::string& primary_path,
+                    std::uint32_t primary_hash,
+                    std::uint32_t animation_source_hash,
+                    const std::vector<std::uint32_t>& animation_model_hashes) {
+    const std::string key = "hero-designer";
+    std::size_t index = find_key(Kind::Hero, key);
+    if (index >= g_tabs.size()) {
+        Tab tab;
+        tab.id = g_next_id++;
+        tab.kind = Kind::Hero;
+        tab.title = "Hero";
+        tab.key = key;
+        g_tabs.push_back(std::move(tab));
+        index = g_tabs.size() - 1;
+    }
+    Tab& tab = g_tabs[index];
+    const bool replacing_active_preview =
+        tab.id == g_active_id && g_mp.has_model && !tab.model_meshes.empty();
+    tab.model_info = info;
+    tab.model_meshes = meshes;
+    tab.model_path = primary_path;
+    tab.model_path_hash = primary_hash;
+    tab.animation_source_hash = animation_source_hash;
+    tab.animation_model_hashes = animation_model_hashes;
+    if (tab.id != g_active_id) return;
+
+    S.mdl_info = tab.model_info;
+    S.mdl_meshes = tab.model_meshes;
+    S.mdl_info_ok = !S.mdl_meshes.empty();
+    S.current_mdl_path = tab.model_path;
+    S.current_mdl_path_hash = tab.model_path_hash;
+    S.current_animation_source_hash = tab.animation_source_hash;
+    S.current_animation_model_hashes = tab.animation_model_hashes;
+    S.anim_authored_only = true;
+    S.item_model_active = false;
+    S.selected_item = -1;
+    S.show_item_details = false;
+    S.entity_model_active = false;
+    S.selected_entity = -1;
+    S.show_entity_details = false;
+    S.show_gdb_render = false;
+    S.show_lua_render = false;
+    S.terrain_mode = false;
+    g_mp.no_tilt = false;
+    reset_model_specific_ui();
+    if (!replacing_active_preview) g_mp.has_model = false;
+    S.pending_model_tab_capture = false;
+    S.pending_preview_build = !S.mdl_meshes.empty();
+}
+
+void UpdateHeroModel(const MDLInfo& info,
+                     const std::vector<MDLMeshGeom>& meshes,
+                     const std::string& primary_path,
+                     std::uint32_t primary_hash,
+                     std::uint32_t animation_source_hash,
+                     const std::vector<std::uint32_t>& animation_model_hashes) {
+    const std::string key = "hero-designer";
+    const std::size_t index = find_key(Kind::Hero, key);
+    if (index >= g_tabs.size()) {
+        StoreHeroModel(info, meshes, primary_path, primary_hash,
+                       animation_source_hash, animation_model_hashes);
+        return;
+    }
+
+    Tab& tab = g_tabs[index];
+    tab.model_info = info;
+    tab.model_meshes = meshes;
+    tab.model_path = primary_path;
+    tab.model_path_hash = primary_hash;
+    tab.animation_source_hash = animation_source_hash;
+    tab.animation_model_hashes = animation_model_hashes;
+    if (tab.id != g_active_id) return;
+
+    S.mdl_info = tab.model_info;
+    S.mdl_meshes = tab.model_meshes;
+    S.mdl_info_ok = !S.mdl_meshes.empty();
+    S.current_mdl_path = tab.model_path;
+    S.current_mdl_path_hash = tab.model_path_hash;
+    S.current_animation_source_hash = tab.animation_source_hash;
+    S.current_animation_model_hashes = tab.animation_model_hashes;
+
+
+
+
+    if (S.pending_preview_build) return;
+    if (g_mp.has_model &&
+        MP_UpdateGeometry(S.mdl_meshes, S.mdl_info, g_mp)) return;
+    S.pending_preview_build = !S.mdl_meshes.empty();
+}
+
 void OpenLevel(const FlatAssetEntry& entry, const std::string& title) {
     const std::string key = entry.full_path.empty() ? entry.name
                                                      : entry.full_path;
@@ -702,6 +854,38 @@ void OpenLua(const std::string& key, const std::string& title,
     g_active_id = g_tabs[index].id;
     g_select_id = g_active_id;
     S.content_tabs_visible = true;
+}
+
+void OpenVfsConfig(const std::string& key, const std::string& title,
+                   const std::string& content) {
+    if (level_load_blocks_tab_switch()) return;
+    save_active_state();
+    std::size_t index = find_key(Kind::VfsConfig, key);
+    if (index >= g_tabs.size()) {
+        Tab tab;
+        tab.id = g_next_id++;
+        tab.kind = Kind::VfsConfig;
+        tab.title = title.empty() ? model_title(key) : title;
+        tab.key = key;
+        tab.text_content = content;
+        g_tabs.push_back(std::move(tab));
+        index = g_tabs.size() - 1;
+    } else {
+        g_tabs[index].text_content = content;
+    }
+    g_active_id = g_tabs[index].id;
+    g_select_id = g_active_id;
+    S.content_tabs_visible = true;
+    S.show_gdb_render = false;
+    S.show_lua_render = false;
+    S.terrain_mode = false;
+    S.item_model_active = false;
+    S.selected_item = -1;
+    S.show_item_details = false;
+    S.entity_model_active = false;
+    S.selected_entity = -1;
+    S.show_entity_details = false;
+    ++S.lua_preview_request;
 }
 
 void OpenCustomQuest(const std::string& quest_id,
@@ -778,13 +962,18 @@ Kind ActiveKind() {
 bool ActiveHasModel() {
     const Tab* tab = active_tab();
     return tab && (tab->kind == Kind::Model || tab->kind == Kind::Item ||
-                   tab->kind == Kind::Entity) &&
+                   tab->kind == Kind::Entity || tab->kind == Kind::Hero) &&
            !tab->model_meshes.empty();
 }
 
 const FlatAssetEntry* ActiveLevelEntry() {
     const Tab* tab = active_tab();
     return tab && tab->kind == Kind::Level ? &tab->level_entry : nullptr;
+}
+
+const std::string* ActiveVfsConfigContent() {
+    const Tab* tab = active_tab();
+    return tab && tab->kind == Kind::VfsConfig ? &tab->text_content : nullptr;
 }
 
 void DrawTabBar() {

@@ -1,9 +1,11 @@
 #include "RenderPanel.h"
+#include "../../Utilities/DebugLog.h"
 #include "../../Utilities/State.h"
 #include "../AnimTree/AnimTreeView.h"
 #include "../ModelPreview.h"
 #include "../EntityModelResolver.h"
 #include "../ContentTabs.h"
+#include "../VfsConfigViewer.h"
 #include "../../textures/export/TextureExport.h"
 #include "../../Level/Terrain/TerrainTextureRegistry.h"
 #include "../../Level/Terrain/EhfLodThumbnails.h"
@@ -67,6 +69,10 @@ extern std::atomic<bool> g_item_icon_dirty;
 bool spawn_level_model_at(ID3D11Device* device,
                           const std::string& model_path,
                           const float engine_pos[3]);
+bool foliage_paint_dab(ID3D11Device* device, const float engine_hit[3],
+                       int tool);
+void foliage_paint_stroke_end(ID3D11Device* device);
+bool delete_selected_level_object();
 bool append_level_entity_model_at(
     ID3D11Device* device,
     const std::vector<uint32_t>& model_hashes,

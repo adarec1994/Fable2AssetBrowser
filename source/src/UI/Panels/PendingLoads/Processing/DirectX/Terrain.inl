@@ -4,6 +4,7 @@
             g_pending_terrain_mesh = Level::TerrainMesh{};
             g_pending_terrain_label.clear();
             g_pending_terrain_ehf_bytes.clear();
+            g_pending_terrain_lightmap = {};
             g_pending_adjacent_terrain_meshes.clear();
             g_pending_terrain_ghf_payload.clear();
             g_pending_terrain_ghf_heights.clear();
@@ -98,7 +99,7 @@
             {
                 picked_label = (composite_name == "embedded_tile_albedo")
                     ? std::string("ehf_embedded_tile_albedo")
-                    : "ehf_composite[" + composite_name + " * lightmap]";
+                    : "ehf_composite[" + composite_name + "]";
                 uv_scale     = 1.0f;
             } else if (Level::DecodeEhfTerrainAlbedoFromBytes(
                     g_pending_terrain_ehf_bytes,
@@ -634,6 +635,36 @@
             }
             TerrainTextureRegistry::SetLodPalette(main_lod_palette);
 
+            bool static_lightmap_thumbnail_bound = false;
+            if (!g_mp.meshes.empty() &&
+                g_pending_terrain_lightmap.ok &&
+                !g_pending_terrain_lightmap.rgba.empty()) {
+                MPPerMesh& m = g_mp.meshes[0];
+                ID3D11ShaderResourceView* lm_srv = create_srv_from_rgba(
+                    device,
+                    static_cast<int>(g_pending_terrain_lightmap.texture_width),
+                    static_cast<int>(g_pending_terrain_lightmap.texture_height),
+                    g_pending_terrain_lightmap.rgba);
+                if (lm_srv) {
+                    if (m.srv_extra) m.srv_extra->Release();
+                    m.srv_extra = lm_srv;
+                    m.extra_visible = false;
+                    m.extra_tex_name = "lmp_static_lightmap";
+                    TerrainTextureRegistry::Register(
+                        "lmp_static_lightmap",
+                        g_pending_terrain_lightmap.rgba,
+                        static_cast<int>(g_pending_terrain_lightmap.texture_width),
+                        static_cast<int>(g_pending_terrain_lightmap.texture_height));
+                    static_lightmap_thumbnail_bound = true;
+                    std::ostringstream lm_log;
+                    lm_log << "  bound LMP static lightmap: 0x" << std::hex
+                           << g_pending_terrain_lightmap.key << std::dec << "  "
+                           << g_pending_terrain_lightmap.texture_width << "x"
+                           << g_pending_terrain_lightmap.texture_height;
+                    OutputLog::info(lm_log.str());
+                }
+            }
+
             if (!g_mp.meshes.empty() && !g_pending_terrain_ehf_bytes.empty()) {
                 const auto& ehf = g_pending_terrain_ehf_bytes;
                 static constexpr char   kMagic[]   = "HeightFieldGraphicsFile";
@@ -661,21 +692,23 @@
 
                     auto lm = TextureAtlas::DecodeAtlas(body_slice);
                     if (lm.ok && lm.pixel_format == 24u && !lm.rgba.empty()) {
-                        MPPerMesh& m = g_mp.meshes[0];
-                        ID3D11ShaderResourceView* lm_srv =
-                            create_srv_from_rgba(device, lm.width,
-                                                 lm.height, lm.rgba);
-                        if (lm_srv) {
-                            if (m.srv_extra) m.srv_extra->Release();
-                            m.srv_extra      = lm_srv;
-                            m.extra_visible  = false;
-                            m.extra_tex_name = "ehf_lightmap";
-                            TerrainTextureRegistry::Register(
-                                "ehf_lightmap", lm.rgba, lm.width, lm.height);
-                            OutputLog::info("  bound lightmap thumbnail: "
-                                + std::to_string(lm.width) + "x"
-                                + std::to_string(lm.height) + " (PF=24)");
+                        TerrainTextureRegistry::Register(
+                            "ehf_height", lm.rgba, lm.width, lm.height);
+                        if (!static_lightmap_thumbnail_bound) {
+                            MPPerMesh& m = g_mp.meshes[0];
+                            ID3D11ShaderResourceView* height_srv =
+                                create_srv_from_rgba(device, lm.width,
+                                                     lm.height, lm.rgba);
+                            if (height_srv) {
+                                if (m.srv_extra) m.srv_extra->Release();
+                                m.srv_extra = height_srv;
+                                m.extra_visible = false;
+                                m.extra_tex_name = "ehf_height";
+                            }
                         }
+                        OutputLog::info("  decoded EHF height thumbnail: "
+                            + std::to_string(lm.width) + "x"
+                            + std::to_string(lm.height) + " (PF=24)");
                     }
 
                     const size_t bn = body_slice.size();
@@ -827,23 +860,16 @@
                 if (Level::ParseEhfBody(g_pending_terrain_ehf_bytes,
                                         splat_parsed)) {
                     progress_update(88, 100, "Building terrain splat shader...");
-                    std::vector<uint8_t> lm_rgba;
-                    int lm_w = 0, lm_h = 0;
-                    const auto* lm_entry =
-                        TerrainTextureRegistry::Find("ehf_lightmap");
-                    if (lm_entry) {
-                        lm_rgba = lm_entry->rgba;
-                        lm_w    = lm_entry->width;
-                        lm_h    = lm_entry->height;
-                    }
                     const auto& fresh_thumbs = EhfLodThumbnails::Get();
                     bool splat_ok = TerrainSplat::Build(
                         device,
                         splat_parsed,
                         fresh_thumbs,
-                        lm_rgba,
-                        lm_w,
-                        lm_h,
+                        g_pending_terrain_lightmap.rgba,
+                        static_cast<int>(
+                            g_pending_terrain_lightmap.texture_width),
+                        static_cast<int>(
+                            g_pending_terrain_lightmap.texture_height),
                         0.0f,
                         0.0f,
                         true);
@@ -893,6 +919,7 @@
         g_pending_terrain_label.clear();
         g_pending_terrain_ehf_bytes.clear();
         g_pending_terrain_ehf_bytes.shrink_to_fit();
+        g_pending_terrain_lightmap = {};
         g_pending_adjacent_terrain_meshes.clear();
         g_pending_adjacent_terrain_meshes.shrink_to_fit();
 
